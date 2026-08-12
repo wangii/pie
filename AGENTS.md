@@ -1,5 +1,9 @@
 # Development Rules
 
+## 本地运行环境:
+- 本地使用 localhost:7890 作为proxy
+- 本机为 macOS,第三方工具可通过homebrew 来安装,更新
+
 ## Conversational Style
 
 - Keep answers short and concise

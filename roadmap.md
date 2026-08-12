@@ -28,6 +28,10 @@ These contracts apply to every phase:
 6. **Execution remains independent.** Provider, streaming, authentication, tools, and TUI behavior should change only where the context boundary requires it.
 7. **The ontology stays bounded.** The only candidate epistemic primitives are Anchor, Frame, Action, and Observation. They are introduced one at a time.
 8. **Each primitive must survive ablation.** A primitive is retained only if enabling it causes a measurable improvement over the immediately preceding phase.
+9. **Boundary mistakes are bounded.** The runtime need not classify every failure correctly as execution noise or epistemic evidence. It must prevent a mistaken classification or commitment from persisting indefinitely.
+10. **Freedom narrows down the hierarchy.** `Anchor → Frame → Action → execution attempts → world result` is not a thinking/execution split. Each layer may adapt only within the success and completion semantics fixed above it.
+
+Once the relevant primitives exist, bounded control transfer is mandatory: a Frame's falsifier or horizon must force epistemic reconsideration, and an Action that cannot meet its frozen completion condition must return `UNRESOLVABLE`. The weak operating assumption is only that a local epistemic intent can be frozen for one finite execution episode; perfect advance knowledge of why an attempt failed is not required.
 
 ## Current boundary to replace
 
@@ -168,23 +172,29 @@ A Frame is a finite-lived investigation commitment, not a structured scratchpad.
 ### Scope
 
 - Give each Frame stable identity and an explicit version.
-- Make replacement, revision, death, and expiry visible state transitions.
-- Prevent silent mutation.
+- Require a falsifier that states what result makes the Frame inadmissible.
+- Require a finite horizon after which the Frame must be reconsidered even if failure classification remains ambiguous.
+- Make replacement, revision, death, falsification, and expiry visible state transitions.
+- Prevent silent mutation or reinterpretation of the falsifier and horizon.
 - Compile only the current admissible Frame by default.
 - Do not add confidence scores, claim graphs, question graphs, or hidden subtypes.
 
+The horizon is an epistemic timeout, analogous to a distributed-system timeout. It need not diagnose why progress stopped; it guarantees that the current investigation commitment cannot hang indefinitely.
+
 ### Evaluation
 
-For the same state and task, compare action selection with and without the Frame. Use cases where competing explanations authorize different next actions.
+For the same state and task, compare action selection with and without the Frame. Use cases where competing explanations authorize different next actions, including cases where relevant evidence is initially mistaken for routine execution failure.
 
 Measure:
 
 - change in next-action distribution;
 - recovery cost from an incorrect Frame;
 - persistence after contradictory evidence;
+- whether falsifiers terminate Frames rather than trigger repeated reinterpretation;
+- whether horizons force bounded reconsideration under ambiguous failure;
 - context and state-management overhead.
 
-**Gate:** if Frame presence does not causally change useful action selection, remove it rather than enriching its schema.
+**Gate:** retain Frame only if it causally improves useful action selection and incorrect commitments terminate under their falsifier or horizon. Otherwise remove it rather than enriching its schema.
 
 ## Phase 3 — Add Action episodes
 
@@ -192,24 +202,30 @@ Separate epistemic intent from low-level tool competence.
 
 ### Scope
 
-- Represent one authorized investigation intent as an Action episode.
+- Represent one authorized investigation intent as an Action episode with a minimal contract: `intent` and `completion_condition`.
+- Freeze that contract for the finite lifetime of the episode.
+- Allow the action-local loop to change tools, commands, paths, and execution strategies, but never what counts as completion.
 - Keep command mistakes, retries, patch failures, and local repairs inside the episode by default.
+- Return `UNRESOLVABLE` and transfer control to the epistemic loop when the completion condition cannot be met under the current Frame and constraints.
 - Preserve the complete episode trace in the raw log.
 - Compile only the execution window needed to continue the current episode.
-- Provide an explicit escalation path when a result challenges the Anchor or current Frame.
+- Provide an explicit escalation path when a world result challenges the Anchor or current Frame, without requiring perfect classification on the first attempt.
 
 ### Evaluation
 
-Compare tool-call-level replanning with episode-local execution on debugging and repository tasks.
+Compare tool-call-level replanning with episode-local execution on debugging and repository tasks. Include unsatisfiable Actions and results whose epistemic significance becomes clear only after local retries.
 
 Measure:
 
 - model-visible execution-noise tokens;
 - LLM round trips per stable intent;
 - repeated planning for the same intent;
-- debugging adaptability when an unexpected result occurs.
+- unauthorized changes to completion semantics;
+- time or attempts before an unsatisfiable Action returns `UNRESOLVABLE`;
+- debugging adaptability when an unexpected result occurs;
+- bounded return to the epistemic loop after persistent reality pushback.
 
-**Gate:** retain episodes only if they reduce cognitive thrashing and context pollution without hiding anomalies or materially weakening debugging.
+**Gate:** retain episodes only if they reduce cognitive thrashing and context pollution, preserve fixed completion semantics, and return control in bounded time without hiding anomalies or materially weakening debugging.
 
 ## Phase 4 — Add Observation
 

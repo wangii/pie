@@ -772,6 +772,60 @@ the already-authorized Action?
 > **Epistemic loop owns commitments.
 > Action-local loop owns competence.**
 
+## Why an Imperfect Boundary Is Sufficient
+
+两层 loop 不依赖系统准确判断每一次失败究竟是 execution problem，还是 epistemic evidence。这样的分类在真实任务中通常无法立即完成。架构真正需要保证的是：
+
+> **一次错误的边界判断不能无限期持续。**
+
+这不是简单的“thinking vs execution”分工，而是一个逐层收窄自由度的层级：
+
+```text
+Anchor
+  ↓ defines success
+Frame
+  ↓ authorizes an investigation
+Action
+  ↓ freezes local intent and completion
+Execution attempts
+  ↓ interact with
+World result
+```
+
+每一层只能在上层给定的约束内调整。Action-local loop 可以更换工具、命令、路径和执行策略，但不能自行改写 Action 的目标。
+
+为此，Frame 有两个硬约束：
+
+```text
+falsifier   什么结果会使当前 Frame 不再成立
+horizon     最多允许当前承诺持续到何时
+```
+
+`falsifier` 防止系统把任何反证都重新解释成支持当前 Frame；`horizon` 防止调查无限延长。即使某个具有 epistemic meaning 的失败暂时被误判为普通 execution noise，Frame 也必须在 falsifier 被触发或 horizon 到达时接受重新审查。
+
+Action 则需要一个最小 contract：
+
+```text
+intent
+completion_condition
+```
+
+执行期间可以自由修复局部方法，但 `completion_condition` 保持冻结。执行 loop 不能为了宣称成功而降低或替换完成标准。如果在当前约束下无法满足它，Action 必须返回：
+
+```text
+UNRESOLVABLE
+```
+
+并把控制权交还 epistemic loop，而不是继续无限重试或暗中 reframing。
+
+因此这里所需的假设很弱：
+
+> **只需在一个有限的 execution episode 内，暂时冻结一个局部 epistemic intent。**
+
+系统不必预先知道失败属于哪一层。现实持续拒绝当前执行路径时，`UNRESOLVABLE`、falsifier 或 horizon 会迫使控制权上移，重新评估 Frame 或 Action。
+
+`horizon` 因而类似 distributed system 中的 timeout：timeout 不需要诊断请求为何没有完成，只需要保证一个 commitment 不能永久挂起。它定义了 action-local loop 与 epistemic loop 之间的有界等待，使边界分类可以不完美，但错误不能无界存活。
+
 ---
 
 # 12. Minimal Runtime Sketch
