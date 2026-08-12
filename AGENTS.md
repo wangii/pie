@@ -12,6 +12,37 @@
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
 
+## Pie Architecture Direction
+
+Pie is a fork of Pi at the context boundary. Pi remains the execution chassis; Pie owns model-facing context construction. Read `README.md` for the thesis and `roadmap.md` for phase gates before changing context, session, compaction, or agent-loop code.
+
+### Current Scope
+
+- The current milestone is Roadmap Phase 0: establish a stable `ContextCompiler` baseline with empty epistemic state.
+- Do not implement Anchor, Frame, Action episodes, Observation, or additional epistemic schemas before the Phase 0 gate passes.
+- Do not continue the cognition experiment as an extension. Extension prototypes may be used as comparative evidence only; the production boundary belongs in the forked core.
+- Keep providers, streaming, authentication, tools, TUI, and raw persistence behavior unchanged unless the context-boundary work requires a concrete change.
+
+### Architectural Invariants
+
+- Treat the transcript as an append-oriented raw event log, not canonical cognitive state.
+- Preserve user messages, assistant messages, tool calls, tool results, errors, retries, and temporary experiments as recoverable provenance.
+- Route every model request through Pie's `ContextCompiler`.
+- Compile from raw events and durable epistemic state, not from an already-compacted narrative.
+- Never persist compiler output back into raw history as if it were an event.
+- Context budget pressure must reduce the model-visible projection; it must not rewrite canonical state or trigger narrative transcript summarization.
+- Keep tool calls and tool results structurally valid when selecting or dropping context.
+- Make context selection inspectable: record selected event identities, omissions, budget estimates, and compiler version outside model cognition.
+- Bound overflow recovery. Do not introduce summarize/retry loops.
+
+### Research Discipline
+
+- Introduce candidate primitives only in this order: Anchor, Frame, Action, Observation.
+- Add one primitive at a time and compare it with the immediately preceding baseline.
+- Require each primitive to pass the ablation and kill gate in `roadmap.md`; remove or redesign failed machinery instead of adding schema to justify it.
+- Do not add claims, questions, hypothesis graphs, dependencies, confidence scores, belief scores, or task-specific ontologies unless the roadmap is explicitly revised first.
+- Prefer deterministic structural projection over LLM summarization. `ContextCompiler` must not become another compactor.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
