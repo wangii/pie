@@ -1,15 +1,17 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { estimateTokens } from "./compaction/index.ts";
-import type { Anchor, EpistemicState, Frame } from "./epistemic-state.ts";
+import type { Action, Anchor, EpistemicState, Frame } from "./epistemic-state.ts";
 import type { SessionEntry } from "./session-manager.ts";
 import { sessionEntryToContextMessages } from "./session-manager.ts";
 
 export const PHASE_ZERO_CONTEXT_COMPILER_VERSION = "pie-phase-0/v1";
 export const PHASE_ONE_CONTEXT_COMPILER_VERSION = "pie-phase-1-anchor/v1";
 export const PHASE_TWO_CONTEXT_COMPILER_VERSION = "pie-phase-2-frame/v1";
+export const PHASE_THREE_CONTEXT_COMPILER_VERSION = "pie-phase-3-action/v1";
 export const ANCHOR_CONTEXT_MESSAGE_TYPE = "pie.anchor";
 export const FRAME_CONTEXT_MESSAGE_TYPE = "pie.frame";
+export const ACTION_CONTEXT_MESSAGE_TYPE = "pie.action";
 
 export type EmptyEpistemicState = Record<never, never>;
 
@@ -18,7 +20,8 @@ export type ContextOmissionReason =
 	| "historical_summary"
 	| "not_model_facing"
 	| "runtime_excluded"
-	| "invalid_tool_sequence";
+	| "invalid_tool_sequence"
+	| "outside_action_episode";
 
 export interface ContextOmission {
 	eventId: string;
@@ -47,6 +50,14 @@ export interface ContextSelectionManifest {
 			horizon: number;
 			completedModelResponses: number;
 			remainingModelResponses: number;
+			tokens: number;
+		};
+		action?: {
+			id: string;
+			startEntryId: string;
+			frameRevisionEntryId: string;
+			sourceEventId: string;
+			completedModelResponses: number;
 			tokens: number;
 		};
 	};
@@ -215,17 +226,43 @@ function frameMessage(frame: Frame): AgentMessage {
 	};
 }
 
+function actionMessage(action: Action): AgentMessage {
+	return {
+		role: "custom",
+		customType: ACTION_CONTEXT_MESSAGE_TYPE,
+		content:
+			`[CURRENT ACTION]\nIntent: ${action.intent}\nCompletion condition: ${action.completionCondition}\n` +
+			"Contract: frozen for this episode. Tools and execution strategy may change; intent and completion condition may not. " +
+			"If the condition cannot be met under the current Frame and constraints, return exactly UNRESOLVABLE.",
+		display: false,
+		details: {
+			actionId: action.id,
+			startEntryId: action.startEntryId,
+			frameRevisionEntryId: action.frameRevisionEntryId,
+			sourceEventId: action.sourceEventId,
+			completedModelResponses: action.completedModelResponses,
+		},
+		timestamp: new Date(action.timestamp).getTime(),
+	};
+}
+
 async function compileProjection(
 	input: ContextCompilerInput,
 	compilerVersion: string,
 	anchor: Anchor | undefined,
 	frame: Frame | undefined,
+	action: Action | undefined,
 ): Promise<ContextCompilation> {
 	const runtimeMessages = new Set(input.runtimeMessages);
 	const omissionsById = new Map<string, ContextOmission>();
 	const projectedEvents: ProjectedEvent[] = [];
 
-	for (const event of input.rawEvents) {
+	const actionSourceIndex = action ? input.rawEvents.findIndex((event) => event.id === action.sourceEventId) : -1;
+	if (action && actionSourceIndex < 0) {
+		throw new Error(`Action ${action.id} source event ${action.sourceEventId} is absent from compiler input.`);
+	}
+
+	for (const [eventIndex, event] of input.rawEvents.entries()) {
 		if (event.type === "compaction" || event.type === "branch_summary") {
 			omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "historical_summary" });
 			continue;
@@ -237,6 +274,14 @@ async function compileProjection(
 		const messages = sessionEntryToContextMessages(event).filter(
 			(message) => message.role !== "bashExecution" || !message.excludeFromContext,
 		);
+		if (action && eventIndex < actionSourceIndex && messages.length > 0) {
+			omissionsById.set(event.id, {
+				eventId: event.id,
+				eventType: event.type,
+				reason: "outside_action_episode",
+			});
+			continue;
+		}
 		if (messages.length === 0) {
 			omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "not_model_facing" });
 			continue;
@@ -253,10 +298,12 @@ async function compileProjection(
 	const requiredTokens = estimateRequiredTokens(input.systemPrompt, input.tools);
 	const anchorMessages = anchor ? [anchorMessage(anchor)] : [];
 	const frameMessages = frame ? [frameMessage(frame)] : [];
-	const retainedMessages = [...anchorMessages, ...frameMessages];
+	const actionMessages = action ? [actionMessage(action)] : [];
+	const retainedMessages = [...anchorMessages, ...frameMessages, ...actionMessages];
 	const anchorTokens = estimateMessagesTokens(anchorMessages);
 	const frameTokens = estimateMessagesTokens(frameMessages);
-	const retainedStateTokens = anchorTokens + frameTokens;
+	const actionTokens = estimateMessagesTokens(actionMessages);
+	const retainedStateTokens = anchorTokens + frameTokens + actionTokens;
 	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - retainedStateTokens);
 	const windows = buildCoherentWindows(projectedEvents);
 	const selectedIds = new Set<string>();
@@ -306,7 +353,7 @@ async function compileProjection(
 	const transformedMessages = input.transformMessages
 		? await input.transformMessages(selectedMessages, input.signal)
 		: selectedMessages;
-	// Anchor is compiler-owned state, so transcript transforms cannot omit or rewrite it.
+	// Epistemic state is compiler-owned, so transcript transforms cannot omit or rewrite it.
 	const messages = [...retainedMessages, ...transformedMessages];
 	const outputMessageTokens = estimateMessagesTokens(messages);
 	if (requiredTokens + outputMessageTokens > availableInputTokens) {
@@ -345,6 +392,16 @@ async function compileProjection(
 							tokens: frameTokens,
 						}
 					: undefined,
+				action: action
+					? {
+							id: action.id,
+							startEntryId: action.startEntryId,
+							frameRevisionEntryId: action.frameRevisionEntryId,
+							sourceEventId: action.sourceEventId,
+							completedModelResponses: action.completedModelResponses,
+							tokens: actionTokens,
+						}
+					: undefined,
 			},
 			budget: {
 				contextWindow,
@@ -361,14 +418,20 @@ async function compileProjection(
 /** Deterministic structural projection with empty epistemic state. */
 export class PhaseZeroContextCompiler implements ContextCompiler {
 	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
-		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined, undefined);
+		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined, undefined, undefined);
 	}
 }
 
 /** Phase 1 projection: Phase 0 selection plus an always-retained durable Anchor. */
 export class PhaseOneContextCompiler implements ContextCompiler {
 	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
-		return compileProjection(input, PHASE_ONE_CONTEXT_COMPILER_VERSION, input.epistemicState.anchor, undefined);
+		return compileProjection(
+			input,
+			PHASE_ONE_CONTEXT_COMPILER_VERSION,
+			input.epistemicState.anchor,
+			undefined,
+			undefined,
+		);
 	}
 }
 
@@ -380,6 +443,20 @@ export class PhaseTwoContextCompiler implements ContextCompiler {
 			PHASE_TWO_CONTEXT_COMPILER_VERSION,
 			input.epistemicState.anchor,
 			input.epistemicState.frame,
+			undefined,
+		);
+	}
+}
+
+/** Phase 3 projection: Phase 2 state plus a frozen Action and its episode-local execution window. */
+export class PhaseThreeContextCompiler implements ContextCompiler {
+	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
+		return compileProjection(
+			input,
+			PHASE_THREE_CONTEXT_COMPILER_VERSION,
+			input.epistemicState.anchor,
+			input.epistemicState.frame,
+			input.epistemicState.action,
 		);
 	}
 }

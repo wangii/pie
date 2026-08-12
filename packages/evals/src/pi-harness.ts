@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { contentText } from "@earendil-works/pi-ai";
 import {
+	type ActionDirective,
 	type AgentSession,
 	type CreateAgentSessionOptions,
 	createAgentSessionFromServices,
@@ -34,6 +35,7 @@ export type PiCodingAgentInput =
 					content: string;
 					anchor?: { statement: string; revisionReason?: string };
 					frame?: FrameDirective;
+					action?: ActionDirective;
 			  }
 			| { type: "reload" }
 	  >;
@@ -50,6 +52,7 @@ type PiCodingAgentHarnessOptions = {
 	transformSystemPrompt?: (defaultPrompt: string) => string;
 	anchorEnabled?: boolean;
 	frameEnabled?: boolean;
+	actionEnabled?: boolean;
 	contextInputTokenLimit?: number;
 };
 
@@ -107,10 +110,11 @@ async function promptAgent(
 	signal: AbortSignal | undefined,
 	anchor?: { statement: string; revisionReason?: string },
 	frame?: FrameDirective,
+	action?: ActionDirective,
 ): Promise<string> {
 	signal?.throwIfAborted();
 	const previousMessageCount = session.messages.length;
-	await session.prompt(input, { anchor, frame });
+	await session.prompt(input, { anchor, frame, action });
 	const assistant = session.messages
 		.slice(previousMessageCount)
 		.reverse()
@@ -169,6 +173,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 				noTools: options.noTools,
 				anchorEnabled: options.anchorEnabled,
 				frameEnabled: options.frameEnabled,
+				actionEnabled: options.actionEnabled,
 				contextInputTokenLimit: options.contextInputTokenLimit,
 			})
 		).session;
@@ -199,6 +204,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 						signal,
 						options.anchorEnabled === false ? undefined : step.anchor,
 						options.frameEnabled === false ? undefined : step.frame,
+						options.actionEnabled === false ? undefined : step.action,
 					);
 				} else {
 					await evalSession.reload();

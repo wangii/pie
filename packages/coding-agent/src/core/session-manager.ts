@@ -156,6 +156,27 @@ export interface FrameTransitionEntry extends SessionEntryBase {
 	replacementFrameId?: string;
 }
 
+/** Frozen contract for one finite Action episode under an exact Frame version. */
+export interface ActionStartEntry extends SessionEntryBase {
+	type: "action_start";
+	actionId: string;
+	intent: string;
+	completionCondition: string;
+	frameRevisionEntryId: string;
+	sourceEventId: string;
+}
+
+/** Explicit terminal control transfer from one Action episode. */
+export interface ActionTransitionEntry extends SessionEntryBase {
+	type: "action_transition";
+	actionId: string;
+	startEntryId: string;
+	transition: "completed" | "unresolvable" | "escalated";
+	sourceEventId: string;
+	reason: string;
+	challenge?: "anchor" | "frame";
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -189,7 +210,9 @@ export type SessionEntry =
 	| SessionInfoEntry
 	| AnchorRevisionEntry
 	| FrameRevisionEntry
-	| FrameTransitionEntry;
+	| FrameTransitionEntry
+	| ActionStartEntry
+	| ActionTransitionEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -359,6 +382,15 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 		}
 	}
 	return null;
+}
+
+function getCurrentActionStart(entries: readonly SessionEntry[]): ActionStartEntry | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		if (entry.type === "action_transition") return undefined;
+		if (entry.type === "action_start") return entry;
+	}
+	return undefined;
 }
 
 function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
@@ -1192,6 +1224,9 @@ export class SessionManager {
 			throw new Error("Anchor statement must not be empty.");
 		}
 		const branch = this.getBranch();
+		if (getCurrentActionStart(branch)) {
+			throw new Error("Anchor cannot change while an Action episode is active.");
+		}
 		if (!branch.some((entry) => entry.id === revision.sourceEventId)) {
 			throw new Error(`Anchor source event ${revision.sourceEventId} is not on the active branch.`);
 		}
@@ -1230,6 +1265,9 @@ export class SessionManager {
 			throw new Error("Frame horizon must be a positive integer.");
 		}
 		const branch = this.getBranch();
+		if (getCurrentActionStart(branch)) {
+			throw new Error("Frame cannot change while an Action episode is active.");
+		}
 		if (!branch.some((entry) => entry.id === revision.sourceEventId)) {
 			throw new Error(`Frame source event ${revision.sourceEventId} is not on the active branch.`);
 		}
@@ -1283,6 +1321,9 @@ export class SessionManager {
 			throw new Error("Only a replaced Frame transition may name a replacement identity.");
 		}
 		const branch = this.getBranch();
+		if (getCurrentActionStart(branch)) {
+			throw new Error("Frame cannot terminate while an Action episode is active.");
+		}
 		if (!branch.some((entry) => entry.id === transition.sourceEventId)) {
 			throw new Error(`Frame transition source event ${transition.sourceEventId} is not on the active branch.`);
 		}
@@ -1301,6 +1342,100 @@ export class SessionManager {
 		}
 		const entry: FrameTransitionEntry = {
 			type: "frame_transition",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...transition,
+			reason,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append the frozen contract for a new Action episode. */
+	appendActionStart(action: Omit<ActionStartEntry, keyof SessionEntryBase | "type">): string {
+		const intent = action.intent.trim();
+		const completionCondition = action.completionCondition.trim();
+		if (!intent) throw new Error("Action intent must not be empty.");
+		if (!completionCondition) throw new Error("Action completion condition must not be empty.");
+		const branch = this.getBranch();
+		if (!branch.some((entry) => entry.id === action.sourceEventId)) {
+			throw new Error(`Action source event ${action.sourceEventId} is not on the active branch.`);
+		}
+		let currentFrame: FrameRevisionEntry | undefined;
+		let currentFrameResponses = 0;
+		let currentAction: ActionStartEntry | undefined;
+		const seenActionIds = new Set<string>();
+		for (const entry of branch) {
+			if (entry.type === "frame_revision") {
+				currentFrame = entry;
+				currentFrameResponses = 0;
+			} else if (entry.type === "frame_transition" && currentFrame?.id === entry.revisionEntryId) {
+				currentFrame = undefined;
+			} else if (entry.type === "message" && entry.message.role === "assistant" && currentFrame) {
+				currentFrameResponses++;
+			} else if (entry.type === "action_start") {
+				seenActionIds.add(entry.actionId);
+				currentAction = entry;
+			} else if (entry.type === "action_transition" && currentAction?.id === entry.startEntryId) {
+				currentAction = undefined;
+			}
+		}
+		if (
+			!currentFrame ||
+			action.frameRevisionEntryId !== currentFrame.id ||
+			currentFrameResponses >= currentFrame.horizon
+		) {
+			throw new Error("Action must bind to a current admissible Frame version.");
+		}
+		if (currentAction) throw new Error("An Action episode is already active.");
+		if (seenActionIds.has(action.actionId)) throw new Error("Action identity must not be reused.");
+		const entry: ActionStartEntry = {
+			type: "action_start",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...action,
+			intent,
+			completionCondition,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a terminal result for the current Action without changing its frozen contract. */
+	appendActionTransition(transition: Omit<ActionTransitionEntry, keyof SessionEntryBase | "type">): string {
+		const reason = transition.reason.trim();
+		if (!reason) throw new Error("Action transition reason must not be empty.");
+		if (transition.transition === "escalated" ? !transition.challenge : transition.challenge !== undefined) {
+			throw new Error("Only an escalated Action may name the challenged epistemic level.");
+		}
+		const branch = this.getBranch();
+		if (!branch.some((entry) => entry.id === transition.sourceEventId)) {
+			throw new Error(`Action transition source event ${transition.sourceEventId} is not on the active branch.`);
+		}
+		let current: ActionStartEntry | undefined;
+		let currentStartIndex = -1;
+		for (const [index, entry] of branch.entries()) {
+			if (entry.type === "action_start") {
+				current = entry;
+				currentStartIndex = index;
+			} else if (entry.type === "action_transition" && current?.id === entry.startEntryId) {
+				current = undefined;
+				currentStartIndex = -1;
+			}
+		}
+		const sourceIndex = branch.findIndex((entry) => entry.id === transition.sourceEventId);
+		if (
+			!current ||
+			transition.actionId !== current.actionId ||
+			transition.startEntryId !== current.id ||
+			sourceIndex <= currentStartIndex
+		) {
+			throw new Error("Action transition does not terminate the current episode from a later result event.");
+		}
+		const entry: ActionTransitionEntry = {
+			type: "action_transition",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),

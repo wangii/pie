@@ -13,6 +13,8 @@ export {
 	VERSION,
 } from "./config.ts";
 export {
+	type ActionDefinition,
+	type ActionDirective,
 	AgentSession,
 	type AgentSessionConfig,
 	type AgentSessionEvent,
@@ -51,6 +53,7 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.ts";
 export {
+	ACTION_CONTEXT_MESSAGE_TYPE,
 	ANCHOR_CONTEXT_MESSAGE_TYPE,
 	ContextBudgetError,
 	type ContextCompilation,
@@ -62,13 +65,17 @@ export {
 	type EmptyEpistemicState,
 	FRAME_CONTEXT_MESSAGE_TYPE,
 	PHASE_ONE_CONTEXT_COMPILER_VERSION,
+	PHASE_THREE_CONTEXT_COMPILER_VERSION,
 	PHASE_TWO_CONTEXT_COMPILER_VERSION,
 	PHASE_ZERO_CONTEXT_COMPILER_VERSION,
 	PhaseOneContextCompiler,
+	PhaseThreeContextCompiler,
 	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
 } from "./core/context-compiler.ts";
 export {
+	type Action,
+	type ActionTerminalTransition,
 	type Anchor,
 	type EpistemicState,
 	type Frame,
@@ -251,6 +258,8 @@ export {
 	type PromptTemplate,
 } from "./core/sdk.ts";
 export {
+	type ActionStartEntry,
+	type ActionTransitionEntry,
 	type AnchorRevisionEntry,
 	type BranchSummaryEntry,
 	buildContextEntries,

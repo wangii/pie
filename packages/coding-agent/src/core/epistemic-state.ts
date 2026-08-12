@@ -1,4 +1,11 @@
-import type { AnchorRevisionEntry, FrameRevisionEntry, FrameTransitionEntry, SessionEntry } from "./session-manager.ts";
+import type {
+	ActionStartEntry,
+	ActionTransitionEntry,
+	AnchorRevisionEntry,
+	FrameRevisionEntry,
+	FrameTransitionEntry,
+	SessionEntry,
+} from "./session-manager.ts";
 
 export interface Anchor {
 	id: string;
@@ -31,10 +38,28 @@ export interface Frame {
 
 export type FrameTerminalTransition = FrameTransitionEntry["transition"];
 
+/** One active, frozen investigation intent executed under an exact Frame version. */
+export interface Action {
+	id: string;
+	intent: string;
+	completionCondition: string;
+	startEntryId: string;
+	frameRevisionEntryId: string;
+	sourceEventId: string;
+	timestamp: string;
+	/** Derived from raw events after startEntryId; it is not persisted as canonical state. */
+	completedModelResponses: number;
+	lastResponseEventId?: string;
+}
+
+export type ActionTerminalTransition = ActionTransitionEntry["transition"];
+
 export interface EpistemicState {
 	anchor?: Anchor;
 	/** Only an admissible Frame is exposed as current state. Terminal Frames remain in the raw log. */
 	frame?: Frame;
+	/** Only an active Action is exposed. Its frozen contract and complete trace remain in the raw log. */
+	action?: Action;
 }
 
 function anchorFromEntry(entry: AnchorRevisionEntry): Anchor {
@@ -62,6 +87,19 @@ function frameFromEntry(entry: FrameRevisionEntry): Frame {
 		sourceEventId: entry.sourceEventId,
 		timestamp: entry.timestamp,
 		revisionReason: entry.revisionReason,
+		completedModelResponses: 0,
+	};
+}
+
+function actionFromEntry(entry: ActionStartEntry): Action {
+	return {
+		id: entry.actionId,
+		intent: entry.intent,
+		completionCondition: entry.completionCondition,
+		startEntryId: entry.id,
+		frameRevisionEntryId: entry.frameRevisionEntryId,
+		sourceEventId: entry.sourceEventId,
+		timestamp: entry.timestamp,
 		completedModelResponses: 0,
 	};
 }
@@ -101,16 +139,49 @@ function validateFrameTransition(entry: FrameTransitionEntry, frame: Frame | und
 	}
 }
 
+function validateActionStart(
+	entry: ActionStartEntry,
+	frame: Frame | undefined,
+	action: Action | undefined,
+	seenActionIds: Set<string>,
+): Action {
+	if (
+		!frame ||
+		entry.frameRevisionEntryId !== frame.revisionEntryId ||
+		frame.completedModelResponses >= frame.horizon
+	) {
+		throw new Error(`Action start ${entry.id} does not bind to a current admissible Frame version.`);
+	}
+	if (action || seenActionIds.has(entry.actionId)) {
+		throw new Error(`Action start ${entry.id} does not start a new finite episode.`);
+	}
+	seenActionIds.add(entry.actionId);
+	return actionFromEntry(entry);
+}
+
+function validateActionTransition(entry: ActionTransitionEntry, action: Action | undefined): void {
+	if (!action || entry.actionId !== action.id || entry.startEntryId !== action.startEntryId) {
+		throw new Error(`Action transition ${entry.id} does not terminate the current Action episode.`);
+	}
+	if (entry.transition === "escalated" ? !entry.challenge : entry.challenge !== undefined) {
+		throw new Error(`Action transition ${entry.id} has invalid escalation metadata.`);
+	}
+}
+
 /** Reconstruct durable epistemic state from the active raw branch. */
 export function restoreEpistemicState(entries: readonly SessionEntry[]): EpistemicState {
 	let anchor: Anchor | undefined;
 	let frame: Frame | undefined;
+	let action: Action | undefined;
 	const seenFrameIds = new Set<string>();
+	const seenActionIds = new Set<string>();
 	const precedingEventIds = new Set<string>();
+	const eventPositions = new Map(entries.map((entry, index) => [entry.id, index] as const));
 	let expectedReplacementFrameId: string | undefined;
 
 	for (const entry of entries) {
 		if (entry.type === "anchor_revision") {
+			if (action) throw new Error(`Anchor revision ${entry.id} cannot change success semantics during an Action.`);
 			if (!precedingEventIds.has(entry.sourceEventId)) {
 				throw new Error(
 					`Anchor revision ${entry.id} references source event ${entry.sourceEventId}, which is not earlier on the active branch.`,
@@ -129,6 +200,7 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 			}
 			anchor = anchorFromEntry(entry);
 		} else if (entry.type === "frame_revision") {
+			if (action) throw new Error(`Frame revision ${entry.id} cannot change its commitment during an Action.`);
 			if (!precedingEventIds.has(entry.sourceEventId)) {
 				throw new Error(
 					`Frame revision ${entry.id} references source event ${entry.sourceEventId}, which is not earlier on the active branch.`,
@@ -142,6 +214,7 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 			frame = validateFrameRevision(entry, frame, seenFrameIds);
 			expectedReplacementFrameId = undefined;
 		} else if (entry.type === "frame_transition") {
+			if (action) throw new Error(`Frame transition ${entry.id} cannot terminate a Frame during an Action.`);
 			if (!precedingEventIds.has(entry.sourceEventId)) {
 				throw new Error(
 					`Frame transition ${entry.id} references source event ${entry.sourceEventId}, which is not earlier on the active branch.`,
@@ -150,12 +223,41 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 			validateFrameTransition(entry, frame);
 			expectedReplacementFrameId = entry.replacementFrameId;
 			frame = undefined;
-		} else if (frame && entry.type === "message" && entry.message.role === "assistant") {
-			frame.completedModelResponses++;
-			frame.lastResponseEventId = entry.id;
+		} else if (entry.type === "action_start") {
+			if (!precedingEventIds.has(entry.sourceEventId)) {
+				throw new Error(
+					`Action start ${entry.id} references source event ${entry.sourceEventId}, which is not earlier on the active branch.`,
+				);
+			}
+			action = validateActionStart(entry, frame, action, seenActionIds);
+		} else if (entry.type === "action_transition") {
+			if (
+				!precedingEventIds.has(entry.sourceEventId) ||
+				!action ||
+				(eventPositions.get(entry.sourceEventId) ?? -1) <= (eventPositions.get(action.startEntryId) ?? -1)
+			) {
+				throw new Error(
+					`Action transition ${entry.id} does not reference a result event after the Action started.`,
+				);
+			}
+			validateActionTransition(entry, action);
+			action = undefined;
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			if (frame) {
+				frame.completedModelResponses++;
+				frame.lastResponseEventId = entry.id;
+			}
+			if (action) {
+				action.completedModelResponses++;
+				action.lastResponseEventId = entry.id;
+			}
 		}
 		precedingEventIds.add(entry.id);
 	}
 
-	return { ...(anchor ? { anchor } : {}), ...(frame ? { frame } : {}) };
+	return {
+		...(anchor ? { anchor } : {}),
+		...(frame ? { frame } : {}),
+		...(action ? { action } : {}),
+	};
 }

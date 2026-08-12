@@ -66,6 +66,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	contextCompiler?: ContextCompiler;
 	anchorEnabled?: boolean;
 	frameEnabled?: boolean;
+	actionEnabled?: boolean;
 	contextInputTokenLimit?: number;
 }
 
@@ -225,6 +226,7 @@ export async function createAgentSessionFromServices(
 		contextCompiler: options.contextCompiler,
 		anchorEnabled: options.anchorEnabled,
 		frameEnabled: options.frameEnabled,
+		actionEnabled: options.actionEnabled,
 		contextInputTokenLimit: options.contextInputTokenLimit,
 	});
 }

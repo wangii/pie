@@ -83,12 +83,14 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Context projection policy. Defaults to Pie's Phase 2 Frame compiler. */
+	/** Context projection policy. Defaults to Pie's Phase 3 Action compiler. */
 	contextCompiler?: ContextCompiler;
 	/** Enable Anchor creation and projection. Set false for the Phase 0 baseline. Default: true. */
 	anchorEnabled?: boolean;
 	/** Enable Frame state and projection. Set false for Phase 2 ablation. Defaults to anchorEnabled. */
 	frameEnabled?: boolean;
+	/** Enable Action episodes and episode-local projection. Set false for Phase 3 ablation. Defaults to frameEnabled. */
+	actionEnabled?: boolean;
 	/** Initial compiler input budget override for controlled evaluations. */
 	contextInputTokenLimit?: number;
 }
@@ -399,6 +401,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		contextCompiler: options.contextCompiler,
 		anchorEnabled: options.anchorEnabled,
 		frameEnabled: options.frameEnabled,
+		actionEnabled: options.actionEnabled,
 		contextInputTokenLimit: options.contextInputTokenLimit,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

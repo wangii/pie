@@ -227,6 +227,21 @@ Measure:
 
 **Gate:** retain episodes only if they reduce cognitive thrashing and context pollution, preserve fixed completion semantics, and return control in bounded time without hiding anomalies or materially weakening debugging.
 
+### Gate check — 2026-08-12
+
+**Status: HOLD (partially satisfied). Do not begin Phase 4.**
+
+Evidence collected against Phase 2:
+
+- `npm run check` passed.
+- Phase 3 persistence, compiler, and provider-boundary tests passed: 17/17.
+- Phase 0–2 provider-boundary controls passed: 13/13.
+- The `deepseek/deepseek-v4-flash` matched ablation in `packages/evals/src/action.eval.ts` passed 6/6 candidate runs versus 0/6 baseline runs, a `+100 pp` lift for preserving frozen completion semantics.
+- The candidate used 2204.3 model tokens per run versus 2030.7 for the baseline (`+173.7`, about `+8.6%`) and reduced mean latency by 482.4 ms. Estimated cost was unchanged at the displayed precision.
+- Deterministic coverage confirms append-only Action provenance, episode-local projection, fixed contracts, explicit escalation, exact `UNRESOLVABLE` handling, and control return before Frame expiry.
+
+The behavioral ablation used synthetic no-tool marker tasks (`toolCalls = 0`). It therefore does not establish reduced tool-level replanning, lower execution-noise tokens on real traces, or preserved debugging adaptability under unexpected results. The Action primitive is not killed, but the full gate remains unpassed until a matched tool-based ablation measures those criteria. Reproduce the recorded run with `npm run eval -- src/action.eval.ts`; local artifacts from this check were written under `packages/evals/.eval/2026-08-12T13-30-23.278Z_ad765e19-ea95-4cdf-979a-b1a7e15248da/` and remain intentionally untracked.
+
 ## Phase 4 — Add Observation
 
 An Observation is durable only when execution changes Anchor satisfaction or Frame admissibility.

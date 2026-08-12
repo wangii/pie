@@ -135,6 +135,7 @@ function createFrameHarness(name: string, frameEnabled: boolean) {
 		noTools: "all",
 		anchorEnabled: true,
 		frameEnabled,
+		actionEnabled: false,
 		output: ({ response, session }): FrameEvalOutput => ({
 			response,
 			compilerVersion: session.latestContextManifest?.compilerVersion ?? null,

@@ -75,6 +75,7 @@ export interface HarnessOptions {
 	modelsJson?: Record<string, unknown>;
 	anchorEnabled?: boolean;
 	frameEnabled?: boolean;
+	actionEnabled?: boolean;
 }
 
 export interface Harness {
@@ -206,6 +207,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		// Existing characterization tests remain the Phase 0 ablation baseline.
 		anchorEnabled: options.anchorEnabled ?? false,
 		frameEnabled: options.frameEnabled,
+		actionEnabled: options.actionEnabled ?? false,
 	});
 
 	const events: AgentSessionEvent[] = [];

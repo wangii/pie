@@ -3,6 +3,8 @@
  */
 
 export {
+	type ActionDefinition,
+	type ActionDirective,
 	AgentSession,
 	type AgentSessionConfig,
 	type AgentSessionEvent,

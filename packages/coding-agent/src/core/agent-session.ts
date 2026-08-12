@@ -69,11 +69,19 @@ import {
 	type ContextCompiler,
 	type ContextSelectionManifest,
 	PhaseOneContextCompiler,
+	PhaseThreeContextCompiler,
 	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
 } from "./context-compiler.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
-import { type Anchor, type Frame, type FrameTerminalTransition, restoreEpistemicState } from "./epistemic-state.ts";
+import {
+	type Action,
+	type ActionTerminalTransition,
+	type Anchor,
+	type Frame,
+	type FrameTerminalTransition,
+	restoreEpistemicState,
+} from "./epistemic-state.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -234,12 +242,14 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Context projection policy. Defaults to Pie's deterministic Phase 2 Frame compiler. */
+	/** Context projection policy. Defaults to Pie's deterministic Phase 3 Action compiler. */
 	contextCompiler?: ContextCompiler;
 	/** Enable Anchor creation and projection. Set false for the Phase 0 baseline. Default: true. */
 	anchorEnabled?: boolean;
 	/** Enable Frame state and projection. Set false for Phase 2 ablation. Defaults to anchorEnabled. */
 	frameEnabled?: boolean;
+	/** Enable Action episodes and episode-local projection. Set false for Phase 3 ablation. Defaults to frameEnabled. */
+	actionEnabled?: boolean;
 	/** Initial compiler input budget override for controlled evaluations. */
 	contextInputTokenLimit?: number;
 }
@@ -266,6 +276,16 @@ export type FrameDirective =
 	| ({ type: "replace"; reason: string } & FrameDefinition)
 	| { type: "falsify" | "die"; reason: string };
 
+export interface ActionDefinition {
+	intent: string;
+	completionCondition: string;
+}
+
+export type ActionDirective =
+	| ({ type: "start" } & ActionDefinition)
+	| { type: "complete" | "unresolvable"; reason: string }
+	| { type: "escalate"; challenge: "anchor" | "frame"; reason: string };
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
@@ -282,6 +302,8 @@ export interface PromptOptions {
 	anchor?: { statement: string; revisionReason?: string };
 	/** Explicit Frame state operation to apply before this model turn. */
 	frame?: FrameDirective;
+	/** Explicit Action episode operation to apply before this model turn. */
+	action?: ActionDirective;
 }
 
 /** Result from cycleModel() */
@@ -399,8 +421,10 @@ export class AgentSession {
 	private readonly _contextCompiler: ContextCompiler;
 	private readonly _anchorEnabled: boolean;
 	private readonly _frameEnabled: boolean;
+	private readonly _actionEnabled: boolean;
 	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
 	private _pendingFrameDirective: FrameDirective | undefined;
+	private _pendingActionDirective: ActionDirective | undefined;
 	private _latestContextManifest: ContextSelectionManifest | undefined;
 	private readonly _configuredContextInputTokenLimit: number | undefined;
 	private _contextInputTokenLimit: number | undefined;
@@ -434,16 +458,22 @@ export class AgentSession {
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._anchorEnabled = config.anchorEnabled ?? true;
 		this._frameEnabled = config.frameEnabled ?? this._anchorEnabled;
+		this._actionEnabled = config.actionEnabled ?? this._frameEnabled;
 		if (this._frameEnabled && !this._anchorEnabled) {
 			throw new Error("Frame requires Anchor to be enabled.");
 		}
+		if (this._actionEnabled && !this._frameEnabled) {
+			throw new Error("Action episodes require Frame to be enabled.");
+		}
 		this._contextCompiler =
 			config.contextCompiler ??
-			(this._frameEnabled
-				? new PhaseTwoContextCompiler()
-				: this._anchorEnabled
-					? new PhaseOneContextCompiler()
-					: new PhaseZeroContextCompiler());
+			(this._actionEnabled
+				? new PhaseThreeContextCompiler()
+				: this._frameEnabled
+					? new PhaseTwoContextCompiler()
+					: this._anchorEnabled
+						? new PhaseOneContextCompiler()
+						: new PhaseZeroContextCompiler());
 		this._configuredContextInputTokenLimit = config.contextInputTokenLimit;
 		this._contextInputTokenLimit = config.contextInputTokenLimit;
 
@@ -535,6 +565,58 @@ export class AgentSession {
 		);
 	}
 
+	private _appendActionStart(definition: ActionDefinition, sourceEventId: string, frame: Frame): void {
+		this._emitAppendedEntry(
+			this.sessionManager.appendActionStart({
+				actionId: `action-${randomUUID()}`,
+				intent: definition.intent,
+				completionCondition: definition.completionCondition,
+				frameRevisionEntryId: frame.revisionEntryId,
+				sourceEventId,
+			}),
+		);
+	}
+
+	private _appendActionTransition(
+		action: Action,
+		transition: ActionTerminalTransition,
+		sourceEventId: string,
+		reason: string,
+		challenge?: "anchor" | "frame",
+	): void {
+		this._emitAppendedEntry(
+			this.sessionManager.appendActionTransition({
+				actionId: action.id,
+				startEntryId: action.startEntryId,
+				transition,
+				sourceEventId,
+				reason,
+				challenge,
+			}),
+		);
+	}
+
+	private _applyActionDirective(
+		directive: ActionDirective,
+		sourceEventId: string,
+		state: ReturnType<typeof restoreEpistemicState>,
+	): void {
+		if (directive.type === "start") {
+			if (state.action) throw new Error("An Action episode is already active.");
+			if (!state.frame) throw new Error("Create an admissible Frame before starting an Action.");
+			this._appendActionStart(directive, sourceEventId, state.frame);
+			return;
+		}
+		if (!state.action) throw new Error(`Cannot ${directive.type} because no Action episode is active.`);
+		this._appendActionTransition(
+			state.action,
+			directive.type === "complete" ? "completed" : directive.type === "unresolvable" ? "unresolvable" : "escalated",
+			sourceEventId,
+			directive.reason,
+			directive.type === "escalate" ? directive.challenge : undefined,
+		);
+	}
+
 	private _installContextCompiler(): void {
 		const transformMessages = this.agent.transformContext;
 		this.agent.transformContext = async (runtimeMessages, signal) => {
@@ -550,6 +632,18 @@ export class AgentSession {
 				.slice()
 				.reverse()
 				.find((entry) => entry.type === "message" && entry.message.role === "user");
+			const requestedActionDirective = this._pendingActionDirective;
+			if (
+				this._actionEnabled &&
+				requestedActionDirective &&
+				requestedActionDirective.type !== "start" &&
+				source?.type === "message"
+			) {
+				this._applyActionDirective(requestedActionDirective, source.id, epistemicState);
+				this._pendingActionDirective = undefined;
+				rawEvents = this.sessionManager.getBranch();
+				epistemicState = restoreEpistemicState(rawEvents);
+			}
 			const requestedAnchorRevision = this._pendingAnchorRevision;
 			if (this._anchorEnabled && requestedAnchorRevision && source?.type === "message") {
 				const current = epistemicState.anchor;
@@ -574,6 +668,12 @@ export class AgentSession {
 				rawEvents = this.sessionManager.getBranch();
 				epistemicState = restoreEpistemicState(rawEvents);
 			}
+			if (this._actionEnabled && requestedActionDirective?.type === "start" && source?.type === "message") {
+				this._applyActionDirective(requestedActionDirective, source.id, epistemicState);
+				this._pendingActionDirective = undefined;
+				rawEvents = this.sessionManager.getBranch();
+				epistemicState = restoreEpistemicState(rawEvents);
+			}
 			const frame = epistemicState.frame;
 			if (
 				this._frameEnabled &&
@@ -582,6 +682,16 @@ export class AgentSession {
 				frame.completedModelResponses >= frame.horizon &&
 				frame.lastResponseEventId
 			) {
+				if (epistemicState.action) {
+					this._appendActionTransition(
+						epistemicState.action,
+						"unresolvable",
+						frame.lastResponseEventId,
+						`The containing Frame reached its ${frame.horizon}-response horizon before the completion condition was met.`,
+					);
+					rawEvents = this.sessionManager.getBranch();
+					epistemicState = restoreEpistemicState(rawEvents);
+				}
 				this._appendFrameTransition(
 					frame,
 					"expired",
@@ -844,10 +954,11 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let persistedMessageEntryId: string | undefined;
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
+				persistedMessageEntryId = this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
 					event.message.display,
@@ -859,7 +970,7 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				persistedMessageEntryId = this.sessionManager.appendMessage(event.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -881,6 +992,23 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+				}
+
+				if (
+					this._actionEnabled &&
+					persistedMessageEntryId &&
+					assistantMsg.stopReason === "stop" &&
+					contentText(assistantMsg.content, "").trim() === "UNRESOLVABLE"
+				) {
+					const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
+					if (action) {
+						this._appendActionTransition(
+							action,
+							"unresolvable",
+							persistedMessageEntryId,
+							"The model returned UNRESOLVABLE for the frozen completion condition.",
+						);
+					}
 				}
 			}
 		}
@@ -1119,7 +1247,11 @@ export class AgentSession {
 			throw new Error("Wait for the current response to finish before revising the Anchor.");
 		}
 		const branch = this.sessionManager.getBranch();
-		const current = restoreEpistemicState(branch).anchor;
+		const state = restoreEpistemicState(branch);
+		if (state.action) {
+			throw new Error("Complete, escalate, or mark the current Action UNRESOLVABLE before revising the Anchor.");
+		}
+		const current = state.anchor;
 		if (!current) {
 			throw new Error("Anchor has not been initialized by a user request.");
 		}
@@ -1165,9 +1297,9 @@ export class AgentSession {
 			branch
 				.slice()
 				.reverse()
-				.find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
+				.find((entry) => entry.type === "message")?.id;
 		if (!resolved || !branch.some((entry) => entry.id === resolved)) {
-			throw new Error("Frame operation requires a source event on the active branch.");
+			throw new Error("Epistemic state operation requires a source event on the active branch.");
 		}
 		return resolved;
 	}
@@ -1175,6 +1307,9 @@ export class AgentSession {
 	private _assertFrameMutationAllowed(): void {
 		if (!this._frameEnabled) throw new Error("Frame is disabled for this session.");
 		if (this.isStreaming) throw new Error("Wait for the current response to finish before changing the Frame.");
+		if (restoreEpistemicState(this.sessionManager.getBranch()).action) {
+			throw new Error("Complete, escalate, or mark the current Action UNRESOLVABLE before changing the Frame.");
+		}
 	}
 
 	/** Create the first version of a new Frame identity. */
@@ -1227,6 +1362,68 @@ export class AgentSession {
 			{ type: transition === "falsified" ? "falsify" : "die", reason: options.reason },
 			this._resolveEpistemicSourceEventId(options.sourceEventId),
 			state.frame,
+		);
+	}
+
+	/** Current active Action episode on the active branch. */
+	get action(): Action | undefined {
+		return this._actionEnabled ? restoreEpistemicState(this.sessionManager.getBranch()).action : undefined;
+	}
+
+	private _validateActionDefinition(definition: ActionDefinition): void {
+		if (!definition.intent.trim()) throw new Error("Action intent must not be empty.");
+		if (!definition.completionCondition.trim()) throw new Error("Action completion condition must not be empty.");
+	}
+
+	private _assertActionMutationAllowed(): void {
+		if (!this._actionEnabled) throw new Error("Action episodes are disabled for this session.");
+		if (this.isStreaming) throw new Error("Wait for the current response to finish before changing the Action.");
+	}
+
+	/** Start one finite episode with a contract that cannot be revised in place. */
+	startAction(definition: ActionDefinition, options?: { sourceEventId?: string }): Action {
+		this._assertActionMutationAllowed();
+		this._validateActionDefinition(definition);
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		this._applyActionDirective(
+			{ type: "start", ...definition },
+			this._resolveEpistemicSourceEventId(options?.sourceEventId),
+			state,
+		);
+		return restoreEpistemicState(this.sessionManager.getBranch()).action!;
+	}
+
+	/** Finish the current episode after its frozen completion condition has been met. */
+	completeAction(reason: string, options?: { sourceEventId?: string }): void {
+		this._terminateAction("completed", reason, options?.sourceEventId);
+	}
+
+	/** Return bounded control to the epistemic loop when the frozen condition cannot be met. */
+	markActionUnresolvable(reason: string, options?: { sourceEventId?: string }): void {
+		this._terminateAction("unresolvable", reason, options?.sourceEventId);
+	}
+
+	/** Escalate a world result that challenges the containing Frame or Anchor. */
+	escalateAction(challenge: "anchor" | "frame", reason: string, options?: { sourceEventId?: string }): void {
+		this._terminateAction("escalated", reason, options?.sourceEventId, challenge);
+	}
+
+	private _terminateAction(
+		transition: ActionTerminalTransition,
+		reason: string,
+		sourceEventId?: string,
+		challenge?: "anchor" | "frame",
+	): void {
+		this._assertActionMutationAllowed();
+		if (!reason.trim()) throw new Error("Action transition reason must not be empty.");
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		if (!state.action) throw new Error("No Action episode is active.");
+		this._appendActionTransition(
+			state.action,
+			transition,
+			this._resolveEpistemicSourceEventId(sourceEventId),
+			reason,
+			challenge,
 		);
 	}
 
@@ -1406,6 +1603,7 @@ export class AgentSession {
 		} finally {
 			this._pendingAnchorRevision = undefined;
 			this._pendingFrameDirective = undefined;
+			this._pendingActionDirective = undefined;
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			await this._emitAgentSettled();
@@ -1473,6 +1671,13 @@ export class AgentSession {
 					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 				);
 			}
+			const currentEpistemicState = restoreEpistemicState(this.sessionManager.getBranch());
+			const terminatesCurrentAction = options?.action && options.action.type !== "start";
+			if (currentEpistemicState.action && (options?.anchor || options?.frame) && !terminatesCurrentAction) {
+				throw new Error(
+					"Complete, escalate, or mark the current Action UNRESOLVABLE before changing its Anchor or Frame.",
+				);
+			}
 			if (options?.anchor && !this._anchorEnabled) {
 				throw new Error("Anchor is disabled for this session.");
 			}
@@ -1481,13 +1686,16 @@ export class AgentSession {
 			}
 			if (options?.frame) {
 				if (!this._frameEnabled) throw new Error("Frame is disabled for this session.");
-				const frameState = restoreEpistemicState(this.sessionManager.getBranch());
 				if (options.frame.type === "create") {
 					this._validateFrameDefinition(options.frame);
-					if (frameState.frame) throw new Error("A Frame is already active; revise or replace it explicitly.");
-					if (!frameState.anchor && !options.anchor) throw new Error("Create an Anchor before creating a Frame.");
+					if (currentEpistemicState.frame) {
+						throw new Error("A Frame is already active; revise or replace it explicitly.");
+					}
+					if (!currentEpistemicState.anchor && !options.anchor) {
+						throw new Error("Create an Anchor before creating a Frame.");
+					}
 				} else {
-					if (!frameState.frame) {
+					if (!currentEpistemicState.frame) {
 						throw new Error(`Cannot ${options.frame.type} a Frame because no Frame is active.`);
 					}
 					if (options.frame.type === "revise" || options.frame.type === "replace") {
@@ -1496,6 +1704,26 @@ export class AgentSession {
 				}
 				if ("reason" in options.frame && !options.frame.reason.trim()) {
 					throw new Error("Frame transition reason must not be empty.");
+				}
+			}
+			if (options?.action) {
+				if (!this._actionEnabled) throw new Error("Action episodes are disabled for this session.");
+				if (options.action.type === "start") {
+					this._validateActionDefinition(options.action);
+					if (currentEpistemicState.action) throw new Error("An Action episode is already active.");
+					const frameWillRemain =
+						options.frame?.type === "create" ||
+						options.frame?.type === "revise" ||
+						options.frame?.type === "replace" ||
+						(!options.frame &&
+							currentEpistemicState.frame !== undefined &&
+							currentEpistemicState.frame.completedModelResponses < currentEpistemicState.frame.horizon);
+					if (!frameWillRemain) throw new Error("Create or revise an admissible Frame before starting an Action.");
+				} else {
+					if (!currentEpistemicState.action) {
+						throw new Error(`Cannot ${options.action.type} because no Action episode is active.`);
+					}
+					if (!options.action.reason.trim()) throw new Error("Action transition reason must not be empty.");
 				}
 			}
 
@@ -1528,7 +1756,7 @@ export class AgentSession {
 
 			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
-				if (options?.anchor || options?.frame) {
+				if (options?.anchor || options?.frame || options?.action) {
 					throw new Error(
 						"Epistemic state changes require an idle session so provenance can identify the new request.",
 					);
@@ -1641,6 +1869,9 @@ export class AgentSession {
 		}
 		if (options?.frame) {
 			this._pendingFrameDirective = options.frame;
+		}
+		if (options?.action) {
+			this._pendingActionDirective = options.action;
 		}
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);

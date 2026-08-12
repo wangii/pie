@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
 	ContextBudgetError,
 	PhaseOneContextCompiler,
+	PhaseThreeContextCompiler,
 	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
 } from "../src/core/context-compiler.ts";
@@ -275,5 +276,60 @@ describe("PhaseZeroContextCompiler", () => {
 			completedModelResponses: 1,
 			remainingModelResponses: 2,
 		});
+	});
+
+	it("retains a frozen Action and excludes execution before its episode source", async () => {
+		const events: SessionEntry[] = [
+			messageEntry("u1", null, user("old investigation", 1)),
+			messageEntry("a1", "u1", assistant("old result", 2)),
+			messageEntry("u2", "a1", user("start bounded action", 3)),
+		];
+		const result = await new PhaseThreeContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: {
+				anchor: {
+					id: "anchor-1",
+					revision: 1,
+					statement: "identify the defect",
+					revisionEntryId: "ar1",
+					previousRevisionId: null,
+					sourceEventId: "u1",
+					timestamp: new Date(1).toISOString(),
+				},
+				frame: {
+					id: "frame-1",
+					version: 1,
+					statement: "the cache is stale",
+					falsifier: "cache bypass reproduces the failure",
+					horizon: 4,
+					revisionEntryId: "fr1",
+					previousRevisionId: null,
+					sourceEventId: "u1",
+					timestamp: new Date(1).toISOString(),
+					completedModelResponses: 1,
+				},
+				action: {
+					id: "action-1",
+					intent: "inspect cache ownership",
+					completionCondition: "the owning process is identified",
+					startEntryId: "as1",
+					frameRevisionEntryId: "fr1",
+					sourceEventId: "u2",
+					timestamp: new Date(3).toISOString(),
+					completedModelResponses: 0,
+				},
+			},
+			runtimeMessages: events.map((event) => (event as SessionMessageEntry).message),
+			model: model(200),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text).at(-1)).toBe("start bounded action");
+		expect(result.messages.map(text)).not.toContain("old investigation");
+		expect(result.manifest.selectedEventIds).toEqual(["u2"]);
+		expect(result.manifest.omissions.filter(({ reason }) => reason === "outside_action_episode")).toHaveLength(2);
+		expect(result.manifest.epistemicState.action).toMatchObject({ id: "action-1", startEntryId: "as1" });
 	});
 });
