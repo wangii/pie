@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -68,10 +69,11 @@ import {
 	type ContextCompiler,
 	type ContextSelectionManifest,
 	PhaseOneContextCompiler,
+	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
 } from "./context-compiler.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
-import { type Anchor, restoreEpistemicState } from "./epistemic-state.ts";
+import { type Anchor, type Frame, type FrameTerminalTransition, restoreEpistemicState } from "./epistemic-state.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -232,10 +234,12 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Context projection policy. Defaults to Pie's deterministic Phase 1 Anchor compiler. */
+	/** Context projection policy. Defaults to Pie's deterministic Phase 2 Frame compiler. */
 	contextCompiler?: ContextCompiler;
-	/** Enable Anchor creation and projection. Set false for Phase 1 ablation. Default: true. */
+	/** Enable Anchor creation and projection. Set false for the Phase 0 baseline. Default: true. */
 	anchorEnabled?: boolean;
+	/** Enable Frame state and projection. Set false for Phase 2 ablation. Defaults to anchorEnabled. */
+	frameEnabled?: boolean;
 	/** Initial compiler input budget override for controlled evaluations. */
 	contextInputTokenLimit?: number;
 }
@@ -248,6 +252,19 @@ export interface ExtensionBindings {
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
 }
+
+export interface FrameDefinition {
+	statement: string;
+	falsifier: string;
+	/** Positive number of completed model responses before mandatory reconsideration. */
+	horizon: number;
+}
+
+export type FrameDirective =
+	| ({ type: "create" } & FrameDefinition)
+	| ({ type: "revise"; revisionReason?: string } & FrameDefinition)
+	| ({ type: "replace"; reason: string } & FrameDefinition)
+	| { type: "falsify" | "die"; reason: string };
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
@@ -263,6 +280,8 @@ export interface PromptOptions {
 	preflightResult?: (success: boolean) => void;
 	/** Explicit task-success semantics to create or revise before this model turn. */
 	anchor?: { statement: string; revisionReason?: string };
+	/** Explicit Frame state operation to apply before this model turn. */
+	frame?: FrameDirective;
 }
 
 /** Result from cycleModel() */
@@ -379,7 +398,9 @@ export class AgentSession {
 	private _modelRuntime: ModelRuntime;
 	private readonly _contextCompiler: ContextCompiler;
 	private readonly _anchorEnabled: boolean;
+	private readonly _frameEnabled: boolean;
 	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
+	private _pendingFrameDirective: FrameDirective | undefined;
 	private _latestContextManifest: ContextSelectionManifest | undefined;
 	private readonly _configuredContextInputTokenLimit: number | undefined;
 	private _contextInputTokenLimit: number | undefined;
@@ -412,9 +433,17 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._anchorEnabled = config.anchorEnabled ?? true;
+		this._frameEnabled = config.frameEnabled ?? this._anchorEnabled;
+		if (this._frameEnabled && !this._anchorEnabled) {
+			throw new Error("Frame requires Anchor to be enabled.");
+		}
 		this._contextCompiler =
 			config.contextCompiler ??
-			(this._anchorEnabled ? new PhaseOneContextCompiler() : new PhaseZeroContextCompiler());
+			(this._frameEnabled
+				? new PhaseTwoContextCompiler()
+				: this._anchorEnabled
+					? new PhaseOneContextCompiler()
+					: new PhaseZeroContextCompiler());
 		this._configuredContextInputTokenLimit = config.contextInputTokenLimit;
 		this._contextInputTokenLimit = config.contextInputTokenLimit;
 
@@ -435,6 +464,77 @@ export class AgentSession {
 		return this._modelRuntime;
 	}
 
+	private _emitAppendedEntry(entryId: string): void {
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) this._emit({ type: "entry_appended", entry });
+	}
+
+	private _appendFrameRevision(
+		definition: FrameDefinition,
+		sourceEventId: string,
+		current?: Frame,
+		revisionReason?: string,
+		frameId = current?.id ?? `frame-${randomUUID()}`,
+	): void {
+		this._emitAppendedEntry(
+			this.sessionManager.appendFrameRevision({
+				frameId,
+				version: (current?.version ?? 0) + 1,
+				statement: definition.statement,
+				falsifier: definition.falsifier,
+				horizon: definition.horizon,
+				previousRevisionId: current?.revisionEntryId ?? null,
+				sourceEventId,
+				revisionReason,
+			}),
+		);
+	}
+
+	private _appendFrameTransition(
+		frame: Frame,
+		transition: FrameTerminalTransition,
+		sourceEventId: string,
+		reason: string,
+		replacementFrameId?: string,
+	): void {
+		this._emitAppendedEntry(
+			this.sessionManager.appendFrameTransition({
+				frameId: frame.id,
+				version: frame.version,
+				revisionEntryId: frame.revisionEntryId,
+				transition,
+				sourceEventId,
+				reason,
+				replacementFrameId,
+			}),
+		);
+	}
+
+	private _applyFrameDirective(directive: FrameDirective, sourceEventId: string, current: Frame | undefined): void {
+		if (directive.type === "create") {
+			if (current) throw new Error("A Frame is already active; revise or replace it explicitly.");
+			this._appendFrameRevision(directive, sourceEventId);
+			return;
+		}
+		if (!current) throw new Error(`Cannot ${directive.type} a Frame because no Frame is active.`);
+		if (directive.type === "revise") {
+			this._appendFrameRevision(directive, sourceEventId, current, directive.revisionReason);
+			return;
+		}
+		if (directive.type === "replace") {
+			const replacementFrameId = `frame-${randomUUID()}`;
+			this._appendFrameTransition(current, "replaced", sourceEventId, directive.reason, replacementFrameId);
+			this._appendFrameRevision(directive, sourceEventId, undefined, undefined, replacementFrameId);
+			return;
+		}
+		this._appendFrameTransition(
+			current,
+			directive.type === "falsify" ? "falsified" : "died",
+			sourceEventId,
+			directive.reason,
+		);
+	}
+
 	private _installContextCompiler(): void {
 		const transformMessages = this.agent.transformContext;
 		this.agent.transformContext = async (runtimeMessages, signal) => {
@@ -446,28 +546,50 @@ export class AgentSession {
 			}
 			let rawEvents = this.sessionManager.getBranch();
 			let epistemicState = this._anchorEnabled ? restoreEpistemicState(rawEvents) : {};
-			const requestedRevision = this._pendingAnchorRevision;
-			if (this._anchorEnabled && requestedRevision) {
-				const source = rawEvents
-					.slice()
-					.reverse()
-					.find((entry) => entry.type === "message" && entry.message.role === "user");
-				if (source?.type === "message" && source.message.role === "user") {
-					const current = epistemicState.anchor;
-					const revisionEntryId = this.sessionManager.appendAnchorRevision({
+			const source = rawEvents
+				.slice()
+				.reverse()
+				.find((entry) => entry.type === "message" && entry.message.role === "user");
+			const requestedAnchorRevision = this._pendingAnchorRevision;
+			if (this._anchorEnabled && requestedAnchorRevision && source?.type === "message") {
+				const current = epistemicState.anchor;
+				this._emitAppendedEntry(
+					this.sessionManager.appendAnchorRevision({
 						anchorId: current?.id ?? `anchor-${source.id}`,
 						revision: (current?.revision ?? 0) + 1,
-						statement: requestedRevision.statement,
+						statement: requestedAnchorRevision.statement,
 						previousRevisionId: current?.revisionEntryId ?? null,
 						sourceEventId: source.id,
-						revisionReason: requestedRevision.revisionReason,
-					});
-					const revisionEntry = this.sessionManager.getEntry(revisionEntryId);
-					if (revisionEntry) this._emit({ type: "entry_appended", entry: revisionEntry });
-					this._pendingAnchorRevision = undefined;
-					rawEvents = this.sessionManager.getBranch();
-					epistemicState = restoreEpistemicState(rawEvents);
-				}
+						revisionReason: requestedAnchorRevision.revisionReason,
+					}),
+				);
+				this._pendingAnchorRevision = undefined;
+				rawEvents = this.sessionManager.getBranch();
+				epistemicState = restoreEpistemicState(rawEvents);
+			}
+			const requestedFrameDirective = this._pendingFrameDirective;
+			if (this._frameEnabled && requestedFrameDirective && source?.type === "message") {
+				this._applyFrameDirective(requestedFrameDirective, source.id, epistemicState.frame);
+				this._pendingFrameDirective = undefined;
+				rawEvents = this.sessionManager.getBranch();
+				epistemicState = restoreEpistemicState(rawEvents);
+			}
+			const frame = epistemicState.frame;
+			if (
+				this._frameEnabled &&
+				!requestedFrameDirective &&
+				frame &&
+				frame.completedModelResponses >= frame.horizon &&
+				frame.lastResponseEventId
+			) {
+				this._appendFrameTransition(
+					frame,
+					"expired",
+					frame.lastResponseEventId,
+					`Frame version ${frame.version} reached its ${frame.horizon}-response horizon.`,
+				);
+				rawEvents = this.sessionManager.getBranch();
+				epistemicState = restoreEpistemicState(rawEvents);
 			}
 			const compilation = await this._contextCompiler.compile({
 				rawEvents,
@@ -1010,17 +1132,102 @@ export class AgentSession {
 		if (!sourceEventId) {
 			throw new Error("Anchor revision requires a source event on the active branch.");
 		}
-		const entryId = this.sessionManager.appendAnchorRevision({
-			anchorId: current.id,
-			revision: current.revision + 1,
-			statement,
-			previousRevisionId: current.revisionEntryId,
-			sourceEventId,
-			revisionReason: options?.revisionReason,
-		});
-		const entry = this.sessionManager.getEntry(entryId);
-		if (entry) this._emit({ type: "entry_appended", entry });
+		this._emitAppendedEntry(
+			this.sessionManager.appendAnchorRevision({
+				anchorId: current.id,
+				revision: current.revision + 1,
+				statement,
+				previousRevisionId: current.revisionEntryId,
+				sourceEventId,
+				revisionReason: options?.revisionReason,
+			}),
+		);
 		return restoreEpistemicState(this.sessionManager.getBranch()).anchor!;
+	}
+
+	/** Current admissible Frame on the active branch. */
+	get frame(): Frame | undefined {
+		return this._frameEnabled ? restoreEpistemicState(this.sessionManager.getBranch()).frame : undefined;
+	}
+
+	private _validateFrameDefinition(definition: FrameDefinition): void {
+		if (!definition.statement.trim()) throw new Error("Frame statement must not be empty.");
+		if (!definition.falsifier.trim()) throw new Error("Frame falsifier must not be empty.");
+		if (!Number.isSafeInteger(definition.horizon) || definition.horizon < 1) {
+			throw new Error("Frame horizon must be a positive integer.");
+		}
+	}
+
+	private _resolveEpistemicSourceEventId(sourceEventId: string | undefined): string {
+		const branch = this.sessionManager.getBranch();
+		const resolved =
+			sourceEventId ??
+			branch
+				.slice()
+				.reverse()
+				.find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
+		if (!resolved || !branch.some((entry) => entry.id === resolved)) {
+			throw new Error("Frame operation requires a source event on the active branch.");
+		}
+		return resolved;
+	}
+
+	private _assertFrameMutationAllowed(): void {
+		if (!this._frameEnabled) throw new Error("Frame is disabled for this session.");
+		if (this.isStreaming) throw new Error("Wait for the current response to finish before changing the Frame.");
+	}
+
+	/** Create the first version of a new Frame identity. */
+	createFrame(definition: FrameDefinition, options?: { sourceEventId?: string }): Frame {
+		this._assertFrameMutationAllowed();
+		this._validateFrameDefinition(definition);
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		if (!state.anchor) throw new Error("Create an Anchor before creating a Frame.");
+		this._applyFrameDirective(
+			{ type: "create", ...definition },
+			this._resolveEpistemicSourceEventId(options?.sourceEventId),
+			state.frame,
+		);
+		return restoreEpistemicState(this.sessionManager.getBranch()).frame!;
+	}
+
+	/** Create an explicit new version without mutating the previous Frame version. */
+	reviseFrame(definition: FrameDefinition, options?: { sourceEventId?: string; revisionReason?: string }): Frame {
+		this._assertFrameMutationAllowed();
+		this._validateFrameDefinition(definition);
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		this._applyFrameDirective(
+			{ type: "revise", ...definition, revisionReason: options?.revisionReason },
+			this._resolveEpistemicSourceEventId(options?.sourceEventId),
+			state.frame,
+		);
+		return restoreEpistemicState(this.sessionManager.getBranch()).frame!;
+	}
+
+	/** Terminate the current identity as replaced, then create a distinct Frame identity. */
+	replaceFrame(definition: FrameDefinition, options: { reason: string; sourceEventId?: string }): Frame {
+		this._assertFrameMutationAllowed();
+		this._validateFrameDefinition(definition);
+		if (!options.reason.trim()) throw new Error("Frame replacement reason must not be empty.");
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		this._applyFrameDirective(
+			{ type: "replace", ...definition, reason: options.reason },
+			this._resolveEpistemicSourceEventId(options.sourceEventId),
+			state.frame,
+		);
+		return restoreEpistemicState(this.sessionManager.getBranch()).frame!;
+	}
+
+	/** Explicitly terminate the current Frame after falsification or deliberate death. */
+	terminateFrame(transition: "falsified" | "died", options: { reason: string; sourceEventId?: string }): void {
+		this._assertFrameMutationAllowed();
+		if (!options.reason.trim()) throw new Error("Frame transition reason must not be empty.");
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		this._applyFrameDirective(
+			{ type: transition === "falsified" ? "falsify" : "die", reason: options.reason },
+			this._resolveEpistemicSourceEventId(options.sourceEventId),
+			state.frame,
+		);
 	}
 
 	/**
@@ -1198,6 +1405,7 @@ export class AgentSession {
 			}
 		} finally {
 			this._pendingAnchorRevision = undefined;
+			this._pendingFrameDirective = undefined;
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			await this._emitAgentSettled();
@@ -1271,6 +1479,25 @@ export class AgentSession {
 			if (options?.anchor && !options.anchor.statement.trim()) {
 				throw new Error("Anchor statement must not be empty.");
 			}
+			if (options?.frame) {
+				if (!this._frameEnabled) throw new Error("Frame is disabled for this session.");
+				const frameState = restoreEpistemicState(this.sessionManager.getBranch());
+				if (options.frame.type === "create") {
+					this._validateFrameDefinition(options.frame);
+					if (frameState.frame) throw new Error("A Frame is already active; revise or replace it explicitly.");
+					if (!frameState.anchor && !options.anchor) throw new Error("Create an Anchor before creating a Frame.");
+				} else {
+					if (!frameState.frame) {
+						throw new Error(`Cannot ${options.frame.type} a Frame because no Frame is active.`);
+					}
+					if (options.frame.type === "revise" || options.frame.type === "replace") {
+						this._validateFrameDefinition(options.frame);
+					}
+				}
+				if ("reason" in options.frame && !options.frame.reason.trim()) {
+					throw new Error("Frame transition reason must not be empty.");
+				}
+			}
 
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
@@ -1301,8 +1528,10 @@ export class AgentSession {
 
 			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
-				if (options?.anchor) {
-					throw new Error("Anchor revisions require an idle session so provenance can identify the new request.");
+				if (options?.anchor || options?.frame) {
+					throw new Error(
+						"Epistemic state changes require an idle session so provenance can identify the new request.",
+					);
 				}
 				if (!options?.streamingBehavior) {
 					throw new Error(
@@ -1409,6 +1638,9 @@ export class AgentSession {
 
 		if (options?.anchor) {
 			this._pendingAnchorRevision = options.anchor;
+		}
+		if (options?.frame) {
+			this._pendingFrameDirective = options.frame;
 		}
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);

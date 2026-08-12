@@ -65,6 +65,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	customTools?: ToolDefinition[];
 	contextCompiler?: ContextCompiler;
 	anchorEnabled?: boolean;
+	frameEnabled?: boolean;
 	contextInputTokenLimit?: number;
 }
 
@@ -223,6 +224,7 @@ export async function createAgentSessionFromServices(
 		sessionStartEvent: options.sessionStartEvent,
 		contextCompiler: options.contextCompiler,
 		anchorEnabled: options.anchorEnabled,
+		frameEnabled: options.frameEnabled,
 		contextInputTokenLimit: options.contextInputTokenLimit,
 	});
 }

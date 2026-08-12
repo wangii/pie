@@ -7,6 +7,8 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type FrameDefinition,
+	type FrameDirective,
 	type ModelCycleResult,
 	type PromptOptions,
 	type SessionStats,

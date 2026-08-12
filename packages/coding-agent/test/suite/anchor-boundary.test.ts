@@ -5,7 +5,7 @@ import { createHarness, getMessageText } from "./harness.ts";
 
 describe("Phase 1 Anchor provider boundary", () => {
 	it("creates an explicit task-success Anchor and always projects it", async () => {
-		const harness = await createHarness({ anchorEnabled: true });
+		const harness = await createHarness({ anchorEnabled: true, frameEnabled: false });
 		try {
 			harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
 			await harness.session.prompt("finish the original task", {
@@ -43,7 +43,7 @@ describe("Phase 1 Anchor provider boundary", () => {
 	});
 
 	it("records explicit revisions without overwriting their provenance", async () => {
-		const harness = await createHarness({ anchorEnabled: true });
+		const harness = await createHarness({ anchorEnabled: true, frameEnabled: false });
 		try {
 			harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("revised answer")]);
 			await harness.session.prompt("ship feature A", { anchor: { statement: "ship feature A" } });
@@ -78,7 +78,7 @@ describe("Phase 1 Anchor provider boundary", () => {
 	});
 
 	it("does not promote a full prompt when no explicit Anchor is supplied", async () => {
-		const harness = await createHarness({ anchorEnabled: true });
+		const harness = await createHarness({ anchorEnabled: true, frameEnabled: false });
 		try {
 			harness.setResponses([fauxAssistantMessage("answer")]);
 			await harness.session.prompt("request with a turn-local reply instruction");
@@ -94,7 +94,7 @@ describe("Phase 1 Anchor provider boundary", () => {
 	});
 
 	it("preserves the Phase 0 projection when Anchor is disabled for ablation", async () => {
-		const harness = await createHarness({ anchorEnabled: false });
+		const harness = await createHarness({ anchorEnabled: false, frameEnabled: false });
 		try {
 			harness.setResponses([fauxAssistantMessage("answer")]);
 			await harness.session.prompt("baseline request");

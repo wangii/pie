@@ -131,6 +131,31 @@ export interface AnchorRevisionEntry extends SessionEntryBase {
 	revisionReason?: string;
 }
 
+/** Append-only version of Pie's finite-lived investigation Frame. */
+export interface FrameRevisionEntry extends SessionEntryBase {
+	type: "frame_revision";
+	frameId: string;
+	version: number;
+	statement: string;
+	falsifier: string;
+	horizon: number;
+	previousRevisionId: string | null;
+	sourceEventId: string;
+	revisionReason?: string;
+}
+
+/** Explicit terminal state transition for one exact Frame version. */
+export interface FrameTransitionEntry extends SessionEntryBase {
+	type: "frame_transition";
+	frameId: string;
+	version: number;
+	revisionEntryId: string;
+	transition: "replaced" | "died" | "falsified" | "expired";
+	sourceEventId: string;
+	reason: string;
+	replacementFrameId?: string;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -162,7 +187,9 @@ export type SessionEntry =
 	| CustomMessageEntry
 	| LabelEntry
 	| SessionInfoEntry
-	| AnchorRevisionEntry;
+	| AnchorRevisionEntry
+	| FrameRevisionEntry
+	| FrameTransitionEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -1188,6 +1215,97 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			...revision,
 			statement,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append an explicit immutable Frame version with raw-event provenance. */
+	appendFrameRevision(revision: Omit<FrameRevisionEntry, keyof SessionEntryBase | "type">): string {
+		const statement = revision.statement.trim();
+		const falsifier = revision.falsifier.trim();
+		if (!statement) throw new Error("Frame statement must not be empty.");
+		if (!falsifier) throw new Error("Frame falsifier must not be empty.");
+		if (!Number.isSafeInteger(revision.horizon) || revision.horizon < 1) {
+			throw new Error("Frame horizon must be a positive integer.");
+		}
+		const branch = this.getBranch();
+		if (!branch.some((entry) => entry.id === revision.sourceEventId)) {
+			throw new Error(`Frame source event ${revision.sourceEventId} is not on the active branch.`);
+		}
+		let current: FrameRevisionEntry | undefined;
+		let expectedReplacementFrameId: string | undefined;
+		const seenFrameIds = new Set<string>();
+		for (const entry of branch) {
+			if (entry.type === "frame_revision") {
+				seenFrameIds.add(entry.frameId);
+				current = entry;
+				expectedReplacementFrameId = undefined;
+			} else if (entry.type === "frame_transition" && current?.id === entry.revisionEntryId) {
+				current = undefined;
+				expectedReplacementFrameId = entry.replacementFrameId;
+			}
+		}
+		if (current) {
+			if (
+				revision.frameId !== current.frameId ||
+				revision.version !== current.version + 1 ||
+				revision.previousRevisionId !== current.id
+			) {
+				throw new Error("Frame revision does not continue the current immutable version chain.");
+			}
+		} else if (
+			seenFrameIds.has(revision.frameId) ||
+			revision.version !== 1 ||
+			revision.previousRevisionId !== null ||
+			(expectedReplacementFrameId !== undefined && revision.frameId !== expectedReplacementFrameId)
+		) {
+			throw new Error("Frame revision does not start the required new identity.");
+		}
+		const entry: FrameRevisionEntry = {
+			type: "frame_revision",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...revision,
+			statement,
+			falsifier,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append an explicit terminal transition for the current Frame version. */
+	appendFrameTransition(transition: Omit<FrameTransitionEntry, keyof SessionEntryBase | "type">): string {
+		const reason = transition.reason.trim();
+		if (!reason) throw new Error("Frame transition reason must not be empty.");
+		if (transition.transition === "replaced" ? !transition.replacementFrameId : transition.replacementFrameId) {
+			throw new Error("Only a replaced Frame transition may name a replacement identity.");
+		}
+		const branch = this.getBranch();
+		if (!branch.some((entry) => entry.id === transition.sourceEventId)) {
+			throw new Error(`Frame transition source event ${transition.sourceEventId} is not on the active branch.`);
+		}
+		let current: FrameRevisionEntry | undefined;
+		for (const entry of branch) {
+			if (entry.type === "frame_revision") current = entry;
+			else if (entry.type === "frame_transition" && current?.id === entry.revisionEntryId) current = undefined;
+		}
+		if (
+			!current ||
+			transition.frameId !== current.frameId ||
+			transition.version !== current.version ||
+			transition.revisionEntryId !== current.id
+		) {
+			throw new Error("Frame transition does not terminate the current Frame version.");
+		}
+		const entry: FrameTransitionEntry = {
+			type: "frame_transition",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...transition,
+			reason,
 		};
 		this._appendEntry(entry);
 		return entry.id;

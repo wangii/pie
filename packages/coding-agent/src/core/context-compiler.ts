@@ -1,13 +1,15 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { estimateTokens } from "./compaction/index.ts";
-import type { Anchor, EpistemicState } from "./epistemic-state.ts";
+import type { Anchor, EpistemicState, Frame } from "./epistemic-state.ts";
 import type { SessionEntry } from "./session-manager.ts";
 import { sessionEntryToContextMessages } from "./session-manager.ts";
 
 export const PHASE_ZERO_CONTEXT_COMPILER_VERSION = "pie-phase-0/v1";
 export const PHASE_ONE_CONTEXT_COMPILER_VERSION = "pie-phase-1-anchor/v1";
+export const PHASE_TWO_CONTEXT_COMPILER_VERSION = "pie-phase-2-frame/v1";
 export const ANCHOR_CONTEXT_MESSAGE_TYPE = "pie.anchor";
+export const FRAME_CONTEXT_MESSAGE_TYPE = "pie.frame";
 
 export type EmptyEpistemicState = Record<never, never>;
 
@@ -35,6 +37,16 @@ export interface ContextSelectionManifest {
 			revision: number;
 			revisionEntryId: string;
 			sourceEventId: string;
+			tokens: number;
+		};
+		frame?: {
+			id: string;
+			version: number;
+			revisionEntryId: string;
+			sourceEventId: string;
+			horizon: number;
+			completedModelResponses: number;
+			remainingModelResponses: number;
 			tokens: number;
 		};
 	};
@@ -182,10 +194,32 @@ function anchorMessage(anchor: Anchor): AgentMessage {
 	};
 }
 
+function frameMessage(frame: Frame): AgentMessage {
+	const remainingModelResponses = Math.max(0, frame.horizon - frame.completedModelResponses);
+	return {
+		role: "custom",
+		customType: FRAME_CONTEXT_MESSAGE_TYPE,
+		content:
+			`[CURRENT FRAME]\nCommitment: ${frame.statement}\nFalsifier: ${frame.falsifier}\n` +
+			`Horizon: ${remainingModelResponses} of ${frame.horizon} model responses remain`,
+		display: false,
+		details: {
+			frameId: frame.id,
+			version: frame.version,
+			revisionEntryId: frame.revisionEntryId,
+			sourceEventId: frame.sourceEventId,
+			horizon: frame.horizon,
+			completedModelResponses: frame.completedModelResponses,
+		},
+		timestamp: new Date(frame.timestamp).getTime(),
+	};
+}
+
 async function compileProjection(
 	input: ContextCompilerInput,
 	compilerVersion: string,
 	anchor: Anchor | undefined,
+	frame: Frame | undefined,
 ): Promise<ContextCompilation> {
 	const runtimeMessages = new Set(input.runtimeMessages);
 	const omissionsById = new Map<string, ContextOmission>();
@@ -217,9 +251,13 @@ async function compileProjection(
 		Math.min(contextWindow - reservedOutputTokens, input.inputTokenLimit ?? Number.POSITIVE_INFINITY),
 	);
 	const requiredTokens = estimateRequiredTokens(input.systemPrompt, input.tools);
-	const retainedMessages = anchor ? [anchorMessage(anchor)] : [];
-	const anchorTokens = estimateMessagesTokens(retainedMessages);
-	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - anchorTokens);
+	const anchorMessages = anchor ? [anchorMessage(anchor)] : [];
+	const frameMessages = frame ? [frameMessage(frame)] : [];
+	const retainedMessages = [...anchorMessages, ...frameMessages];
+	const anchorTokens = estimateMessagesTokens(anchorMessages);
+	const frameTokens = estimateMessagesTokens(frameMessages);
+	const retainedStateTokens = anchorTokens + frameTokens;
+	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - retainedStateTokens);
 	const windows = buildCoherentWindows(projectedEvents);
 	const selectedIds = new Set<string>();
 	let selectedEventTokens = 0;
@@ -239,10 +277,10 @@ async function compileProjection(
 					reason: "invalid_tool_sequence",
 				});
 			}
-			throw new ContextBudgetError(availableInputTokens, requiredTokens + anchorTokens + newestWindow.tokens);
+			throw new ContextBudgetError(availableInputTokens, requiredTokens + retainedStateTokens + newestWindow.tokens);
 		}
 		if (newestWindow.tokens > messageBudget) {
-			throw new ContextBudgetError(availableInputTokens, requiredTokens + anchorTokens + newestWindow.tokens);
+			throw new ContextBudgetError(availableInputTokens, requiredTokens + retainedStateTokens + newestWindow.tokens);
 		}
 
 		for (let index = windows.length - 1; index >= 0; index--) {
@@ -295,13 +333,25 @@ async function compileProjection(
 							tokens: anchorTokens,
 						}
 					: undefined,
+				frame: frame
+					? {
+							id: frame.id,
+							version: frame.version,
+							revisionEntryId: frame.revisionEntryId,
+							sourceEventId: frame.sourceEventId,
+							horizon: frame.horizon,
+							completedModelResponses: frame.completedModelResponses,
+							remainingModelResponses: Math.max(0, frame.horizon - frame.completedModelResponses),
+							tokens: frameTokens,
+						}
+					: undefined,
 			},
 			budget: {
 				contextWindow,
 				reservedOutputTokens,
 				availableInputTokens,
 				requiredTokens,
-				selectedMessageTokens: anchorTokens + selectedEventTokens,
+				selectedMessageTokens: retainedStateTokens + selectedEventTokens,
 				outputMessageTokens,
 			},
 		},
@@ -311,13 +361,25 @@ async function compileProjection(
 /** Deterministic structural projection with empty epistemic state. */
 export class PhaseZeroContextCompiler implements ContextCompiler {
 	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
-		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined);
+		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined, undefined);
 	}
 }
 
 /** Phase 1 projection: Phase 0 selection plus an always-retained durable Anchor. */
 export class PhaseOneContextCompiler implements ContextCompiler {
 	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
-		return compileProjection(input, PHASE_ONE_CONTEXT_COMPILER_VERSION, input.epistemicState.anchor);
+		return compileProjection(input, PHASE_ONE_CONTEXT_COMPILER_VERSION, input.epistemicState.anchor, undefined);
+	}
+}
+
+/** Phase 2 projection: Phase 1 selection plus the current admissible finite-lived Frame. */
+export class PhaseTwoContextCompiler implements ContextCompiler {
+	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
+		return compileProjection(
+			input,
+			PHASE_TWO_CONTEXT_COMPILER_VERSION,
+			input.epistemicState.anchor,
+			input.epistemicState.frame,
+		);
 	}
 }

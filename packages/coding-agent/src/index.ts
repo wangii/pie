@@ -17,6 +17,8 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type FrameDefinition,
+	type FrameDirective,
 	type ModelCycleResult,
 	type ParsedSkillBlock,
 	type PromptOptions,
@@ -58,14 +60,19 @@ export {
 	type ContextOmissionReason,
 	type ContextSelectionManifest,
 	type EmptyEpistemicState,
+	FRAME_CONTEXT_MESSAGE_TYPE,
 	PHASE_ONE_CONTEXT_COMPILER_VERSION,
+	PHASE_TWO_CONTEXT_COMPILER_VERSION,
 	PHASE_ZERO_CONTEXT_COMPILER_VERSION,
 	PhaseOneContextCompiler,
+	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
 } from "./core/context-compiler.ts";
 export {
 	type Anchor,
 	type EpistemicState,
+	type Frame,
+	type FrameTerminalTransition,
 	restoreEpistemicState,
 } from "./core/epistemic-state.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
@@ -253,6 +260,8 @@ export {
 	type CustomEntry,
 	type CustomMessageEntry,
 	type FileEntry,
+	type FrameRevisionEntry,
+	type FrameTransitionEntry,
 	getLatestCompactionEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,

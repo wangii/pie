@@ -74,6 +74,7 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
 	anchorEnabled?: boolean;
+	frameEnabled?: boolean;
 }
 
 export interface Harness {
@@ -204,6 +205,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		extensionRunnerRef,
 		// Existing characterization tests remain the Phase 0 ablation baseline.
 		anchorEnabled: options.anchorEnabled ?? false,
+		frameEnabled: options.frameEnabled,
 	});
 
 	const events: AgentSessionEvent[] = [];

@@ -9,6 +9,7 @@ import {
 	type CreateAgentSessionOptions,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
+	type FrameDirective,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -28,7 +29,12 @@ import { PI_SESSION_SNAPSHOT_ARTIFACT } from "./vitest-evals/artifacts.ts";
 export type PiCodingAgentInput =
 	| string
 	| Array<
-			| { type: "prompt"; content: string; anchor?: { statement: string; revisionReason?: string } }
+			| {
+					type: "prompt";
+					content: string;
+					anchor?: { statement: string; revisionReason?: string };
+					frame?: FrameDirective;
+			  }
 			| { type: "reload" }
 	  >;
 
@@ -43,6 +49,7 @@ type PiCodingAgentHarnessOptions = {
 	noTools?: CreateAgentSessionOptions["noTools"];
 	transformSystemPrompt?: (defaultPrompt: string) => string;
 	anchorEnabled?: boolean;
+	frameEnabled?: boolean;
 	contextInputTokenLimit?: number;
 };
 
@@ -99,10 +106,11 @@ async function promptAgent(
 	input: string,
 	signal: AbortSignal | undefined,
 	anchor?: { statement: string; revisionReason?: string },
+	frame?: FrameDirective,
 ): Promise<string> {
 	signal?.throwIfAborted();
 	const previousMessageCount = session.messages.length;
-	await session.prompt(input, { anchor });
+	await session.prompt(input, { anchor, frame });
 	const assistant = session.messages
 		.slice(previousMessageCount)
 		.reverse()
@@ -160,6 +168,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 				thinkingLevel: "off",
 				noTools: options.noTools,
 				anchorEnabled: options.anchorEnabled,
+				frameEnabled: options.frameEnabled,
 				contextInputTokenLimit: options.contextInputTokenLimit,
 			})
 		).session;
@@ -189,6 +198,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 						step.content,
 						signal,
 						options.anchorEnabled === false ? undefined : step.anchor,
+						options.frameEnabled === false ? undefined : step.frame,
 					);
 				} else {
 					await evalSession.reload();

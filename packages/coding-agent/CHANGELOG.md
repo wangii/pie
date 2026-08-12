@@ -6,6 +6,7 @@
 
 - Added a deterministic Phase 0 `ContextCompiler` that projects raw session events at every model request, records selection diagnostics, and reduces context without narrative summarization.
 - Added Phase 1 durable Anchors with append-only revision provenance, mandatory context projection, and an ablation switch.
+- Added Phase 2 finite-lived Frames with immutable versions, explicit terminal transitions, falsifiers, response horizons, and an ablation switch.
 - Added fullscreen transcript search with `Ctrl+Shift+F`, incremental match highlighting, configurable search match theme colors, and next/previous navigation with `Enter`/`Ctrl+G` and `Shift+Enter`/`Ctrl+Shift+G`.
 - Added experimental strict JSON-schema constrained sampling for the default `read`, `bash`, `edit`, and `write` tools under `PI_EXPERIMENTAL=1`.
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.

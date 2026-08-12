@@ -1,7 +1,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { ContextBudgetError, PhaseOneContextCompiler, PhaseZeroContextCompiler } from "../src/core/context-compiler.ts";
+import {
+	ContextBudgetError,
+	PhaseOneContextCompiler,
+	PhaseTwoContextCompiler,
+	PhaseZeroContextCompiler,
+} from "../src/core/context-compiler.ts";
 import type { SessionEntry, SessionMessageEntry } from "../src/core/session-manager.ts";
 
 const usage = {
@@ -222,5 +227,53 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.messages.map(text)).toEqual(["[ANCHOR]\nkeep original", "c".repeat(24)]);
 		expect(result.manifest.selectedEventIds).toEqual(["u2"]);
 		expect(result.manifest.epistemicState.anchor).toMatchObject({ id: "anchor-1", revision: 1 });
+	});
+
+	it("retains the current Frame with its falsifier and finite remaining horizon", async () => {
+		const event = messageEntry("u1", null, user("inspect the failure", 1));
+		const result = await new PhaseTwoContextCompiler().compile({
+			rawEvents: [event],
+			epistemicState: {
+				anchor: {
+					id: "anchor-1",
+					revision: 1,
+					statement: "restore authorization correctness",
+					revisionEntryId: "ar1",
+					previousRevisionId: null,
+					sourceEventId: "u1",
+					timestamp: new Date(1).toISOString(),
+				},
+				frame: {
+					id: "frame-1",
+					version: 2,
+					statement: "worker-local state survives logout",
+					falsifier: "a worker restart preserves the authorization",
+					horizon: 3,
+					revisionEntryId: "fr2",
+					previousRevisionId: "fr1",
+					sourceEventId: "u1",
+					timestamp: new Date(1).toISOString(),
+					completedModelResponses: 1,
+				},
+			},
+			runtimeMessages: [event.message],
+			model: model(100),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text)).toEqual([
+			"[ANCHOR]\nrestore authorization correctness",
+			"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
+				"Falsifier: a worker restart preserves the authorization\nHorizon: 2 of 3 model responses remain",
+			"inspect the failure",
+		]);
+		expect(result.manifest.epistemicState.frame).toMatchObject({
+			id: "frame-1",
+			version: 2,
+			completedModelResponses: 1,
+			remainingModelResponses: 2,
+		});
 	});
 });

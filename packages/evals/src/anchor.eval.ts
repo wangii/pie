@@ -151,6 +151,7 @@ function createAnchorHarness(name: string, anchorEnabled: boolean) {
 		model: MODEL,
 		noTools: "all",
 		anchorEnabled,
+		frameEnabled: false,
 		contextInputTokenLimit: CONTEXT_INPUT_TOKEN_LIMIT,
 		output: ({ response, session }): AnchorEvalOutput => {
 			const manifest = session.latestContextManifest;
