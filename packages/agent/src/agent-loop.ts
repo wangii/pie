@@ -300,6 +300,7 @@ async function streamAssistantResponse(
 		messages: llmMessages,
 		tools: context.tools,
 	};
+	config.onModelContext?.(llmContext);
 
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =

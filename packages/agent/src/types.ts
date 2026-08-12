@@ -178,6 +178,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
 	/**
+	 * Observes the exact LLM context immediately before the stream function is called.
+	 * Intended for diagnostics and deterministic boundary tests. Do not mutate the context.
+	 */
+	onModelContext?: (context: Readonly<Context>) => void;
+
+	/**
 	 * Optional transform applied to the context before `convertToLlm`.
 	 *
 	 * Use this for operations that work at the AgentMessage level:

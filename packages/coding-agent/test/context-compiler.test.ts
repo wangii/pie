@@ -1,0 +1,187 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
+import { describe, expect, it } from "vitest";
+import { ContextBudgetError, PhaseZeroContextCompiler } from "../src/core/context-compiler.ts";
+import type { SessionEntry, SessionMessageEntry } from "../src/core/session-manager.ts";
+
+const usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function model(contextWindow: number): Model<"faux"> {
+	return {
+		id: "faux-1",
+		name: "Faux",
+		api: "faux",
+		provider: "faux",
+		baseUrl: "http://localhost:0",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens: 8,
+	};
+}
+
+function user(text: string, timestamp: number): AgentMessage {
+	return { role: "user", content: [{ type: "text", text }], timestamp };
+}
+
+function assistant(text: string, timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "faux",
+		provider: "faux",
+		model: "faux-1",
+		usage,
+		stopReason: "stop",
+		timestamp,
+	};
+}
+
+function messageEntry(id: string, parentId: string | null, message: AgentMessage): SessionMessageEntry {
+	return { type: "message", id, parentId, timestamp: new Date(message.timestamp).toISOString(), message };
+}
+
+function text(message: AgentMessage): string {
+	if (!(message.role === "user" || message.role === "assistant" || message.role === "toolResult")) return "";
+	return typeof message.content === "string"
+		? message.content
+		: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+}
+
+describe("PhaseZeroContextCompiler", () => {
+	it("preserves the uncompressed transcript when it fits", async () => {
+		const events: SessionEntry[] = [
+			messageEntry("u1", null, user("first", 1)),
+			messageEntry("a1", "u1", assistant("answer", 2)),
+			messageEntry("u2", "a1", user("second", 3)),
+		];
+
+		const result = await new PhaseZeroContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: {},
+			runtimeMessages: events.flatMap((event) => (event.type === "message" ? [event.message] : [])),
+			model: model(100),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text)).toEqual(["first", "answer", "second"]);
+		expect(result.manifest.selectedEventIds).toEqual(["u1", "a1", "u2"]);
+		expect(result.manifest.omissions).toEqual([]);
+	});
+
+	it("treats legacy summaries as provenance and compiles from raw messages", async () => {
+		const events: SessionEntry[] = [
+			messageEntry("u1", null, user("raw question", 1)),
+			messageEntry("a1", "u1", assistant("raw answer", 2)),
+			{
+				type: "compaction",
+				id: "compact",
+				parentId: "a1",
+				timestamp: new Date(3).toISOString(),
+				summary: "narrative summary",
+				firstKeptEntryId: "u1",
+				tokensBefore: 50,
+			},
+			messageEntry("u2", "compact", user("continue", 4)),
+		];
+
+		const result = await new PhaseZeroContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: {},
+			runtimeMessages: [user("continue", 4)],
+			model: model(100),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text)).toEqual(["raw question", "raw answer", "continue"]);
+		expect(result.manifest.omissions).toContainEqual({
+			eventId: "compact",
+			eventType: "compaction",
+			reason: "historical_summary",
+		});
+	});
+
+	it("drops whole older turns under budget pressure without mutating raw events", async () => {
+		const events: SessionEntry[] = [
+			messageEntry("u1", null, user("a".repeat(24), 1)),
+			messageEntry("a1", "u1", assistant("b".repeat(24), 2)),
+			messageEntry("u2", "a1", user("c".repeat(24), 3)),
+			messageEntry("a2", "u2", assistant("d".repeat(24), 4)),
+		];
+		const rawCount = events.length;
+
+		const result = await new PhaseZeroContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: {},
+			runtimeMessages: events.map((event) => (event as SessionMessageEntry).message),
+			model: model(21),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text)).toEqual(["c".repeat(24), "d".repeat(24)]);
+		expect(result.manifest.selectedEventIds).toEqual(["u2", "a2"]);
+		expect(result.manifest.omissions.filter((omission) => omission.reason === "budget")).toHaveLength(2);
+		expect(events).toHaveLength(rawCount);
+	});
+
+	it("keeps tool calls paired with their results", async () => {
+		const toolCall = assistant("", 2);
+		toolCall.content = [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x" } }];
+		toolCall.stopReason = "toolUse";
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "result" }],
+			details: {},
+			isError: false,
+			timestamp: 3,
+		};
+		const events: SessionEntry[] = [
+			messageEntry("u1", null, user("read", 1)),
+			messageEntry("a1", "u1", toolCall),
+			messageEntry("t1", "a1", toolResult),
+		];
+
+		const result = await new PhaseZeroContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: {},
+			runtimeMessages: events.map((event) => (event as SessionMessageEntry).message),
+			model: model(100),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+	});
+
+	it("returns an actionable error when the newest coherent window cannot fit", async () => {
+		const event = messageEntry("u1", null, user("x".repeat(80), 1));
+		await expect(
+			new PhaseZeroContextCompiler().compile({
+				rawEvents: [event],
+				epistemicState: {},
+				runtimeMessages: [event.message],
+				model: model(16),
+				systemPrompt: "",
+				tools: [],
+				reservedOutputTokens: 8,
+			}),
+		).rejects.toBeInstanceOf(ContextBudgetError);
+	});
+});

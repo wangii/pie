@@ -178,12 +178,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await checkCompaction(overflowMessage);
 		await checkCompaction({ ...overflowMessage, timestamp: Date.now() + 1 });
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledTimes(1);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 		expect(events).toContainEqual({
 			type: "compaction_end",
 			reason: "overflow",
 			errorMessage:
-				"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+				"Context overflow recovery failed after one projection-retry attempt. Try reducing the current request or switching to a larger-context model.",
 		});
 	});
 
@@ -244,7 +244,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
-	it("should trigger threshold compaction for error messages using last successful usage", async () => {
+	it("should tighten projection for error messages using last successful usage", async () => {
 		const model = session.model!;
 
 		// A successful assistant message with token usage just over the compaction threshold.
@@ -314,7 +314,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		await checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		expect(
+			(session as unknown as { _contextInputTokenLimit: number | undefined })._contextInputTokenLimit,
+		).toBeGreaterThan(0);
 	});
 
 	it("should not trigger threshold compaction for error messages when no prior usage exists", async () => {

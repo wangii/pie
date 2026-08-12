@@ -9,6 +9,7 @@ import { estimateTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
+	_contextInputTokenLimit: number | undefined;
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
 };
@@ -278,38 +279,23 @@ describe("AgentSession compaction characterization", () => {
 		expect(getStreamCallCount()).toBe(1);
 	});
 
-	it("compacts and resumes after a length stop below the desired output limit", async () => {
+	it("rejects an oversized current request before the provider without compacting", async () => {
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "overflow compacted",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
-				},
-			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([
-			fauxAssistantMessage("partial response", { stopReason: "length" }),
-			fauxAssistantMessage("completed response"),
-		]);
+		harness.setResponses([fauxAssistantMessage("must not run")]);
 
 		await harness.session.prompt("x".repeat(5000));
 
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
-			reason: "overflow",
-			aborted: false,
-			willRetry: true,
-		});
-		expect(harness.session.getLastAssistantText()).toBe("completed response");
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		const lastMessage = harness.session.messages.at(-1);
+		expect(lastMessage?.role === "assistant" ? lastMessage.errorMessage : undefined).toContain(
+			"Pie could not build a valid model context",
+		);
 	});
 
 	it("does not compact when a length stop reaches the desired output limit", async () => {
@@ -325,22 +311,10 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
 	});
 
-	it("stops after one compact-and-retry when a second response is also truncated", async () => {
+	it("stops after one stricter projection retry when overflow repeats", async () => {
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 1_000_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "overflow compacted",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
-				},
-			],
 		});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -351,9 +325,10 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("x".repeat(5000));
 
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.eventsOfType("compaction_start").filter((event) => event.reason === "overflow")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toBe(
-			"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+			"Context overflow recovery failed after one projection-retry attempt. Try reducing the current request or switching to a larger-context model.",
 		);
 	});
 
@@ -434,44 +409,38 @@ describe("AgentSession compaction characterization", () => {
 			}
 		});
 
-		await sessionInternals._checkCompaction(overflowMessage);
-		await sessionInternals._checkCompaction({ ...overflowMessage, timestamp: Date.now() + 1 });
+		await expect(sessionInternals._checkCompaction(overflowMessage)).resolves.toBe(true);
+		await expect(sessionInternals._checkCompaction({ ...overflowMessage, timestamp: Date.now() + 1 })).resolves.toBe(
+			false,
+		);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledTimes(1);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 		expect(compactionErrors).toContain(
-			"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+			"Context overflow recovery failed after one projection-retry attempt. Try reducing the current request or switching to a larger-context model.",
 		);
 	});
 
-	it("compacts successful overflow responses without retrying", async () => {
+	it("bounds repeated forced overflow without a summarize-retry loop", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			models: [{ id: "faux-1", contextWindow: 1, maxTokens: 100 }],
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "successful overflow compacted",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
-				},
-			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("completed answer")]);
+		harness.setResponses([fauxAssistantMessage("must not run"), fauxAssistantMessage("must not run")]);
 
-		await expect(harness.session.prompt("hello")).resolves.toBeUndefined();
+		await harness.session.prompt("hello");
+		await harness.session.prompt("again");
 
-		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
-		expect(compactionEnd).toMatchObject({
-			reason: "overflow",
-			aborted: false,
-			willRetry: false,
-		});
-		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		const errors = harness.session.messages.filter(
+			(message): message is AssistantMessage => message.role === "assistant" && message.stopReason === "error",
+		);
+		expect(errors).toHaveLength(2);
+		expect(
+			errors.every((message) => message.errorMessage?.includes("Pie could not build a valid model context")),
+		).toBe(true);
 	});
 
 	it("ignores stale pre-compaction assistant usage on pre-prompt checks", async () => {
@@ -512,7 +481,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
-	it("triggers threshold compaction for error messages using the last successful usage", async () => {
+	it("tightens future projections for error messages using the last successful usage", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
@@ -537,7 +506,8 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		expect(sessionInternals._contextInputTokenLimit).toBeGreaterThan(0);
 	});
 
 	it("does not trigger threshold compaction for error messages when no prior usage exists", async () => {

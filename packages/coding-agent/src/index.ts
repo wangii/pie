@@ -48,6 +48,18 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.ts";
+export {
+	ContextBudgetError,
+	type ContextCompilation,
+	type ContextCompiler,
+	type ContextCompilerInput,
+	type ContextOmission,
+	type ContextOmissionReason,
+	type ContextSelectionManifest,
+	type EmptyEpistemicState,
+	PHASE_ZERO_CONTEXT_COMPILER_VERSION,
+	PhaseZeroContextCompiler,
+} from "./core/context-compiler.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {

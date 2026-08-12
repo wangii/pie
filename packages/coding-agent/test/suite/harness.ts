@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type {
+	Context,
 	FauxModelDefinition,
 	FauxProviderRegistration,
 	FauxResponseStep,
@@ -87,6 +88,7 @@ export interface Harness {
 	appendResponses: (responses: FauxResponseStep[]) => void;
 	getPendingResponseCount: () => number;
 	events: AgentSessionEvent[];
+	providerContexts: Context[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
 	cleanup: () => void;
@@ -108,6 +110,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const toolMap = options.tools ? Object.fromEntries(options.tools.map((tool) => [tool.name, tool])) : undefined;
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const providerContexts: Context[] = [];
 
 	const sessionManager = SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
@@ -149,6 +152,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			tools: [],
 		},
 		convertToLlm,
+		onModelContext: (context) => {
+			providerContexts.push({
+				...context,
+				messages: structuredClone(context.messages),
+				tools: context.tools?.slice(),
+			});
+		},
 		onPayload: async (payload) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("before_provider_request")) {
@@ -210,6 +220,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		appendResponses: fauxProvider.appendResponses,
 		getPendingResponseCount: fauxProvider.getPendingResponseCount,
 		events,
+		providerContexts,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},

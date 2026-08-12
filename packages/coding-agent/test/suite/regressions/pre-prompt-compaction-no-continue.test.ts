@@ -13,7 +13,7 @@ function createUsage(totalTokens: number) {
 	};
 }
 
-describe("pre-prompt compaction regression", () => {
+describe("pre-prompt overflow projection regression", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -23,22 +23,10 @@ describe("pre-prompt compaction regression", () => {
 		}
 	});
 
-	it("compacts length-stop overflow before a new prompt without continuing from an assistant message", async () => {
+	it("tightens projection before a new prompt without continuing from an assistant message", async () => {
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "pre-prompt summary",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
-				},
-			],
 		});
 		harnesses.push(harness);
 
@@ -64,12 +52,13 @@ describe("pre-prompt compaction regression", () => {
 		await expect(harness.session.prompt("next prompt")).resolves.toBeUndefined();
 
 		expect(continueSpy).not.toHaveBeenCalled();
-		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
-			reason: "overflow",
-			aborted: false,
-			willRetry: true,
-		});
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 		expect(getUserTexts(harness)).toContain("next prompt");
-		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.faux.state.callCount).toBe(0);
+		const lastMessage = harness.session.messages.at(-1);
+		expect(lastMessage?.role === "assistant" ? lastMessage.errorMessage : undefined).toContain(
+			"Pie could not build a valid model context",
+		);
 	});
 });

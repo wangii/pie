@@ -64,6 +64,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { type ContextCompiler, type ContextSelectionManifest, PhaseZeroContextCompiler } from "./context-compiler.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -225,6 +226,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Context projection policy. Defaults to Pie's deterministic Phase 0 compiler. */
+	contextCompiler?: ContextCompiler;
 }
 
 export interface ExtensionBindings {
@@ -362,6 +365,10 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
+	private readonly _contextCompiler: ContextCompiler;
+	private _latestContextManifest: ContextSelectionManifest | undefined;
+	private _contextInputTokenLimit: number | undefined;
+	private _contextBudgetModelKey: string | undefined;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -389,10 +396,12 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._contextCompiler = config.contextCompiler ?? new PhaseZeroContextCompiler();
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._installContextCompiler();
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
 
@@ -404,6 +413,36 @@ export class AgentSession {
 
 	get modelRuntime(): ModelRuntime {
 		return this._modelRuntime;
+	}
+
+	private _installContextCompiler(): void {
+		const transformMessages = this.agent.transformContext;
+		this.agent.transformContext = async (runtimeMessages, signal) => {
+			const model = this.agent.state.model;
+			const modelKey = `${model.provider}\0${model.id}\0${model.contextWindow}`;
+			if (this._contextBudgetModelKey !== modelKey) {
+				this._contextBudgetModelKey = modelKey;
+				this._contextInputTokenLimit = undefined;
+			}
+			const compilation = await this._contextCompiler.compile({
+				rawEvents: this.sessionManager.getBranch(),
+				epistemicState: {},
+				runtimeMessages,
+				model,
+				systemPrompt: this.agent.state.systemPrompt,
+				tools: this.agent.state.tools,
+				reservedOutputTokens: Math.min(
+					this.settingsManager.getCompactionReserveTokens(),
+					model.maxTokens,
+					Math.floor(model.contextWindow * 0.25),
+				),
+				inputTokenLimit: this._contextInputTokenLimit,
+				signal,
+				transformMessages,
+			});
+			this._latestContextManifest = compilation.manifest;
+			return compilation.messages;
+		};
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -892,6 +931,11 @@ export class AgentSession {
 	/** Current retry attempt (0 if not retrying) */
 	get retryAttempt(): number {
 		return this._retryAttempt;
+	}
+
+	/** Diagnostics for the most recent model-facing context compilation. */
+	get latestContextManifest(): ContextSelectionManifest | undefined {
+		return this._latestContextManifest;
 	}
 
 	/**
@@ -1948,13 +1992,11 @@ export class AgentSession {
 	}
 
 	/**
-	 * Check if compaction is needed and run it.
+	 * Adjust the compiler projection after provider usage or overflow feedback.
 	 * Called after agent_end and before prompt submission.
 	 *
-	 * Two cases:
-	 * 1. Recoverable failure: LLM returned context overflow or stopped below its desired output limit;
-	 *    remove the assistant message, compact, and auto-retry once
-	 * 2. Threshold: Context over threshold, compact, NO auto-retry (user continues manually)
+	 * Overflow recovery retries once with a stricter projection. Threshold pressure
+	 * constrains future projections. Neither path generates or persists a summary.
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -1975,9 +2017,8 @@ export class AgentSession {
 		const sameModel =
 			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
 
-		// Skip compaction checks if this assistant message is older than the latest
-		// compaction boundary. This prevents a stale pre-compaction usage/error
-		// from retriggering compaction on the first prompt after compaction.
+		// Ignore feedback older than the latest legacy compaction boundary. Its usage
+		// describes a superseded provider request and must not resize the current projection.
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const assistantIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
@@ -1985,18 +2026,11 @@ export class AgentSession {
 			return false;
 		}
 
-		// Case 1: Recoverable failure. Explicit/silent context overflow still uses context metadata.
-		// A length stop is recoverable when output ended below the model's original desired limit,
-		// independent of the configured context size or any context-clamped provider request limit.
-		// A successful response over the configured window should compact but must not retry: the
-		// assistant answer already completed and agent.continue() cannot continue from an assistant.
+		// Explicit overflow or a context-clamped length stop gets one projection retry.
 		const recoverableLength = sameModel && isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
 		if (sameModel && (isContextOverflow(assistantMessage, contextWindow) || recoverableLength)) {
 			const willRetry = assistantMessage.stopReason !== "stop";
-
-			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
-			}
+			if (!willRetry) return false;
 
 			if (this._overflowRecoveryAttempted) {
 				this._emit({
@@ -2006,25 +2040,25 @@ export class AgentSession {
 					aborted: false,
 					willRetry: false,
 					errorMessage:
-						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+						"Context overflow recovery failed after one projection-retry attempt. Try reducing the current request or switching to a larger-context model.",
 				});
 				return false;
 			}
 
 			this._overflowRecoveryAttempted = true;
-			// Remove the failed or truncated message from agent state. It remains in session history,
-			// but must not be included in the compact-and-retry context.
+			const previousBudget = this._latestContextManifest?.budget.availableInputTokens ?? contextWindow;
+			this._contextInputTokenLimit = Math.max(1, Math.floor(previousBudget * 0.75));
+			// Remove the failed or truncated message from runtime state. It remains in raw session history,
+			// while the compiler excludes it from the bounded retry projection.
 			const messages = this.agent.state.messages;
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this.agent.state.messages = messages.slice(0, -1);
 			}
-			return await this._runAutoCompaction("overflow", willRetry);
+			return true;
 		}
 
-		// Case 2: Threshold - context is getting large
-		// For error messages or all-zero usage messages, estimate from the last valid response.
-		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
-		// responses can still compact and do not reset context accounting.
+		// Threshold feedback constrains future compiler projections. For errors or all-zero
+		// usage, estimate from the last valid response without rewriting the transcript.
 		let contextTokens: number;
 		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
 		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
@@ -2047,14 +2081,21 @@ export class AgentSession {
 			contextTokens = directContextTokens;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			return await this._runAutoCompaction("threshold", false);
+			const reservedOutputTokens = Math.min(
+				settings.reserveTokens,
+				this.model?.maxTokens ?? settings.reserveTokens,
+				Math.floor(contextWindow * 0.25),
+			);
+			this._contextInputTokenLimit = Math.max(1, contextWindow - reservedOutputTokens);
 		}
 		return false;
 	}
 
 	/**
-	 * Internal: Run auto-compaction with events.
+	 * Legacy auto-compaction implementation retained for comparative tests.
+	 * Pie's model-request path does not call this method.
 	 */
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: retained as comparative Phase 0 evidence
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		let started = false;
