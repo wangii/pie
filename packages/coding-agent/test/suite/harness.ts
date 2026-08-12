@@ -73,6 +73,7 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	anchorEnabled?: boolean;
 }
 
 export interface Harness {
@@ -201,6 +202,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
+		// Existing characterization tests remain the Phase 0 ablation baseline.
+		anchorEnabled: options.anchorEnabled ?? false,
 	});
 
 	const events: AgentSessionEvent[] = [];

@@ -6,7 +6,7 @@ import { createHarness, getMessageText } from "./harness.ts";
 
 describe("context compiler provider boundary", () => {
 	it("captures the exact provider context and emits a selection manifest", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ anchorEnabled: false });
 		try {
 			harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
 			await harness.session.prompt("first prompt");
@@ -39,7 +39,7 @@ describe("context compiler provider boundary", () => {
 				details: {},
 			}),
 		};
-		const harness = await createHarness({ tools: [echoTool] });
+		const harness = await createHarness({ tools: [echoTool], anchorEnabled: false });
 		try {
 			harness.setResponses([
 				fauxAssistantMessage(fauxToolCall("echo", { text: "hello" }, { id: "call-1" }), {
@@ -62,7 +62,7 @@ describe("context compiler provider boundary", () => {
 	});
 
 	it("bypasses a persisted compaction summary and selects its raw provenance", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ anchorEnabled: false });
 		try {
 			const firstId = harness.sessionManager.appendMessage({
 				role: "user",

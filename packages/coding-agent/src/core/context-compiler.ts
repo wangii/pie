@@ -1,10 +1,13 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { estimateTokens } from "./compaction/index.ts";
+import type { Anchor, EpistemicState } from "./epistemic-state.ts";
 import type { SessionEntry } from "./session-manager.ts";
 import { sessionEntryToContextMessages } from "./session-manager.ts";
 
 export const PHASE_ZERO_CONTEXT_COMPILER_VERSION = "pie-phase-0/v1";
+export const PHASE_ONE_CONTEXT_COMPILER_VERSION = "pie-phase-1-anchor/v1";
+export const ANCHOR_CONTEXT_MESSAGE_TYPE = "pie.anchor";
 
 export type EmptyEpistemicState = Record<never, never>;
 
@@ -22,10 +25,19 @@ export interface ContextOmission {
 }
 
 export interface ContextSelectionManifest {
-	compilerVersion: typeof PHASE_ZERO_CONTEXT_COMPILER_VERSION;
+	compilerVersion: string;
 	inputEventIds: string[];
 	selectedEventIds: string[];
 	omissions: ContextOmission[];
+	epistemicState: {
+		anchor?: {
+			id: string;
+			revision: number;
+			revisionEntryId: string;
+			sourceEventId: string;
+			tokens: number;
+		};
+	};
 	budget: {
 		contextWindow: number;
 		reservedOutputTokens: number;
@@ -38,7 +50,7 @@ export interface ContextSelectionManifest {
 
 export interface ContextCompilerInput {
 	rawEvents: readonly SessionEntry[];
-	epistemicState: EmptyEpistemicState;
+	epistemicState: EpistemicState;
 	runtimeMessages: readonly AgentMessage[];
 	model: Model<Api>;
 	systemPrompt: string;
@@ -154,115 +166,158 @@ function buildCoherentWindows(events: readonly ProjectedEvent[]): CoherentWindow
 	return windows;
 }
 
-/**
- * Phase 0 compiler: deterministic structural projection from the active raw branch.
- * Compaction and branch summaries remain in provenance but are never treated as cognition.
- */
-export class PhaseZeroContextCompiler implements ContextCompiler {
-	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
-		const runtimeMessages = new Set(input.runtimeMessages);
-		const omissionsById = new Map<string, ContextOmission>();
-		const projectedEvents: ProjectedEvent[] = [];
+function anchorMessage(anchor: Anchor): AgentMessage {
+	return {
+		role: "custom",
+		customType: ANCHOR_CONTEXT_MESSAGE_TYPE,
+		content: `[ANCHOR]\n${anchor.statement}`,
+		display: false,
+		details: {
+			anchorId: anchor.id,
+			revision: anchor.revision,
+			revisionEntryId: anchor.revisionEntryId,
+			sourceEventId: anchor.sourceEventId,
+		},
+		timestamp: new Date(anchor.timestamp).getTime(),
+	};
+}
 
-		for (const event of input.rawEvents) {
-			if (event.type === "compaction" || event.type === "branch_summary") {
-				omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "historical_summary" });
-				continue;
-			}
-			if (isRuntimeExcluded(event, runtimeMessages)) {
-				omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "runtime_excluded" });
-				continue;
-			}
-			const messages = sessionEntryToContextMessages(event).filter(
-				(message) => message.role !== "bashExecution" || !message.excludeFromContext,
-			);
-			if (messages.length === 0) {
-				omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "not_model_facing" });
-				continue;
-			}
-			projectedEvents.push({ event, messages, tokens: estimateMessagesTokens(messages) });
+async function compileProjection(
+	input: ContextCompilerInput,
+	compilerVersion: string,
+	anchor: Anchor | undefined,
+): Promise<ContextCompilation> {
+	const runtimeMessages = new Set(input.runtimeMessages);
+	const omissionsById = new Map<string, ContextOmission>();
+	const projectedEvents: ProjectedEvent[] = [];
+
+	for (const event of input.rawEvents) {
+		if (event.type === "compaction" || event.type === "branch_summary") {
+			omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "historical_summary" });
+			continue;
 		}
-
-		const contextWindow = Math.max(0, input.model.contextWindow);
-		const reservedOutputTokens = Math.max(0, Math.min(input.reservedOutputTokens, contextWindow));
-		const availableInputTokens = Math.max(
-			0,
-			Math.min(contextWindow - reservedOutputTokens, input.inputTokenLimit ?? Number.POSITIVE_INFINITY),
+		if (isRuntimeExcluded(event, runtimeMessages)) {
+			omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "runtime_excluded" });
+			continue;
+		}
+		const messages = sessionEntryToContextMessages(event).filter(
+			(message) => message.role !== "bashExecution" || !message.excludeFromContext,
 		);
-		const requiredTokens = estimateRequiredTokens(input.systemPrompt, input.tools);
-		const messageBudget = Math.max(0, availableInputTokens - requiredTokens);
-		const windows = buildCoherentWindows(projectedEvents);
-		const selectedIds = new Set<string>();
-		let selectedMessageTokens = 0;
-
-		const allMessagesTokens = windows.reduce((sum, window) => sum + window.tokens, 0);
-		const allWindowsValid = windows.every((window) => window.valid);
-		if (allWindowsValid && allMessagesTokens <= messageBudget) {
-			for (const event of projectedEvents) selectedIds.add(event.event.id);
-			selectedMessageTokens = allMessagesTokens;
-		} else if (windows.length > 0) {
-			const newestWindow = windows[windows.length - 1]!;
-			if (!newestWindow.valid) {
-				for (const event of newestWindow.events) {
-					omissionsById.set(event.event.id, {
-						eventId: event.event.id,
-						eventType: event.event.type,
-						reason: "invalid_tool_sequence",
-					});
-				}
-				throw new ContextBudgetError(availableInputTokens, requiredTokens + newestWindow.tokens);
-			}
-			if (newestWindow.tokens > messageBudget) {
-				throw new ContextBudgetError(availableInputTokens, requiredTokens + newestWindow.tokens);
-			}
-
-			for (let index = windows.length - 1; index >= 0; index--) {
-				const window = windows[index]!;
-				if (!window.valid || selectedMessageTokens + window.tokens > messageBudget) break;
-				for (const event of window.events) selectedIds.add(event.event.id);
-				selectedMessageTokens += window.tokens;
-			}
+		if (messages.length === 0) {
+			omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "not_model_facing" });
+			continue;
 		}
+		projectedEvents.push({ event, messages, tokens: estimateMessagesTokens(messages) });
+	}
 
-		for (const event of projectedEvents) {
-			if (!selectedIds.has(event.event.id) && !omissionsById.has(event.event.id)) {
+	const contextWindow = Math.max(0, input.model.contextWindow);
+	const reservedOutputTokens = Math.max(0, Math.min(input.reservedOutputTokens, contextWindow));
+	const availableInputTokens = Math.max(
+		0,
+		Math.min(contextWindow - reservedOutputTokens, input.inputTokenLimit ?? Number.POSITIVE_INFINITY),
+	);
+	const requiredTokens = estimateRequiredTokens(input.systemPrompt, input.tools);
+	const retainedMessages = anchor ? [anchorMessage(anchor)] : [];
+	const anchorTokens = estimateMessagesTokens(retainedMessages);
+	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - anchorTokens);
+	const windows = buildCoherentWindows(projectedEvents);
+	const selectedIds = new Set<string>();
+	let selectedEventTokens = 0;
+
+	const allMessagesTokens = windows.reduce((sum, window) => sum + window.tokens, 0);
+	const allWindowsValid = windows.every((window) => window.valid);
+	if (allWindowsValid && allMessagesTokens <= messageBudget) {
+		for (const event of projectedEvents) selectedIds.add(event.event.id);
+		selectedEventTokens = allMessagesTokens;
+	} else if (windows.length > 0) {
+		const newestWindow = windows[windows.length - 1]!;
+		if (!newestWindow.valid) {
+			for (const event of newestWindow.events) {
 				omissionsById.set(event.event.id, {
 					eventId: event.event.id,
 					eventType: event.event.type,
-					reason: "budget",
+					reason: "invalid_tool_sequence",
 				});
 			}
+			throw new ContextBudgetError(availableInputTokens, requiredTokens + anchorTokens + newestWindow.tokens);
+		}
+		if (newestWindow.tokens > messageBudget) {
+			throw new ContextBudgetError(availableInputTokens, requiredTokens + anchorTokens + newestWindow.tokens);
 		}
 
-		const selectedEvents = projectedEvents.filter((event) => selectedIds.has(event.event.id));
-		const selectedMessages = selectedEvents.flatMap((event) => event.messages);
-		const messages = input.transformMessages
-			? await input.transformMessages(selectedMessages, input.signal)
-			: selectedMessages;
-		const outputMessageTokens = estimateMessagesTokens(messages);
-		if (requiredTokens + outputMessageTokens > availableInputTokens) {
-			throw new ContextBudgetError(availableInputTokens, requiredTokens + outputMessageTokens);
+		for (let index = windows.length - 1; index >= 0; index--) {
+			const window = windows[index]!;
+			if (!window.valid || selectedEventTokens + window.tokens > messageBudget) break;
+			for (const event of window.events) selectedIds.add(event.event.id);
+			selectedEventTokens += window.tokens;
 		}
+	}
 
-		return {
-			messages,
-			manifest: {
-				compilerVersion: PHASE_ZERO_CONTEXT_COMPILER_VERSION,
-				inputEventIds: input.rawEvents.map((event) => event.id),
-				selectedEventIds: selectedEvents.map((event) => event.event.id),
-				omissions: input.rawEvents.flatMap((event) => {
-					const omission = omissionsById.get(event.id);
-					return omission ? [omission] : [];
-				}),
-				budget: {
-					contextWindow,
-					reservedOutputTokens,
-					availableInputTokens,
-					requiredTokens,
-					selectedMessageTokens,
-					outputMessageTokens,
-				},
+	for (const event of projectedEvents) {
+		if (!selectedIds.has(event.event.id) && !omissionsById.has(event.event.id)) {
+			omissionsById.set(event.event.id, {
+				eventId: event.event.id,
+				eventType: event.event.type,
+				reason: "budget",
+			});
+		}
+	}
+
+	const selectedEvents = projectedEvents.filter((event) => selectedIds.has(event.event.id));
+	const selectedMessages = selectedEvents.flatMap((event) => event.messages);
+	const transformedMessages = input.transformMessages
+		? await input.transformMessages(selectedMessages, input.signal)
+		: selectedMessages;
+	// Anchor is compiler-owned state, so transcript transforms cannot omit or rewrite it.
+	const messages = [...retainedMessages, ...transformedMessages];
+	const outputMessageTokens = estimateMessagesTokens(messages);
+	if (requiredTokens + outputMessageTokens > availableInputTokens) {
+		throw new ContextBudgetError(availableInputTokens, requiredTokens + outputMessageTokens);
+	}
+
+	return {
+		messages,
+		manifest: {
+			compilerVersion,
+			inputEventIds: input.rawEvents.map((event) => event.id),
+			selectedEventIds: selectedEvents.map((event) => event.event.id),
+			omissions: input.rawEvents.flatMap((event) => {
+				const omission = omissionsById.get(event.id);
+				return omission ? [omission] : [];
+			}),
+			epistemicState: {
+				anchor: anchor
+					? {
+							id: anchor.id,
+							revision: anchor.revision,
+							revisionEntryId: anchor.revisionEntryId,
+							sourceEventId: anchor.sourceEventId,
+							tokens: anchorTokens,
+						}
+					: undefined,
 			},
-		};
+			budget: {
+				contextWindow,
+				reservedOutputTokens,
+				availableInputTokens,
+				requiredTokens,
+				selectedMessageTokens: anchorTokens + selectedEventTokens,
+				outputMessageTokens,
+			},
+		},
+	};
+}
+
+/** Deterministic structural projection with empty epistemic state. */
+export class PhaseZeroContextCompiler implements ContextCompiler {
+	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
+		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined);
+	}
+}
+
+/** Phase 1 projection: Phase 0 selection plus an always-retained durable Anchor. */
+export class PhaseOneContextCompiler implements ContextCompiler {
+	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
+		return compileProjection(input, PHASE_ONE_CONTEXT_COMPILER_VERSION, input.epistemicState.anchor);
 	}
 }

@@ -49,6 +49,7 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.ts";
 export {
+	ANCHOR_CONTEXT_MESSAGE_TYPE,
 	ContextBudgetError,
 	type ContextCompilation,
 	type ContextCompiler,
@@ -57,9 +58,16 @@ export {
 	type ContextOmissionReason,
 	type ContextSelectionManifest,
 	type EmptyEpistemicState,
+	PHASE_ONE_CONTEXT_COMPILER_VERSION,
 	PHASE_ZERO_CONTEXT_COMPILER_VERSION,
+	PhaseOneContextCompiler,
 	PhaseZeroContextCompiler,
 } from "./core/context-compiler.ts";
+export {
+	type Anchor,
+	type EpistemicState,
+	restoreEpistemicState,
+} from "./core/epistemic-state.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {
@@ -236,6 +244,7 @@ export {
 	type PromptTemplate,
 } from "./core/sdk.ts";
 export {
+	type AnchorRevisionEntry,
 	type BranchSummaryEntry,
 	buildContextEntries,
 	buildSessionContext,

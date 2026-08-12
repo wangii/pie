@@ -120,6 +120,17 @@ export interface SessionInfoEntry extends SessionEntryBase {
 	name?: string;
 }
 
+/** Append-only revision of Pie's durable task-success Anchor. */
+export interface AnchorRevisionEntry extends SessionEntryBase {
+	type: "anchor_revision";
+	anchorId: string;
+	revision: number;
+	statement: string;
+	previousRevisionId: string | null;
+	sourceEventId: string;
+	revisionReason?: string;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -150,7 +161,8 @@ export type SessionEntry =
 	| CustomEntry
 	| CustomMessageEntry
 	| LabelEntry
-	| SessionInfoEntry;
+	| SessionInfoEntry
+	| AnchorRevisionEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -1141,6 +1153,41 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			name: sanitizedName,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append an explicit Anchor revision with raw-event provenance. */
+	appendAnchorRevision(revision: Omit<AnchorRevisionEntry, keyof SessionEntryBase | "type">): string {
+		const statement = revision.statement.trim();
+		if (!statement) {
+			throw new Error("Anchor statement must not be empty.");
+		}
+		const branch = this.getBranch();
+		if (!branch.some((entry) => entry.id === revision.sourceEventId)) {
+			throw new Error(`Anchor source event ${revision.sourceEventId} is not on the active branch.`);
+		}
+		const previous = branch
+			.slice()
+			.reverse()
+			.find((entry): entry is AnchorRevisionEntry => entry.type === "anchor_revision");
+		if (
+			(!previous && (revision.revision !== 1 || revision.previousRevisionId !== null)) ||
+			(previous !== undefined &&
+				(revision.anchorId !== previous.anchorId ||
+					revision.revision !== previous.revision + 1 ||
+					revision.previousRevisionId !== previous.id))
+		) {
+			throw new Error("Anchor revision does not continue the active append-only revision chain.");
+		}
+		const entry: AnchorRevisionEntry = {
+			type: "anchor_revision",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...revision,
+			statement,
 		};
 		this._appendEntry(entry);
 		return entry.id;

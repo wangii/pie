@@ -25,7 +25,12 @@ import {
 } from "vitest-evals/harness";
 import { PI_SESSION_SNAPSHOT_ARTIFACT } from "./vitest-evals/artifacts.ts";
 
-export type PiCodingAgentInput = string | Array<{ type: "prompt"; content: string } | { type: "reload" }>;
+export type PiCodingAgentInput =
+	| string
+	| Array<
+			| { type: "prompt"; content: string; anchor?: { statement: string; revisionReason?: string } }
+			| { type: "reload" }
+	  >;
 
 type PiCodingAgentModelSelection = {
 	provider: string;
@@ -37,6 +42,8 @@ type PiCodingAgentHarnessOptions = {
 	model?: PiCodingAgentModelSelection;
 	noTools?: CreateAgentSessionOptions["noTools"];
 	transformSystemPrompt?: (defaultPrompt: string) => string;
+	anchorEnabled?: boolean;
+	contextInputTokenLimit?: number;
 };
 
 type PiCodingAgentHarnessWithOutput<TOutput extends JsonValue> = PiCodingAgentHarnessOptions & {
@@ -87,10 +94,15 @@ function toTranscriptEvents(messages: AgentSession["messages"]): TranscriptEvent
 	return events;
 }
 
-async function promptAgent(session: AgentSession, input: string, signal: AbortSignal | undefined): Promise<string> {
+async function promptAgent(
+	session: AgentSession,
+	input: string,
+	signal: AbortSignal | undefined,
+	anchor?: { statement: string; revisionReason?: string },
+): Promise<string> {
 	signal?.throwIfAborted();
 	const previousMessageCount = session.messages.length;
-	await session.prompt(input);
+	await session.prompt(input, { anchor });
 	const assistant = session.messages
 		.slice(previousMessageCount)
 		.reverse()
@@ -147,6 +159,8 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 				model,
 				thinkingLevel: "off",
 				noTools: options.noTools,
+				anchorEnabled: options.anchorEnabled,
+				contextInputTokenLimit: options.contextInputTokenLimit,
 			})
 		).session;
 
@@ -170,7 +184,12 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 			let response: string | undefined;
 			for (const step of steps) {
 				if (step.type === "prompt") {
-					response = await promptAgent(evalSession, step.content, signal);
+					response = await promptAgent(
+						evalSession,
+						step.content,
+						signal,
+						options.anchorEnabled === false ? undefined : step.anchor,
+					);
 				} else {
 					await evalSession.reload();
 				}

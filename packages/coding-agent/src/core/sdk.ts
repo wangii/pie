@@ -5,6 +5,7 @@ import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import type { ContextCompiler } from "./context-compiler.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -82,6 +83,12 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Context projection policy. Defaults to Pie's Phase 1 Anchor compiler. */
+	contextCompiler?: ContextCompiler;
+	/** Enable Anchor creation and projection. Set false for Phase 1 ablation. Default: true. */
+	anchorEnabled?: boolean;
+	/** Initial compiler input budget override for controlled evaluations. */
+	contextInputTokenLimit?: number;
 }
 
 /** Result from createAgentSession */
@@ -387,6 +394,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		contextCompiler: options.contextCompiler,
+		anchorEnabled: options.anchorEnabled,
+		contextInputTokenLimit: options.contextInputTokenLimit,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

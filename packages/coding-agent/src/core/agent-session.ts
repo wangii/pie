@@ -64,8 +64,14 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
-import { type ContextCompiler, type ContextSelectionManifest, PhaseZeroContextCompiler } from "./context-compiler.ts";
+import {
+	type ContextCompiler,
+	type ContextSelectionManifest,
+	PhaseOneContextCompiler,
+	PhaseZeroContextCompiler,
+} from "./context-compiler.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import { type Anchor, restoreEpistemicState } from "./epistemic-state.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -226,8 +232,12 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Context projection policy. Defaults to Pie's deterministic Phase 0 compiler. */
+	/** Context projection policy. Defaults to Pie's deterministic Phase 1 Anchor compiler. */
 	contextCompiler?: ContextCompiler;
+	/** Enable Anchor creation and projection. Set false for Phase 1 ablation. Default: true. */
+	anchorEnabled?: boolean;
+	/** Initial compiler input budget override for controlled evaluations. */
+	contextInputTokenLimit?: number;
 }
 
 export interface ExtensionBindings {
@@ -251,6 +261,8 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean) => void;
+	/** Explicit task-success semantics to create or revise before this model turn. */
+	anchor?: { statement: string; revisionReason?: string };
 }
 
 /** Result from cycleModel() */
@@ -366,7 +378,10 @@ export class AgentSession {
 
 	private _modelRuntime: ModelRuntime;
 	private readonly _contextCompiler: ContextCompiler;
+	private readonly _anchorEnabled: boolean;
+	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
 	private _latestContextManifest: ContextSelectionManifest | undefined;
+	private readonly _configuredContextInputTokenLimit: number | undefined;
 	private _contextInputTokenLimit: number | undefined;
 	private _contextBudgetModelKey: string | undefined;
 
@@ -396,7 +411,12 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
-		this._contextCompiler = config.contextCompiler ?? new PhaseZeroContextCompiler();
+		this._anchorEnabled = config.anchorEnabled ?? true;
+		this._contextCompiler =
+			config.contextCompiler ??
+			(this._anchorEnabled ? new PhaseOneContextCompiler() : new PhaseZeroContextCompiler());
+		this._configuredContextInputTokenLimit = config.contextInputTokenLimit;
+		this._contextInputTokenLimit = config.contextInputTokenLimit;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -422,11 +442,36 @@ export class AgentSession {
 			const modelKey = `${model.provider}\0${model.id}\0${model.contextWindow}`;
 			if (this._contextBudgetModelKey !== modelKey) {
 				this._contextBudgetModelKey = modelKey;
-				this._contextInputTokenLimit = undefined;
+				this._contextInputTokenLimit = this._configuredContextInputTokenLimit;
+			}
+			let rawEvents = this.sessionManager.getBranch();
+			let epistemicState = this._anchorEnabled ? restoreEpistemicState(rawEvents) : {};
+			const requestedRevision = this._pendingAnchorRevision;
+			if (this._anchorEnabled && requestedRevision) {
+				const source = rawEvents
+					.slice()
+					.reverse()
+					.find((entry) => entry.type === "message" && entry.message.role === "user");
+				if (source?.type === "message" && source.message.role === "user") {
+					const current = epistemicState.anchor;
+					const revisionEntryId = this.sessionManager.appendAnchorRevision({
+						anchorId: current?.id ?? `anchor-${source.id}`,
+						revision: (current?.revision ?? 0) + 1,
+						statement: requestedRevision.statement,
+						previousRevisionId: current?.revisionEntryId ?? null,
+						sourceEventId: source.id,
+						revisionReason: requestedRevision.revisionReason,
+					});
+					const revisionEntry = this.sessionManager.getEntry(revisionEntryId);
+					if (revisionEntry) this._emit({ type: "entry_appended", entry: revisionEntry });
+					this._pendingAnchorRevision = undefined;
+					rawEvents = this.sessionManager.getBranch();
+					epistemicState = restoreEpistemicState(rawEvents);
+				}
 			}
 			const compilation = await this._contextCompiler.compile({
-				rawEvents: this.sessionManager.getBranch(),
-				epistemicState: {},
+				rawEvents,
+				epistemicState,
 				runtimeMessages,
 				model,
 				systemPrompt: this.agent.state.systemPrompt,
@@ -938,6 +983,46 @@ export class AgentSession {
 		return this._latestContextManifest;
 	}
 
+	/** Current durable Anchor on the active branch. */
+	get anchor(): Anchor | undefined {
+		return this._anchorEnabled ? restoreEpistemicState(this.sessionManager.getBranch()).anchor : undefined;
+	}
+
+	/** Explicitly revise task-success semantics without overwriting prior revisions. */
+	reviseAnchor(statement: string, options?: { sourceEventId?: string; revisionReason?: string }): Anchor {
+		if (!this._anchorEnabled) {
+			throw new Error("Anchor is disabled for this session.");
+		}
+		if (this.isStreaming) {
+			throw new Error("Wait for the current response to finish before revising the Anchor.");
+		}
+		const branch = this.sessionManager.getBranch();
+		const current = restoreEpistemicState(branch).anchor;
+		if (!current) {
+			throw new Error("Anchor has not been initialized by a user request.");
+		}
+		const sourceEventId =
+			options?.sourceEventId ??
+			branch
+				.slice()
+				.reverse()
+				.find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
+		if (!sourceEventId) {
+			throw new Error("Anchor revision requires a source event on the active branch.");
+		}
+		const entryId = this.sessionManager.appendAnchorRevision({
+			anchorId: current.id,
+			revision: current.revision + 1,
+			statement,
+			previousRevisionId: current.revisionEntryId,
+			sourceEventId,
+			revisionReason: options?.revisionReason,
+		});
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) this._emit({ type: "entry_appended", entry });
+		return restoreEpistemicState(this.sessionManager.getBranch()).anchor!;
+	}
+
 	/**
 	 * Get the names of currently active tools.
 	 * Returns the names of tools currently set on the agent.
@@ -1112,6 +1197,7 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
+			this._pendingAnchorRevision = undefined;
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			await this._emitAgentSettled();
@@ -1179,6 +1265,12 @@ export class AgentSession {
 					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 				);
 			}
+			if (options?.anchor && !this._anchorEnabled) {
+				throw new Error("Anchor is disabled for this session.");
+			}
+			if (options?.anchor && !options.anchor.statement.trim()) {
+				throw new Error("Anchor statement must not be empty.");
+			}
 
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
@@ -1209,6 +1301,9 @@ export class AgentSession {
 
 			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
+				if (options?.anchor) {
+					throw new Error("Anchor revisions require an idle session so provenance can identify the new request.");
+				}
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -1312,6 +1407,9 @@ export class AgentSession {
 			return;
 		}
 
+		if (options?.anchor) {
+			this._pendingAnchorRevision = options.anchor;
+		}
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);
 	}

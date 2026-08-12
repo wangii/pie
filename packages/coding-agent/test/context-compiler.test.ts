@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { ContextBudgetError, PhaseZeroContextCompiler } from "../src/core/context-compiler.ts";
+import { ContextBudgetError, PhaseOneContextCompiler, PhaseZeroContextCompiler } from "../src/core/context-compiler.ts";
 import type { SessionEntry, SessionMessageEntry } from "../src/core/session-manager.ts";
 
 const usage = {
@@ -50,7 +50,15 @@ function messageEntry(id: string, parentId: string | null, message: AgentMessage
 }
 
 function text(message: AgentMessage): string {
-	if (!(message.role === "user" || message.role === "assistant" || message.role === "toolResult")) return "";
+	if (
+		!(
+			message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult" ||
+			message.role === "custom"
+		)
+	)
+		return "";
 	return typeof message.content === "string"
 		? message.content
 		: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
@@ -183,5 +191,36 @@ describe("PhaseZeroContextCompiler", () => {
 				reservedOutputTokens: 8,
 			}),
 		).rejects.toBeInstanceOf(ContextBudgetError);
+	});
+
+	it("retains the Anchor while dropping older raw turns under pressure", async () => {
+		const events: SessionEntry[] = [
+			messageEntry("u1", null, user("a".repeat(24), 1)),
+			messageEntry("a1", "u1", assistant("b".repeat(24), 2)),
+			messageEntry("u2", "a1", user("c".repeat(24), 3)),
+		];
+		const result = await new PhaseOneContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: {
+				anchor: {
+					id: "anchor-1",
+					revision: 1,
+					statement: "keep original",
+					revisionEntryId: "ar1",
+					previousRevisionId: null,
+					sourceEventId: "u1",
+					timestamp: new Date(1).toISOString(),
+				},
+			},
+			runtimeMessages: events.map((event) => (event as SessionMessageEntry).message),
+			model: model(30),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text)).toEqual(["[ANCHOR]\nkeep original", "c".repeat(24)]);
+		expect(result.manifest.selectedEventIds).toEqual(["u2"]);
+		expect(result.manifest.epistemicState.anchor).toMatchObject({ id: "anchor-1", revision: 1 });
 	});
 });
