@@ -8,6 +8,7 @@ import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import type { PieModelSettings } from "./pie-models.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -92,6 +93,7 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
+	pieModels?: PieModelSettings;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -746,6 +748,10 @@ export class SettingsManager {
 
 	getDefaultThinkingLevel(): ThinkingLevel | undefined {
 		return this.settings.defaultThinkingLevel;
+	}
+
+	getPieModelSettings(): PieModelSettings {
+		return { ...(this.settings.pieModels ?? {}) };
 	}
 
 	setDefaultThinkingLevel(level: ThinkingLevel): void {

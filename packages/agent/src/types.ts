@@ -169,6 +169,17 @@ export interface AgentLoopTurnUpdate {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+/** Selects the model role for one provider request before context compilation. */
+export interface PrepareModelRequestContext {
+	context: AgentContext;
+	model: Model<any>;
+	thinkingLevel: ThinkingLevel;
+	requestIndex: number;
+	phase: "initial" | "tool_continuation" | "steering" | "follow_up";
+	previousMessage?: AssistantMessage;
+	previousToolResults: ToolResultMessage[];
+}
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -257,6 +268,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	prepareNextTurn?: (
 		context: PrepareNextTurnContext,
+	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
+
+	/**
+	 * Called immediately before each model request and before `transformContext`.
+	 * This is the request-role routing seam; context compilation therefore uses
+	 * the selected model's context window rather than the session model's window.
+	 */
+	prepareModelRequest?: (
+		context: PrepareModelRequestContext,
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 
 	/**

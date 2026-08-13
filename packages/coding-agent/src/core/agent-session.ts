@@ -118,6 +118,7 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { PieProductionLoop, type PieProductionLoopState } from "./pie-agent-loop.ts";
+import type { PieModelRole, PieModelRoutes } from "./pie-models.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
@@ -280,6 +281,8 @@ export interface AgentSessionConfig {
 	observationEnabled?: boolean;
 	/** Initial compiler input budget override for controlled evaluations. */
 	contextInputTokenLimit?: number;
+	/** Resolved production-loop model routes. Undefined routes follow the session model. */
+	pieModelRoutes?: PieModelRoutes;
 }
 
 export interface ExtensionBindings {
@@ -529,6 +532,8 @@ export class AgentSession {
 	private readonly _frameEnabled: boolean;
 	private readonly _actionEnabled: boolean;
 	private readonly _observationEnabled: boolean;
+	private readonly _pieModelRoutes: PieModelRoutes;
+	private _activeRequestModel: Model<any> | undefined;
 	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
 	private _pendingFrameDirective: FrameDirective | undefined;
 	private _pendingActionDirective: ActionDirective | undefined;
@@ -569,6 +574,15 @@ export class AgentSession {
 		this._frameEnabled = config.frameEnabled ?? this._anchorEnabled;
 		this._actionEnabled = config.actionEnabled ?? this._frameEnabled;
 		this._observationEnabled = config.observationEnabled ?? this._actionEnabled;
+		this._pieModelRoutes =
+			config.pieModelRoutes ??
+			({
+				epistemic: undefined,
+				execution: undefined,
+				observation: undefined,
+				verification: undefined,
+				finalAnswer: undefined,
+			} satisfies PieModelRoutes);
 		if (this._frameEnabled && !this._anchorEnabled) {
 			throw new Error("Frame requires Anchor to be enabled.");
 		}
@@ -791,7 +805,7 @@ export class AgentSession {
 	private _installContextCompiler(): void {
 		const transformMessages = this.agent.transformContext;
 		this.agent.transformContext = async (runtimeMessages, signal) => {
-			const model = this.agent.state.model;
+			const model = this._activeRequestModel ?? this.agent.state.model;
 			const modelKey = `${model.provider}\0${model.id}\0${model.contextWindow}`;
 			if (this._contextBudgetModelKey !== modelKey) {
 				this._contextBudgetModelKey = modelKey;
@@ -901,8 +915,23 @@ export class AgentSession {
 		};
 	}
 
+	private _pieModelForRole(role: PieModelRole): Model<any> {
+		return this._pieModelRoutes[role] ?? this.agent.state.model;
+	}
+
 	private _bindPieProductionLifecycle(): void {
 		if (!(this.agent.loopRunner instanceof PieProductionLoop)) return;
+
+		this.agent.prepareModelRequest = ({ requestIndex, phase }) => {
+			const role: PieModelRole =
+				requestIndex === 0 || phase === "steering" || phase === "follow_up" ? "epistemic" : "execution";
+			const model = this._pieModelForRole(role);
+			this._activeRequestModel = model;
+			return {
+				model,
+				thinkingLevel: clampThinkingLevel(model, this.agent.state.thinkingLevel) as ThinkingLevel,
+			};
+		};
 
 		this.agent.loopRunner.bindLifecycle({
 			beginRequest: (messages) => {
@@ -2210,6 +2239,7 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
+			this._activeRequestModel = undefined;
 			if (this._automaticActionRequest) {
 				const branch = this.sessionManager.getBranch();
 				const action = restoreEpistemicState(branch).action;

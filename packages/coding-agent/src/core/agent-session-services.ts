@@ -6,6 +6,7 @@ import { resolvePath } from "../utils/paths.ts";
 import type { ContextCompiler } from "./context-compiler.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRuntime } from "./model-runtime.ts";
+import type { PieModelSettings } from "./pie-models.ts";
 import {
 	DefaultResourceLoader,
 	type DefaultResourceLoaderOptions,
@@ -59,6 +60,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	pieModels?: PieModelSettings;
 	tools?: string[];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
@@ -219,6 +221,7 @@ export async function createAgentSessionFromServices(
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
 		scopedModels: options.scopedModels,
+		pieModels: options.pieModels,
 		tools: options.tools,
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,

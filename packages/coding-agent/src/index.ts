@@ -241,6 +241,13 @@ export {
 	PieProductionLoop,
 	type PieProductionLoopState,
 } from "./core/pie-agent-loop.ts";
+export {
+	type PieModelReference,
+	type PieModelRole,
+	type PieModelRoutes,
+	type PieModelSettings,
+	resolvePieModelRoutes,
+} from "./core/pie-models.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage

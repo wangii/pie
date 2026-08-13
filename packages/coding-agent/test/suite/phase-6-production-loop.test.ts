@@ -236,6 +236,39 @@ describe("Phase 6 production loop ownership", () => {
 		}
 	});
 
+	it("routes epistemic requests and Action-local continuations independently", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			models: [
+				{ id: "session", reasoning: true, contextWindow: 8_000 },
+				{ id: "controller", reasoning: true, contextWindow: 16_000 },
+				{ id: "executor", reasoning: false, contextWindow: 32_000 },
+			],
+			tools: [echoTool],
+			pieModelRouteIds: {
+				epistemic: "controller",
+				execution: "executor",
+			},
+		});
+		try {
+			harness.session.setThinkingLevel("high");
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("echo", { value: "world-result" }, { id: "routed-call" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("routed completion"),
+			]);
+
+			await harness.session.prompt("route this request");
+
+			expect(harness.providerModelIds).toEqual(["controller", "executor"]);
+			expect(harness.providerContexts).toHaveLength(2);
+			expect(harness.session.latestContextManifest?.budget.contextWindow).toBe(32_000);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("owns provider requests and tool continuation without invoking the stock loop", async () => {
 		const harness = await createHarness({
 			pieProductionLoop: true,

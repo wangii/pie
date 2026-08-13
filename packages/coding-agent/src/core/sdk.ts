@@ -12,6 +12,7 @@ import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { createPieProductionLoop } from "./pie-agent-loop.ts";
+import { type PieModelSettings, resolvePieModelRoutes } from "./pie-models.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -52,6 +53,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Per-role production-loop model routes. Settings are used when omitted. */
+	pieModels?: PieModelSettings;
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -266,6 +269,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		options.tools ? [...options.tools] : options.noTools ? [] : defaultActiveToolNames
 	).filter((name) => !excludedToolNameSet?.has(name));
 
+	const pieModelRoutes = resolvePieModelRoutes(
+		options.pieModels ?? settingsManager.getPieModelSettings(),
+		modelRuntime,
+	);
+	for (const [role, roleModel] of Object.entries(pieModelRoutes)) {
+		if (roleModel && !modelRuntime.hasConfiguredAuth(roleModel.provider)) {
+			throw new Error(`No configured authentication for Pie ${role} model ${roleModel.provider}/${roleModel.id}.`);
+		}
+	}
+
 	let agent: Agent;
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
@@ -410,6 +423,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		actionEnabled: options.actionEnabled,
 		observationEnabled: options.observationEnabled,
 		contextInputTokenLimit: options.contextInputTokenLimit,
+		pieModelRoutes,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

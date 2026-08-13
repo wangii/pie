@@ -21,6 +21,7 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { createPieProductionLoop } from "../../src/core/pie-agent-loop.ts";
+import type { PieModelRole, PieModelRoutes } from "../../src/core/pie-models.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -81,6 +82,7 @@ export interface HarnessOptions {
 	contextInputTokenLimit?: number;
 	/** Use Pie's production loop instead of agent-core's transcript loop. */
 	pieProductionLoop?: boolean;
+	pieModelRouteIds?: Partial<Record<PieModelRole, string>>;
 	/** Existing raw session used by restart and branch integration tests. */
 	sessionManager?: SessionManager;
 }
@@ -99,6 +101,7 @@ export interface Harness {
 	getPendingResponseCount: () => number;
 	events: AgentSessionEvent[];
 	providerContexts: Context[];
+	providerModelIds: string[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
 	cleanup: () => void;
@@ -121,6 +124,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 	const providerContexts: Context[] = [];
+	const providerModelIds: string[] = [];
 
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
@@ -156,6 +160,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const agent = new Agent({
 		getApiKey: () => (withConfiguredAuth ? "faux-key" : undefined),
 		streamFn: (requestModel, context, streamOptions) => {
+			providerModelIds.push(requestModel.id);
 			providerContexts.push({
 				...context,
 				messages: structuredClone(context.messages),
@@ -201,6 +206,21 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
 
+	const modelForRole = (role: PieModelRole) => {
+		const modelId = options.pieModelRouteIds?.[role];
+		if (!modelId) return undefined;
+		const roleModel = fauxProvider.getModel(modelId);
+		if (!roleModel) throw new Error(`Unknown faux Pie model route: ${role}=${modelId}`);
+		return roleModel;
+	};
+	const pieModelRoutes: PieModelRoutes = {
+		epistemic: modelForRole("epistemic"),
+		execution: modelForRole("execution"),
+		observation: modelForRole("observation"),
+		verification: modelForRole("verification"),
+		finalAnswer: modelForRole("finalAnswer"),
+	};
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -219,6 +239,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		actionEnabled: options.actionEnabled ?? false,
 		observationEnabled: options.observationEnabled ?? false,
 		contextInputTokenLimit: options.contextInputTokenLimit,
+		pieModelRoutes,
 	});
 
 	const events: AgentSessionEvent[] = [];
@@ -239,6 +260,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		getPendingResponseCount: fauxProvider.getPendingResponseCount,
 		events,
 		providerContexts,
+		providerModelIds,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},

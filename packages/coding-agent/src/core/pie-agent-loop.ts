@@ -93,7 +93,11 @@ export class PieProductionLoop implements AgentLoopRunner {
 		}
 
 		let firstTurn = true;
+		let requestIndex = 0;
 		let pendingStartsRequest = false;
+		let requestPhase: "initial" | "tool_continuation" | "steering" | "follow_up" = "initial";
+		let previousMessage: AgentMessage | undefined;
+		let previousToolResults: ToolResultMessage[] = [];
 		this._state = "reconsidering";
 		let pendingMessages = (await config.getSteeringMessages?.()) ?? [];
 
@@ -109,6 +113,7 @@ export class PieProductionLoop implements AgentLoopRunner {
 
 				if (pendingMessages.length > 0) {
 					this._state = "reconsidering";
+					requestPhase = pendingStartsRequest ? "follow_up" : "steering";
 					const deliveredMessages = pendingMessages;
 					for (const message of deliveredMessages) {
 						await request.emit({ type: "message_start", message });
@@ -123,6 +128,29 @@ export class PieProductionLoop implements AgentLoopRunner {
 					}
 				}
 
+				const requestSnapshot = await config.prepareModelRequest?.({
+					context: currentContext,
+					model: config.model,
+					thinkingLevel: config.reasoning ?? "off",
+					requestIndex,
+					phase: requestPhase,
+					previousMessage: previousMessage?.role === "assistant" ? previousMessage : undefined,
+					previousToolResults,
+				});
+				if (requestSnapshot) {
+					currentContext = requestSnapshot.context ?? currentContext;
+					config = {
+						...config,
+						model: requestSnapshot.model ?? config.model,
+						reasoning:
+							requestSnapshot.thinkingLevel === undefined
+								? config.reasoning
+								: requestSnapshot.thinkingLevel === "off"
+									? undefined
+									: requestSnapshot.thinkingLevel,
+					};
+				}
+				requestIndex++;
 				this._state = "model_streaming";
 				const message = await streamAssistantResponse(
 					currentContext,
@@ -165,6 +193,9 @@ export class PieProductionLoop implements AgentLoopRunner {
 				}
 
 				await request.emit({ type: "turn_end", message, toolResults });
+				previousMessage = message;
+				previousToolResults = toolResults;
+				requestPhase = toolResults.length > 0 ? "tool_continuation" : "initial";
 				if (toolExecutionTerminated) {
 					await this.lifecycle?.interruptRequest(
 						"Tool execution terminated before the Action completion condition was met.",
