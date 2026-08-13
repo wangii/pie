@@ -13,6 +13,8 @@
 - Added the initial Phase 6 Pie application path with a dedicated `pie` executable and a production loop that owns model requests, tool continuation, queues, cancellation boundaries, completion, and automatic Anchor/Frame/Action lifecycle without delegating to Pi's conversational loop.
 - Added Pie TUI visibility for loop and context status, read-only `/pie` diagnostics, derived epistemic transition markers, restoration receipts, exact Observation provenance, and bounded operational-error repair with ambiguous-mutation replay protection.
 - Added deduplicated projection-reduction notices and collapsed structural Action traces with expandable attempts, streamed updates, repairs, and finalized results.
+- Added a read-only `view_frame_action_graph` tool that projects Frame revision/replacement chains and their authorized Action episodes from the active raw branch.
+- Added `/vf` to open the current `view_frame_action_graph` output in the configured external editor.
 - Added fullscreen transcript search with `Ctrl+Shift+F`, incremental match highlighting, configurable search match theme colors, and next/previous navigation with `Enter`/`Ctrl+G` and `Shift+Enter`/`Ctrl+Shift+G`.
 - Added experimental strict JSON-schema constrained sampling for the default `read`, `bash`, `edit`, and `write` tools under `PI_EXPERIMENTAL=1`.
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.

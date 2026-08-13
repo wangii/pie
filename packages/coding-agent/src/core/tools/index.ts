@@ -27,6 +27,21 @@ export {
 	type FindToolOptions,
 } from "./find.ts";
 export {
+	buildFrameActionGraph,
+	createFrameActionGraphTool,
+	createFrameActionGraphToolDefinition,
+	type FrameActionGraph,
+	type FrameActionGraphActionNode,
+	type FrameActionGraphActionStatus,
+	type FrameActionGraphEdge,
+	type FrameActionGraphFrameNode,
+	type FrameActionGraphFrameStatus,
+	type FrameActionGraphNode,
+	type FrameActionGraphToolDetails,
+	type FrameActionGraphToolInput,
+	type FrameActionGraphToolOptions,
+} from "./frame-action-graph.ts";
+export {
 	createGrepTool,
 	createGrepToolDefinition,
 	type GrepOperations,

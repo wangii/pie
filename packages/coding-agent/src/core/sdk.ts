@@ -23,6 +23,7 @@ import {
 	createCodingTools,
 	createEditTool,
 	createFindTool,
+	createFrameActionGraphTool,
 	createGrepTool,
 	createLsTool,
 	createReadOnlyTools,
@@ -136,6 +137,7 @@ export {
 	createWriteTool,
 	createGrepTool,
 	createFindTool,
+	createFrameActionGraphTool,
 	createLsTool,
 };
 

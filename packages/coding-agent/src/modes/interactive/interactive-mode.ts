@@ -2975,6 +2975,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/vf") {
+				this.editor.setText("");
+				await this.handleViewFrameActionGraphCommand();
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -6154,6 +6159,47 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new PieDiagnosticsComponent(diagnostics, true));
 		this.chatContainer.addChild(new DynamicBorder());
 		this.ui.requestRender();
+	}
+
+	private async handleViewFrameActionGraphCommand(): Promise<void> {
+		const tool = this.agent.state.tools.find((candidate) => candidate.name === "view_frame_action_graph");
+		if (!tool) {
+			this.showError("view_frame_action_graph is not available in this session.");
+			return;
+		}
+
+		let content: string;
+		try {
+			const result = await tool.execute(`vf-${crypto.randomUUID()}`, {});
+			content = result.content
+				.filter((part): part is Extract<(typeof result.content)[number], { type: "text" }> => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+		} catch (error: unknown) {
+			this.showError(`view_frame_action_graph failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		if (!content) {
+			this.showError("view_frame_action_graph returned no text output.");
+			return;
+		}
+
+		this.ui.stop();
+		let editorError: string | undefined;
+		try {
+			const result = await editInExternalEditor({
+				command: this.settingsManager.getExternalEditorCommand(),
+				content,
+			});
+			if (result.status === "failed") editorError = "External editor exited unsuccessfully.";
+		} catch (error: unknown) {
+			editorError = `External editor failed: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
+		if (editorError) this.showError(editorError);
 	}
 
 	private handleSessionCommand(): void {

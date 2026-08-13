@@ -436,6 +436,7 @@ Record only operational traits needed to execute safely:
 | Tools | Conservative side-effect class | Loop consequence |
 | --- | --- | --- |
 | `read`, `grep`, `find`, `ls` | read-only | May run concurrently when their existing execution contracts permit it |
+| `view_frame_action_graph` | read-only derived state | Project the active branch without mutating raw or epistemic state; never treat viewing the graph itself as an Observation |
 | `edit`, `write` | workspace mutation | Serialize conflicting mutations and never replay them implicitly during recovery |
 | `bash` | mixed/unbounded | Treat conservatively; the command and result, not the tool name, determine what happened |
 
@@ -469,7 +470,7 @@ Escalate only when the finalized failure or resulting world state changes Frame 
 
 ### 6.4 Preserve the execution chassis
 
-Keep existing model selection, authentication, streaming, built-in coding tools, and raw session persistence working through narrow adapters. Validate at least the default configured provider and all seven built-ins: `read`, `grep`, `find`, `ls`, `bash`, `edit`, and `write`. Provider or tool redesign is out of scope unless the new loop exposes a concrete blocking incompatibility.
+Keep existing model selection, authentication, streaming, built-in coding tools, and raw session persistence working through narrow adapters. Validate at least the default configured provider and all eight built-ins: `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write`, and `view_frame_action_graph`. Provider or tool redesign is out of scope unless the new loop exposes a concrete blocking incompatibility.
 
 Legacy sessions may be opened using the migration behavior established in Phase 5. Their raw entries remain provenance; Pie must not reactivate legacy compaction summaries as cognition merely to render or resume them.
 
@@ -499,7 +500,7 @@ Phase 6 passes only when all of the following hold:
 
 - deterministic tests prove that interactive requests, tool continuations, follow-ups, cancellation, failures, and resumed sessions are driven exclusively by the new loop;
 - provider-boundary tests prove every request is produced by `ContextCompiler`, including recovery and continuation requests;
-- a deterministic tool matrix covers all seven built-ins, preserves exact call/result provenance, prevents side-effect replay on resume, and proves Observation materialization depends on contextual adjudication rather than tool name or success/error status;
+- a deterministic tool matrix covers all eight built-ins, preserves exact call/result provenance, prevents side-effect replay on resume, and proves Observation materialization depends on contextual adjudication rather than tool name or success/error status;
 - command-error tests cover pre-execution rejection, invocation failure, completed negative results, interruption, and ambiguous partial mutation; they prove bounded repair, no blind mutation replay, frozen completion semantics, and exact `UNRESOLVABLE` control return;
 - `pie` can start in the existing TUI, complete real repository edits with built-in tools, accept another task, exit, reopen, and continue the same raw session;
 - one persisted manual soak completes at least three non-trivial coding tasks across 30 or more model requests and two process restarts, including steering, cancellation, an agent-generated invalid command with successful repair, an exhausted command-repair path, and forced context-budget pressure;
@@ -545,7 +546,7 @@ Phase 6.2.1's P2 sustained-use surface is also implemented:
 - the collapsed summary reports only attempt, finalized/tool-error, repair, streamed-update, and terminal-status counts; expansion restores the retained execution detail without generating a narrative episode summary;
 - deterministic component and interactive tests cover projection-notice classification/deduplication, collapsed/expanded Action traces, streamed-update retention, terminal status, historical tool completion, and existing pending-tool recovery; `npm run check` passes.
 
-The application gate remains open. Next work is the full seven-built-in tool matrix, broader application-boundary cancellation/resume coverage, and the required sustained manual soak. Observation remains selective and is not inferred from tool name, success, or error status.
+The application gate remains open. Next work is the full eight-built-in tool matrix, broader application-boundary cancellation/resume coverage, and the required sustained manual soak. Observation remains selective and is not inferred from tool name, success, or error status.
 
 ## Evaluation matrix
 

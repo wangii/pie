@@ -92,3 +92,17 @@ export {
 	type PieProductionLoopState,
 } from "./pie-agent-loop.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
+export {
+	buildFrameActionGraph,
+	createFrameActionGraphTool,
+	createFrameActionGraphToolDefinition,
+	type FrameActionGraph,
+	type FrameActionGraphActionNode,
+	type FrameActionGraphActionStatus,
+	type FrameActionGraphEdge,
+	type FrameActionGraphFrameNode,
+	type FrameActionGraphFrameStatus,
+	type FrameActionGraphNode,
+	type FrameActionGraphToolDetails,
+	type FrameActionGraphToolOptions,
+} from "./tools/frame-action-graph.ts";
