@@ -77,6 +77,9 @@ export interface HarnessOptions {
 	frameEnabled?: boolean;
 	actionEnabled?: boolean;
 	observationEnabled?: boolean;
+	contextInputTokenLimit?: number;
+	/** Existing raw session used by restart and branch integration tests. */
+	sessionManager?: SessionManager;
 }
 
 export interface Harness {
@@ -116,7 +119,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 	const providerContexts: Context[] = [];
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -149,20 +152,21 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 
 	const agent = new Agent({
 		getApiKey: () => (withConfiguredAuth ? "faux-key" : undefined),
-		streamFn: streamSimple,
-		initialState: {
-			model,
-			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
-			tools: [],
-		},
-		convertToLlm,
-		onModelContext: (context) => {
+		streamFn: (requestModel, context, streamOptions) => {
 			providerContexts.push({
 				...context,
 				messages: structuredClone(context.messages),
 				tools: context.tools?.slice(),
 			});
+			return streamSimple(requestModel, context, streamOptions);
 		},
+		initialState: {
+			model,
+			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
+			tools: [],
+			messages: sessionManager.buildSessionContext().messages,
+		},
+		convertToLlm,
 		onPayload: async (payload) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("before_provider_request")) {
@@ -210,6 +214,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		frameEnabled: options.frameEnabled,
 		actionEnabled: options.actionEnabled ?? false,
 		observationEnabled: options.observationEnabled ?? false,
+		contextInputTokenLimit: options.contextInputTokenLimit,
 	});
 
 	const events: AgentSessionEvent[] = [];

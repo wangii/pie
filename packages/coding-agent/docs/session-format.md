@@ -210,6 +210,19 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 {"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false}}
 ```
 
+### Epistemic Entries
+
+Pie stores its surviving epistemic primitives as append-only entries on the same raw session tree:
+
+- `anchor_revision`: one immutable revision of task-success semantics, linked to its prior revision and source event.
+- `frame_revision`: one immutable Frame version with a required falsifier and finite response horizon.
+- `frame_transition`: explicit `replaced`, `died`, `falsified`, or `expired` termination of one exact Frame version.
+- `action_start`: a frozen intent and completion condition bound to one exact Frame revision.
+- `action_transition`: explicit `completed`, `unresolvable`, or `escalated` return from one Action episode.
+- `observation`: immutable evidence linked to exact `toolResult` or `bashExecution` event IDs from the active Action.
+
+These entries are durable state and provenance, not chat messages. `SessionManager.getBranch()` is used to restore the current state. A Frame transition does not delete Observations linked to that Frame version, and branching restores only the state reachable on the selected branch.
+
 ### ModelChangeEntry
 
 Emitted when the user switches models mid-session.
@@ -319,7 +332,16 @@ Entries form a tree:
 
 ## Context Building
 
-`buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
+`buildContextEntries()` and `buildSessionContext()` retain Pi's compaction-aware projection for rendering and compatibility. Pie model requests do not use that projection as canonical cognition: every request is rebuilt by `ContextCompiler` from the uncompressed active branch plus restored epistemic state.
+
+For Pie model requests:
+
+- legacy `compaction` and `branch_summary` text is omitted as `historical_summary`;
+- raw messages remain recoverable and may be structurally selected;
+- Anchor, current Frame, relevant Observations, and current Action are compiler-owned context;
+- selection manifests record selected event IDs, omissions, compiler version, and token estimates outside cognition.
+
+`buildContextEntries()` walks from the current leaf to the root, producing the compatibility entry list while honoring compaction:
 
 1. Collects all entries on the path
 2. If a `CompactionEntry` is on the path:

@@ -40,6 +40,7 @@ export type PiCodingAgentInput =
 					observation?: ObservationDefinition;
 			  }
 			| { type: "reload" }
+			| { type: "restart" }
 			| { type: "seed"; files: Record<string, string> }
 			| { type: "remove"; paths: string[] }
 			| {
@@ -66,10 +67,18 @@ type PiCodingAgentHarnessOptions = {
 	actionEnabled?: boolean;
 	observationEnabled?: boolean;
 	contextInputTokenLimit?: number;
+	/** Run restart steps by reopening the persisted session. False provides a matched uninterrupted control. */
+	performPersistedRestarts?: boolean;
 };
 
 type PiCodingAgentHarnessWithOutput<TOutput extends JsonValue> = PiCodingAgentHarnessOptions & {
-	output: (args: { response: string; session: AgentSession }) => TOutput | Promise<TOutput>;
+	output: (args: {
+		response: string;
+		session: AgentSession;
+		cwd: string;
+		input: PiCodingAgentInput;
+		persistedRestartCount: number;
+	}) => TOutput | Promise<TOutput>;
 };
 
 export function resolveModelSelection(
@@ -177,22 +186,24 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 		signal?.throwIfAborted();
 		sessionManager = SessionManager.create(cwd, join(root, "sessions"));
 		setArtifact("runId", sessionManager.getSessionId());
-		session = (
-			await createAgentSessionFromServices({
-				services,
-				sessionManager,
-				model,
-				thinkingLevel: "off",
-				noTools: options.noTools,
-				anchorEnabled: options.anchorEnabled,
-				frameEnabled: options.frameEnabled,
-				actionEnabled: options.actionEnabled,
-				observationEnabled: options.observationEnabled,
-				contextInputTokenLimit: options.contextInputTokenLimit,
-			})
-		).session;
+		const createEvalSession = async (manager: SessionManager): Promise<AgentSession> =>
+			(
+				await createAgentSessionFromServices({
+					services,
+					sessionManager: manager,
+					model,
+					thinkingLevel: "off",
+					noTools: options.noTools,
+					anchorEnabled: options.anchorEnabled,
+					frameEnabled: options.frameEnabled,
+					actionEnabled: options.actionEnabled,
+					observationEnabled: options.observationEnabled,
+					contextInputTokenLimit: options.contextInputTokenLimit,
+				})
+			).session;
+		session = await createEvalSession(sessionManager);
 
-		const evalSession = session;
+		let evalSession = session;
 		if (options.transformSystemPrompt) {
 			transformedSystemPrompt = options.transformSystemPrompt(evalSession.systemPrompt);
 			if (!transformedSystemPrompt.trim()) throw new Error("Transformed eval system prompt must not be empty.");
@@ -210,6 +221,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 			}
 			const steps = typeof input === "string" ? [{ type: "prompt" as const, content: input }] : input;
 			let response: string | undefined;
+			let persistedRestartCount = 0;
 			for (const step of steps) {
 				if (step.type === "prompt") {
 					response = await promptAgent(
@@ -221,6 +233,15 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 						options.actionEnabled === false ? undefined : step.action,
 						options.observationEnabled === false ? undefined : step.observation,
 					);
+				} else if (step.type === "restart") {
+					if (options.performPersistedRestarts === false) continue;
+					const sessionPath = sessionManager.getSessionFile();
+					if (!sessionPath) throw new Error("Eval restart requires a persisted session.");
+					evalSession.dispose();
+					sessionManager = SessionManager.open(sessionPath);
+					persistedRestartCount++;
+					evalSession = await createEvalSession(sessionManager);
+					session = evalSession;
 				} else if (step.type === "seed") {
 					for (const [relativePath, content] of Object.entries(step.files)) {
 						const target = join(cwd, relativePath);
@@ -278,6 +299,12 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 					evalSession.completeAction(step.reason, { sourceEventId });
 				} else if (step.type === "adjudicate_current_frame") {
 					if (response === undefined) throw new Error("Frame adjudication requires a preceding model response.");
+					const decision = response
+						.trim()
+						.split("\n")
+						.map((line) => line.trim())
+						.filter(Boolean)
+						.at(-1);
 					const sourceEventId = sessionManager
 						.getBranch()
 						.slice()
@@ -287,7 +314,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 					if (evalSession.action) {
 						evalSession.completeAction("the Frame adjudication decision was produced", { sourceEventId });
 					}
-					if (response.trim() === "REJECT_FRAME") {
+					if (decision === "REJECT_FRAME") {
 						evalSession.terminateFrame("falsified", {
 							reason: "the adjudication Action found that the declared falsifier occurred",
 							sourceEventId,
@@ -298,7 +325,10 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 				}
 			}
 			if (response === undefined) throw new Error("Pi eval input must include at least one prompt step.");
-			const output = "output" in options ? await options.output({ response, session: evalSession }) : response;
+			const output =
+				"output" in options
+					? await options.output({ response, session: evalSession, cwd, input, persistedRestartCount })
+					: response;
 			const stats = evalSession.getSessionStats();
 			const hasPricing = [model.cost, ...(model.cost.tiers ?? [])].some(
 				({ input, output, cacheRead, cacheWrite }) => input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0,

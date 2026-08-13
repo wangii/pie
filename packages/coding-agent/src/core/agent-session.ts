@@ -67,6 +67,7 @@ import {
 } from "./compaction/index.ts";
 import {
 	type ContextCompiler,
+	type ContextOmissionReason,
 	type ContextSelectionManifest,
 	PhaseFourContextCompiler,
 	PhaseOneContextCompiler,
@@ -345,6 +346,34 @@ export interface SessionStats {
 	};
 	cost: number;
 	contextUsage?: ContextUsage;
+}
+
+/** Concise, derived diagnostics for Pie's active state and most recent context projection. */
+export interface EpistemicDiagnostics {
+	enabled: {
+		anchor: boolean;
+		frame: boolean;
+		action: boolean;
+		observation: boolean;
+	};
+	state: {
+		anchor?: Pick<Anchor, "id" | "revision" | "statement" | "revisionEntryId">;
+		frame?: Pick<Frame, "id" | "version" | "statement" | "revisionEntryId" | "horizon" | "completedModelResponses">;
+		action?: Pick<Action, "id" | "intent" | "completionCondition" | "startEntryId" | "completedModelResponses">;
+		observations: Array<Pick<Observation, "id" | "statement" | "entryId" | "sourceEventIds">>;
+	};
+	provenance: {
+		rawEventCount: number;
+		activeBranchEventCount: number;
+	};
+	context?: {
+		compilerVersion: string;
+		selectedEventCount: number;
+		omittedEventCount: number;
+		omissionsByReason: Partial<Record<ContextOmissionReason, number>>;
+		availableInputTokens: number;
+		outputMessageTokens: number;
+	};
 }
 
 interface ToolDefinitionEntry {
@@ -1314,6 +1343,74 @@ export class AgentSession {
 	/** Diagnostics for the most recent model-facing context compilation. */
 	get latestContextManifest(): ContextSelectionManifest | undefined {
 		return this._latestContextManifest;
+	}
+
+	/** Return a concise derived view; raw entries and the full manifest remain the sources of truth. */
+	getEpistemicDiagnostics(): EpistemicDiagnostics {
+		const branch = this.sessionManager.getBranch();
+		const state = this._anchorEnabled ? restoreEpistemicState(branch) : {};
+		const manifest = this._latestContextManifest;
+		const omissionsByReason: Partial<Record<ContextOmissionReason, number>> = {};
+		for (const omission of manifest?.omissions ?? []) {
+			omissionsByReason[omission.reason] = (omissionsByReason[omission.reason] ?? 0) + 1;
+		}
+		return {
+			enabled: {
+				anchor: this._anchorEnabled,
+				frame: this._frameEnabled,
+				action: this._actionEnabled,
+				observation: this._observationEnabled,
+			},
+			state: {
+				anchor: state.anchor
+					? {
+							id: state.anchor.id,
+							revision: state.anchor.revision,
+							statement: state.anchor.statement,
+							revisionEntryId: state.anchor.revisionEntryId,
+						}
+					: undefined,
+				frame: state.frame
+					? {
+							id: state.frame.id,
+							version: state.frame.version,
+							statement: state.frame.statement,
+							revisionEntryId: state.frame.revisionEntryId,
+							horizon: state.frame.horizon,
+							completedModelResponses: state.frame.completedModelResponses,
+						}
+					: undefined,
+				action: state.action
+					? {
+							id: state.action.id,
+							intent: state.action.intent,
+							completionCondition: state.action.completionCondition,
+							startEntryId: state.action.startEntryId,
+							completedModelResponses: state.action.completedModelResponses,
+						}
+					: undefined,
+				observations: (state.observations ?? []).map((observation) => ({
+					id: observation.id,
+					statement: observation.statement,
+					entryId: observation.entryId,
+					sourceEventIds: observation.sourceEventIds,
+				})),
+			},
+			provenance: {
+				rawEventCount: this.sessionManager.getEntries().length,
+				activeBranchEventCount: branch.length,
+			},
+			context: manifest
+				? {
+						compilerVersion: manifest.compilerVersion,
+						selectedEventCount: manifest.selectedEventIds.length,
+						omittedEventCount: manifest.omissions.length,
+						omissionsByReason,
+						availableInputTokens: manifest.budget.availableInputTokens,
+						outputMessageTokens: manifest.budget.outputMessageTokens,
+					}
+				: undefined,
+		};
 	}
 
 	/** Current durable Anchor on the active branch. */

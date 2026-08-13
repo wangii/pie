@@ -95,6 +95,12 @@ interface AgentSession {
   thinkingLevel: ThinkingLevel;
   messages: AgentMessage[];
   isStreaming: boolean;
+  anchor: Anchor | undefined;
+  frame: Frame | undefined;
+  action: Action | undefined;
+  observations: readonly Observation[];
+  latestContextManifest: ContextSelectionManifest | undefined;
+  getEpistemicDiagnostics(): EpistemicDiagnostics;
 
   // In-place tree navigation within the current session file
   navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
@@ -112,6 +118,47 @@ interface AgentSession {
 ```
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
+
+### Epistemic state and context diagnostics
+
+Pie persists Anchor, Frame, Action, and Observation entries in the raw session tree and restores them from the active branch. Compiler output is derived and is never persisted as raw history. Use `latestContextManifest` for the full most-recent selection record, or `getEpistemicDiagnostics()` for a concise view:
+
+```typescript
+const diagnostics = session.getEpistemicDiagnostics();
+console.log(diagnostics.state.anchor?.statement);
+console.log(diagnostics.state.frame?.completedModelResponses);
+console.log(diagnostics.state.observations.map(({ id, sourceEventIds }) => ({ id, sourceEventIds })));
+console.log(diagnostics.context?.omissionsByReason);
+```
+
+The diagnostics include enabled primitives, current branch state, raw/branch event counts, compiler version, selection counts, omission reasons, and token estimates. They are derived from `SessionManager` and the latest compiler manifest; a UI must not treat its rendered copy as canonical state.
+
+State changes are explicit through `PromptOptions` or the corresponding methods:
+
+```typescript
+await session.prompt("Investigate the logout failure", {
+  anchor: { statement: "Logout must revoke authorization." },
+  frame: {
+    type: "create",
+    statement: "Worker-local state survives logout.",
+    falsifier: "A clean worker restart preserves the failure.",
+    horizon: 8,
+  },
+  action: {
+    type: "start",
+    intent: "run the restart probe",
+    completionCondition: "the post-restart result is captured",
+  },
+});
+
+session.materializeObservation({
+  statement: "The failure persisted after a clean restart.",
+  affects: "frame",
+  sourceEventIds: [toolResultEntryId],
+});
+```
+
+Observations must reference exact `toolResult` or `bashExecution` entries from the active Action. Legacy compaction and branch-summary entries remain raw provenance but Pie's `ContextCompiler` does not treat their narrative text as privileged model context.
 
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
@@ -188,6 +235,10 @@ interface PromptOptions {
   streamingBehavior?: "steer" | "followUp";
   source?: InputSource;
   preflightResult?: (success: boolean) => void;
+  anchor?: { statement: string; revisionReason?: string };
+  frame?: FrameDirective;
+  action?: ActionDirective;
+  observation?: ObservationDefinition;
 }
 ```
 

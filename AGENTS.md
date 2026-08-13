@@ -23,8 +23,8 @@ Pie is a fork of Pi at the context boundary. Pi remains the execution chassis; P
 
 ### Current Scope
 
-- The current milestone is Roadmap Phase 0: establish a stable `ContextCompiler` baseline with empty epistemic state.
-- Do not implement Anchor, Frame, Action episodes, Observation, or additional epistemic schemas before the Phase 0 gate passes.
+- The current milestone is Roadmap Phase 5: integrate the surviving Anchor, Frame, Action, and Observation primitives after their independent gates passed.
+- Do not add further epistemic primitives or ontology. Prioritize integrated restoration, branching, legacy-session behavior, diagnostics, benchmarks, and long-session stability.
 - Do not continue the cognition experiment as an extension. Extension prototypes may be used as comparative evidence only; the production boundary belongs in the forked core.
 - Keep providers, streaming, authentication, tools, TUI, and raw persistence behavior unchanged unless the context-boundary work requires a concrete change.
 

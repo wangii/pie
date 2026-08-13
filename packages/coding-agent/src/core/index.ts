@@ -9,6 +9,7 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type EpistemicDiagnostics,
 	type FrameDefinition,
 	type FrameDirective,
 	type ModelCycleResult,
