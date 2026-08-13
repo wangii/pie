@@ -23,12 +23,14 @@
 
 ### Changed
 
+- Split production context projection by role: execution requests follow the active Action's detailed path, while epistemic and final-answer requests compare deterministic completed-Action outcomes and current feedback without replaying prior execution noise.
 - Separated production Frames from task success and Actions from whole-task wrappers; plain provider stops and successful tool calls no longer complete an Action or authorize a final answer.
 - Replaced the inherited Mistral SDK transport with a native Chat Completions HTTP stream, eliminating its generated client and schema runtime overhead.
 - Documented the generic `AI_AGENT=pi` process marker and how it differs from `PI_CODING_AGENT=true` ([#7747](https://github.com/earendil-works/pi/issues/7747)).
 
 ### Fixed
 
+- Fixed production Frames and Actions collapsing back into task-sized wrappers by validating relation/falsifier separation, rejecting bundled whole-task Actions, bounding each Action independently of its Frame lease, and preserving explicit Frame adjudication at the lease boundary.
 - Fixed `/vf` not listing the Actions authorized by the selected Frame.
 - Fixed inherited GitHub Copilot login triggering API rate limits while enabling model policies by limiting concurrent policy updates ([#6187](https://github.com/earendil-works/pi/issues/6187)).
 - Fixed fullscreen transcript search snapping back to the current match during manual scrolling and fragmented mouse input leaking into the search query.

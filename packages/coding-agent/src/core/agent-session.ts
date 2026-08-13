@@ -290,6 +290,8 @@ export interface AgentSessionConfig {
 	pieModelRoutes?: PieModelRoutes;
 	/** Clamp controller-estimated Frame response leases to this inclusive range. */
 	frameHorizonRange?: { min: number; max: number };
+	/** Maximum completed model responses allowed inside one production Action episode. */
+	actionResponseLimit?: number;
 }
 
 export interface ExtensionBindings {
@@ -543,6 +545,7 @@ export class AgentSession {
 	private _activeRequestModel: Model<any> | undefined;
 	private _activeProductionRequestRole: PieProductionRequestRole | undefined;
 	private readonly _frameHorizonRange: { min: number; max: number };
+	private readonly _actionResponseLimit: number;
 	private _controlRepairAttempts = 0;
 	private readonly _maxControlRepairAttempts = 3;
 	private _lastControlError: string | undefined;
@@ -629,6 +632,11 @@ export class AgentSession {
 			throw new Error("Frame horizon range must contain positive ordered integers.");
 		}
 		this._frameHorizonRange = frameHorizonRange;
+		const actionResponseLimit = config.actionResponseLimit ?? 6;
+		if (!Number.isSafeInteger(actionResponseLimit) || actionResponseLimit < 2) {
+			throw new Error("Action response limit must be an integer of at least 2 so control transfer remains bounded.");
+		}
+		this._actionResponseLimit = actionResponseLimit;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -891,9 +899,12 @@ export class AgentSession {
 				epistemicState = restoreEpistemicState(rawEvents);
 			}
 			const frame = epistemicState.frame;
+			const latestEntry = rawEvents.at(-1);
+			const explicitActionAdjudicationPending = latestEntry?.type === "action_transition";
 			if (
 				this._frameEnabled &&
 				!requestedFrameDirective &&
+				!explicitActionAdjudicationPending &&
 				frame &&
 				frame.completedModelResponses >= frame.horizon &&
 				frame.lastResponseEventId
@@ -929,6 +940,7 @@ export class AgentSession {
 					this._activeProductionRequestRole && this._activeProductionRequestRole !== "execution"
 						? []
 						: this.agent.state.tools,
+				projectionRole: this._activeProductionRequestRole ?? "default",
 				requestInstruction: this._activeProductionRequestRole
 					? {
 							role: "custom",
@@ -960,14 +972,21 @@ export class AgentSession {
 
 	private _productionSystemPrompt(role: PieProductionRequestRole): string {
 		if (role === "execution") {
+			const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
+			const responseBudget = action
+				? ` This episode has used ${action.completedModelResponses}/${this._actionResponseLimit} completed model responses; ` +
+					"the final response is reserved for epistemic adjudication, so execution stops when only one remains."
+				: "";
 			return (
 				"Execute only the frozen CURRENT ACTION under the CURRENT FRAME. The CURRENT ACTION is the complete and exclusive " +
 				"scope of this request, even if the user asked for later work. Do not perform, anticipate, or combine a later episode. " +
 				"You may use multiple tools and model responses and may repair local execution strategy, but you must not change " +
-				"the Action intent or completion condition. As soon as the exact completion condition is established, stop this " +
-				"generation immediately: do not call another tool, do not begin the next task step, and do not produce the user's " +
-				"final answer. A provider stop ends only this generation; it does not complete the Action or authorize a final " +
-				"answer. Return exactly UNRESOLVABLE only when the frozen completion condition cannot be met under current constraints."
+				"the Action intent or completion condition." +
+				responseBudget +
+				" As soon as the exact completion condition is established, stop this generation immediately: do not call another " +
+				"tool, do not begin the next task step, and do not produce the user's final answer. A provider stop ends only this " +
+				"generation; it does not complete the Action or authorize a final answer. Return exactly UNRESOLVABLE only when " +
+				"the frozen completion condition cannot be met under current constraints."
 			);
 		}
 		if (role === "finalAnswer") {
@@ -977,12 +996,16 @@ export class AgentSession {
 				: `Epistemic control established Anchor satisfaction and authorized the final answer: ${authorization?.reason ?? "authorized"}. Give only the user-visible final answer. Do not call tools.`;
 		}
 		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		const actionBudgetExhausted =
+			state.action !== undefined && state.action.completedModelResponses >= this._actionResponseLimit;
 		const allowed = state.action
-			? "continue_action, complete_action, unresolvable_action, or escalate_action"
+			? actionBudgetExhausted
+				? "complete_action, unresolvable_action, or escalate_action"
+				: "continue_action, complete_action, unresolvable_action, or escalate_action"
 			: state.frame
 				? "authorize_action, revise_frame, replace_frame, falsify_frame, kill_frame, authorize_final, or report_inability"
 				: state.anchor
-					? "create_frame, revise_anchor, or report_inability"
+					? "create_frame, revise_anchor, authorize_final, or report_inability"
 					: "report_inability";
 		return (
 			"PIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
@@ -991,17 +1014,22 @@ export class AgentSession {
 			"last character must be }. " +
 			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
 			`The current state permits only: ${allowed}. ` +
-			`Frame horizon counts every completed model response under one exact Frame version and must be estimated within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}; allow enough responses for all sequential Actions the commitment may authorize without writing a step plan. ` +
+			`Frame horizon counts every completed model response under one exact Frame version and must be estimated within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}; allow enough responses for multiple sequential Actions without writing a step plan. ` +
+			`One Action may use at most ${this._actionResponseLimit} completed model responses; when that budget is exhausted, continue_action is forbidden and control must return. ` +
 			'Schemas: {"kind":"create_frame","statement":string,"falsifier":string,"horizon":integer}; ' +
 			"revise_frame and replace_frame also require reason; falsify_frame, kill_frame, continue_action, " +
 			"complete_action, unresolvable_action, authorize_final, and report_inability require reason; " +
 			"revise_anchor requires statement and reason; authorize_action requires intent and completionCondition; " +
-			"escalate_action requires challenge (anchor or frame) and reason. A Frame is a concrete finite investigation " +
-			"commitment, not a request paraphrase. Its falsifier names a concrete world result. An Action is one bounded " +
-			"investigation episode, not the whole task. A plain assistant stop, successful tool call, or final-looking prose " +
-			"proves neither Action completion nor Anchor satisfaction. When an Action is active, adjudicate only that exact " +
-			"frozen intent and completion condition. Ignore and do not credit execution outside its scope; such execution cannot " +
-			"merge a later Action into the current episode. After complete_action, reconsider separately before authorizing the next Action."
+			"escalate_action requires challenge (anchor or frame) and reason. A Frame must assert one provisional causal or " +
+			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
+			"the requested deliverable. Its falsifier names an exact observable world result that contradicts that relation, not " +
+			"an inability to finish the investigation. An Action is one bounded episode with one externally checkable completion " +
+			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. Split evidence collection, " +
+			"mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
+			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
+			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
+			"outside its scope; such execution cannot merge a later Action into the current episode. After complete_action, " +
+			"reconsider separately before authorizing the next Action."
 		);
 	}
 
@@ -1017,9 +1045,26 @@ export class AgentSession {
 
 	private _normalizeSemanticText(text: string): string {
 		return text
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, " ")
+			.normalize("NFKC")
+			.toLocaleLowerCase()
+			.replace(/[^\p{L}\p{N}]+/gu, " ")
 			.trim();
+	}
+
+	private _semanticCharacterContainment(left: string, right: string): number {
+		const grams = (text: string): Set<string> => {
+			const characters = Array.from(this._normalizeSemanticText(text).replace(/\s+/g, ""));
+			if (characters.length < 3) return new Set(characters.length > 0 ? [characters.join("")] : []);
+			return new Set(characters.slice(0, -2).map((_, index) => characters.slice(index, index + 3).join("")));
+		};
+		const leftGrams = grams(left);
+		const rightGrams = grams(right);
+		if (leftGrams.size === 0 || rightGrams.size === 0) return 0;
+		let intersection = 0;
+		for (const gram of leftGrams) {
+			if (rightGrams.has(gram)) intersection++;
+		}
+		return intersection / Math.min(leftGrams.size, rightGrams.size);
 	}
 
 	private _parseControlDecision(message: AssistantMessage): PieControlDecision {
@@ -1069,23 +1114,73 @@ export class AgentSession {
 		const anchor = restoreEpistemicState(this.sessionManager.getBranch()).anchor;
 		const statement = this._normalizeSemanticText(definition.statement);
 		const anchorStatement = anchor ? this._normalizeSemanticText(anchor.statement) : "";
-		if (!statement || statement === anchorStatement || statement.length < 12) {
-			throw new Error("Frame statement must express an investigation commitment rather than restate the Anchor.");
+		const startsWithTaskVerb =
+			/^(?:investigate|analy[sz]e|inspect|trace|locate|determine|review|fix|implement|complete|deliver|produce|consider|check|verify)(?:\s|$)/u.test(
+				statement,
+			) || /^(?:调查|分析|检查|追踪|定位|确定|修复|实现|完成|交付|考虑|核对|验证)/u.test(statement);
+		const repeatsAnchor =
+			statement === anchorStatement ||
+			(anchor !== undefined &&
+				anchorStatement.length >= 80 &&
+				this._semanticCharacterContainment(definition.statement, anchor.statement) >= 0.72);
+		const predictsOwnFalsifier = /\bfalsifier\b/u.test(statement) || /(?:反证|证伪结果|否证结果)/u.test(statement);
+		const conditionsTruthOnProbe =
+			/\b(?:accurate(?:ly)?|correct(?:ly)?|true|valid|explains?)\b.*\b(?:only if|if and only if|provided that)\b/u.test(
+				statement,
+			) || /(?:准确|正确|成立|有效).*(?:仅当|当且仅当|前提是)/u.test(statement);
+		if (
+			!statement ||
+			statement.length < 12 ||
+			startsWithTaskVerb ||
+			repeatsAnchor ||
+			predictsOwnFalsifier ||
+			conditionsTruthOnProbe
+		) {
+			throw new Error(
+				"Frame statement must assert one provisional world relation rather than restate or execute the Anchor.",
+			);
 		}
 		const falsifier = this._normalizeSemanticText(definition.falsifier);
 		if (
 			falsifier.length < 12 ||
-			/^(?:cannot|can not|unable to) (?:complete|finish)/.test(falsifier) ||
+			this._semanticCharacterContainment(definition.statement, definition.falsifier) >= 0.7 ||
+			/^(?:cannot|can not|unable to|failure to|no (?:specific |concrete )?)(?:complete|finish|locate|find|identify|mismatch|ambiguity|site|cause|fix|edit)/u.test(
+				falsifier,
+			) ||
+			/^(?:无法|不能|未能|没有找到|找不到|无具体)(?:完成|定位|发现|识别|问题|原因|修复)/u.test(falsifier) ||
 			falsifier === "the frame is wrong" ||
 			falsifier === "this is not true"
 		) {
-			throw new Error("Frame falsifier must name a concrete contradictory world result.");
+			throw new Error(
+				"Frame falsifier must name a concrete observable result that contradicts, rather than restates, the Frame relation.",
+			);
 		}
 		return {
 			statement: definition.statement.trim(),
 			falsifier: definition.falsifier.trim(),
 			horizon: Math.min(this._frameHorizonRange.max, Math.max(this._frameHorizonRange.min, definition.horizon)),
 		};
+	}
+
+	private _validateControllerAction(
+		definition: ActionDefinition,
+		state: ReturnType<typeof restoreEpistemicState>,
+	): void {
+		this._validateActionDefinition(definition);
+		const intent = this._normalizeSemanticText(definition.intent);
+		const completion = this._normalizeSemanticText(definition.completionCondition);
+		const anchor = state.anchor ? this._normalizeSemanticText(state.anchor.statement) : "";
+		const bundlesWholeTask =
+			/\b(?:end to end|whole (?:task|request)|entire (?:task|request)|final answer)\b/u.test(intent) ||
+			/\b(?:written (?:inventory|report)|concrete diagnosis|proposed fix|final answer|whole (?:task|request)|entire (?:task|request)|confirmed absence)\b/u.test(
+				completion,
+			) ||
+			/(?:完整|全部|整个)(?:任务|请求|调查)|最终答案|诊断.*修复|修复.*验证/u.test(`${intent} ${completion}`);
+		if (intent === anchor || bundlesWholeTask) {
+			throw new Error(
+				"Action must authorize one finite episode with one checkable result, not the whole task or a bundled deliverable.",
+			);
+		}
 	}
 
 	private _expireProductionFrame(sourceEventId: string): boolean {
@@ -1165,11 +1260,7 @@ export class AgentSession {
 			case "authorize_action": {
 				if (state.action) throw new Error("An Action episode is already active.");
 				if (!state.frame) throw new Error("Create an admissible Frame before authorizing an Action.");
-				this._validateActionDefinition(decision);
-				const anchorText = state.anchor ? this._normalizeSemanticText(state.anchor.statement) : "";
-				if (this._normalizeSemanticText(decision.intent) === anchorText) {
-					throw new Error("Action intent must be one finite investigation episode rather than the whole Anchor.");
-				}
+				this._validateControllerAction(decision, state);
 				this._appendActionStart(decision, sourceEventId, state.frame);
 				state = restoreEpistemicState(this.sessionManager.getBranch());
 				this._operationalActionId = state.action?.id;
@@ -1181,6 +1272,15 @@ export class AgentSession {
 			}
 			case "continue_action":
 				if (!state.action) throw new Error("No Action is active to continue.");
+				if (state.action.completedModelResponses >= this._actionResponseLimit) {
+					this._appendActionTransition(
+						state.action,
+						"unresolvable",
+						sourceEventId,
+						`Action reached its ${this._actionResponseLimit}-response execution budget without establishing the frozen completion condition.`,
+					);
+					return "epistemic";
+				}
 				return "execution";
 			case "complete_action":
 			case "unresolvable_action":
@@ -1279,13 +1379,31 @@ export class AgentSession {
 			},
 			handleControlResponse: (message) => {
 				const sourceEventId = this._latestAssistantEventId();
-				if (this._expireProductionFrame(sourceEventId)) {
-					this._controlRepairAttempts = 0;
-					this._lastControlError = undefined;
-					return { nextRole: "epistemic" };
-				}
 				try {
-					const nextRole = this._applyProductionControl(this._parseControlDecision(message), sourceEventId);
+					const decision = this._parseControlDecision(message);
+					const state = restoreEpistemicState(this.sessionManager.getBranch());
+					const frameLeaseExhausted =
+						state.frame !== undefined && state.frame.completedModelResponses >= state.frame.horizon;
+					const explicitActionDecision =
+						state.action !== undefined &&
+						(decision.kind === "complete_action" ||
+							decision.kind === "unresolvable_action" ||
+							decision.kind === "escalate_action");
+					const explicitFrameDecision =
+						!state.action &&
+						(decision.kind === "revise_frame" ||
+							decision.kind === "replace_frame" ||
+							decision.kind === "falsify_frame" ||
+							decision.kind === "kill_frame" ||
+							decision.kind === "authorize_final" ||
+							decision.kind === "report_inability");
+					if (frameLeaseExhausted && !explicitActionDecision && !explicitFrameDecision) {
+						this._expireProductionFrame(sourceEventId);
+						this._controlRepairAttempts = 0;
+						this._lastControlError = undefined;
+						return { nextRole: "epistemic" };
+					}
+					const nextRole = this._applyProductionControl(decision, sourceEventId);
 					this._controlRepairAttempts = 0;
 					this._lastControlError = undefined;
 					return { nextRole };
@@ -1309,7 +1427,9 @@ export class AgentSession {
 				const sourceEventId = this._latestAssistantEventId();
 				if (this._expireProductionFrame(sourceEventId)) return { nextRole: "epistemic" };
 				const state = restoreEpistemicState(this.sessionManager.getBranch());
-				if (!state.action) return { nextRole: "epistemic" };
+				if (!state.action || state.action.completedModelResponses >= this._actionResponseLimit - 1) {
+					return { nextRole: "epistemic" };
+				}
 				if (toolResults.length > 0) return { nextRole: "execution" };
 				return { nextRole: "epistemic" };
 			},

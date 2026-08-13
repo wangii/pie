@@ -59,6 +59,7 @@ export {
 } from "./core/compaction/index.ts";
 export {
 	ACTION_CONTEXT_MESSAGE_TYPE,
+	ACTION_OUTCOME_CONTEXT_MESSAGE_TYPE,
 	ANCHOR_CONTEXT_MESSAGE_TYPE,
 	ContextBudgetError,
 	type ContextCompilation,
@@ -66,6 +67,7 @@ export {
 	type ContextCompilerInput,
 	type ContextOmission,
 	type ContextOmissionReason,
+	type ContextProjectionRole,
 	type ContextSelectionManifest,
 	type EmptyEpistemicState,
 	FRAME_CONTEXT_MESSAGE_TYPE,

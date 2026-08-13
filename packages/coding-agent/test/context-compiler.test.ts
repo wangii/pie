@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	ContextBudgetError,
@@ -9,7 +9,8 @@ import {
 	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
 } from "../src/core/context-compiler.ts";
-import type { SessionEntry, SessionMessageEntry } from "../src/core/session-manager.ts";
+import { restoreEpistemicState } from "../src/core/epistemic-state.ts";
+import { type SessionEntry, SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
 
 const usage = {
 	input: 0,
@@ -35,7 +36,7 @@ function model(contextWindow: number): Model<"faux"> {
 	};
 }
 
-function user(text: string, timestamp: number): AgentMessage {
+function user(text: string, timestamp: number): UserMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp };
 }
 
@@ -427,6 +428,169 @@ describe("PhaseZeroContextCompiler", () => {
 			selected: [{ id: "frame-evidence" }],
 			omitted: [{ id: "anchor-evidence", reason: "budget" }],
 		});
+	});
+
+	it("uses a depth projection for execution and excludes controller decisions", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("diagnose cache behavior", 1));
+		manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "diagnose cache behavior",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+		const frameControlId = manager.appendMessage(
+			assistant(
+				JSON.stringify({
+					kind: "create_frame",
+					statement: "Worker cache lifetime controls authorization",
+					falsifier: "A clean worker restart preserves the failure",
+					horizon: 8,
+				}),
+				2,
+			),
+		);
+		const frameRevisionId = manager.appendFrameRevision({
+			frameId: "frame-1",
+			version: 1,
+			statement: "Worker cache lifetime controls authorization",
+			falsifier: "A clean worker restart preserves the failure",
+			horizon: 8,
+			previousRevisionId: null,
+			sourceEventId: frameControlId,
+		});
+		const actionControlId = manager.appendMessage(
+			assistant(
+				JSON.stringify({
+					kind: "authorize_action",
+					intent: "Inspect worker cache lifetime",
+					completionCondition: "Exact results establish the cache lifetime",
+				}),
+				3,
+			),
+		);
+		manager.appendActionStart({
+			actionId: "action-1",
+			intent: "Inspect worker cache lifetime",
+			completionCondition: "Exact results establish the cache lifetime",
+			frameRevisionEntryId: frameRevisionId,
+			sourceEventId: actionControlId,
+		});
+		manager.appendMessage(
+			assistant('Controller decision:\n{"operation":"continue_action","reason":"Need exact evidence"}', 4),
+		);
+		const toolCall = assistant("", 5);
+		toolCall.content = [{ type: "toolCall", id: "cache-read", name: "read", arguments: { path: "cache.ts" } }];
+		toolCall.stopReason = "toolUse";
+		manager.appendMessage(toolCall);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "cache-read",
+			toolName: "read",
+			content: [{ type: "text", text: "ttl=30" }],
+			details: {},
+			isError: false,
+			timestamp: 6,
+		});
+		const events = manager.getBranch();
+
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: restoreEpistemicState(events),
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(500),
+			systemPrompt: "",
+			tools: [],
+			projectionRole: "execution",
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.manifest.projection).toMatchObject({
+			role: "execution",
+			policy: "commitment-depth/v1",
+		});
+		expect(result.messages.map(text)).toContain("ttl=30");
+		expect(result.messages.map(text)).not.toContain("diagnose cache behavior");
+		expect(result.messages.map(text).join("\n")).not.toContain("authorize_action");
+		expect(result.messages.map(text).join("\n")).not.toContain("continue_action");
+		expect(result.messages.map((message) => message.role).slice(-2)).toEqual(["assistant", "toolResult"]);
+	});
+
+	it("uses a breadth projection of completed Action outcomes and current feedback", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("diagnose authorization", 1));
+		manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "diagnose authorization",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+		const frameControlId = manager.appendMessage(assistant('{"kind":"create_frame"}', 2));
+		const frameRevisionId = manager.appendFrameRevision({
+			frameId: "frame-1",
+			version: 1,
+			statement: "Worker cache lifetime controls authorization",
+			falsifier: "A clean worker restart preserves the failure",
+			horizon: 12,
+			previousRevisionId: null,
+			sourceEventId: frameControlId,
+		});
+		const firstControlId = manager.appendMessage(assistant('{"kind":"authorize_action"}', 3));
+		const firstStartId = manager.appendActionStart({
+			actionId: "action-1",
+			intent: "Inspect cache ownership",
+			completionCondition: "The owning process is identified",
+			frameRevisionEntryId: frameRevisionId,
+			sourceEventId: firstControlId,
+		});
+		manager.appendMessage(assistant("low-level first episode trace", 4));
+		const firstCompletionId = manager.appendMessage(assistant('{"kind":"complete_action"}', 5));
+		manager.appendActionTransition({
+			actionId: "action-1",
+			startEntryId: firstStartId,
+			transition: "completed",
+			sourceEventId: firstCompletionId,
+			reason: "Exact results identified the worker process",
+		});
+		const secondControlId = manager.appendMessage(assistant('{"kind":"authorize_action"}', 6));
+		manager.appendActionStart({
+			actionId: "action-2",
+			intent: "Inspect cache invalidation",
+			completionCondition: "An exact result establishes invalidation behavior",
+			frameRevisionEntryId: frameRevisionId,
+			sourceEventId: secondControlId,
+		});
+		manager.appendMessage(assistant("current episode feedback", 7));
+		const events = manager.getBranch();
+
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: restoreEpistemicState(events),
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(1_000),
+			systemPrompt: "",
+			tools: [],
+			projectionRole: "epistemic",
+			reservedOutputTokens: 8,
+		});
+		const texts = result.messages.map(text);
+
+		expect(result.manifest.projection).toMatchObject({
+			role: "epistemic",
+			policy: "epistemic-breadth/v1",
+			actionOutcomes: {
+				selected: [{ actionId: "action-1", transition: "completed" }],
+				omitted: [],
+			},
+		});
+		expect(texts).toContain("diagnose authorization");
+		expect(texts).toContain("current episode feedback");
+		expect(texts.join("\n")).toContain("[ACTION OUTCOME action-1]");
+		expect(texts.join("\n")).toContain("Worker cache lifetime controls authorization");
+		expect(texts).not.toContain("low-level first episode trace");
+		expect(texts.join("\n")).not.toContain("authorize_action");
 	});
 
 	it("retains a frozen Action and excludes execution before its episode source", async () => {

@@ -61,6 +61,65 @@ describe("context compiler provider boundary", () => {
 		}
 	});
 
+	it("projects execution depth and epistemic breadth through the production boundary", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+			frameHorizonRange: { min: 4, max: 20 },
+		});
+		try {
+			const decision = (value: Record<string, unknown>) => fauxAssistantMessage(JSON.stringify(value));
+			harness.setResponses([
+				decision({
+					kind: "create_frame",
+					statement: "Worker cache lifetime controls authorization behavior",
+					falsifier: "A clean worker restart preserves the authorization failure",
+					horizon: 20,
+				}),
+				decision({
+					kind: "authorize_action",
+					intent: "Inspect cache ownership",
+					completionCondition: "Exact repository results identify the owning process",
+				}),
+				fauxAssistantMessage("first low-level episode trace"),
+				decision({ kind: "complete_action", reason: "The owning process was identified" }),
+				decision({
+					kind: "authorize_action",
+					intent: "Inspect cache invalidation",
+					completionCondition: "An exact runtime result establishes invalidation behavior",
+				}),
+				fauxAssistantMessage("second episode result"),
+				decision({ kind: "complete_action", reason: "Invalidation behavior was established" }),
+				decision({ kind: "authorize_final", reason: "Both bounded results satisfy the request" }),
+				fauxAssistantMessage("final answer"),
+			]);
+
+			await harness.session.prompt("diagnose authorization behavior");
+
+			const epistemicAfterFirst = harness.providerContexts[4]!.messages.map(getMessageText);
+			expect(epistemicAfterFirst.join("\n")).toContain("[ACTION OUTCOME");
+			expect(epistemicAfterFirst.join("\n")).toContain("Inspect cache ownership");
+			expect(epistemicAfterFirst).not.toContain("first low-level episode trace");
+
+			const secondExecution = harness.providerContexts[5]!.messages.map(getMessageText);
+			expect(secondExecution.join("\n")).toContain("[CURRENT ACTION]");
+			expect(secondExecution.join("\n")).not.toContain("[ACTION OUTCOME");
+			expect(secondExecution).not.toContain("first low-level episode trace");
+
+			const finalProjection = harness.providerContexts[8]!.messages.map(getMessageText).join("\n");
+			expect(finalProjection.match(/\[ACTION OUTCOME/g)).toHaveLength(2);
+			expect(harness.session.latestContextManifest?.projection).toMatchObject({
+				role: "finalAnswer",
+				policy: "epistemic-breadth/v1",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("bypasses a persisted compaction summary and selects its raw provenance", async () => {
 		const harness = await createHarness({ anchorEnabled: false });
 		try {
