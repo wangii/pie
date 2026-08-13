@@ -109,6 +109,7 @@ import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+import { ActionExecutionTraceComponent } from "./components/action-execution-trace.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -138,6 +139,7 @@ import {
 	formatOperationalError,
 	isPieStateTransitionEntry,
 	PieDiagnosticsComponent,
+	PieProjectionReductionNoticeComponent,
 	PieRestorationReceiptComponent,
 	PieStateTransitionComponent,
 	PieStatusComponent,
@@ -474,6 +476,8 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private activeActionTrace: ActionExecutionTraceComponent | undefined;
+	private lastProjectionReductionSignature: string | undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2006,6 +2010,8 @@ export class InteractiveMode {
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
+		this.activeActionTrace = undefined;
+		this.lastProjectionReductionSignature = undefined;
 		this.renderInitialMessages();
 		this.showRestorationReceipt();
 	}
@@ -3157,12 +3163,28 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				} else if (isPieStateTransitionEntry(event.entry)) {
 					const marker = new PieStateTransitionComponent(event.entry, this.toolOutputExpanded);
-					this.chatContainer.addChild(marker);
+					if (event.entry.type === "action_start") {
+						this.chatContainer.addChild(marker);
+						this.activeActionTrace = new ActionExecutionTraceComponent(
+							event.entry.actionId,
+							this.toolOutputExpanded,
+						);
+						this.chatContainer.addChild(this.activeActionTrace);
+					} else if (event.entry.type === "action_transition") {
+						if (this.activeActionTrace?.actionId === event.entry.actionId) {
+							this.activeActionTrace.markTerminal(event.entry.transition);
+							this.activeActionTrace = undefined;
+						}
+						this.chatContainer.addChild(marker);
+					} else {
+						this.chatContainer.addChild(marker);
+					}
 					this.ui.requestRender();
 				}
 				break;
 
 			case "context_compiled":
+				this.showProjectionReductionNotice(event.manifest);
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -3175,7 +3197,8 @@ export class InteractiveMode {
 					1,
 					0,
 				);
-				this.chatContainer.addChild(marker);
+				if (this.activeActionTrace) this.activeActionTrace.recordRepair(marker);
+				else this.chatContainer.addChild(marker);
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -3237,7 +3260,9 @@ export class InteractiveMode {
 									this.sessionManager.getCwd(),
 								);
 								component.setExpanded(this.toolOutputExpanded);
-								this.chatContainer.addChild(component);
+								if (this.activeActionTrace)
+									this.activeActionTrace.addAttempt(content.id, content.name, component);
+								else this.chatContainer.addChild(component);
 								this.pendingTools.set(content.id, component);
 							} else {
 								const component = this.pendingTools.get(content.id);
@@ -3311,7 +3336,9 @@ export class InteractiveMode {
 						this.sessionManager.getCwd(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
+					if (this.activeActionTrace) {
+						this.activeActionTrace.addAttempt(event.toolCallId, event.toolName, component);
+					} else this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
 				component.markExecutionStarted();
@@ -3323,6 +3350,7 @@ export class InteractiveMode {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.partialResult, isError: false }, true);
+					this.activeActionTrace?.recordStreamedUpdate(event.toolCallId, event.toolName, event.partialResult);
 					this.ui.requestRender();
 				}
 				break;
@@ -3332,6 +3360,7 @@ export class InteractiveMode {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
+					this.activeActionTrace?.finishAttempt(event.toolCallId, event.isError);
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3502,6 +3531,20 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private showProjectionReductionNotice(
+		manifest: Extract<AgentSessionEvent, { type: "context_compiled" }>["manifest"],
+	): void {
+		const omittedByBudget = manifest.omissions.filter((omission) => omission.reason === "budget");
+		if (omittedByBudget.length === 0) {
+			this.lastProjectionReductionSignature = undefined;
+			return;
+		}
+		const signature = omittedByBudget.map((omission) => omission.eventId).join("\0");
+		if (signature === this.lastProjectionReductionSignature) return;
+		this.lastProjectionReductionSignature = signature;
+		this.chatContainer.addChild(new PieProjectionReductionNoticeComponent(omittedByBudget.length));
+	}
+
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
@@ -3636,6 +3679,8 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
+		this.activeActionTrace = undefined;
+		this.lastProjectionReductionSignature = undefined;
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
@@ -3653,7 +3698,20 @@ export class InteractiveMode {
 				if (item.type === "custom") {
 					this.addCustomEntryToChat(item);
 				} else {
-					this.chatContainer.addChild(new PieStateTransitionComponent(item, this.toolOutputExpanded));
+					const marker = new PieStateTransitionComponent(item, this.toolOutputExpanded);
+					if (item.type === "action_start") {
+						this.chatContainer.addChild(marker);
+						this.activeActionTrace = new ActionExecutionTraceComponent(item.actionId, this.toolOutputExpanded);
+						this.chatContainer.addChild(this.activeActionTrace);
+					} else if (item.type === "action_transition") {
+						if (this.activeActionTrace?.actionId === item.actionId) {
+							this.activeActionTrace.markTerminal(item.transition);
+							this.activeActionTrace = undefined;
+						}
+						this.chatContainer.addChild(marker);
+					} else {
+						this.chatContainer.addChild(marker);
+					}
 				}
 				continue;
 			}
@@ -3678,7 +3736,8 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						if (this.activeActionTrace) this.activeActionTrace.addAttempt(content.id, content.name, component);
+						else this.chatContainer.addChild(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -3706,6 +3765,7 @@ export class InteractiveMode {
 				const component = renderedPendingTools.get(message.toolCallId);
 				if (component) {
 					component.updateResult(message);
+					this.activeActionTrace?.finishAttempt(message.toolCallId, message.isError);
 					renderedPendingTools.delete(message.toolCallId);
 				}
 			} else {
@@ -4499,7 +4559,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof ActionExecutionTraceComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -4507,7 +4567,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof ActionExecutionTraceComponent) {
 								child.setImageWidthCells(width);
 							}
 						}

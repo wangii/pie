@@ -148,6 +148,17 @@ function formatDiagnostics(diagnostics: EpistemicDiagnostics): string {
 	return lines.join("\n");
 }
 
+export class PieProjectionReductionNoticeComponent extends Text {
+	constructor(omittedEventCount: number) {
+		const events = omittedEventCount === 1 ? "event" : "events";
+		super(
+			theme.fg("dim", `Projection reduced: ${omittedEventCount} older ${events} omitted; raw log unchanged.`),
+			1,
+			0,
+		);
+	}
+}
+
 export class PieDiagnosticsComponent extends Text implements Expandable {
 	private readonly diagnostics: EpistemicDiagnostics;
 

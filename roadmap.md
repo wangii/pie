@@ -538,6 +538,13 @@ Phase 6.2.1's P0/P1 visibility and recovery surface is now implemented:
 - operational failures are classified as pre-execution rejection, invocation failure, completed negative result, interruption, or ambiguous mutation; repair is bounded to three failed attempts per Action, exhaustion returns `UNRESOLVABLE`, and exact ambiguous mutation replay is blocked until read-only inspection;
 - deterministic production-loop, Observation provenance, diagnostics UI, footer, interactive status, and session-file restoration tests pass, and `npm run check` passes.
 
+Phase 6.2.1's P2 sustained-use surface is also implemented:
+
+- context manifests with budget omissions emit a concise, deduplicated `Projection reduced` notice that reports the omitted raw-event count and explicitly states that the raw log is unchanged; structural Action-local and legacy-summary omissions do not trigger it;
+- each Action's tool attempts, streamed updates, operational repairs, and finalized results are grouped into one trace collapsed by default, while assistant messages remain visible outside the trace;
+- the collapsed summary reports only attempt, finalized/tool-error, repair, streamed-update, and terminal-status counts; expansion restores the retained execution detail without generating a narrative episode summary;
+- deterministic component and interactive tests cover projection-notice classification/deduplication, collapsed/expanded Action traces, streamed-update retention, terminal status, historical tool completion, and existing pending-tool recovery; `npm run check` passes.
+
 The application gate remains open. Next work is the full seven-built-in tool matrix, broader application-boundary cancellation/resume coverage, and the required sustained manual soak. Observation remains selective and is not inferred from tool name, success, or error status.
 
 ## Evaluation matrix

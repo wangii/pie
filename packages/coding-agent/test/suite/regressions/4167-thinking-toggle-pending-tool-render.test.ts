@@ -4,6 +4,7 @@ import { Container, Text, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { SessionEntry } from "../../../src/core/session-manager.ts";
+import { ActionExecutionTraceComponent } from "../../../src/modes/interactive/components/action-execution-trace.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
@@ -37,6 +38,7 @@ type RenderSessionContextThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
 	chatContainer: Container;
 	footer: { invalidate(): void };
+	pieStatus: { invalidate(): void };
 	ui: TUI;
 	settingsManager: {
 		getShowImages(): boolean;
@@ -67,6 +69,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
 		chatContainer,
 		footer: { invalidate: vi.fn() },
+		pieStatus: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
 		settingsManager: {
 			getShowImages: () => false,
@@ -178,5 +181,53 @@ describe("InteractiveMode.renderSessionEntries", () => {
 
 		expect(fakeThis.pendingTools.size).toBe(0);
 		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");
+	});
+
+	test("reconstructs completed Action tool traces collapsed by default", () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const renderSessionEntries = (
+			InteractiveMode.prototype as unknown as { renderSessionEntries: RenderSessionEntries }
+		).renderSessionEntries;
+		const messageEntries = createSessionEntries([
+			createAssistantToolCallMessage(),
+			createToolResultMessage("ACTION_HISTORICAL_RESULT"),
+		]);
+		const actionStart: SessionEntry = {
+			type: "action_start",
+			id: "action-start",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			actionId: "action-1",
+			intent: "inspect fixture",
+			completionCondition: "identify the result",
+			frameRevisionEntryId: "frame-1",
+			sourceEventId: "user-1",
+		};
+		messageEntries[0]!.parentId = actionStart.id;
+		const actionTransition: SessionEntry = {
+			type: "action_transition",
+			id: "action-transition",
+			parentId: messageEntries[1]!.id,
+			timestamp: new Date(1).toISOString(),
+			actionId: "action-1",
+			startEntryId: actionStart.id,
+			transition: "completed",
+			sourceEventId: messageEntries[1]!.id,
+			reason: "completion condition met",
+		};
+
+		renderSessionEntries.call(fakeThis, [actionStart, ...messageEntries, actionTransition]);
+
+		const trace = fakeThis.chatContainer.children.find(
+			(child): child is ActionExecutionTraceComponent => child instanceof ActionExecutionTraceComponent,
+		);
+		expect(trace).toBeDefined();
+		expect(renderChat(fakeThis.chatContainer)).toContain(
+			"Action trace · 1 attempt (1 finalized, 0 tool errors) · 0 repairs · 0 streamed updates · completed",
+		);
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("ACTION_HISTORICAL_RESULT");
+
+		trace?.setExpanded(true);
+		expect(renderChat(fakeThis.chatContainer)).toContain("ACTION_HISTORICAL_RESULT");
 	});
 });

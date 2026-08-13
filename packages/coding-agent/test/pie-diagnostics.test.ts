@@ -5,6 +5,7 @@ import {
 	formatOperationalError,
 	formatPieStatus,
 	PieDiagnosticsComponent,
+	PieProjectionReductionNoticeComponent,
 	PieRestorationReceiptComponent,
 	PieStateTransitionComponent,
 } from "../src/modes/interactive/components/pie-diagnostics.ts";
@@ -95,6 +96,13 @@ describe("Pie diagnostics UI projections", () => {
 		expect(status).toBe(
 			"Pie · TOOL EXECUTION · ACTION running · Frame 7/24 · ctx 8.4k/12k · omitted 41 · repair 1/3 completed negative result",
 		);
+	});
+
+	it("renders budget-pressure notices without compaction language", () => {
+		const notice = plain(new PieProjectionReductionNoticeComponent(37).render(120));
+		expect(notice).toBe("Projection reduced: 37 older events omitted; raw log unchanged.");
+		expect(notice).not.toContain("compact");
+		expect(plain(new PieProjectionReductionNoticeComponent(1).render(120))).toContain("1 older event omitted");
 	});
 
 	it("renders read-only state, omission reasons, and exact Observation provenance", () => {

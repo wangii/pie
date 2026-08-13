@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type { ContextSelectionManifest } from "../src/core/context-compiler.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
@@ -115,6 +116,42 @@ describe("InteractiveMode.showStatus", () => {
 		// adds spacer + text
 		expect(fakeThis.chatContainer.children).toHaveLength(5);
 		expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_TWO");
+	});
+});
+
+describe("InteractiveMode projection reduction notices", () => {
+	beforeAll(() => initTheme("dark"));
+
+	test("emits one notice per distinct budget reduction and ignores structural omissions", () => {
+		const fakeThis: {
+			chatContainer: Container;
+			lastProjectionReductionSignature?: string;
+		} = {
+			chatContainer: new Container(),
+		};
+		const showNotice = (
+			InteractiveMode as unknown as {
+				prototype: {
+					showProjectionReductionNotice(this: typeof fakeThis, manifest: ContextSelectionManifest): void;
+				};
+			}
+		).prototype.showProjectionReductionNotice;
+		const manifest = (omissions: ContextSelectionManifest["omissions"]): ContextSelectionManifest =>
+			({ omissions }) as ContextSelectionManifest;
+
+		showNotice.call(fakeThis, manifest([{ eventId: "old-1", eventType: "message", reason: "budget" }]));
+		showNotice.call(fakeThis, manifest([{ eventId: "old-1", eventType: "message", reason: "budget" }]));
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+		expect(renderAll(fakeThis.chatContainer)).toContain("raw log unchanged");
+
+		showNotice.call(
+			fakeThis,
+			manifest([{ eventId: "action-local", eventType: "message", reason: "outside_action_episode" }]),
+		);
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+
+		showNotice.call(fakeThis, manifest([{ eventId: "old-1", eventType: "message", reason: "budget" }]));
+		expect(fakeThis.chatContainer.children).toHaveLength(2);
 	});
 });
 
