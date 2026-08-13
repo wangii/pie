@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { contentText } from "@earendil-works/pi-ai";
 import {
@@ -38,6 +38,7 @@ export type PiCodingAgentInput =
 					action?: ActionDirective;
 			  }
 			| { type: "reload" }
+			| { type: "seed"; files: Record<string, string> }
 	  >;
 
 type PiCodingAgentModelSelection = {
@@ -206,6 +207,12 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 						options.frameEnabled === false ? undefined : step.frame,
 						options.actionEnabled === false ? undefined : step.action,
 					);
+				} else if (step.type === "seed") {
+					for (const [relativePath, content] of Object.entries(step.files)) {
+						const target = join(cwd, relativePath);
+						await mkdir(dirname(target), { recursive: true });
+						await writeFile(target, content, "utf8");
+					}
 				} else {
 					await evalSession.reload();
 				}
