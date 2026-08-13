@@ -111,12 +111,41 @@ describe("Phase 8 model-response lease derivation", () => {
 		}
 	});
 
+	it("authorizes a projected-out provisional contract by its visible stable ID", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control(frame([budget(firstAction, 1)])),
+				(context) => {
+					const rawMessages = context.messages.map((message) => JSON.stringify(message)).join("\n");
+					expect(rawMessages).not.toContain('"kind":"create_frame"');
+					expect(context.systemPrompt).toContain('"actionContractId":"A1"');
+					expect(context.systemPrompt).toContain(firstAction.intent);
+					return control({ kind: "authorize_action", actionContractId: "A1" });
+				},
+				fauxAssistantMessage("The exact path is established."),
+				control({ kind: "complete_action", reason: "The listed contract condition was established" }),
+				control({ kind: "authorize_final", reason: "The bounded request is satisfied" }),
+				fauxAssistantMessage("Located."),
+			]);
+
+			await harness.session.prompt("locate the implementation boundary");
+
+			expect(harness.sessionManager.getBranch().find((entry) => entry.type === "action_start")).toMatchObject(
+				firstAction,
+			);
+			expect(harness.providerContexts[1]!.systemPrompt).not.toContain("ensure its exact contract matches");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("counts parallel tool calls as one evidence round and dependent probes as another", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
 			harness.setResponses([
 				control(frame([budget(firstAction, 2)])),
-				control({ kind: "authorize_action", ...firstAction }),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage(
 					[
 						fauxToolCall("inspect", { value: "a" }, { id: "parallel-a" }),
@@ -157,7 +186,7 @@ describe("Phase 8 model-response lease derivation", () => {
 		try {
 			harness.setResponses([
 				control(frame([budget(firstAction, 3)])),
-				control({ kind: "authorize_action", ...firstAction }),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage(fauxToolCall("inspect", { value: "entry" }, { id: "early" }), {
 					stopReason: "toolUse",
 				}),

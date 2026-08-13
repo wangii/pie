@@ -33,16 +33,17 @@ const inspectTool: AgentTool = {
 };
 
 const action = {
-	kind: "authorize_action",
 	intent: "Inspect cache lifetime and the restart boundary",
 	completionCondition: "The cache lifetime and restart behavior are established by exact tool results",
 } as const;
 
 const secondAction = {
-	kind: "authorize_action",
 	intent: "Inspect whether invalidation crosses the worker boundary",
 	completionCondition: "An exact result establishes whether worker invalidation occurs",
 } as const;
+
+const authorizeFirstAction = { kind: "authorize_action", actionContractId: "A1" } as const;
+const authorizeSecondAction = { kind: "authorize_action", actionContractId: "A2" } as const;
 
 function actionBudget(definition: { intent: string; completionCondition: string }, expectedEvidenceRounds = 3) {
 	return {
@@ -81,7 +82,7 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control(frame),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage("inspection result is ready"),
 				control({ kind: "complete_action", reason: "Exact cache lifetime evidence was collected" }),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
@@ -135,24 +136,25 @@ describe("Phase 7 production control flow", () => {
 					falsifier: "A distinct Action response budget returns control before the Frame lease expires",
 					actions: [
 						actionBudget({
+							intent: "Trace the Frame and Action transition paths end to end",
+							completionCondition:
+								"A concrete diagnosis with code references and a proposed fix, or a confirmed absence, is delivered",
+						}),
+					],
+				}),
+				control({
+					kind: "create_frame",
+					statement: "Action lifetime is controlled only by the containing Frame response lease",
+					falsifier: "A distinct Action response budget returns control before the Frame lease expires",
+					actions: [
+						actionBudget({
 							intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
 							completionCondition:
 								"Exact source locations establish whether Action has an independent response boundary",
 						}),
 					],
 				}),
-				control({
-					kind: "authorize_action",
-					intent: "Trace the Frame and Action transition paths end to end",
-					completionCondition:
-						"A concrete diagnosis with code references and a proposed fix, or a confirmed absence, is delivered",
-				}),
-				control({
-					kind: "authorize_action",
-					intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
-					completionCondition:
-						"Exact source locations establish whether Action has an independent response boundary",
-				}),
+				control(authorizeFirstAction),
 				fauxAssistantMessage("The bounded source locations are established."),
 				control({ kind: "complete_action", reason: "The exact Action lifetime boundary was established" }),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
@@ -177,7 +179,7 @@ describe("Phase 7 production control flow", () => {
 			expect(harness.providerContexts[1]!.systemPrompt).toContain(
 				"previous decision was rejected: Frame statement must assert one provisional world relation",
 			);
-			expect(harness.providerContexts[3]!.systemPrompt).toContain(
+			expect(harness.providerContexts[2]!.systemPrompt).toContain(
 				"previous decision was rejected: Action must authorize one finite episode",
 			);
 		} finally {
@@ -201,7 +203,7 @@ describe("Phase 7 production control flow", () => {
 					falsifier: "同一工具的所有结果都被运行时固定归入同一个循环",
 					horizon: 12,
 				}),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage("bounded result"),
 				control({ kind: "complete_action", reason: "The bounded result was established" }),
 				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
@@ -273,7 +275,7 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control(frame),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage("This looks finished, but no exact result establishes the condition."),
 				control({ kind: "continue_action", reason: "The completion condition is not established" }),
 				fauxAssistantMessage(fauxToolCall("inspect", { value: "cache" }, { id: "inspect-cache" }), {
@@ -308,7 +310,7 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control(frame),
-				control(action),
+				control(authorizeFirstAction),
 				(context) => {
 					const instruction = context.messages
 						.map(getMessageText)
@@ -336,7 +338,7 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control(frame),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage(fauxToolCall("inspect", { value: "first" }, { id: "inspect-first" }), {
 					stopReason: "toolUse",
 				}),
@@ -377,14 +379,10 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control(frame),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage("First result established."),
 				control({ kind: "complete_action", reason: "First bounded condition met" }),
-				control({
-					kind: "authorize_action",
-					intent: "Inspect whether invalidation crosses the worker boundary",
-					completionCondition: "An exact result establishes whether worker invalidation occurs",
-				}),
+				control(authorizeSecondAction),
 				fauxAssistantMessage("Second result established."),
 				control({ kind: "complete_action", reason: "Second bounded condition met" }),
 				control({ kind: "authorize_final", reason: "Both required facts establish the Anchor" }),
@@ -439,7 +437,7 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control(frame),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage("The exact bounded result is established."),
 				control({ kind: "complete_action", reason: "The bounded result is established at the lease boundary" }),
 				control({ kind: "authorize_final", reason: "The completed Action establishes the Anchor" }),
@@ -477,7 +475,7 @@ describe("Phase 7 production control flow", () => {
 					...frame,
 					actions: [actionBudget(action, 2), actionBudget(secondAction, 1)],
 				}),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage(fauxToolCall("inspect", { value: "first" }, { id: "inspect-budget-first" }), {
 					stopReason: "toolUse",
 				}),
@@ -486,7 +484,7 @@ describe("Phase 7 production control flow", () => {
 				}),
 				fauxAssistantMessage("The episode result remains incomplete."),
 				control({ kind: "continue_action", reason: "Try to keep the same episode alive" }),
-				control(secondAction),
+				control(authorizeSecondAction),
 				fauxAssistantMessage("remaining boundary established"),
 				control({ kind: "complete_action", reason: "The remaining bounded result was established" }),
 				control({ kind: "authorize_final", reason: "Both bounded results establish the Anchor" }),
@@ -521,7 +519,7 @@ describe("Phase 7 production control flow", () => {
 		try {
 			harness.setResponses([
 				control({ ...frame, actions: [actionBudget(action, 1)] }),
-				control(action),
+				control(authorizeFirstAction),
 				fauxAssistantMessage(fauxToolCall("inspect", { value: "inconclusive" }, { id: "lease-round" }), {
 					stopReason: "toolUse",
 				}),
@@ -547,12 +545,12 @@ describe("Phase 7 production control flow", () => {
 	});
 
 	it("authorizes different first Actions for competing Frames under the same Anchor", async () => {
-		const run = async (candidateFrame: Record<string, unknown>, candidateAction: Record<string, unknown>) => {
+		const run = async (candidateFrame: Record<string, unknown>) => {
 			const harness = await createHarness(fullStackOptions());
 			try {
 				harness.setResponses([
 					control(candidateFrame),
-					control(candidateAction),
+					control(authorizeFirstAction),
 					fauxAssistantMessage("bounded result"),
 					control({ kind: "complete_action", reason: "The candidate result was established" }),
 					control({ kind: "authorize_final", reason: "The shared Anchor is satisfied" }),
@@ -564,21 +562,17 @@ describe("Phase 7 production control flow", () => {
 				harness.cleanup();
 			}
 		};
-		const cacheAction = await run(frame, action);
+		const cacheAction = await run(frame);
 		const databaseCandidate = {
-			kind: "authorize_action",
 			intent: "Compare primary and replica authorization reads",
 			completionCondition: "Exact read results establish whether replica divergence exists",
 		};
-		const databaseAction = await run(
-			{
-				kind: "create_frame",
-				statement: "Authorization failure is controlled by stale database replica reads",
-				falsifier: "A primary-database trace shows the same stale authorization value",
-				actions: [actionBudget(databaseCandidate)],
-			},
-			databaseCandidate,
-		);
+		const databaseAction = await run({
+			kind: "create_frame",
+			statement: "Authorization failure is controlled by stale database replica reads",
+			falsifier: "A primary-database trace shows the same stale authorization value",
+			actions: [actionBudget(databaseCandidate)],
+		});
 
 		expect(cacheAction).toBe(action.intent);
 		expect(databaseAction).toBe("Compare primary and replica authorization reads");
@@ -595,7 +589,7 @@ describe("Phase 7 production control flow", () => {
 			try {
 				harness.setResponses([
 					control(frame),
-					control(action),
+					control(authorizeFirstAction),
 					fauxAssistantMessage("The bounded episode reached a controller boundary."),
 					control({
 						kind: outcome.kind,
@@ -628,7 +622,7 @@ describe("Phase 7 production control flow", () => {
 				fauxAssistantMessage(
 					'Controller decision:\n{"operation":"falsify_frame","reason":"An exact restart result contradicted the commitment"}',
 				),
-				control(action),
+				control(authorizeFirstAction),
 				control({ kind: "report_inability", reason: "No admissible Frame remains" }),
 				fauxAssistantMessage("A replacement Frame is required before further execution."),
 			]);

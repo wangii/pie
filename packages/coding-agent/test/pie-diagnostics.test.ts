@@ -80,7 +80,8 @@ const diagnostics: EpistemicDiagnostics = {
 	context: {
 		compilerVersion: "pie-phase-4-observation/v1",
 		selectedEventCount: 23,
-		omittedEventCount: 41,
+		budgetOmittedEventCount: 37,
+		structuralExcludedEventCount: 4,
 		omissionsByReason: { budget: 37, historical_summary: 2, not_model_facing: 2 },
 		availableInputTokens: 12_000,
 		outputMessageTokens: 8_400,
@@ -111,7 +112,7 @@ describe("Pie diagnostics UI projections", () => {
 		const session = { getEpistemicDiagnostics: () => diagnostics };
 		const status = formatPieStatus(session as never);
 		expect(status).toBe(
-			"Pie · TOOL EXECUTION · ACTION running · Frame responses 7/24 · evidence rounds 1/2 · ctx 8.4k/12k · omitted 41 · repair 1/3 completed negative result",
+			"Pie · TOOL EXECUTION · ACTION running · Frame responses 7/24 · evidence rounds 1/2 · ctx 8.4k/12k · budget omitted 37 · structural excluded 4 · repair 1/3 completed negative result",
 		);
 	});
 
@@ -130,6 +131,8 @@ describe("Pie diagnostics UI projections", () => {
 		expect(output).toContain("source result-event · bash · call call-1");
 		expect(output).toContain('args: {"command":"npm test"}');
 		expect(output).toContain("retained output:\nfailed assertion");
+		expect(output).toContain("budget-omitted events: 37");
+		expect(output).toContain("structurally excluded events: 4");
 		expect(output).toContain("budget=37");
 		expect(output).toContain("input budget: 12000");
 		expect(output).toContain("Model-response lease: derived · 2 provisional Actions · evidence rounds 2 + 3");

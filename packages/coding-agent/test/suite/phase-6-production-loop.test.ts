@@ -9,10 +9,14 @@ function control(decision: Record<string, unknown>) {
 	return fauxAssistantMessage(JSON.stringify(decision));
 }
 
-const productionAction = {
-	kind: "authorize_action",
+const productionActionContract = {
 	intent: "Inspect the implementation boundary relevant to the request",
 	completionCondition: "Exact repository or runtime results establish the relevant implementation behavior",
+} as const;
+
+const productionAction = {
+	kind: "authorize_action",
+	actionContractId: "A1",
 } as const;
 
 const productionFrame = {
@@ -21,8 +25,7 @@ const productionFrame = {
 	falsifier: "An exact repository or runtime result shows a different boundary controls the behavior",
 	actions: [
 		{
-			intent: productionAction.intent,
-			completionCondition: productionAction.completionCondition,
+			...productionActionContract,
 			expectedEvidenceRounds: 5,
 			budgetReason: "The second probe depends on the implementation location returned by the first result",
 		},
@@ -78,10 +81,7 @@ describe("Phase 6 production loop ownership", () => {
 						},
 					],
 				}),
-				control({
-					...productionAction,
-					intent: "Inspect the follow-up verification boundary",
-				}),
+				control(productionAction),
 				fauxAssistantMessage("follow-up investigated"),
 				control({ kind: "complete_action", reason: "The follow-up condition was met" }),
 				control({ kind: "authorize_final", reason: "The follow-up request is satisfied" }),

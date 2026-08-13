@@ -442,7 +442,8 @@ export interface EpistemicDiagnostics {
 	context?: {
 		compilerVersion: string;
 		selectedEventCount: number;
-		omittedEventCount: number;
+		budgetOmittedEventCount: number;
+		structuralExcludedEventCount: number;
 		omissionsByReason: Partial<Record<ContextOmissionReason, number>>;
 		availableInputTokens: number;
 		outputMessageTokens: number;
@@ -463,7 +464,7 @@ export interface EpistemicDiagnostics {
 interface ActiveFrameLeaseBudget {
 	frameRevisionEntryId: string;
 	calculation: FrameLeaseCalculation;
-	actions: Array<ProvisionalActionContract & { actionStartEntryId?: string }>;
+	actions: Array<ProvisionalActionContract & { contractId: string; actionStartEntryId?: string }>;
 }
 
 interface ToolDefinitionEntry {
@@ -1037,6 +1038,24 @@ export class AgentSession {
 				? consumedEvidenceRounds >= activeActionBudget.expectedEvidenceRounds
 				: state.action.completedModelResponses >= this._actionResponseLimit);
 		const policy = DEFAULT_FRAME_LEASE_POLICY;
+		const availableActionContracts = !state.action
+			? this._leaseBudgetForFrame(state.frame)?.actions.filter((candidate) => !candidate.actionStartEntryId)
+			: undefined;
+		const availableActionContractsPrompt = availableActionContracts
+			? availableActionContracts.length > 0
+				? ` Available provisional Action contracts for the current Frame:\n${availableActionContracts
+						.map((candidate) =>
+							JSON.stringify({
+								actionContractId: candidate.contractId,
+								intent: candidate.intent,
+								completionCondition: candidate.completionCondition,
+								expectedEvidenceRounds: candidate.expectedEvidenceRounds,
+								budgetReason: candidate.budgetReason,
+							}),
+						)
+						.join("\n")}\nAuthorize one by its actionContractId; do not reproduce or paraphrase its text.`
+				: " No unused provisional Action contracts remain for the current Frame."
+			: "";
 		const allowed = state.action
 			? actionBudgetExhausted
 				? "complete_action, unresolvable_action, or escalate_action"
@@ -1052,8 +1071,9 @@ export class AgentSession {
 			"the discriminator property named exactly kind, and no prose or markdown. The first character must be { and the " +
 			"last character must be }. " +
 			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
-			`The current state permits only: ${allowed}. ` +
-			`For create_frame, revise_frame, or replace_frame, enumerate 1-${policy.maxActions} provisional bounded Actions; do not supply horizon. ` +
+			`The current state permits only: ${allowed}.` +
+			availableActionContractsPrompt +
+			` For create_frame, revise_frame, or replace_frame, enumerate 1-${policy.maxActions} provisional bounded Actions; do not supply horizon. ` +
 			`Each provisional Action has intent, completionCondition, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. ` +
 			"One evidence round is one model response that emits one or more independent evidence-producing tool calls; parallel read-only calls in that response count once. A later round is valid only when its probe depends on a result unavailable before the preceding round. " +
 			"Complexity, uncertainty, file count, or tool-call count do not justify extra rounds. Unknown source locations require a discovery-only Action before source reading. " +
@@ -1062,13 +1082,13 @@ export class AgentSession {
 			'Schemas: {"kind":"create_frame","statement":string,"falsifier":string,"actions":[{"intent":string,"completionCondition":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
 			"revise_frame and replace_frame use the same actions array and also require reason; falsify_frame, kill_frame, continue_action, " +
 			"complete_action, unresolvable_action, authorize_final, and report_inability require reason; " +
-			"revise_anchor requires statement and reason; authorize_action requires intent and completionCondition matching one unused provisional contract; " +
+			"revise_anchor requires statement and reason; authorize_action requires only actionContractId from one listed unused provisional contract; " +
 			"escalate_action requires challenge (anchor or frame) and reason. A Frame must assert one provisional causal or " +
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
 			"the requested deliverable. Its falsifier names an exact observable world result that contradicts that relation, not " +
 			"an inability to finish the investigation. An Action is one bounded episode with one externally checkable completion " +
-			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. Before authorize_action, " +
-			"ensure its exact contract matches the accepted provisional calculation. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
+			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. For authorize_action, " +
+			"select a listed actionContractId instead of regenerating contract text. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
 			"Split evidence collection, mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
 			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
 			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
@@ -1243,8 +1263,9 @@ export class AgentSession {
 			budget: {
 				frameRevisionEntryId: "",
 				calculation,
-				actions: definition.actions.map((candidate) => ({
+				actions: definition.actions.map((candidate, index) => ({
 					...candidate,
+					contractId: `A${index + 1}`,
 					intent: candidate.intent.trim(),
 					completionCondition: candidate.completionCondition.trim(),
 					budgetReason: candidate.budgetReason.trim(),
@@ -1301,10 +1322,10 @@ export class AgentSession {
 
 	private _leaseBudgetForAction(
 		state: ReturnType<typeof restoreEpistemicState>,
-	): (ProvisionalActionContract & { actionStartEntryId: string }) | undefined {
+	): (ProvisionalActionContract & { contractId: string; actionStartEntryId: string }) | undefined {
 		if (!state.action) return undefined;
 		return this._leaseBudgetForFrame(state.frame)?.actions.find(
-			(candidate): candidate is ProvisionalActionContract & { actionStartEntryId: string } =>
+			(candidate): candidate is ProvisionalActionContract & { contractId: string; actionStartEntryId: string } =>
 				candidate.actionStartEntryId === state.action?.startEntryId,
 		);
 	}
@@ -1392,7 +1413,9 @@ export class AgentSession {
 			case "authorize_action": {
 				if (state.action) throw new Error("An Action episode is already active.");
 				if (!state.frame) throw new Error("Create an admissible Frame before authorizing an Action.");
-				this._validateControllerAction(decision, state);
+				if (typeof decision.actionContractId !== "string" || !decision.actionContractId.trim()) {
+					throw new Error("Action authorization requires a listed actionContractId.");
+				}
 				const leaseBudget = this._leaseBudgetForFrame(state.frame);
 				if (!leaseBudget) {
 					throw new Error(
@@ -1402,15 +1425,14 @@ export class AgentSession {
 				const planned = leaseBudget.actions.find(
 					(candidate) =>
 						candidate.actionStartEntryId === undefined &&
-						candidate.intent === decision.intent.trim() &&
-						candidate.completionCondition === decision.completionCondition.trim(),
+						candidate.contractId === decision.actionContractId.trim(),
 				);
 				if (!planned) {
 					throw new Error(
-						"Authorized Action must match one unused provisional contract from the current Frame lease calculation; revise the Frame when new evidence changes the candidate set.",
+						`Action contract ${decision.actionContractId.trim()} is not an unused contract listed for the current Frame.`,
 					);
 				}
-				this._appendActionStart(decision, sourceEventId, state.frame);
+				this._appendActionStart(planned, sourceEventId, state.frame);
 				state = restoreEpistemicState(this.sessionManager.getBranch());
 				planned.actionStartEntryId = state.action?.startEntryId;
 				this._operationalActionId = state.action?.id;
@@ -2283,6 +2305,8 @@ export class AgentSession {
 		for (const omission of manifest?.omissions ?? []) {
 			omissionsByReason[omission.reason] = (omissionsByReason[omission.reason] ?? 0) + 1;
 		}
+		const budgetOmittedEventCount = omissionsByReason.budget ?? 0;
+		const structuralExcludedEventCount = (manifest?.omissions.length ?? 0) - budgetOmittedEventCount;
 		const toolCalls = new Map<string, { name: string; arguments: unknown }>();
 		let lastAction:
 			| {
@@ -2422,7 +2446,8 @@ export class AgentSession {
 				? {
 						compilerVersion: manifest.compilerVersion,
 						selectedEventCount: manifest.selectedEventIds.length,
-						omittedEventCount: manifest.omissions.length,
+						budgetOmittedEventCount,
+						structuralExcludedEventCount,
 						omissionsByReason,
 						availableInputTokens: manifest.budget.availableInputTokens,
 						outputMessageTokens: manifest.budget.outputMessageTokens,

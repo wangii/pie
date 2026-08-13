@@ -31,6 +31,8 @@
 
 ### Fixed
 
+- Fixed production Action authorization stalling because projected-out provisional contract text had to be regenerated verbatim; epistemic control now lists stable contract IDs and authorizes the selected frozen contract by ID.
+- Fixed Pie context status conflating budget omissions with expected structural projection exclusions.
 - Fixed production Frame horizons underfunding sequential Actions by deriving leases from explicit authorization, serial evidence-round, terminal-adjudication, and Frame-adjudication costs instead of an LLM-supplied total.
 - Fixed production Frames and Actions collapsing back into task-sized wrappers by validating relation/falsifier separation, rejecting bundled whole-task Actions, bounding each Action independently of its Frame lease, and preserving explicit Frame adjudication at the lease boundary.
 - Fixed `/vf` not listing the Actions authorized by the selected Frame.

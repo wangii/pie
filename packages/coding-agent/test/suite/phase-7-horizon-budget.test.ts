@@ -33,7 +33,7 @@ describe("Phase 8 production model-response lease budgeting", () => {
 						},
 					],
 				}),
-				control({ kind: "authorize_action", ...action }),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The exact entry points are established."),
 				control({ kind: "complete_action", reason: "The exact entry points were established" }),
 				control({ kind: "authorize_final", reason: "The bounded prompt audit satisfies the request" }),

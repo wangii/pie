@@ -41,7 +41,7 @@ export type PieControlDecision =
 	  }
 	| { kind: "falsify_frame" | "kill_frame"; reason: string }
 	| { kind: "revise_anchor"; statement: string; reason: string }
-	| { kind: "authorize_action"; intent: string; completionCondition: string }
+	| { kind: "authorize_action"; actionContractId: string }
 	| { kind: "continue_action"; reason: string }
 	| { kind: "complete_action" | "unresolvable_action"; reason: string }
 	| { kind: "escalate_action"; challenge: "anchor" | "frame"; reason: string }

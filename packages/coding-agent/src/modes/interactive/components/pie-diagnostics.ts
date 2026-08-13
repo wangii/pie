@@ -58,7 +58,8 @@ export function formatPieStatus(session: AgentSession): string | undefined {
 		parts.push(
 			`ctx ${formatTokenCount(diagnostics.context.outputMessageTokens)}/${formatTokenCount(diagnostics.context.availableInputTokens)}`,
 		);
-		parts.push(`omitted ${diagnostics.context.omittedEventCount}`);
+		parts.push(`budget omitted ${diagnostics.context.budgetOmittedEventCount}`);
+		parts.push(`structural excluded ${diagnostics.context.structuralExcludedEventCount}`);
 	}
 	if ((source.retryAttempt ?? 0) > 0) parts.push(`provider retry ${source.retryAttempt}`);
 	if (diagnostics.runtime.recovery) {
@@ -160,7 +161,7 @@ function formatDiagnostics(diagnostics: EpistemicDiagnostics): string {
 			.map(([reason, count]) => `${reason}=${count}`)
 			.join(", ");
 		lines.push(
-			`${theme.fg("dim", "Compiler:")} ${diagnostics.context.compilerVersion}\n  selected events: ${diagnostics.context.selectedEventCount}\n  omitted events: ${diagnostics.context.omittedEventCount}${omissions ? ` (${omissions})` : ""}\n  selected token estimate: ${diagnostics.context.outputMessageTokens}\n  input budget: ${diagnostics.context.availableInputTokens}`,
+			`${theme.fg("dim", "Compiler:")} ${diagnostics.context.compilerVersion}\n  selected events: ${diagnostics.context.selectedEventCount}\n  budget-omitted events: ${diagnostics.context.budgetOmittedEventCount}\n  structurally excluded events: ${diagnostics.context.structuralExcludedEventCount}${omissions ? ` (${omissions})` : ""}\n  selected token estimate: ${diagnostics.context.outputMessageTokens}\n  input budget: ${diagnostics.context.availableInputTokens}`,
 		);
 	} else {
 		lines.push(`${theme.fg("dim", "Compiler:")} no request compiled yet`);
