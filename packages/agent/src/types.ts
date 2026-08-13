@@ -49,6 +49,29 @@ export type ToolExecutionMode = "sequential" | "parallel";
  */
 export type QueueMode = "all" | "one-at-a-time";
 
+/** One complete loop invocation owned by an application-selected runner. */
+export interface AgentLoopRunRequest {
+	mode: "prompt" | "continuation";
+	prompts: AgentMessage[];
+	context: AgentContext;
+	config: AgentLoopConfig;
+	emit: (event: AgentEvent) => Promise<void> | void;
+	signal: AbortSignal | undefined;
+	streamFn: StreamFn;
+}
+
+/**
+ * Owns turn progression for an Agent run.
+ *
+ * Agent core supplies its conversational runner by default. Applications can
+ * replace it while retaining Agent state, events, provider streaming, and tool
+ * execution services.
+ */
+export interface AgentLoopRunner {
+	readonly id: string;
+	run(request: AgentLoopRunRequest): Promise<AgentMessage[]>;
+}
+
 /** A single tool call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 

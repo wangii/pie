@@ -20,6 +20,7 @@ import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-sessi
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
+import { createPieProductionLoop } from "../../src/core/pie-agent-loop.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -78,6 +79,8 @@ export interface HarnessOptions {
 	actionEnabled?: boolean;
 	observationEnabled?: boolean;
 	contextInputTokenLimit?: number;
+	/** Use Pie's production loop instead of agent-core's transcript loop. */
+	pieProductionLoop?: boolean;
 	/** Existing raw session used by restart and branch integration tests. */
 	sessionManager?: SessionManager;
 }
@@ -190,6 +193,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (!runner) return messages;
 			return runner.emitContext(messages);
 		},
+		loopRunner: options.pieProductionLoop ? createPieProductionLoop() : undefined,
 	});
 	const extensionsResult = options.extensionFactories
 		? await createTestExtensionsResult(options.extensionFactories, tempDir)

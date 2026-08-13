@@ -15,6 +15,7 @@ import type {
 	AgentContext,
 	AgentEvent,
 	AgentLoopConfig,
+	AgentLoopRunner,
 	AgentMessage,
 	AgentTool,
 	AgentToolCall,
@@ -23,6 +24,23 @@ import type {
 } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+/** Stock transcript-driven loop retained as the agent-core default. */
+export const defaultAgentLoopRunner: AgentLoopRunner = {
+	id: "pi-conversation/v1",
+	async run(request) {
+		return request.mode === "prompt"
+			? runAgentLoop(
+					request.prompts,
+					request.context,
+					request.config,
+					request.emit,
+					request.signal,
+					request.streamFn,
+				)
+			: runAgentLoopContinue(request.context, request.config, request.emit, request.signal, request.streamFn);
+	},
+};
 
 /**
  * Start an agent loop with a new prompt message.
@@ -278,7 +296,7 @@ async function runLoop(
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
  */
-async function streamAssistantResponse(
+export async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
@@ -379,7 +397,7 @@ async function streamAssistantResponse(
  * whose arguments parse and validate but are silently incomplete. None of them
  * are safe to execute; report each as an error so the model can re-issue them.
  */
-async function failToolCallsFromTruncatedMessage(
+export async function failToolCallsFromTruncatedMessage(
 	toolCalls: AgentToolCall[],
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -409,7 +427,7 @@ async function failToolCallsFromTruncatedMessage(
 /**
  * Execute tool calls from an assistant message.
  */
-async function executeToolCalls(
+export async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	config: AgentLoopConfig,
@@ -426,7 +444,7 @@ async function executeToolCalls(
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
 }
 
-type ExecutedToolCallBatch = {
+export type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
 };

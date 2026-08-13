@@ -8,7 +8,7 @@ import type {
 	ThinkingBudgets,
 	Transport,
 } from "@earendil-works/pi-ai";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import { defaultAgentLoopRunner } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AfterToolCallContext,
@@ -16,6 +16,7 @@ import type {
 	AgentContext,
 	AgentEvent,
 	AgentLoopConfig,
+	AgentLoopRunner,
 	AgentLoopTurnUpdate,
 	AgentMessage,
 	AgentState,
@@ -122,6 +123,8 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
+	/** Application-owned turn progression. Defaults to agent-core's conversational loop. */
+	loopRunner?: AgentLoopRunner;
 }
 
 class PendingMessageQueue {
@@ -215,6 +218,8 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	/** Sole owner of turn progression for prompt and continuation runs. */
+	public loopRunner: AgentLoopRunner;
 
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
@@ -239,6 +244,7 @@ export class Agent {
 		this.transport = runtimeOptions.transport ?? "auto";
 		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
+		this.loopRunner = runtimeOptions.loopRunner ?? defaultAgentLoopRunner;
 	}
 
 	/**
@@ -415,26 +421,29 @@ export class Agent {
 		options: { skipInitialSteeringPoll?: boolean } = {},
 	): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
-			await runAgentLoop(
-				messages,
-				this.createContextSnapshot(),
-				this.createLoopConfig(options),
-				(event) => this.processEvents(event),
+			await this.loopRunner.run({
+				mode: "prompt",
+				prompts: messages,
+				context: this.createContextSnapshot(),
+				config: this.createLoopConfig(options),
+				emit: (event) => this.processEvents(event),
 				signal,
-				this.streamFunction,
-			);
+				streamFn: this.streamFunction,
+			});
 		});
 	}
 
 	private async runContinuation(): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
-			await runAgentLoopContinue(
-				this.createContextSnapshot(),
-				this.createLoopConfig(),
-				(event) => this.processEvents(event),
+			await this.loopRunner.run({
+				mode: "continuation",
+				prompts: [],
+				context: this.createContextSnapshot(),
+				config: this.createLoopConfig(),
+				emit: (event) => this.processEvents(event),
 				signal,
-				this.streamFunction,
-			);
+				streamFn: this.streamFunction,
+			});
 		});
 	}
 

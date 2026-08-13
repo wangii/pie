@@ -83,4 +83,9 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export {
+	createPieProductionLoop,
+	PieProductionLoop,
+	type PieProductionLoopState,
+} from "./pie-agent-loop.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";

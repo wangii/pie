@@ -5,6 +5,7 @@
 ### Added
 
 - Added an `onModelContext` diagnostic hook for observing the exact context passed to each model request.
+- Added an application-selectable `AgentLoopRunner` boundary so applications can own turn progression while reusing provider and tool execution services.
 
 ### Fixed
 
