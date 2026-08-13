@@ -5,6 +5,23 @@ import { describe, expect, it } from "vitest";
 import { PieProductionLoop, type PieProductionLoopState } from "../../src/core/pie-agent-loop.ts";
 import { createHarness, getMessageText } from "./harness.ts";
 
+function control(decision: Record<string, unknown>) {
+	return fauxAssistantMessage(JSON.stringify(decision));
+}
+
+const productionFrame = {
+	kind: "create_frame",
+	statement: "Repository behavior is controlled by the current implementation boundary",
+	falsifier: "An exact repository or runtime result shows a different boundary controls the behavior",
+	horizon: 12,
+} as const;
+
+const productionAction = {
+	kind: "authorize_action",
+	intent: "Inspect the implementation boundary relevant to the request",
+	completionCondition: "Exact repository or runtime results establish the relevant implementation behavior",
+} as const;
+
 const echoTool: AgentTool = {
 	name: "echo",
 	label: "Echo",
@@ -32,7 +49,29 @@ describe("Phase 6 production loop ownership", () => {
 		});
 		try {
 			harness.setResponses([
+				control(productionFrame),
+				control(productionAction),
+				fauxAssistantMessage("production request investigated"),
+				control({ kind: "complete_action", reason: "The bounded investigation condition was met" }),
+				control({ kind: "authorize_final", reason: "The first request is satisfied" }),
 				fauxAssistantMessage("production request complete"),
+				control({ kind: "kill_frame", reason: "The next request requires a distinct investigation" }),
+				control({
+					kind: "revise_anchor",
+					statement: "now verify the follow-up behavior",
+					reason: "The user supplied a distinct task",
+				}),
+				control({
+					...productionFrame,
+					statement: "Follow-up behavior is controlled by the verification boundary",
+				}),
+				control({
+					...productionAction,
+					intent: "Inspect the follow-up verification boundary",
+				}),
+				fauxAssistantMessage("follow-up investigated"),
+				control({ kind: "complete_action", reason: "The follow-up condition was met" }),
+				control({ kind: "authorize_final", reason: "The follow-up request is satisfied" }),
 				fauxAssistantMessage("follow-up complete"),
 			]);
 
@@ -40,10 +79,10 @@ describe("Phase 6 production loop ownership", () => {
 
 			let diagnostics = harness.session.getEpistemicDiagnostics();
 			expect(diagnostics.state.anchor?.statement).toBe("implement the requested fix");
-			expect(diagnostics.state.frame?.statement).toContain("implement the requested fix");
+			expect(diagnostics.state.frame?.statement).toBe(productionFrame.statement);
 			expect(diagnostics.state.action).toBeUndefined();
 			expect(diagnostics.state.observations).toEqual([]);
-			expect(harness.providerContexts[0]!.messages.map(getMessageText)).toEqual(
+			expect(harness.providerContexts[2]!.messages.map(getMessageText)).toEqual(
 				expect.arrayContaining([
 					expect.stringContaining("[ANCHOR]"),
 					expect.stringContaining("[CURRENT FRAME]"),
@@ -77,7 +116,12 @@ describe("Phase 6 production loop ownership", () => {
 			observationEnabled: true,
 		});
 		try {
-			harness.setResponses([fauxAssistantMessage("explicit state retained")]);
+			harness.setResponses([
+				fauxAssistantMessage("explicit state retained"),
+				control({ kind: "complete_action", reason: "The explicit completion condition was met" }),
+				control({ kind: "authorize_final", reason: "The explicit Anchor is satisfied" }),
+				fauxAssistantMessage("explicit state retained"),
+			]);
 
 			await harness.session.prompt("raw request text", {
 				anchor: { statement: "explicit success semantics" },
@@ -97,7 +141,8 @@ describe("Phase 6 production loop ownership", () => {
 			const diagnostics = harness.session.getEpistemicDiagnostics();
 			expect(diagnostics.state.anchor?.statement).toBe("explicit success semantics");
 			expect(diagnostics.state.frame?.statement).toBe("explicit investigation");
-			expect(diagnostics.state.action).toMatchObject({
+			expect(diagnostics.state.action).toBeUndefined();
+			expect(harness.sessionManager.getBranch().find((entry) => entry.type === "action_start")).toMatchObject({
 				intent: "explicit intent",
 				completionCondition: "explicit completion",
 			});
@@ -144,13 +189,16 @@ describe("Phase 6 production loop ownership", () => {
 			expect(restored.state.lastAction?.transition).toBeUndefined();
 			expect(resumed.providerContexts).toHaveLength(0);
 
-			resumed.setResponses([fauxAssistantMessage("new request complete")]);
+			resumed.setResponses([
+				control({ kind: "unresolvable_action", reason: "The new request supersedes this persisted episode" }),
+				control({ kind: "report_inability", reason: "A new bounded investigation must be authorized separately" }),
+				fauxAssistantMessage("new request requires a separate investigation"),
+			]);
 			await resumed.session.prompt("continue with a new bounded request");
 
-			expect(resumed.providerContexts).toHaveLength(1);
+			expect(resumed.providerContexts).toHaveLength(3);
 			expect(manager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
-				expect.objectContaining({ transition: "unresolvable", reason: expect.stringContaining("superseded") }),
-				expect.objectContaining({ transition: "completed" }),
+				expect.objectContaining({ transition: "unresolvable", reason: expect.stringContaining("supersedes") }),
 			]);
 		} finally {
 			resumed.cleanup();
@@ -166,7 +214,11 @@ describe("Phase 6 production loop ownership", () => {
 			observationEnabled: true,
 		});
 		try {
-			harness.setResponses([fauxAssistantMessage("cancelled", { stopReason: "aborted" })]);
+			harness.setResponses([
+				control(productionFrame),
+				control(productionAction),
+				fauxAssistantMessage("cancelled", { stopReason: "aborted" }),
+			]);
 
 			await harness.session.prompt("run until interrupted");
 
@@ -191,13 +243,18 @@ describe("Phase 6 production loop ownership", () => {
 		});
 		try {
 			harness.setResponses([
+				control(productionFrame),
+				control(productionAction),
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 				fauxAssistantMessage("recovered"),
+				control({ kind: "complete_action", reason: "Recovery established the frozen condition" }),
+				control({ kind: "authorize_final", reason: "The request is satisfied after recovery" }),
+				fauxAssistantMessage("recovered final answer"),
 			]);
 
 			await harness.session.prompt("recover without weakening the request");
 
-			expect(harness.providerContexts).toHaveLength(2);
+			expect(harness.providerContexts).toHaveLength(7);
 			expect(harness.session.action).toBeUndefined();
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_start")).toHaveLength(1);
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
@@ -219,13 +276,15 @@ describe("Phase 6 production loop ownership", () => {
 		});
 		try {
 			harness.setResponses([
+				control(productionFrame),
+				control(productionAction),
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 			]);
 
 			await harness.session.prompt("fail in bounded time");
 
-			expect(harness.providerContexts).toHaveLength(2);
+			expect(harness.providerContexts).toHaveLength(4);
 			expect(harness.session.action).toBeUndefined();
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
 				expect.objectContaining({ transition: "unresolvable" }),
@@ -239,6 +298,10 @@ describe("Phase 6 production loop ownership", () => {
 	it("routes epistemic requests and Action-local continuations independently", async () => {
 		const harness = await createHarness({
 			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
 			models: [
 				{ id: "session", reasoning: true, contextWindow: 8_000 },
 				{ id: "controller", reasoning: true, contextWindow: 16_000 },
@@ -253,17 +316,30 @@ describe("Phase 6 production loop ownership", () => {
 		try {
 			harness.session.setThinkingLevel("high");
 			harness.setResponses([
+				control(productionFrame),
+				control(productionAction),
 				fauxAssistantMessage(fauxToolCall("echo", { value: "world-result" }, { id: "routed-call" }), {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("routed completion"),
+				control({ kind: "complete_action", reason: "The routed result met the condition" }),
+				control({ kind: "authorize_final", reason: "The routed request is satisfied" }),
+				fauxAssistantMessage("routed final answer"),
 			]);
 
 			await harness.session.prompt("route this request");
 
-			expect(harness.providerModelIds).toEqual(["controller", "executor"]);
-			expect(harness.providerContexts).toHaveLength(2);
-			expect(harness.session.latestContextManifest?.budget.contextWindow).toBe(32_000);
+			expect(harness.providerModelIds).toEqual([
+				"controller",
+				"controller",
+				"executor",
+				"executor",
+				"controller",
+				"controller",
+				"session",
+			]);
+			expect(harness.providerContexts).toHaveLength(7);
+			expect(harness.session.latestContextManifest?.budget.contextWindow).toBe(8_000);
 		} finally {
 			harness.cleanup();
 		}
@@ -277,7 +353,7 @@ describe("Phase 6 production loop ownership", () => {
 		try {
 			const loop = harness.session.agent.loopRunner;
 			expect(loop).toBeInstanceOf(PieProductionLoop);
-			expect(loop.id).toBe("pie-production/v1");
+			expect(loop.id).toBe("pie-production/v2");
 
 			const states: Array<{ event: string; state: PieProductionLoopState }> = [];
 			harness.session.subscribe((event) => {
@@ -352,10 +428,15 @@ describe("Phase 6 production loop ownership", () => {
 			});
 			try {
 				harness.setResponses([
+					control(productionFrame),
+					control(productionAction),
 					fauxAssistantMessage(fauxToolCall(testCase.name, testCase.args, { id: `call-${testCase.expected}` }), {
 						stopReason: "toolUse",
 					}),
 					fauxAssistantMessage("local repair complete"),
+					control({ kind: "complete_action", reason: "The repaired execution established the condition" }),
+					control({ kind: "authorize_final", reason: "The request is satisfied" }),
+					fauxAssistantMessage("local repair final answer"),
 				]);
 				await harness.session.prompt(`exercise ${testCase.expected}`);
 
@@ -395,9 +476,13 @@ describe("Phase 6 production loop ownership", () => {
 		try {
 			const call = { path: "state.txt", content: "changed" };
 			harness.setResponses([
+				control(productionFrame),
+				control(productionAction),
 				fauxAssistantMessage(fauxToolCall("write", call, { id: "write-1" }), { stopReason: "toolUse" }),
 				fauxAssistantMessage(fauxToolCall("write", call, { id: "write-2" }), { stopReason: "toolUse" }),
 				fauxAssistantMessage(fauxToolCall("write", call, { id: "write-3" }), { stopReason: "toolUse" }),
+				control({ kind: "report_inability", reason: "Operational repair was exhausted" }),
+				fauxAssistantMessage("Unable to replay the ambiguous mutation safely."),
 			]);
 
 			await harness.session.prompt("perform a bounded mutation");
@@ -415,8 +500,8 @@ describe("Phase 6 production loop ownership", () => {
 					reason: expect.stringContaining("Operational repair exhausted after 3/3"),
 				}),
 			]);
-			expect(harness.providerContexts).toHaveLength(3);
-			expect((harness.session.agent.loopRunner as PieProductionLoop).state).toBe("failed");
+			expect(harness.providerContexts).toHaveLength(7);
+			expect((harness.session.agent.loopRunner as PieProductionLoop).state).toBe("completed");
 			expect(harness.session.isIdle).toBe(true);
 		} finally {
 			harness.cleanup();
@@ -465,7 +550,7 @@ describe("Phase 6 production loop ownership", () => {
 			expect(harness.providerContexts).toHaveLength(2);
 			expect(harness.providerContexts[1]!.messages.map(getMessageText)).toContain("steer now");
 			expect(harness.session.getLastAssistantText()).toBe("steering received");
-			expect(harness.session.agent.loopRunner.id).toBe("pie-production/v1");
+			expect(harness.session.agent.loopRunner.id).toBe("pie-production/v2");
 		} finally {
 			harness.cleanup();
 		}

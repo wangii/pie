@@ -401,7 +401,9 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			if (!this.loopRunner.canContinueFromAssistant) {
+				throw new Error("Cannot continue from message role: assistant");
+			}
 		}
 
 		await this.runContinuation();

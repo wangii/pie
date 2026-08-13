@@ -268,7 +268,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.messages.map(text)).toEqual([
 			"[ANCHOR]\nrestore authorization correctness",
 			"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
-				"Falsifier: a worker restart preserves the authorization\nHorizon: 2 of 3 model responses remain",
+				"Falsifier: a worker restart preserves the authorization\nResponse lease: 1/3 completed; 2 model responses remain",
 			"inspect the failure",
 		]);
 		expect(result.manifest.epistemicState.frame).toMatchObject({
@@ -345,7 +345,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.messages.map(text).slice(0, 4)).toEqual([
 			"[ANCHOR]\nlogout revokes authorization",
 			"[CURRENT FRAME]\nCommitment: worker cache survives logout\n" +
-				"Falsifier: worker restart preserves the failure\nHorizon: 4 of 4 model responses remain",
+				"Falsifier: worker restart preserves the failure\nResponse lease: 0/4 completed; 4 model responses remain",
 			"[OBSERVATION anchor-evidence]\nauthorization remains after logout\nRelevance: Anchor",
 			"[OBSERVATION frame-evidence]\nworker cache TTL is 30 seconds\nRelevance: current Frame",
 		]);

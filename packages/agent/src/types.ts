@@ -69,6 +69,8 @@ export interface AgentLoopRunRequest {
  */
 export interface AgentLoopRunner {
 	readonly id: string;
+	/** Application loops may retry/reconsider after a persisted assistant generation. */
+	readonly canContinueFromAssistant?: boolean;
 	run(request: AgentLoopRunRequest): Promise<AgentMessage[]>;
 }
 

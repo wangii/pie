@@ -19,9 +19,11 @@
 - Added experimental strict JSON-schema constrained sampling for the default `read`, `bash`, `edit`, and `write` tools under `PI_EXPERIMENTAL=1`.
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.
 - Added configurable Pie model routing for epistemic requests and Action-local continuations.
+- Added Phase 7 production control with semantic Frame decisions, bounded response leases, finite multi-response Action episodes, explicit terminal control transfer, and final-answer authorization.
 
 ### Changed
 
+- Separated production Frames from task success and Actions from whole-task wrappers; plain provider stops and successful tool calls no longer complete an Action or authorize a final answer.
 - Replaced the inherited Mistral SDK transport with a native Chat Completions HTTP stream, eliminating its generated client and schema runtime overhead.
 - Documented the generic `AI_AGENT=pi` process marker and how it differs from `PI_CODING_AGENT=true` ([#7747](https://github.com/earendil-works/pi/issues/7747)).
 

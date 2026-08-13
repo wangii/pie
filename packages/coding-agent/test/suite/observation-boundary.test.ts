@@ -67,7 +67,7 @@ describe("Phase 4 Observation provider boundary", () => {
 				"[ANCHOR]\nlogout must revoke authorization",
 				"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
 					"Falsifier: a worker restart preserves the authorization failure\n" +
-					"Horizon: 3 of 5 model responses remain",
+					"Response lease: 2/5 completed; 3 model responses remain",
 				`[OBSERVATION ${observation.id}]\nworker-local authorization cache survives logout for 30 seconds\n` +
 					"Relevance: current Frame and Anchor",
 				"[CURRENT ACTION]\n" +

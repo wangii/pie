@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
 	Agent,
 	type AgentEvent,
+	type AgentLoopRunner,
 	type AgentTool,
 	type AgentToolUpdateCallback,
 	type StreamFn,
@@ -613,6 +614,26 @@ describe("Agent", () => {
 		// Cleanup
 		agent.abort();
 		await firstPrompt.catch(() => {});
+	});
+
+	it("allows an application loop to continue from an assistant generation", async () => {
+		const modes: string[] = [];
+		const loopRunner: AgentLoopRunner = {
+			id: "application-control",
+			canContinueFromAssistant: true,
+			run: async (request) => {
+				modes.push(request.mode);
+				return [];
+			},
+		};
+		const agent = new Agent({
+			streamFn: () => new MockAssistantStream(),
+			loopRunner,
+		});
+		agent.state.messages = [createAssistantMessage("generation complete")];
+
+		await expect(agent.continue()).resolves.toBeUndefined();
+		expect(modes).toEqual(["continuation"]);
 	});
 
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {

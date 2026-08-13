@@ -37,7 +37,7 @@ describe("Phase 3 Action provider boundary", () => {
 				"[ANCHOR]\nlogout must revoke authorization",
 				"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
 					"Falsifier: a clean worker preserves the authorization failure\n" +
-					"Horizon: 3 of 4 model responses remain",
+					"Response lease: 1/4 completed; 3 model responses remain",
 				"[CURRENT ACTION]\n" +
 					"Intent: determine whether logout invalidates worker-local authorization state\n" +
 					"Completion condition: the worker cache lifetime is identified or cache survival is ruled out\n" +

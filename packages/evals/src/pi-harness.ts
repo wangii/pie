@@ -69,6 +69,8 @@ type PiCodingAgentHarnessOptions = {
 	contextInputTokenLimit?: number;
 	/** Run restart steps by reopening the persisted session. False provides a matched uninterrupted control. */
 	performPersistedRestarts?: boolean;
+	/** Harness-local ablation transform; comparison grouping still uses the original matched input. */
+	transformInput?: (input: PiCodingAgentInput) => PiCodingAgentInput;
 };
 
 type PiCodingAgentHarnessWithOutput<TOutput extends JsonValue> = PiCodingAgentHarnessOptions & {
@@ -219,7 +221,11 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 			if (evalSession.extensionRunner.getExtensionPaths().length !== 0) {
 				throw new Error("Expected an isolated eval session to start without extensions.");
 			}
-			const steps = typeof input === "string" ? [{ type: "prompt" as const, content: input }] : input;
+			const effectiveInput = options.transformInput?.(input) ?? input;
+			const steps =
+				typeof effectiveInput === "string"
+					? [{ type: "prompt" as const, content: effectiveInput }]
+					: effectiveInput;
 			let response: string | undefined;
 			let persistedRestartCount = 0;
 			for (const step of steps) {
@@ -327,7 +333,13 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 			if (response === undefined) throw new Error("Pi eval input must include at least one prompt step.");
 			const output =
 				"output" in options
-					? await options.output({ response, session: evalSession, cwd, input, persistedRestartCount })
+					? await options.output({
+							response,
+							session: evalSession,
+							cwd,
+							input: effectiveInput,
+							persistedRestartCount,
+						})
 					: response;
 			const stats = evalSession.getSessionStats();
 			const hasPricing = [model.cost, ...(model.cost.tiers ?? [])].some(

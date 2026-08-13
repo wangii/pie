@@ -117,7 +117,12 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
-import { PieProductionLoop, type PieProductionLoopState } from "./pie-agent-loop.ts";
+import {
+	type PieControlDecision,
+	PieProductionLoop,
+	type PieProductionLoopState,
+	type PieProductionRequestRole,
+} from "./pie-agent-loop.ts";
 import type { PieModelRole, PieModelRoutes } from "./pie-models.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -283,6 +288,8 @@ export interface AgentSessionConfig {
 	contextInputTokenLimit?: number;
 	/** Resolved production-loop model routes. Undefined routes follow the session model. */
 	pieModelRoutes?: PieModelRoutes;
+	/** Clamp controller-estimated Frame response leases to this inclusive range. */
+	frameHorizonRange?: { min: number; max: number };
 }
 
 export interface ExtensionBindings {
@@ -534,6 +541,13 @@ export class AgentSession {
 	private readonly _observationEnabled: boolean;
 	private readonly _pieModelRoutes: PieModelRoutes;
 	private _activeRequestModel: Model<any> | undefined;
+	private _activeProductionRequestRole: PieProductionRequestRole | undefined;
+	private readonly _frameHorizonRange: { min: number; max: number };
+	private _controlRepairAttempts = 0;
+	private readonly _maxControlRepairAttempts = 3;
+	private _lastControlError: string | undefined;
+	private _pendingFinalAuthorization: { kind: "satisfied" | "inability"; reason: string } | undefined;
+	private _productionControlEnabled = false;
 	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
 	private _pendingFrameDirective: FrameDirective | undefined;
 	private _pendingActionDirective: ActionDirective | undefined;
@@ -605,6 +619,16 @@ export class AgentSession {
 							: new PhaseZeroContextCompiler());
 		this._configuredContextInputTokenLimit = config.contextInputTokenLimit;
 		this._contextInputTokenLimit = config.contextInputTokenLimit;
+		const frameHorizonRange = config.frameHorizonRange ?? { min: 12, max: 24 };
+		if (
+			!Number.isSafeInteger(frameHorizonRange.min) ||
+			!Number.isSafeInteger(frameHorizonRange.max) ||
+			frameHorizonRange.min < 1 ||
+			frameHorizonRange.max < frameHorizonRange.min
+		) {
+			throw new Error("Frame horizon range must contain positive ordered integers.");
+		}
+		this._frameHorizonRange = frameHorizonRange;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -898,8 +922,23 @@ export class AgentSession {
 				epistemicState,
 				runtimeMessages,
 				model,
-				systemPrompt: this.agent.state.systemPrompt,
-				tools: this.agent.state.tools,
+				systemPrompt: this._activeProductionRequestRole
+					? `${this.agent.state.systemPrompt}\n\n${this._productionSystemPrompt(this._activeProductionRequestRole)}`
+					: this.agent.state.systemPrompt,
+				tools:
+					this._activeProductionRequestRole && this._activeProductionRequestRole !== "execution"
+						? []
+						: this.agent.state.tools,
+				requestInstruction: this._activeProductionRequestRole
+					? {
+							role: "custom",
+							customType: "pie.production-request",
+							content: `[PIE ${this._activeProductionRequestRole.toUpperCase()} REQUEST]\n${this._productionSystemPrompt(this._activeProductionRequestRole)}`,
+							display: false,
+							details: { role: this._activeProductionRequestRole },
+							timestamp: Date.now(),
+						}
+					: undefined,
 				reservedOutputTokens: Math.min(
 					this.settingsManager.getCompactionReserveTokens(),
 					model.maxTokens,
@@ -919,23 +958,288 @@ export class AgentSession {
 		return this._pieModelRoutes[role] ?? this.agent.state.model;
 	}
 
+	private _productionSystemPrompt(role: PieProductionRequestRole): string {
+		if (role === "execution") {
+			return (
+				"Execute only the frozen CURRENT ACTION under the CURRENT FRAME. The CURRENT ACTION is the complete and exclusive " +
+				"scope of this request, even if the user asked for later work. Do not perform, anticipate, or combine a later episode. " +
+				"You may use multiple tools and model responses and may repair local execution strategy, but you must not change " +
+				"the Action intent or completion condition. As soon as the exact completion condition is established, stop this " +
+				"generation immediately: do not call another tool, do not begin the next task step, and do not produce the user's " +
+				"final answer. A provider stop ends only this generation; it does not complete the Action or authorize a final " +
+				"answer. Return exactly UNRESOLVABLE only when the frozen completion condition cannot be met under current constraints."
+			);
+		}
+		if (role === "finalAnswer") {
+			const authorization = this._pendingFinalAuthorization;
+			return authorization?.kind === "inability"
+				? `Epistemic control authorized a bounded inability report: ${authorization.reason}. Give the user a concise actionable report. Do not call tools.`
+				: `Epistemic control established Anchor satisfaction and authorized the final answer: ${authorization?.reason ?? "authorized"}. Give only the user-visible final answer. Do not call tools.`;
+		}
+		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		const allowed = state.action
+			? "continue_action, complete_action, unresolvable_action, or escalate_action"
+			: state.frame
+				? "authorize_action, revise_frame, replace_frame, falsify_frame, kill_frame, authorize_final, or report_inability"
+				: state.anchor
+					? "create_frame, revise_anchor, or report_inability"
+					: "report_inability";
+		return (
+			"PIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
+			"do not call or simulate tools, and do not output requested answer tokens. Return exactly one JSON object, with " +
+			"the discriminator property named exactly kind, and no prose or markdown. The first character must be { and the " +
+			"last character must be }. " +
+			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
+			`The current state permits only: ${allowed}. ` +
+			`Frame horizon counts every completed model response under one exact Frame version and must be estimated within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}; allow enough responses for all sequential Actions the commitment may authorize without writing a step plan. ` +
+			'Schemas: {"kind":"create_frame","statement":string,"falsifier":string,"horizon":integer}; ' +
+			"revise_frame and replace_frame also require reason; falsify_frame, kill_frame, continue_action, " +
+			"complete_action, unresolvable_action, authorize_final, and report_inability require reason; " +
+			"revise_anchor requires statement and reason; authorize_action requires intent and completionCondition; " +
+			"escalate_action requires challenge (anchor or frame) and reason. A Frame is a concrete finite investigation " +
+			"commitment, not a request paraphrase. Its falsifier names a concrete world result. An Action is one bounded " +
+			"investigation episode, not the whole task. A plain assistant stop, successful tool call, or final-looking prose " +
+			"proves neither Action completion nor Anchor satisfaction. When an Action is active, adjudicate only that exact " +
+			"frozen intent and completion condition. Ignore and do not credit execution outside its scope; such execution cannot " +
+			"merge a later Action into the current episode. After complete_action, reconsider separately before authorizing the next Action."
+		);
+	}
+
+	private _latestAssistantEventId(): string {
+		const entry = this.sessionManager
+			.getBranch()
+			.slice()
+			.reverse()
+			.find((candidate) => candidate.type === "message" && candidate.message.role === "assistant");
+		if (!entry) throw new Error("Pie control requires a persisted assistant response as provenance.");
+		return entry.id;
+	}
+
+	private _normalizeSemanticText(text: string): string {
+		return text
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, " ")
+			.trim();
+	}
+
+	private _parseControlDecision(message: AssistantMessage): PieControlDecision {
+		if (message.content.some((part) => part.type === "toolCall")) {
+			throw new Error("Epistemic control must not invoke tools.");
+		}
+		const text = contentText(message.content, "").trim();
+		let value: unknown;
+		try {
+			value = JSON.parse(text);
+		} catch {
+			const starts = [...text.matchAll(/\{/g)].map((match) => match.index).reverse();
+			const ends = [...text.matchAll(/\}/g)].map((match) => match.index + 1).reverse();
+			for (const start of starts) {
+				for (const end of ends) {
+					if (end <= start) continue;
+					try {
+						const candidate: unknown = JSON.parse(text.slice(start, end));
+						if (
+							candidate &&
+							typeof candidate === "object" &&
+							!Array.isArray(candidate) &&
+							("kind" in candidate || "operation" in candidate)
+						) {
+							value = candidate;
+							break;
+						}
+					} catch {
+						// Keep scanning for one explicit decision object in incidental prose.
+					}
+				}
+				if (value !== undefined) break;
+			}
+		}
+		if (!value || typeof value !== "object" || Array.isArray(value)) {
+			throw new Error("Epistemic control response must contain one JSON decision object.");
+		}
+		if (!("kind" in value) && "operation" in value && typeof value.operation === "string") {
+			return { ...value, kind: value.operation } as unknown as PieControlDecision;
+		}
+		if (!("kind" in value)) throw new Error("Epistemic control decision requires the kind discriminator.");
+		return value as PieControlDecision;
+	}
+
+	private _clampControllerFrame(definition: FrameDefinition): FrameDefinition {
+		this._validateFrameDefinition(definition);
+		const anchor = restoreEpistemicState(this.sessionManager.getBranch()).anchor;
+		const statement = this._normalizeSemanticText(definition.statement);
+		const anchorStatement = anchor ? this._normalizeSemanticText(anchor.statement) : "";
+		if (!statement || statement === anchorStatement || statement.length < 12) {
+			throw new Error("Frame statement must express an investigation commitment rather than restate the Anchor.");
+		}
+		const falsifier = this._normalizeSemanticText(definition.falsifier);
+		if (
+			falsifier.length < 12 ||
+			/^(?:cannot|can not|unable to) (?:complete|finish)/.test(falsifier) ||
+			falsifier === "the frame is wrong" ||
+			falsifier === "this is not true"
+		) {
+			throw new Error("Frame falsifier must name a concrete contradictory world result.");
+		}
+		return {
+			statement: definition.statement.trim(),
+			falsifier: definition.falsifier.trim(),
+			horizon: Math.min(this._frameHorizonRange.max, Math.max(this._frameHorizonRange.min, definition.horizon)),
+		};
+	}
+
+	private _expireProductionFrame(sourceEventId: string): boolean {
+		let state = restoreEpistemicState(this.sessionManager.getBranch());
+		const frame = state.frame;
+		if (!frame || frame.completedModelResponses < frame.horizon) return false;
+		if (state.action) {
+			this._appendActionTransition(
+				state.action,
+				"unresolvable",
+				sourceEventId,
+				`The containing Frame reached its ${frame.horizon}-response lease before the frozen completion condition was met.`,
+			);
+			state = restoreEpistemicState(this.sessionManager.getBranch());
+		}
+		this._appendFrameTransition(
+			frame,
+			"expired",
+			sourceEventId,
+			`Frame version ${frame.version} reached its ${frame.horizon}-response lease.`,
+		);
+		return true;
+	}
+
+	private _applyProductionControl(decision: PieControlDecision, sourceEventId: string): PieProductionRequestRole {
+		let state = restoreEpistemicState(this.sessionManager.getBranch());
+		const reason = "reason" in decision ? decision.reason?.trim() : undefined;
+		if ("reason" in decision && !reason) throw new Error(`Control decision ${decision.kind} requires a reason.`);
+		switch (decision.kind) {
+			case "create_frame": {
+				if (state.frame) throw new Error("A Frame is already active; revise or replace it explicitly.");
+				const frame = this._clampControllerFrame(decision);
+				this._applyFrameDirective({ type: "create", ...frame }, sourceEventId, undefined);
+				return "epistemic";
+			}
+			case "revise_frame":
+			case "replace_frame": {
+				if (state.action) throw new Error("Terminate the active Action before changing its Frame.");
+				if (!state.frame) throw new Error(`Cannot ${decision.kind} because no Frame is active.`);
+				const frame = this._clampControllerFrame(decision);
+				this._applyFrameDirective(
+					decision.kind === "revise_frame"
+						? { type: "revise", ...frame, revisionReason: reason }
+						: { type: "replace", ...frame, reason: reason! },
+					sourceEventId,
+					state.frame,
+				);
+				return "epistemic";
+			}
+			case "falsify_frame":
+			case "kill_frame":
+				if (state.action) throw new Error("Terminate the active Action before terminating its Frame.");
+				if (!state.frame) throw new Error("No Frame is active.");
+				this._appendFrameTransition(
+					state.frame,
+					decision.kind === "falsify_frame" ? "falsified" : "died",
+					sourceEventId,
+					reason!,
+				);
+				return "epistemic";
+			case "revise_anchor":
+				if (state.action || state.frame)
+					throw new Error("Terminate the active Action and Frame before revising the Anchor.");
+				if (!state.anchor) throw new Error("No Anchor is active.");
+				if (!decision.statement?.trim()) throw new Error("Anchor statement must not be empty.");
+				this._emitAppendedEntry(
+					this.sessionManager.appendAnchorRevision({
+						anchorId: state.anchor.id,
+						revision: state.anchor.revision + 1,
+						statement: decision.statement.trim(),
+						previousRevisionId: state.anchor.revisionEntryId,
+						sourceEventId,
+						revisionReason: reason,
+					}),
+				);
+				return "epistemic";
+			case "authorize_action": {
+				if (state.action) throw new Error("An Action episode is already active.");
+				if (!state.frame) throw new Error("Create an admissible Frame before authorizing an Action.");
+				this._validateActionDefinition(decision);
+				const anchorText = state.anchor ? this._normalizeSemanticText(state.anchor.statement) : "";
+				if (this._normalizeSemanticText(decision.intent) === anchorText) {
+					throw new Error("Action intent must be one finite investigation episode rather than the whole Anchor.");
+				}
+				this._appendActionStart(decision, sourceEventId, state.frame);
+				state = restoreEpistemicState(this.sessionManager.getBranch());
+				this._operationalActionId = state.action?.id;
+				this._operationalRepairAttempts = 0;
+				this._latestOperationalError = undefined;
+				this._pendingRepairExhaustion = undefined;
+				this._ambiguousMutation = undefined;
+				return "execution";
+			}
+			case "continue_action":
+				if (!state.action) throw new Error("No Action is active to continue.");
+				return "execution";
+			case "complete_action":
+			case "unresolvable_action":
+			case "escalate_action":
+				if (!state.action) throw new Error(`Cannot ${decision.kind} because no Action is active.`);
+				this._appendActionTransition(
+					state.action,
+					decision.kind === "complete_action"
+						? "completed"
+						: decision.kind === "unresolvable_action"
+							? "unresolvable"
+							: "escalated",
+					sourceEventId,
+					reason!,
+					decision.kind === "escalate_action" ? decision.challenge : undefined,
+				);
+				return "epistemic";
+			case "authorize_final":
+			case "report_inability":
+				if (state.action) throw new Error("Terminate the active Action before authorizing terminal output.");
+				this._pendingFinalAuthorization = {
+					kind: decision.kind === "authorize_final" ? "satisfied" : "inability",
+					reason: reason!,
+				};
+				return "finalAnswer";
+			default:
+				throw new Error("Unknown Pie control decision.");
+		}
+	}
+
 	private _bindPieProductionLifecycle(): void {
 		if (!(this.agent.loopRunner instanceof PieProductionLoop)) return;
+		const loop = this.agent.loopRunner;
 
-		this.agent.prepareModelRequest = ({ requestIndex, phase }) => {
-			const role: PieModelRole =
-				requestIndex === 0 || phase === "steering" || phase === "follow_up" ? "epistemic" : "execution";
-			const model = this._pieModelForRole(role);
+		this.agent.prepareModelRequest = ({ context }) => {
+			const requestRole = loop.requestRole;
+			const modelRole: PieModelRole = requestRole === "finalAnswer" ? "finalAnswer" : requestRole;
+			const model = this._pieModelForRole(modelRole);
 			this._activeRequestModel = model;
+			this._activeProductionRequestRole = requestRole;
 			return {
+				context: {
+					...context,
+					systemPrompt: `${context.systemPrompt}\n\n${this._productionSystemPrompt(requestRole)}`,
+					tools: requestRole === "finalAnswer" || requestRole === "epistemic" ? [] : context.tools,
+				},
 				model,
 				thinkingLevel: clampThinkingLevel(model, this.agent.state.thinkingLevel) as ThinkingLevel,
 			};
 		};
 
-		this.agent.loopRunner.bindLifecycle({
-			beginRequest: (messages) => {
-				if (!this._anchorEnabled || !this._frameEnabled || !this._actionEnabled) return;
+		loop.bindLifecycle({
+			beginRequest: (messages, kind) => {
+				this._productionControlEnabled = this._anchorEnabled && this._frameEnabled && this._actionEnabled;
+				this._pendingFinalAuthorization = undefined;
+				this._controlRepairAttempts = 0;
+				this._lastControlError = undefined;
+				this._automaticActionRequest = this._productionControlEnabled;
+				if (!this._productionControlEnabled || kind === "follow_up") return;
 				if (
 					this._pendingAnchorRevision ||
 					this._pendingFrameDirective ||
@@ -945,109 +1249,75 @@ export class AgentSession {
 					return;
 				}
 				const branch = this.sessionManager.getBranch();
-				let state = restoreEpistemicState(branch);
+				const state = restoreEpistemicState(branch);
+				if (state.anchor) return;
 				const sourceEventId = branch
 					.slice()
 					.reverse()
 					.find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
 				if (!sourceEventId) throw new Error("Pie production request requires a persisted user event.");
-
 				const statement = messages
 					.filter((message) => message.role === "user")
 					.map((message) => contentText(message.content, ""))
 					.filter((text) => text.trim().length > 0)
 					.join("\n\n");
 				if (!statement) throw new Error("Pie production request requires non-empty task-success semantics.");
-
-				if (state.action) {
-					this._appendActionTransition(
-						state.action,
-						"unresolvable",
+				this._emitAppendedEntry(
+					this.sessionManager.appendAnchorRevision({
+						anchorId: `anchor-${sourceEventId}`,
+						revision: 1,
+						statement,
+						previousRevisionId: null,
 						sourceEventId,
-						"A new user request superseded the active Action before its completion condition was met.",
-					);
-					state = restoreEpistemicState(this.sessionManager.getBranch());
-				}
-
-				if (!state.anchor) {
-					this._emitAppendedEntry(
-						this.sessionManager.appendAnchorRevision({
-							anchorId: `anchor-${sourceEventId}`,
-							revision: 1,
-							statement,
-							previousRevisionId: null,
-							sourceEventId,
-						}),
-					);
-				} else {
-					this._emitAppendedEntry(
-						this.sessionManager.appendAnchorRevision({
-							anchorId: state.anchor.id,
-							revision: state.anchor.revision + 1,
-							statement,
-							previousRevisionId: state.anchor.revisionEntryId,
-							sourceEventId,
-							revisionReason: "New production-loop user request.",
-						}),
-					);
-				}
-				state = restoreEpistemicState(this.sessionManager.getBranch());
-
-				const frameDefinition = {
-					statement: `Complete the current user request without weakening its stated success semantics: ${statement}`,
-					falsifier:
-						"A world result shows the request cannot be completed under the current repository and runtime constraints.",
-					horizon: 24,
-				};
-				if (state.frame) {
-					this._applyFrameDirective(
-						{
-							type: "revise",
-							...frameDefinition,
-							revisionReason: "Authorize the new production-loop request.",
-						},
-						sourceEventId,
-						state.frame,
-					);
-				} else {
-					this._applyFrameDirective({ type: "create", ...frameDefinition }, sourceEventId, undefined);
-				}
-				state = restoreEpistemicState(this.sessionManager.getBranch());
-				this._appendActionStart(
-					{
-						intent: statement,
-						completionCondition: `Produce a user-visible final answer only after completing this request: ${statement}`,
-					},
-					sourceEventId,
-					state.frame!,
+					}),
 				);
-				const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
-				this._operationalActionId = action?.id;
-				this._operationalRepairAttempts = 0;
-				this._latestOperationalError = undefined;
-				this._pendingRepairExhaustion = undefined;
-				this._ambiguousMutation = undefined;
-				this._automaticActionRequest = true;
 			},
-			completeRequest: () => {
-				if (!this._automaticActionRequest) return;
+			initialRole: () => {
+				if (!this._productionControlEnabled) return "execution";
+				if (this._pendingActionDirective?.type === "start") return "execution";
+				return "epistemic";
+			},
+			handleControlResponse: (message) => {
+				const sourceEventId = this._latestAssistantEventId();
+				if (this._expireProductionFrame(sourceEventId)) {
+					this._controlRepairAttempts = 0;
+					this._lastControlError = undefined;
+					return { nextRole: "epistemic" };
+				}
+				try {
+					const nextRole = this._applyProductionControl(this._parseControlDecision(message), sourceEventId);
+					this._controlRepairAttempts = 0;
+					this._lastControlError = undefined;
+					return { nextRole };
+				} catch (error) {
+					this._controlRepairAttempts++;
+					this._lastControlError = error instanceof Error ? error.message : String(error);
+					if (this._controlRepairAttempts >= this._maxControlRepairAttempts) {
+						throw new Error(
+							`Pie epistemic control failed validation after ${this._maxControlRepairAttempts} bounded attempts: ${this._lastControlError}`,
+						);
+					}
+					return { nextRole: "epistemic" };
+				}
+			},
+			handleExecutionResponse: (_message, toolResults) => {
+				if (!this._productionControlEnabled) {
+					return toolResults.length > 0
+						? { nextRole: "execution" }
+						: { nextRole: "execution", terminal: "completed" };
+				}
+				const sourceEventId = this._latestAssistantEventId();
+				if (this._expireProductionFrame(sourceEventId)) return { nextRole: "epistemic" };
+				const state = restoreEpistemicState(this.sessionManager.getBranch());
+				if (!state.action) return { nextRole: "epistemic" };
+				if (toolResults.length > 0) return { nextRole: "execution" };
+				return { nextRole: "epistemic" };
+			},
+			completeFinalAnswer: () => {
 				this._latestOperationalError = undefined;
 				this._ambiguousMutation = undefined;
-				const branch = this.sessionManager.getBranch();
-				const state = restoreEpistemicState(branch);
-				const sourceEventId = branch
-					.slice()
-					.reverse()
-					.find((entry) => entry.type === "message" && entry.message.role === "assistant")?.id;
-				if (state.action && sourceEventId) {
-					this._appendActionTransition(
-						state.action,
-						"completed",
-						sourceEventId,
-						"The production loop emitted a user-visible final answer for the frozen request.",
-					);
-				}
 				this._automaticActionRequest = false;
+				this._pendingFinalAuthorization = undefined;
 			},
 			interruptRequest: (reason) => {
 				if (!this._automaticActionRequest) return;
@@ -1058,13 +1328,6 @@ export class AgentSession {
 					this._appendActionTransition(state.action, "unresolvable", sourceEventId, reason);
 				}
 				this._automaticActionRequest = false;
-			},
-			shouldContinueAfterToolResults: () => {
-				if (!this._actionEnabled) return true;
-				const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
-				if (action) return true;
-				this._automaticActionRequest = false;
-				return false;
 			},
 		});
 	}
@@ -1404,11 +1667,19 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
+		// Emit to extensions first. Epistemic controller responses remain raw
+		// provenance but are not rendered as user-facing assistant output.
 		await this._emitExtensionEvent(event);
+		const hidesControllerMessage =
+			this._productionControlEnabled &&
+			this._activeProductionRequestRole === "epistemic" &&
+			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+			event.message.role === "assistant";
 
 		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		if (!hidesControllerMessage) {
+			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		}
 		if (event.type === "tool_execution_end") this._recordOperationalError(event);
 
 		// Handle session persistence
@@ -2240,6 +2511,7 @@ export class AgentSession {
 			}
 		} finally {
 			this._activeRequestModel = undefined;
+			this._activeProductionRequestRole = undefined;
 			if (this._automaticActionRequest) {
 				const branch = this.sessionManager.getBranch();
 				const action = restoreEpistemicState(branch).action;

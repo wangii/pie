@@ -94,7 +94,7 @@ describe("Pie diagnostics UI projections", () => {
 		const session = { getEpistemicDiagnostics: () => diagnostics };
 		const status = formatPieStatus(session as never);
 		expect(status).toBe(
-			"Pie · TOOL EXECUTION · ACTION running · Frame 7/24 · ctx 8.4k/12k · omitted 41 · repair 1/3 completed negative result",
+			"Pie · TOOL EXECUTION · ACTION running · Frame responses 7/24 · ctx 8.4k/12k · omitted 41 · repair 1/3 completed negative result",
 		);
 	});
 

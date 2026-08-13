@@ -24,7 +24,7 @@ describe("Phase 2 Frame provider boundary", () => {
 				"[ANCHOR]\nlogout must revoke authorization",
 				"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
 					"Falsifier: a worker restart preserves the authorization failure\n" +
-					"Horizon: 3 of 3 model responses remain",
+					"Response lease: 0/3 completed; 3 model responses remain",
 				"diagnose logout authorization",
 			]);
 			expect(harness.session.frame).toMatchObject({ version: 1, completedModelResponses: 1 });

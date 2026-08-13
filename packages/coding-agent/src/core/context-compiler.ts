@@ -91,6 +91,8 @@ export interface ContextCompilerInput {
 	model: Model<Api>;
 	systemPrompt: string;
 	tools: readonly AgentTool[];
+	/** Compiler-owned transient request instruction; never persisted as a raw event. */
+	requestInstruction?: AgentMessage;
 	reservedOutputTokens: number;
 	inputTokenLimit?: number;
 	signal?: AbortSignal;
@@ -234,7 +236,7 @@ function frameMessage(frame: Frame): AgentMessage {
 		customType: FRAME_CONTEXT_MESSAGE_TYPE,
 		content:
 			`[CURRENT FRAME]\nCommitment: ${frame.statement}\nFalsifier: ${frame.falsifier}\n` +
-			`Horizon: ${remainingModelResponses} of ${frame.horizon} model responses remain`,
+			`Response lease: ${frame.completedModelResponses}/${frame.horizon} completed; ${remainingModelResponses} model responses remain`,
 		display: false,
 		details: {
 			frameId: frame.id,
@@ -343,10 +345,12 @@ async function compileProjection(
 	const anchorMessages = anchor ? [anchorMessage(anchor)] : [];
 	const frameMessages = frame ? [frameMessage(frame)] : [];
 	const actionMessages = action ? [actionMessage(action)] : [];
+	const requestInstructionMessages = input.requestInstruction ? [input.requestInstruction] : [];
 	const anchorTokens = estimateMessagesTokens(anchorMessages);
 	const frameTokens = estimateMessagesTokens(frameMessages);
 	const actionTokens = estimateMessagesTokens(actionMessages);
-	const requiredStateTokens = anchorTokens + frameTokens + actionTokens;
+	const requestInstructionTokens = estimateMessagesTokens(requestInstructionMessages);
+	const requiredStateTokens = anchorTokens + frameTokens + actionTokens + requestInstructionTokens;
 	const windows = buildCoherentWindows(projectedEvents);
 	const newestWindow = windows.at(-1);
 	if (newestWindow && !newestWindow.valid) {
@@ -435,7 +439,7 @@ async function compileProjection(
 		? await input.transformMessages(selectedMessages, input.signal)
 		: selectedMessages;
 	// Epistemic state is compiler-owned, so transcript transforms cannot omit or rewrite it.
-	const messages = [...retainedMessages, ...transformedMessages];
+	const messages = [...retainedMessages, ...transformedMessages, ...requestInstructionMessages];
 	const outputMessageTokens = estimateMessagesTokens(messages);
 	if (requiredTokens + outputMessageTokens > availableInputTokens) {
 		throw new ContextBudgetError(availableInputTokens, requiredTokens + outputMessageTokens);
