@@ -301,6 +301,7 @@ You are running in an isolated evaluation workspace at the current directory. Al
 		anchorEnabled: true,
 		frameEnabled: true,
 		actionEnabled,
+		observationEnabled: false,
 		output: ({ response, session }): ActionToolsEvalOutput => ({
 			response,
 			compilerVersion: session.latestContextManifest?.compilerVersion ?? null,

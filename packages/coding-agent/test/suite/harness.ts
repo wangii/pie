@@ -76,6 +76,7 @@ export interface HarnessOptions {
 	anchorEnabled?: boolean;
 	frameEnabled?: boolean;
 	actionEnabled?: boolean;
+	observationEnabled?: boolean;
 }
 
 export interface Harness {
@@ -208,6 +209,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		anchorEnabled: options.anchorEnabled ?? false,
 		frameEnabled: options.frameEnabled,
 		actionEnabled: options.actionEnabled ?? false,
+		observationEnabled: options.observationEnabled ?? false,
 	});
 
 	const events: AgentSessionEvent[] = [];

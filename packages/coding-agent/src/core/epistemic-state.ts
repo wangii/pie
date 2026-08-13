@@ -4,6 +4,7 @@ import type {
 	AnchorRevisionEntry,
 	FrameRevisionEntry,
 	FrameTransitionEntry,
+	ObservationEntry,
 	SessionEntry,
 } from "./session-manager.ts";
 
@@ -54,12 +55,27 @@ export interface Action {
 
 export type ActionTerminalTransition = ActionTransitionEntry["transition"];
 
+/** Immutable durable evidence selected from exact Action-local execution results. */
+export interface Observation {
+	id: string;
+	entryId: string;
+	statement: string;
+	sourceEventIds: readonly string[];
+	anchorId?: string;
+	anchorRevisionEntryId?: string;
+	frameId?: string;
+	frameRevisionEntryId?: string;
+	timestamp: string;
+}
+
 export interface EpistemicState {
 	anchor?: Anchor;
 	/** Only an admissible Frame is exposed as current state. Terminal Frames remain in the raw log. */
 	frame?: Frame;
 	/** Only an active Action is exposed. Its frozen contract and complete trace remain in the raw log. */
 	action?: Action;
+	/** Durable immutable evidence remains independent of later Frame transitions. */
+	observations?: readonly Observation[];
 }
 
 function anchorFromEntry(entry: AnchorRevisionEntry): Anchor {
@@ -101,6 +117,20 @@ function actionFromEntry(entry: ActionStartEntry): Action {
 		sourceEventId: entry.sourceEventId,
 		timestamp: entry.timestamp,
 		completedModelResponses: 0,
+	};
+}
+
+function observationFromEntry(entry: ObservationEntry): Observation {
+	return {
+		id: entry.observationId,
+		entryId: entry.id,
+		statement: entry.statement,
+		sourceEventIds: [...entry.sourceEventIds],
+		anchorId: entry.anchorId,
+		anchorRevisionEntryId: entry.anchorRevisionEntryId,
+		frameId: entry.frameId,
+		frameRevisionEntryId: entry.frameRevisionEntryId,
+		timestamp: entry.timestamp,
 	};
 }
 
@@ -173,8 +203,10 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 	let anchor: Anchor | undefined;
 	let frame: Frame | undefined;
 	let action: Action | undefined;
+	const observations: Observation[] = [];
 	const seenFrameIds = new Set<string>();
 	const seenActionIds = new Set<string>();
+	const seenObservationIds = new Set<string>();
 	const precedingEventIds = new Set<string>();
 	const eventPositions = new Map(entries.map((entry, index) => [entry.id, index] as const));
 	let expectedReplacementFrameId: string | undefined;
@@ -242,6 +274,46 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 			}
 			validateActionTransition(entry, action);
 			action = undefined;
+		} else if (entry.type === "observation") {
+			const targetsAnchor = entry.anchorId !== undefined || entry.anchorRevisionEntryId !== undefined;
+			const targetsFrame = entry.frameId !== undefined || entry.frameRevisionEntryId !== undefined;
+			if (
+				!action ||
+				!entry.statement.trim() ||
+				entry.sourceEventIds.length === 0 ||
+				new Set(entry.sourceEventIds).size !== entry.sourceEventIds.length ||
+				seenObservationIds.has(entry.observationId) ||
+				(!targetsAnchor && !targetsFrame) ||
+				(entry.anchorId === undefined) !== (entry.anchorRevisionEntryId === undefined) ||
+				(entry.frameId === undefined) !== (entry.frameRevisionEntryId === undefined)
+			) {
+				throw new Error(`Observation ${entry.id} is not a valid immutable evidence record.`);
+			}
+			if (
+				(targetsAnchor &&
+					(!anchor || entry.anchorId !== anchor.id || entry.anchorRevisionEntryId !== anchor.revisionEntryId)) ||
+				(targetsFrame &&
+					(!frame || entry.frameId !== frame.id || entry.frameRevisionEntryId !== frame.revisionEntryId))
+			) {
+				throw new Error(`Observation ${entry.id} does not target the current epistemic state.`);
+			}
+			const actionStartPosition = eventPositions.get(action.startEntryId) ?? -1;
+			for (const sourceEventId of entry.sourceEventIds) {
+				const sourcePosition = eventPositions.get(sourceEventId) ?? -1;
+				const source = sourcePosition < 0 ? undefined : entries[sourcePosition];
+				if (
+					!precedingEventIds.has(sourceEventId) ||
+					sourcePosition <= actionStartPosition ||
+					source?.type !== "message" ||
+					(source.message.role !== "toolResult" && source.message.role !== "bashExecution")
+				) {
+					throw new Error(
+						`Observation ${entry.id} source ${sourceEventId} is not an execution result from its Action episode.`,
+					);
+				}
+			}
+			seenObservationIds.add(entry.observationId);
+			observations.push(observationFromEntry(entry));
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			if (frame) {
 				frame.completedModelResponses++;
@@ -259,5 +331,6 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 		...(anchor ? { anchor } : {}),
 		...(frame ? { frame } : {}),
 		...(action ? { action } : {}),
+		...(observations.length > 0 ? { observations } : {}),
 	};
 }

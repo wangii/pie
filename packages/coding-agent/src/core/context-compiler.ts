@@ -1,7 +1,7 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { estimateTokens } from "./compaction/index.ts";
-import type { Action, Anchor, EpistemicState, Frame } from "./epistemic-state.ts";
+import type { Action, Anchor, EpistemicState, Frame, Observation } from "./epistemic-state.ts";
 import type { SessionEntry } from "./session-manager.ts";
 import { sessionEntryToContextMessages } from "./session-manager.ts";
 
@@ -9,9 +9,11 @@ export const PHASE_ZERO_CONTEXT_COMPILER_VERSION = "pie-phase-0/v1";
 export const PHASE_ONE_CONTEXT_COMPILER_VERSION = "pie-phase-1-anchor/v1";
 export const PHASE_TWO_CONTEXT_COMPILER_VERSION = "pie-phase-2-frame/v1";
 export const PHASE_THREE_CONTEXT_COMPILER_VERSION = "pie-phase-3-action/v1";
+export const PHASE_FOUR_CONTEXT_COMPILER_VERSION = "pie-phase-4-observation/v1";
 export const ANCHOR_CONTEXT_MESSAGE_TYPE = "pie.anchor";
 export const FRAME_CONTEXT_MESSAGE_TYPE = "pie.frame";
 export const ACTION_CONTEXT_MESSAGE_TYPE = "pie.action";
+export const OBSERVATION_CONTEXT_MESSAGE_TYPE = "pie.observation";
 
 export type EmptyEpistemicState = Record<never, never>;
 
@@ -59,6 +61,17 @@ export interface ContextSelectionManifest {
 			sourceEventId: string;
 			completedModelResponses: number;
 			tokens: number;
+		};
+		observations?: {
+			selected: Array<{
+				id: string;
+				entryId: string;
+				sourceEventIds: readonly string[];
+				anchorRelevant: boolean;
+				frameRelevant: boolean;
+				tokens: number;
+			}>;
+			omitted: Array<{ id: string; entryId: string; reason: "budget" | "not_relevant" }>;
 		};
 	};
 	budget: {
@@ -119,6 +132,15 @@ type CoherentWindow = {
 	events: ProjectedEvent[];
 	tokens: number;
 	valid: boolean;
+};
+
+type ProjectedObservation = {
+	observation: Observation;
+	message: AgentMessage;
+	tokens: number;
+	anchorRelevant: boolean;
+	frameRelevant: boolean;
+	order: number;
 };
 
 function safeJsonLength(value: unknown): number {
@@ -246,12 +268,34 @@ function actionMessage(action: Action): AgentMessage {
 	};
 }
 
+function observationMessage(observation: Observation, anchorRelevant: boolean, frameRelevant: boolean): AgentMessage {
+	const relevance =
+		frameRelevant && anchorRelevant ? "current Frame and Anchor" : frameRelevant ? "current Frame" : "Anchor";
+	return {
+		role: "custom",
+		customType: OBSERVATION_CONTEXT_MESSAGE_TYPE,
+		content: `[OBSERVATION ${observation.id}]\n${observation.statement}\nRelevance: ${relevance}`,
+		display: false,
+		details: {
+			observationId: observation.id,
+			entryId: observation.entryId,
+			sourceEventIds: observation.sourceEventIds,
+			anchorId: observation.anchorId,
+			anchorRevisionEntryId: observation.anchorRevisionEntryId,
+			frameId: observation.frameId,
+			frameRevisionEntryId: observation.frameRevisionEntryId,
+		},
+		timestamp: new Date(observation.timestamp).getTime(),
+	};
+}
+
 async function compileProjection(
 	input: ContextCompilerInput,
 	compilerVersion: string,
 	anchor: Anchor | undefined,
 	frame: Frame | undefined,
 	action: Action | undefined,
+	observations: readonly Observation[],
 ): Promise<ContextCompilation> {
 	const runtimeMessages = new Set(input.runtimeMessages);
 	const omissionsById = new Map<string, ContextOmission>();
@@ -299,13 +343,61 @@ async function compileProjection(
 	const anchorMessages = anchor ? [anchorMessage(anchor)] : [];
 	const frameMessages = frame ? [frameMessage(frame)] : [];
 	const actionMessages = action ? [actionMessage(action)] : [];
-	const retainedMessages = [...anchorMessages, ...frameMessages, ...actionMessages];
 	const anchorTokens = estimateMessagesTokens(anchorMessages);
 	const frameTokens = estimateMessagesTokens(frameMessages);
 	const actionTokens = estimateMessagesTokens(actionMessages);
-	const retainedStateTokens = anchorTokens + frameTokens + actionTokens;
-	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - retainedStateTokens);
+	const requiredStateTokens = anchorTokens + frameTokens + actionTokens;
 	const windows = buildCoherentWindows(projectedEvents);
+	const newestWindow = windows.at(-1);
+	if (newestWindow && !newestWindow.valid) {
+		for (const event of newestWindow.events) {
+			omissionsById.set(event.event.id, {
+				eventId: event.event.id,
+				eventType: event.event.type,
+				reason: "invalid_tool_sequence",
+			});
+		}
+		throw new ContextBudgetError(availableInputTokens, requiredTokens + requiredStateTokens + newestWindow.tokens);
+	}
+
+	const projectedObservations: ProjectedObservation[] = observations.map((observation, order) => {
+		const anchorRelevant = anchor !== undefined && observation.anchorRevisionEntryId === anchor.revisionEntryId;
+		const frameRelevant = frame !== undefined && observation.frameRevisionEntryId === frame.revisionEntryId;
+		const message = observationMessage(observation, anchorRelevant, frameRelevant);
+		return {
+			observation,
+			message,
+			tokens: estimateMessagesTokens([message]),
+			anchorRelevant,
+			frameRelevant,
+			order,
+		};
+	});
+	const selectedObservationIds = new Set<string>();
+	let selectedObservationTokens = 0;
+	const observationBudget = Math.max(
+		0,
+		availableInputTokens - requiredTokens - requiredStateTokens - (newestWindow?.tokens ?? 0),
+	);
+	const prioritizedObservations = projectedObservations
+		.filter((candidate) => candidate.frameRelevant || candidate.anchorRelevant)
+		.sort((left, right) => {
+			if (left.frameRelevant !== right.frameRelevant) return left.frameRelevant ? -1 : 1;
+			return right.order - left.order;
+		});
+	for (const candidate of prioritizedObservations) {
+		if (selectedObservationTokens + candidate.tokens <= observationBudget) {
+			selectedObservationIds.add(candidate.observation.id);
+			selectedObservationTokens += candidate.tokens;
+		}
+	}
+	const selectedObservations = projectedObservations.filter((candidate) =>
+		selectedObservationIds.has(candidate.observation.id),
+	);
+	const observationMessages = selectedObservations.map((candidate) => candidate.message);
+	const retainedMessages = [...anchorMessages, ...frameMessages, ...observationMessages, ...actionMessages];
+	const retainedStateTokens = requiredStateTokens + selectedObservationTokens;
+	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - retainedStateTokens);
 	const selectedIds = new Set<string>();
 	let selectedEventTokens = 0;
 
@@ -314,20 +406,9 @@ async function compileProjection(
 	if (allWindowsValid && allMessagesTokens <= messageBudget) {
 		for (const event of projectedEvents) selectedIds.add(event.event.id);
 		selectedEventTokens = allMessagesTokens;
-	} else if (windows.length > 0) {
-		const newestWindow = windows[windows.length - 1]!;
-		if (!newestWindow.valid) {
-			for (const event of newestWindow.events) {
-				omissionsById.set(event.event.id, {
-					eventId: event.event.id,
-					eventType: event.event.type,
-					reason: "invalid_tool_sequence",
-				});
-			}
-			throw new ContextBudgetError(availableInputTokens, requiredTokens + retainedStateTokens + newestWindow.tokens);
-		}
+	} else if (newestWindow) {
 		if (newestWindow.tokens > messageBudget) {
-			throw new ContextBudgetError(availableInputTokens, requiredTokens + retainedStateTokens + newestWindow.tokens);
+			throw new ContextBudgetError(availableInputTokens, requiredTokens + requiredStateTokens + newestWindow.tokens);
 		}
 
 		for (let index = windows.length - 1; index >= 0; index--) {
@@ -402,6 +483,29 @@ async function compileProjection(
 							tokens: actionTokens,
 						}
 					: undefined,
+				observations:
+					observations.length > 0
+						? {
+								selected: selectedObservations.map((candidate) => ({
+									id: candidate.observation.id,
+									entryId: candidate.observation.entryId,
+									sourceEventIds: candidate.observation.sourceEventIds,
+									anchorRelevant: candidate.anchorRelevant,
+									frameRelevant: candidate.frameRelevant,
+									tokens: candidate.tokens,
+								})),
+								omitted: projectedObservations
+									.filter((candidate) => !selectedObservationIds.has(candidate.observation.id))
+									.map((candidate) => ({
+										id: candidate.observation.id,
+										entryId: candidate.observation.entryId,
+										reason:
+											candidate.frameRelevant || candidate.anchorRelevant
+												? ("budget" as const)
+												: ("not_relevant" as const),
+									})),
+							}
+						: undefined,
 			},
 			budget: {
 				contextWindow,
@@ -418,7 +522,7 @@ async function compileProjection(
 /** Deterministic structural projection with empty epistemic state. */
 export class PhaseZeroContextCompiler implements ContextCompiler {
 	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
-		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined, undefined, undefined);
+		return compileProjection(input, PHASE_ZERO_CONTEXT_COMPILER_VERSION, undefined, undefined, undefined, []);
 	}
 }
 
@@ -431,6 +535,7 @@ export class PhaseOneContextCompiler implements ContextCompiler {
 			input.epistemicState.anchor,
 			undefined,
 			undefined,
+			[],
 		);
 	}
 }
@@ -444,6 +549,7 @@ export class PhaseTwoContextCompiler implements ContextCompiler {
 			input.epistemicState.anchor,
 			input.epistemicState.frame,
 			undefined,
+			[],
 		);
 	}
 }
@@ -457,6 +563,21 @@ export class PhaseThreeContextCompiler implements ContextCompiler {
 			input.epistemicState.anchor,
 			input.epistemicState.frame,
 			input.epistemicState.action,
+			[],
+		);
+	}
+}
+
+/** Phase 4 projection: relevant durable Observations precede the current Action within a bounded budget. */
+export class PhaseFourContextCompiler implements ContextCompiler {
+	async compile(input: ContextCompilerInput): Promise<ContextCompilation> {
+		return compileProjection(
+			input,
+			PHASE_FOUR_CONTEXT_COMPILER_VERSION,
+			input.epistemicState.anchor,
+			input.epistemicState.frame,
+			input.epistemicState.action,
+			input.epistemicState.observations ?? [],
 		);
 	}
 }

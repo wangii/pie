@@ -177,6 +177,18 @@ export interface ActionTransitionEntry extends SessionEntryBase {
 	challenge?: "anchor" | "frame";
 }
 
+/** Immutable durable world evidence with exact raw execution-result provenance. */
+export interface ObservationEntry extends SessionEntryBase {
+	type: "observation";
+	observationId: string;
+	statement: string;
+	sourceEventIds: string[];
+	anchorId?: string;
+	anchorRevisionEntryId?: string;
+	frameId?: string;
+	frameRevisionEntryId?: string;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -212,7 +224,8 @@ export type SessionEntry =
 	| FrameRevisionEntry
 	| FrameTransitionEntry
 	| ActionStartEntry
-	| ActionTransitionEntry;
+	| ActionTransitionEntry
+	| ObservationEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -1441,6 +1454,91 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			...transition,
 			reason,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Materialize one immutable Observation from exact results inside the current Action episode. */
+	appendObservation(observation: Omit<ObservationEntry, keyof SessionEntryBase | "type">): string {
+		const statement = observation.statement.trim();
+		if (!statement) throw new Error("Observation statement must not be empty.");
+		if (observation.sourceEventIds.length === 0) {
+			throw new Error("Observation must reference at least one execution result.");
+		}
+		if (new Set(observation.sourceEventIds).size !== observation.sourceEventIds.length) {
+			throw new Error("Observation provenance must not contain duplicate event identities.");
+		}
+		const targetsAnchor = observation.anchorId !== undefined || observation.anchorRevisionEntryId !== undefined;
+		const targetsFrame = observation.frameId !== undefined || observation.frameRevisionEntryId !== undefined;
+		if (!targetsAnchor && !targetsFrame) {
+			throw new Error("Observation must affect Anchor satisfaction, Frame admissibility, or both.");
+		}
+		if (
+			(observation.anchorId === undefined) !== (observation.anchorRevisionEntryId === undefined) ||
+			(observation.frameId === undefined) !== (observation.frameRevisionEntryId === undefined)
+		) {
+			throw new Error("Observation target metadata must identify a complete Anchor or Frame revision.");
+		}
+
+		const branch = this.getBranch();
+		if (branch.some((entry) => entry.type === "observation" && entry.observationId === observation.observationId)) {
+			throw new Error("Observation identity must not be reused.");
+		}
+		let anchor: AnchorRevisionEntry | undefined;
+		let frame: FrameRevisionEntry | undefined;
+		let action: ActionStartEntry | undefined;
+		let actionStartIndex = -1;
+		for (const [index, entry] of branch.entries()) {
+			if (entry.type === "anchor_revision") {
+				anchor = entry;
+			} else if (entry.type === "frame_revision") {
+				frame = entry;
+			} else if (entry.type === "frame_transition" && frame?.id === entry.revisionEntryId) {
+				frame = undefined;
+			} else if (entry.type === "action_start") {
+				action = entry;
+				actionStartIndex = index;
+			} else if (entry.type === "action_transition" && action?.id === entry.startEntryId) {
+				action = undefined;
+				actionStartIndex = -1;
+			}
+		}
+		if (!action) throw new Error("Observation materialization requires an active Action episode.");
+		if (
+			targetsAnchor &&
+			(!anchor || observation.anchorId !== anchor.anchorId || observation.anchorRevisionEntryId !== anchor.id)
+		) {
+			throw new Error("Observation does not target the current Anchor revision.");
+		}
+		if (
+			targetsFrame &&
+			(!frame || observation.frameId !== frame.frameId || observation.frameRevisionEntryId !== frame.id)
+		) {
+			throw new Error("Observation does not target the current Frame version.");
+		}
+		for (const sourceEventId of observation.sourceEventIds) {
+			const sourceIndex = branch.findIndex((entry) => entry.id === sourceEventId);
+			const source = sourceIndex < 0 ? undefined : branch[sourceIndex];
+			if (
+				sourceIndex <= actionStartIndex ||
+				source?.type !== "message" ||
+				(source.message.role !== "toolResult" && source.message.role !== "bashExecution")
+			) {
+				throw new Error(
+					`Observation source ${sourceEventId} must be an exact execution result after the current Action started.`,
+				);
+			}
+		}
+
+		const entry: ObservationEntry = {
+			type: "observation",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...observation,
+			statement,
+			sourceEventIds: [...observation.sourceEventIds],
 		};
 		this._appendEntry(entry);
 		return entry.id;

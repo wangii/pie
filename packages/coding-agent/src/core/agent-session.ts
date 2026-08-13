@@ -68,6 +68,7 @@ import {
 import {
 	type ContextCompiler,
 	type ContextSelectionManifest,
+	PhaseFourContextCompiler,
 	PhaseOneContextCompiler,
 	PhaseThreeContextCompiler,
 	PhaseTwoContextCompiler,
@@ -80,6 +81,7 @@ import {
 	type Anchor,
 	type Frame,
 	type FrameTerminalTransition,
+	type Observation,
 	restoreEpistemicState,
 } from "./epistemic-state.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
@@ -242,7 +244,7 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Context projection policy. Defaults to Pie's deterministic Phase 3 Action compiler. */
+	/** Context projection policy. Defaults to Pie's deterministic Phase 4 Observation compiler. */
 	contextCompiler?: ContextCompiler;
 	/** Enable Anchor creation and projection. Set false for the Phase 0 baseline. Default: true. */
 	anchorEnabled?: boolean;
@@ -250,6 +252,8 @@ export interface AgentSessionConfig {
 	frameEnabled?: boolean;
 	/** Enable Action episodes and episode-local projection. Set false for Phase 3 ablation. Defaults to frameEnabled. */
 	actionEnabled?: boolean;
+	/** Enable durable selective Observations. Set false for Phase 4 ablation. Defaults to actionEnabled. */
+	observationEnabled?: boolean;
 	/** Initial compiler input budget override for controlled evaluations. */
 	contextInputTokenLimit?: number;
 }
@@ -286,6 +290,13 @@ export type ActionDirective =
 	| { type: "complete" | "unresolvable"; reason: string }
 	| { type: "escalate"; challenge: "anchor" | "frame"; reason: string };
 
+export interface ObservationDefinition {
+	statement: string;
+	affects: "anchor" | "frame" | "anchor_and_frame";
+	/** Exact toolResult or bashExecution event identities from the current Action episode. */
+	sourceEventIds: readonly string[];
+}
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
@@ -304,6 +315,8 @@ export interface PromptOptions {
 	frame?: FrameDirective;
 	/** Explicit Action episode operation to apply before this model turn. */
 	action?: ActionDirective;
+	/** Explicitly materialize epistemically relevant execution evidence before this model turn. */
+	observation?: ObservationDefinition;
 }
 
 /** Result from cycleModel() */
@@ -422,9 +435,11 @@ export class AgentSession {
 	private readonly _anchorEnabled: boolean;
 	private readonly _frameEnabled: boolean;
 	private readonly _actionEnabled: boolean;
+	private readonly _observationEnabled: boolean;
 	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
 	private _pendingFrameDirective: FrameDirective | undefined;
 	private _pendingActionDirective: ActionDirective | undefined;
+	private _pendingObservation: ObservationDefinition | undefined;
 	private _latestContextManifest: ContextSelectionManifest | undefined;
 	private readonly _configuredContextInputTokenLimit: number | undefined;
 	private _contextInputTokenLimit: number | undefined;
@@ -459,21 +474,27 @@ export class AgentSession {
 		this._anchorEnabled = config.anchorEnabled ?? true;
 		this._frameEnabled = config.frameEnabled ?? this._anchorEnabled;
 		this._actionEnabled = config.actionEnabled ?? this._frameEnabled;
+		this._observationEnabled = config.observationEnabled ?? this._actionEnabled;
 		if (this._frameEnabled && !this._anchorEnabled) {
 			throw new Error("Frame requires Anchor to be enabled.");
 		}
 		if (this._actionEnabled && !this._frameEnabled) {
 			throw new Error("Action episodes require Frame to be enabled.");
 		}
+		if (this._observationEnabled && !this._actionEnabled) {
+			throw new Error("Observations require Action episodes to be enabled.");
+		}
 		this._contextCompiler =
 			config.contextCompiler ??
-			(this._actionEnabled
-				? new PhaseThreeContextCompiler()
-				: this._frameEnabled
-					? new PhaseTwoContextCompiler()
-					: this._anchorEnabled
-						? new PhaseOneContextCompiler()
-						: new PhaseZeroContextCompiler());
+			(this._observationEnabled
+				? new PhaseFourContextCompiler()
+				: this._actionEnabled
+					? new PhaseThreeContextCompiler()
+					: this._frameEnabled
+						? new PhaseTwoContextCompiler()
+						: this._anchorEnabled
+							? new PhaseOneContextCompiler()
+							: new PhaseZeroContextCompiler());
 		this._configuredContextInputTokenLimit = config.contextInputTokenLimit;
 		this._contextInputTokenLimit = config.contextInputTokenLimit;
 
@@ -617,6 +638,61 @@ export class AgentSession {
 		);
 	}
 
+	private _validateObservationDefinition(
+		definition: ObservationDefinition,
+		state: ReturnType<typeof restoreEpistemicState>,
+	): void {
+		if (!definition.statement.trim()) throw new Error("Observation statement must not be empty.");
+		if (definition.sourceEventIds.length === 0) {
+			throw new Error("Observation must reference at least one execution result.");
+		}
+		if (new Set(definition.sourceEventIds).size !== definition.sourceEventIds.length) {
+			throw new Error("Observation provenance must not contain duplicate event identities.");
+		}
+		if (!state.action) throw new Error("Observation materialization requires an active Action episode.");
+		if ((definition.affects === "anchor" || definition.affects === "anchor_and_frame") && !state.anchor) {
+			throw new Error("Observation cannot affect Anchor satisfaction because no Anchor is active.");
+		}
+		if ((definition.affects === "frame" || definition.affects === "anchor_and_frame") && !state.frame) {
+			throw new Error("Observation cannot affect Frame admissibility because no Frame is active.");
+		}
+		const branch = this.sessionManager.getBranch();
+		const actionStartIndex = branch.findIndex((entry) => entry.id === state.action?.startEntryId);
+		for (const sourceEventId of definition.sourceEventIds) {
+			const sourceIndex = branch.findIndex((entry) => entry.id === sourceEventId);
+			const source = sourceIndex < 0 ? undefined : branch[sourceIndex];
+			if (
+				sourceIndex <= actionStartIndex ||
+				source?.type !== "message" ||
+				(source.message.role !== "toolResult" && source.message.role !== "bashExecution")
+			) {
+				throw new Error(
+					`Observation source ${sourceEventId} must be an exact execution result after the current Action started.`,
+				);
+			}
+		}
+	}
+
+	private _appendObservation(
+		definition: ObservationDefinition,
+		state: ReturnType<typeof restoreEpistemicState>,
+	): void {
+		this._validateObservationDefinition(definition, state);
+		const targetsAnchor = definition.affects === "anchor" || definition.affects === "anchor_and_frame";
+		const targetsFrame = definition.affects === "frame" || definition.affects === "anchor_and_frame";
+		this._emitAppendedEntry(
+			this.sessionManager.appendObservation({
+				observationId: `observation-${randomUUID()}`,
+				statement: definition.statement,
+				sourceEventIds: [...definition.sourceEventIds],
+				anchorId: targetsAnchor ? state.anchor?.id : undefined,
+				anchorRevisionEntryId: targetsAnchor ? state.anchor?.revisionEntryId : undefined,
+				frameId: targetsFrame ? state.frame?.id : undefined,
+				frameRevisionEntryId: targetsFrame ? state.frame?.revisionEntryId : undefined,
+			}),
+		);
+	}
+
 	private _installContextCompiler(): void {
 		const transformMessages = this.agent.transformContext;
 		this.agent.transformContext = async (runtimeMessages, signal) => {
@@ -632,6 +708,13 @@ export class AgentSession {
 				.slice()
 				.reverse()
 				.find((entry) => entry.type === "message" && entry.message.role === "user");
+			const requestedObservation = this._pendingObservation;
+			if (this._observationEnabled && requestedObservation) {
+				this._appendObservation(requestedObservation, epistemicState);
+				this._pendingObservation = undefined;
+				rawEvents = this.sessionManager.getBranch();
+				epistemicState = restoreEpistemicState(rawEvents);
+			}
 			const requestedActionDirective = this._pendingActionDirective;
 			if (
 				this._actionEnabled &&
@@ -1365,6 +1448,23 @@ export class AgentSession {
 		);
 	}
 
+	/** Durable Observations on the active branch. */
+	get observations(): readonly Observation[] {
+		return this._observationEnabled
+			? (restoreEpistemicState(this.sessionManager.getBranch()).observations ?? [])
+			: [];
+	}
+
+	/** Materialize an execution result only when it changes Anchor satisfaction or Frame admissibility. */
+	materializeObservation(definition: ObservationDefinition): Observation {
+		if (!this._observationEnabled) throw new Error("Observations are disabled for this session.");
+		if (this.isStreaming) {
+			throw new Error("Wait for the current response to finish before materializing an Observation.");
+		}
+		this._appendObservation(definition, restoreEpistemicState(this.sessionManager.getBranch()));
+		return this.observations.at(-1)!;
+	}
+
 	/** Current active Action episode on the active branch. */
 	get action(): Action | undefined {
 		return this._actionEnabled ? restoreEpistemicState(this.sessionManager.getBranch()).action : undefined;
@@ -1604,6 +1704,7 @@ export class AgentSession {
 			this._pendingAnchorRevision = undefined;
 			this._pendingFrameDirective = undefined;
 			this._pendingActionDirective = undefined;
+			this._pendingObservation = undefined;
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			await this._emitAgentSettled();
@@ -1706,6 +1807,10 @@ export class AgentSession {
 					throw new Error("Frame transition reason must not be empty.");
 				}
 			}
+			if (options?.observation) {
+				if (!this._observationEnabled) throw new Error("Observations are disabled for this session.");
+				this._validateObservationDefinition(options.observation, currentEpistemicState);
+			}
 			if (options?.action) {
 				if (!this._actionEnabled) throw new Error("Action episodes are disabled for this session.");
 				if (options.action.type === "start") {
@@ -1756,7 +1861,7 @@ export class AgentSession {
 
 			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
-				if (options?.anchor || options?.frame || options?.action) {
+				if (options?.anchor || options?.frame || options?.action || options?.observation) {
 					throw new Error(
 						"Epistemic state changes require an idle session so provenance can identify the new request.",
 					);
@@ -1872,6 +1977,9 @@ export class AgentSession {
 		}
 		if (options?.action) {
 			this._pendingActionDirective = options.action;
+		}
+		if (options?.observation) {
+			this._pendingObservation = options.observation;
 		}
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);

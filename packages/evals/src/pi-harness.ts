@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -12,6 +12,7 @@ import {
 	createAgentSessionServices,
 	type FrameDirective,
 	ModelRuntime,
+	type ObservationDefinition,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -36,9 +37,18 @@ export type PiCodingAgentInput =
 					anchor?: { statement: string; revisionReason?: string };
 					frame?: FrameDirective;
 					action?: ActionDirective;
+					observation?: ObservationDefinition;
 			  }
 			| { type: "reload" }
 			| { type: "seed"; files: Record<string, string> }
+			| { type: "remove"; paths: string[] }
+			| {
+					type: "observe_latest_action_results";
+					statement: string;
+					affects: ObservationDefinition["affects"];
+			  }
+			| { type: "complete_current_action"; reason: string }
+			| { type: "adjudicate_current_frame" }
 	  >;
 
 type PiCodingAgentModelSelection = {
@@ -54,6 +64,7 @@ type PiCodingAgentHarnessOptions = {
 	anchorEnabled?: boolean;
 	frameEnabled?: boolean;
 	actionEnabled?: boolean;
+	observationEnabled?: boolean;
 	contextInputTokenLimit?: number;
 };
 
@@ -112,10 +123,11 @@ async function promptAgent(
 	anchor?: { statement: string; revisionReason?: string },
 	frame?: FrameDirective,
 	action?: ActionDirective,
+	observation?: ObservationDefinition,
 ): Promise<string> {
 	signal?.throwIfAborted();
 	const previousMessageCount = session.messages.length;
-	await session.prompt(input, { anchor, frame, action });
+	await session.prompt(input, { anchor, frame, action, observation });
 	const assistant = session.messages
 		.slice(previousMessageCount)
 		.reverse()
@@ -175,6 +187,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 				anchorEnabled: options.anchorEnabled,
 				frameEnabled: options.frameEnabled,
 				actionEnabled: options.actionEnabled,
+				observationEnabled: options.observationEnabled,
 				contextInputTokenLimit: options.contextInputTokenLimit,
 			})
 		).session;
@@ -206,12 +219,79 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 						options.anchorEnabled === false ? undefined : step.anchor,
 						options.frameEnabled === false ? undefined : step.frame,
 						options.actionEnabled === false ? undefined : step.action,
+						options.observationEnabled === false ? undefined : step.observation,
 					);
 				} else if (step.type === "seed") {
 					for (const [relativePath, content] of Object.entries(step.files)) {
 						const target = join(cwd, relativePath);
 						await mkdir(dirname(target), { recursive: true });
 						await writeFile(target, content, "utf8");
+					}
+				} else if (step.type === "remove") {
+					for (const relativePath of step.paths) {
+						await unlink(join(cwd, relativePath));
+					}
+				} else if (step.type === "observe_latest_action_results") {
+					if (options.observationEnabled === false) continue;
+					const branch = sessionManager.getBranch();
+					let actionStartIndex = -1;
+					for (let index = branch.length - 1; index >= 0; index--) {
+						if (branch[index]?.type === "action_start") {
+							actionStartIndex = index;
+							break;
+						}
+					}
+					const sourceEventIds = branch
+						.slice(actionStartIndex + 1)
+						.filter(
+							(entry) =>
+								entry.type === "message" &&
+								(entry.message.role === "toolResult" || entry.message.role === "bashExecution"),
+						)
+						.map((entry) => entry.id);
+					if (sourceEventIds.length === 0) {
+						throw new Error("Observation eval step requires an execution result in the current Action episode.");
+					}
+					evalSession.materializeObservation({
+						statement: step.statement,
+						affects: step.affects,
+						sourceEventIds,
+					});
+				} else if (step.type === "complete_current_action") {
+					const branch = sessionManager.getBranch();
+					let actionStartIndex = -1;
+					for (let index = branch.length - 1; index >= 0; index--) {
+						if (branch[index]?.type === "action_start") {
+							actionStartIndex = index;
+							break;
+						}
+					}
+					const sourceEventId = branch
+						.slice(actionStartIndex + 1)
+						.reverse()
+						.find(
+							(entry) =>
+								entry.type === "message" &&
+								(entry.message.role === "toolResult" || entry.message.role === "bashExecution"),
+						)?.id;
+					if (!sourceEventId) throw new Error("Action completion requires an execution result event.");
+					evalSession.completeAction(step.reason, { sourceEventId });
+				} else if (step.type === "adjudicate_current_frame") {
+					if (response === undefined) throw new Error("Frame adjudication requires a preceding model response.");
+					const sourceEventId = sessionManager
+						.getBranch()
+						.slice()
+						.reverse()
+						.find((entry) => entry.type === "message" && entry.message.role === "assistant")?.id;
+					if (!sourceEventId) throw new Error("Frame adjudication requires an assistant result event.");
+					if (evalSession.action) {
+						evalSession.completeAction("the Frame adjudication decision was produced", { sourceEventId });
+					}
+					if (response.trim() === "REJECT_FRAME") {
+						evalSession.terminateFrame("falsified", {
+							reason: "the adjudication Action found that the declared falsifier occurred",
+							sourceEventId,
+						});
 					}
 				} else {
 					await evalSession.reload();

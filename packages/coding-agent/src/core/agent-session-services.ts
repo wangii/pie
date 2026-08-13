@@ -67,6 +67,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	anchorEnabled?: boolean;
 	frameEnabled?: boolean;
 	actionEnabled?: boolean;
+	observationEnabled?: boolean;
 	contextInputTokenLimit?: number;
 }
 
@@ -227,6 +228,7 @@ export async function createAgentSessionFromServices(
 		anchorEnabled: options.anchorEnabled,
 		frameEnabled: options.frameEnabled,
 		actionEnabled: options.actionEnabled,
+		observationEnabled: options.observationEnabled,
 		contextInputTokenLimit: options.contextInputTokenLimit,
 	});
 }

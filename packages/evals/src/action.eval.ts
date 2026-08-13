@@ -116,6 +116,7 @@ function createActionHarness(name: string, actionEnabled: boolean) {
 		anchorEnabled: true,
 		frameEnabled: true,
 		actionEnabled,
+		observationEnabled: false,
 		output: ({ response, session }): ActionEvalOutput => ({
 			response,
 			compilerVersion: session.latestContextManifest?.compilerVersion ?? null,

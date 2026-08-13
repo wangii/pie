@@ -12,6 +12,7 @@ export {
 	type FrameDefinition,
 	type FrameDirective,
 	type ModelCycleResult,
+	type ObservationDefinition,
 	type PromptOptions,
 	type SessionStats,
 } from "./agent-session.ts";
