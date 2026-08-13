@@ -49,6 +49,11 @@ export function formatPieStatus(session: AgentSession): string | undefined {
 			`Frame responses ${diagnostics.state.frame.completedModelResponses}/${diagnostics.state.frame.horizon}`,
 		);
 	}
+	if (diagnostics.state.action && diagnostics.leaseBudget?.derivation === "available") {
+		parts.push(
+			`evidence rounds ${diagnostics.leaseBudget.consumedEvidenceRounds ?? 0}/${diagnostics.leaseBudget.activeExpectedEvidenceRounds ?? "?"}`,
+		);
+	}
 	if (diagnostics.context) {
 		parts.push(
 			`ctx ${formatTokenCount(diagnostics.context.outputMessageTokens)}/${formatTokenCount(diagnostics.context.availableInputTokens)}`,
@@ -105,8 +110,12 @@ function formatDiagnostics(diagnostics: EpistemicDiagnostics): string {
 	);
 	const action = diagnostics.state.action;
 	if (action) {
+		const evidenceRounds =
+			diagnostics.leaseBudget?.derivation === "available"
+				? `\n  evidence rounds: ${diagnostics.leaseBudget.consumedEvidenceRounds ?? 0}/${diagnostics.leaseBudget.activeExpectedEvidenceRounds ?? "?"}${diagnostics.leaseBudget.activeBudgetReason ? `\n  serial dependency: ${diagnostics.leaseBudget.activeBudgetReason}` : ""}`
+				: "";
 		lines.push(
-			`${theme.fg("dim", "Action:")} ${action.id} · active · ${action.completedModelResponses} model responses\n  intent: ${action.intent}\n  frozen completion: ${action.completionCondition}\n  start event: ${action.startEntryId}`,
+			`${theme.fg("dim", "Action:")} ${action.id} · active · ${action.completedModelResponses} model responses\n  intent: ${action.intent}\n  frozen completion: ${action.completionCondition}${evidenceRounds}\n  start event: ${action.startEntryId}`,
 		);
 	} else if (diagnostics.state.lastAction) {
 		const terminal = diagnostics.state.lastAction;
@@ -115,6 +124,18 @@ function formatDiagnostics(diagnostics: EpistemicDiagnostics): string {
 		);
 	} else {
 		lines.push(`${theme.fg("dim", "Action:")} none`);
+	}
+	if (diagnostics.leaseBudget) {
+		if (diagnostics.leaseBudget.derivation === "available" && diagnostics.leaseBudget.costs) {
+			const costs = diagnostics.leaseBudget.costs;
+			lines.push(
+				`${theme.fg("dim", "Model-response lease:")} derived · ${diagnostics.leaseBudget.provisionalActionCount} provisional Actions · evidence rounds ${(diagnostics.leaseBudget.expectedEvidenceRounds ?? []).join(" + ")}\n  costs: initial control ${costs.initialControl} · authorization ${costs.actionAuthorization} · execution ${costs.execution} · terminal adjudication ${costs.actionTerminalAdjudication} · Frame adjudication ${costs.finalFrameAdjudication}\n  unused evidence rounds returned: ${diagnostics.leaseBudget.unusedEvidenceRounds ?? 0}`,
+			);
+		} else {
+			lines.push(
+				`${theme.fg("dim", "Model-response lease:")} derivation unavailable (restored or legacy Frame); numeric horizon preserved`,
+			);
+		}
 	}
 	lines.push(`${theme.fg("dim", "Observations:")} ${diagnostics.state.observations.length}`);
 	for (const observation of diagnostics.state.observations) {

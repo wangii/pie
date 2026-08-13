@@ -9,17 +9,24 @@ function control(decision: Record<string, unknown>) {
 	return fauxAssistantMessage(JSON.stringify(decision));
 }
 
-const productionFrame = {
-	kind: "create_frame",
-	statement: "Repository behavior is controlled by the current implementation boundary",
-	falsifier: "An exact repository or runtime result shows a different boundary controls the behavior",
-	horizon: 12,
-} as const;
-
 const productionAction = {
 	kind: "authorize_action",
 	intent: "Inspect the implementation boundary relevant to the request",
 	completionCondition: "Exact repository or runtime results establish the relevant implementation behavior",
+} as const;
+
+const productionFrame = {
+	kind: "create_frame",
+	statement: "Repository behavior is controlled by the current implementation boundary",
+	falsifier: "An exact repository or runtime result shows a different boundary controls the behavior",
+	actions: [
+		{
+			intent: productionAction.intent,
+			completionCondition: productionAction.completionCondition,
+			expectedEvidenceRounds: 5,
+			budgetReason: "The second probe depends on the implementation location returned by the first result",
+		},
+	],
 } as const;
 
 const echoTool: AgentTool = {
@@ -63,7 +70,13 @@ describe("Phase 6 production loop ownership", () => {
 				}),
 				control({
 					...productionFrame,
-					statement: "Follow-up behavior is controlled by the verification boundary",
+					statement: "Cached verifier state controls whether queued input reaches the follow-up boundary",
+					actions: [
+						{
+							...productionFrame.actions[0],
+							intent: "Inspect the follow-up verification boundary",
+						},
+					],
 				}),
 				control({
 					...productionAction,

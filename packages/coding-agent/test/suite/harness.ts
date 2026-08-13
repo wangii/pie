@@ -84,6 +84,7 @@ export interface HarnessOptions {
 	pieProductionLoop?: boolean;
 	pieModelRouteIds?: Partial<Record<PieModelRole, string>>;
 	frameHorizonRange?: { min: number; max: number };
+	actionResponseLimit?: number;
 	/** Existing raw session used by restart and branch integration tests. */
 	sessionManager?: SessionManager;
 }
@@ -242,6 +243,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		contextInputTokenLimit: options.contextInputTokenLimit,
 		pieModelRoutes,
 		frameHorizonRange: options.frameHorizonRange,
+		actionResponseLimit: options.actionResponseLimit,
 	});
 
 	const events: AgentSessionEvent[] = [];

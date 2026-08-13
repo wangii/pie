@@ -61,7 +61,7 @@ console.log("PASS");
 		},
 		task:
 			"Fix the identifier regression and run npm test. Numeric zero is valid; only null and undefined are absent. " +
-			"Use bounded investigation episodes. The first Action completion condition is only: establish the exact defect from read-only repository evidence; it must not edit files or run the post-edit verification. After explicitly completing that Action, authorize a second Action under the same still-admissible Frame whose completion condition is: apply the repair and verify it with npm test. End the final answer with a line containing only PASS.",
+			"Diagnose the exact defect before changing the implementation. End the final answer with a line containing only PASS.",
 		baselineFrame: {
 			statement: "Complete the current user request without weakening its success semantics",
 			falsifier: "A world result shows the whole request cannot be completed",

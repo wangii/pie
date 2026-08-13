@@ -8,6 +8,7 @@ import {
 	streamAssistantResponse,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { ProvisionalActionContract } from "./frame-lease-budget.ts";
 
 /** Runtime states owned exclusively by Pie's production loop. */
 export type PieProductionLoopState =
@@ -23,9 +24,21 @@ export type PieProductionLoopState =
 export type PieProductionRequestRole = "epistemic" | "execution" | "finalAnswer";
 
 export type PieControlDecision =
-	| { kind: "create_frame"; statement: string; falsifier: string; horizon: number }
-	| { kind: "revise_frame"; statement: string; falsifier: string; horizon: number; reason: string }
-	| { kind: "replace_frame"; statement: string; falsifier: string; horizon: number; reason: string }
+	| { kind: "create_frame"; statement: string; falsifier: string; actions: ProvisionalActionContract[] }
+	| {
+			kind: "revise_frame";
+			statement: string;
+			falsifier: string;
+			actions: ProvisionalActionContract[];
+			reason: string;
+	  }
+	| {
+			kind: "replace_frame";
+			statement: string;
+			falsifier: string;
+			actions: ProvisionalActionContract[];
+			reason: string;
+	  }
 	| { kind: "falsify_frame" | "kill_frame"; reason: string }
 	| { kind: "revise_anchor"; statement: string; reason: string }
 	| { kind: "authorize_action"; intent: string; completionCondition: string }

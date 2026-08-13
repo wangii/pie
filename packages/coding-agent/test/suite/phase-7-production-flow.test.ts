@@ -6,6 +6,13 @@ import { PieProductionLoop } from "../../src/core/pie-agent-loop.ts";
 import { createHarness, getMessageText } from "./harness.ts";
 
 function control(decision: Record<string, unknown>) {
+	if (
+		(decision.kind === "create_frame" || decision.kind === "revise_frame" || decision.kind === "replace_frame") &&
+		!("actions" in decision)
+	) {
+		const { horizon: _legacyHorizon, ...withoutHorizon } = decision;
+		return fauxAssistantMessage(JSON.stringify({ ...withoutHorizon, actions: [actionBudget(action)] }));
+	}
 	return fauxAssistantMessage(JSON.stringify(decision));
 }
 
@@ -25,17 +32,35 @@ const inspectTool: AgentTool = {
 	}),
 };
 
-const frame = {
-	kind: "create_frame",
-	statement: "Repository behavior is controlled by the persisted cache boundary",
-	falsifier: "A restart test shows the failure persists after every cache instance is recreated",
-	horizon: 20,
-} as const;
-
 const action = {
 	kind: "authorize_action",
 	intent: "Inspect cache lifetime and the restart boundary",
 	completionCondition: "The cache lifetime and restart behavior are established by exact tool results",
+} as const;
+
+const secondAction = {
+	kind: "authorize_action",
+	intent: "Inspect whether invalidation crosses the worker boundary",
+	completionCondition: "An exact result establishes whether worker invalidation occurs",
+} as const;
+
+function actionBudget(definition: { intent: string; completionCondition: string }, expectedEvidenceRounds = 3) {
+	return {
+		intent: definition.intent,
+		completionCondition: definition.completionCondition,
+		expectedEvidenceRounds,
+		budgetReason:
+			expectedEvidenceRounds === 1
+				? "One response can issue all independent known probes"
+				: "Each later probe depends on the path or runtime result returned by the preceding probe",
+	};
+}
+
+const frame = {
+	kind: "create_frame",
+	statement: "Repository behavior is controlled by the persisted cache boundary",
+	falsifier: "A restart test shows the failure persists after every cache instance is recreated",
+	actions: [actionBudget(action), actionBudget(secondAction, 1)],
 } as const;
 
 function fullStackOptions() {
@@ -46,7 +71,7 @@ function fullStackOptions() {
 		actionEnabled: true,
 		observationEnabled: true,
 		tools: [inspectTool],
-		frameHorizonRange: { min: 3, max: 20 },
+		frameHorizonRange: { min: 6, max: 32 },
 	};
 }
 
@@ -71,7 +96,7 @@ describe("Phase 7 production control flow", () => {
 			expect(createdFrame).toMatchObject({
 				statement: frame.statement,
 				falsifier: frame.falsifier,
-				horizon: 20,
+				horizon: 12,
 			});
 			expect(createdFrame?.type === "frame_revision" ? createdFrame.statement : undefined).not.toBe(
 				"diagnose the restart failure",
@@ -87,6 +112,157 @@ describe("Phase 7 production control flow", () => {
 			expect(harness.session.agent.loopRunner).toBeInstanceOf(PieProductionLoop);
 			expect(harness.providerContexts).toHaveLength(6);
 			expect(harness.providerContexts.every((context) => context.messages.length > 0)).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects natural-task Frame and Action degeneration before execution", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement:
+						"Investigate the frame/action degeneration regression: trace state transitions, locate the root cause, and deliver a diagnosis with a fix.",
+					falsifier:
+						"No concrete degeneration site or root cause can be located after inspecting the transition paths.",
+					horizon: 16,
+				}),
+				control({
+					kind: "create_frame",
+					statement: "Action lifetime is controlled only by the containing Frame response lease",
+					falsifier: "A distinct Action response budget returns control before the Frame lease expires",
+					actions: [
+						actionBudget({
+							intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
+							completionCondition:
+								"Exact source locations establish whether Action has an independent response boundary",
+						}),
+					],
+				}),
+				control({
+					kind: "authorize_action",
+					intent: "Trace the Frame and Action transition paths end to end",
+					completionCondition:
+						"A concrete diagnosis with code references and a proposed fix, or a confirmed absence, is delivered",
+				}),
+				control({
+					kind: "authorize_action",
+					intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
+					completionCondition:
+						"Exact source locations establish whether Action has an independent response boundary",
+				}),
+				fauxAssistantMessage("The bounded source locations are established."),
+				control({ kind: "complete_action", reason: "The exact Action lifetime boundary was established" }),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("The Action boundary was verified."),
+			]);
+
+			await harness.session.prompt(
+				"Investigate the frame/action degeneration regression: trace state transitions, locate the root cause, and deliver a diagnosis with a fix.",
+			);
+
+			const branch = harness.sessionManager.getBranch();
+			expect(branch.filter((entry) => entry.type === "frame_revision")).toEqual([
+				expect.objectContaining({
+					statement: "Action lifetime is controlled only by the containing Frame response lease",
+				}),
+			]);
+			expect(branch.filter((entry) => entry.type === "action_start")).toEqual([
+				expect.objectContaining({
+					intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
+				}),
+			]);
+			expect(harness.providerContexts[1]!.systemPrompt).toContain(
+				"previous decision was rejected: Frame statement must assert one provisional world relation",
+			);
+			expect(harness.providerContexts[3]!.systemPrompt).toContain(
+				"previous decision was rejected: Action must authorize one finite episode",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("normalizes non-ASCII Anchor text before semantic Frame validation", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "调查工具说明如何适配认识循环和执行循环并给出具体修改",
+					falsifier: "没有发现工具说明与两个循环之间的具体差异",
+					horizon: 12,
+				}),
+				control({
+					kind: "create_frame",
+					statement: "工具调用结果的意义而非工具名称决定其所属循环",
+					falsifier: "同一工具的所有结果都被运行时固定归入同一个循环",
+					horizon: 12,
+				}),
+				control(action),
+				fauxAssistantMessage("bounded result"),
+				control({ kind: "complete_action", reason: "The bounded result was established" }),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("调查工具说明如何适配认识循环和执行循环并给出具体修改");
+
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_revision")).toEqual([
+				expect.objectContaining({ statement: "工具调用结果的意义而非工具名称决定其所属循环" }),
+			]);
+			expect(harness.providerContexts[1]!.systemPrompt).toContain("previous decision was rejected");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("requires a contradictory falsifier and preserves explicit adjudication under a derived Frame lease", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "The restart probe produces a cache-invalidating result",
+					falsifier: "Running the restart probe produces the cache-invalidating result",
+					horizon: 1,
+				}),
+				control({
+					kind: "create_frame",
+					statement:
+						"The concrete falsifier prescribed by the report will occur when its restart probe runs, contradicting worker-local cache persistence",
+					falsifier: "The authorization failure persists after a clean worker restart",
+					horizon: 1,
+				}),
+				control({
+					kind: "create_frame",
+					statement: "Worker-local cache persistence explains the authorization failure",
+					falsifier: "The authorization failure persists after a clean worker restart",
+					horizon: 1,
+				}),
+				control({
+					kind: "falsify_frame",
+					reason: "The clean-restart result directly contradicts worker-local cache persistence",
+				}),
+				control({ kind: "report_inability", reason: "Boundary adjudication was verified" }),
+				fauxAssistantMessage("The explicit falsification was preserved."),
+			]);
+
+			await harness.session.prompt("adjudicate the restart evidence at the lease boundary");
+
+			const branch = harness.sessionManager.getBranch();
+			expect(branch.filter((entry) => entry.type === "frame_revision")).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "frame_transition")).toEqual([
+				expect.objectContaining({ transition: "falsified" }),
+			]);
+			expect(harness.providerContexts[1]!.systemPrompt).toContain(
+				"previous decision was rejected: Frame falsifier must name a concrete observable result that contradicts",
+			);
+			expect(harness.providerContexts[2]!.systemPrompt).toContain(
+				"previous decision was rejected: Frame statement must assert one provisional world relation",
+			);
 		} finally {
 			harness.cleanup();
 		}
@@ -229,41 +405,142 @@ describe("Phase 7 production control flow", () => {
 		}
 	});
 
-	it("expires the response lease after terminating the active Action and reconsiders in the same run", async () => {
+	it("rejects a conditional meta-Frame that turns its probe into support", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement:
+						"The report accurately identifies worker-local cache as the cause only if its restart probe reproduces the failure",
+					falsifier: "Running the restart probe does not reproduce the authorization failure",
+					horizon: 16,
+				}),
+				control(frame),
+				control({ kind: "report_inability", reason: "Conditional Frame rejection was verified" }),
+				fauxAssistantMessage("The conditional Frame was rejected."),
+			]);
+
+			await harness.session.prompt("verify that the restart probe remains a falsifier");
+
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_revision")).toEqual([
+				expect.objectContaining({ statement: frame.statement }),
+			]);
+			expect(harness.providerContexts[1]!.systemPrompt).toContain(
+				"previous decision was rejected: Frame statement must assert one provisional world relation",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("preserves explicit Action completion within the derived Frame lease", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control(frame),
+				control(action),
+				fauxAssistantMessage("The exact bounded result is established."),
+				control({ kind: "complete_action", reason: "The bounded result is established at the lease boundary" }),
+				control({ kind: "authorize_final", reason: "The completed Action establishes the Anchor" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("complete exactly at the Frame lease boundary");
+
+			const branch = harness.sessionManager.getBranch();
+			const actionCompletionIndex = branch.findIndex(
+				(entry) => entry.type === "action_transition" && entry.transition === "completed",
+			);
+			const frameExpiryIndex = branch.findIndex(
+				(entry) => entry.type === "frame_transition" && entry.transition === "expired",
+			);
+			expect(actionCompletionIndex).toBeGreaterThan(-1);
+			expect(frameExpiryIndex).toBe(-1);
+			expect(harness.providerContexts[5]!.systemPrompt).toContain(
+				"Epistemic control established Anchor satisfaction and authorized the final answer",
+			);
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("returns control before one Action can consume the containing Frame lease", async () => {
 		const harness = await createHarness({
 			...fullStackOptions(),
-			frameHorizonRange: { min: 3, max: 3 },
+			actionResponseLimit: 4,
 		});
 		try {
 			harness.setResponses([
-				control({ ...frame, horizon: 99 }),
-				control(action),
-				fauxAssistantMessage("No terminal evidence yet."),
-				control({ kind: "continue_action", reason: "More evidence is required" }),
 				control({
-					kind: "create_frame",
-					statement: "Runtime invalidation is controlled by worker-local state",
-					falsifier: "A worker trace shows authorization reads only the shared session store",
-					horizon: 3,
+					...frame,
+					actions: [actionBudget(action, 2), actionBudget(secondAction, 1)],
 				}),
-				control({ kind: "report_inability", reason: "The original lease expired before evidence was established" }),
-				fauxAssistantMessage("Unable to establish the result before mandatory reconsideration."),
+				control(action),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "first" }, { id: "inspect-budget-first" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "second" }, { id: "inspect-budget-second" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("The episode result remains incomplete."),
+				control({ kind: "continue_action", reason: "Try to keep the same episode alive" }),
+				control(secondAction),
+				fauxAssistantMessage("remaining boundary established"),
+				control({ kind: "complete_action", reason: "The remaining bounded result was established" }),
+				control({ kind: "authorize_final", reason: "Both bounded results establish the Anchor" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("inspect cache behavior without one task-sized Action");
+
+			const branch = harness.sessionManager.getBranch();
+			const frameEntry = branch.find((entry) => entry.type === "frame_revision");
+			const starts = branch.filter((entry) => entry.type === "action_start");
+			const transitions = branch.filter((entry) => entry.type === "action_transition");
+			expect(starts).toHaveLength(2);
+			expect(new Set(starts.map((entry) => entry.frameRevisionEntryId))).toEqual(
+				new Set([frameEntry?.type === "frame_revision" ? frameEntry.id : undefined]),
+			);
+			expect(transitions).toEqual([
+				expect.objectContaining({
+					transition: "unresolvable",
+					reason: expect.stringContaining("2-round serial evidence budget"),
+				}),
+				expect.objectContaining({ transition: "completed" }),
+			]);
+			expect(branch.filter((entry) => entry.type === "frame_transition")).toHaveLength(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("returns control when the accepted evidence-round estimate is exhausted", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({ ...frame, actions: [actionBudget(action, 1)] }),
+				control(action),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "inconclusive" }, { id: "lease-round" }), {
+					stopReason: "toolUse",
+				}),
+				control({ kind: "continue_action", reason: "Try to extend the exhausted estimate" }),
+				control({ kind: "report_inability", reason: "The bounded evidence round was inconclusive" }),
+				fauxAssistantMessage("Unable to establish the result within the evidence-round budget."),
 			]);
 
 			await harness.session.prompt("diagnose within a bounded lease");
 
 			const branch = harness.sessionManager.getBranch();
-			const actionTransitionIndex = branch.findIndex(
-				(entry) => entry.type === "action_transition" && entry.transition === "unresolvable",
-			);
-			const frameExpiryIndex = branch.findIndex(
-				(entry) => entry.type === "frame_transition" && entry.transition === "expired",
-			);
-			expect(actionTransitionIndex).toBeGreaterThan(-1);
-			expect(frameExpiryIndex).toBeGreaterThan(actionTransitionIndex);
-			expect(branch.filter((entry) => entry.type === "frame_revision")[0]).toMatchObject({ horizon: 3 });
-			expect(harness.providerContexts).toHaveLength(7);
-			expect(harness.session.getLastAssistantText()).toContain("mandatory reconsideration");
+			expect(branch.filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({
+					transition: "unresolvable",
+					reason: expect.stringContaining("1-round serial evidence budget"),
+				}),
+			]);
+			expect(branch.filter((entry) => entry.type === "frame_transition")).toHaveLength(0);
+			expect(harness.session.getLastAssistantText()).toContain("evidence-round budget");
 		} finally {
 			harness.cleanup();
 		}
@@ -288,18 +565,19 @@ describe("Phase 7 production control flow", () => {
 			}
 		};
 		const cacheAction = await run(frame, action);
+		const databaseCandidate = {
+			kind: "authorize_action",
+			intent: "Compare primary and replica authorization reads",
+			completionCondition: "Exact read results establish whether replica divergence exists",
+		};
 		const databaseAction = await run(
 			{
 				kind: "create_frame",
 				statement: "Authorization failure is controlled by stale database replica reads",
 				falsifier: "A primary-database trace shows the same stale authorization value",
-				horizon: 20,
+				actions: [actionBudget(databaseCandidate)],
 			},
-			{
-				kind: "authorize_action",
-				intent: "Compare primary and replica authorization reads",
-				completionCondition: "Exact read results establish whether replica divergence exists",
-			},
+			databaseCandidate,
 		);
 
 		expect(cacheAction).toBe(action.intent);

@@ -114,6 +114,12 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import {
+	DEFAULT_FRAME_LEASE_POLICY,
+	deriveFrameLease,
+	type FrameLeaseCalculation,
+	type ProvisionalActionContract,
+} from "./frame-lease-budget.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -288,9 +294,9 @@ export interface AgentSessionConfig {
 	contextInputTokenLimit?: number;
 	/** Resolved production-loop model routes. Undefined routes follow the session model. */
 	pieModelRoutes?: PieModelRoutes;
-	/** Clamp controller-estimated Frame response leases to this inclusive range. */
+	/** Inclusive bounds for the deterministically derived production Frame lease. */
 	frameHorizonRange?: { min: number; max: number };
-	/** Maximum completed model responses allowed inside one production Action episode. */
+	/** Legacy fallback when a restored Frame has no transient lease derivation. */
 	actionResponseLimit?: number;
 }
 
@@ -441,6 +447,23 @@ export interface EpistemicDiagnostics {
 		availableInputTokens: number;
 		outputMessageTokens: number;
 	};
+	leaseBudget?: {
+		derivation: "available" | "unavailable";
+		frameRevisionEntryId: string;
+		provisionalActionCount?: number;
+		expectedEvidenceRounds?: number[];
+		consumedEvidenceRounds?: number;
+		activeExpectedEvidenceRounds?: number;
+		activeBudgetReason?: string;
+		unusedEvidenceRounds?: number;
+		costs?: FrameLeaseCalculation["costs"];
+	};
+}
+
+interface ActiveFrameLeaseBudget {
+	frameRevisionEntryId: string;
+	calculation: FrameLeaseCalculation;
+	actions: Array<ProvisionalActionContract & { actionStartEntryId?: string }>;
 }
 
 interface ToolDefinitionEntry {
@@ -462,6 +485,8 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
+const DEFAULT_ACTION_RESPONSE_LIMIT = 6;
+const DEFAULT_MAX_FRAME_HORIZON = 32;
 
 // ============================================================================
 // AgentSession Class
@@ -546,6 +571,7 @@ export class AgentSession {
 	private _activeProductionRequestRole: PieProductionRequestRole | undefined;
 	private readonly _frameHorizonRange: { min: number; max: number };
 	private readonly _actionResponseLimit: number;
+	private _frameLeaseBudget: ActiveFrameLeaseBudget | undefined;
 	private _controlRepairAttempts = 0;
 	private readonly _maxControlRepairAttempts = 3;
 	private _lastControlError: string | undefined;
@@ -622,7 +648,12 @@ export class AgentSession {
 							: new PhaseZeroContextCompiler());
 		this._configuredContextInputTokenLimit = config.contextInputTokenLimit;
 		this._contextInputTokenLimit = config.contextInputTokenLimit;
-		const frameHorizonRange = config.frameHorizonRange ?? { min: 12, max: 24 };
+		const actionResponseLimit = config.actionResponseLimit ?? DEFAULT_ACTION_RESPONSE_LIMIT;
+		if (!Number.isSafeInteger(actionResponseLimit) || actionResponseLimit < 2) {
+			throw new Error("Action response limit must be an integer of at least 2 so control transfer remains bounded.");
+		}
+		this._actionResponseLimit = actionResponseLimit;
+		const frameHorizonRange = config.frameHorizonRange ?? { min: 1, max: DEFAULT_MAX_FRAME_HORIZON };
 		if (
 			!Number.isSafeInteger(frameHorizonRange.min) ||
 			!Number.isSafeInteger(frameHorizonRange.max) ||
@@ -632,11 +663,6 @@ export class AgentSession {
 			throw new Error("Frame horizon range must contain positive ordered integers.");
 		}
 		this._frameHorizonRange = frameHorizonRange;
-		const actionResponseLimit = config.actionResponseLimit ?? 6;
-		if (!Number.isSafeInteger(actionResponseLimit) || actionResponseLimit < 2) {
-			throw new Error("Action response limit must be an integer of at least 2 so control transfer remains bounded.");
-		}
-		this._actionResponseLimit = actionResponseLimit;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -972,18 +998,25 @@ export class AgentSession {
 
 	private _productionSystemPrompt(role: PieProductionRequestRole): string {
 		if (role === "execution") {
-			const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
-			const responseBudget = action
-				? ` This episode has used ${action.completedModelResponses}/${this._actionResponseLimit} completed model responses; ` +
-					"the final response is reserved for epistemic adjudication, so execution stops when only one remains."
-				: "";
+			const state = restoreEpistemicState(this.sessionManager.getBranch());
+			const action = state.action;
+			const actionBudget = this._leaseBudgetForAction(state);
+			const consumedRounds = action ? this._consumedEvidenceRounds(action.startEntryId) : 0;
+			const responseBudget = actionBudget
+				? ` This episode has consumed ${consumedRounds}/${actionBudget.expectedEvidenceRounds} serial evidence rounds. ` +
+					`Accepted dependency: ${actionBudget.budgetReason}. The estimate is an upper lease, not a quota.`
+				: action
+					? ` This restored episode has no transient round derivation; the legacy ${this._actionResponseLimit}-response safety bound applies.`
+					: "";
 			return (
 				"Execute only the frozen CURRENT ACTION under the CURRENT FRAME. The CURRENT ACTION is the complete and exclusive " +
 				"scope of this request, even if the user asked for later work. Do not perform, anticipate, or combine a later episode. " +
 				"You may use multiple tools and model responses and may repair local execution strategy, but you must not change " +
 				"the Action intent or completion condition." +
 				responseBudget +
-				" As soon as the exact completion condition is established, stop this generation immediately: do not call another " +
+				" Batch independent read-only tool calls in one response when their execution contracts permit it. Do not spend a " +
+				"response only narrating progress: either gather evidence needed by the completion condition or state the established result. " +
+				"As soon as the exact completion condition is established, stop this generation immediately: do not call another " +
 				"tool, do not begin the next task step, and do not produce the user's final answer. A provider stop ends only this " +
 				"generation; it does not complete the Action or authorize a final answer. Return exactly UNRESOLVABLE only when " +
 				"the frozen completion condition cannot be met under current constraints."
@@ -996,8 +1029,14 @@ export class AgentSession {
 				: `Epistemic control established Anchor satisfaction and authorized the final answer: ${authorization?.reason ?? "authorized"}. Give only the user-visible final answer. Do not call tools.`;
 		}
 		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		const activeActionBudget = this._leaseBudgetForAction(state);
+		const consumedEvidenceRounds = state.action ? this._consumedEvidenceRounds(state.action.startEntryId) : 0;
 		const actionBudgetExhausted =
-			state.action !== undefined && state.action.completedModelResponses >= this._actionResponseLimit;
+			state.action !== undefined &&
+			(activeActionBudget
+				? consumedEvidenceRounds >= activeActionBudget.expectedEvidenceRounds
+				: state.action.completedModelResponses >= this._actionResponseLimit);
+		const policy = DEFAULT_FRAME_LEASE_POLICY;
 		const allowed = state.action
 			? actionBudgetExhausted
 				? "complete_action, unresolvable_action, or escalate_action"
@@ -1014,18 +1053,23 @@ export class AgentSession {
 			"last character must be }. " +
 			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
 			`The current state permits only: ${allowed}. ` +
-			`Frame horizon counts every completed model response under one exact Frame version and must be estimated within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}; allow enough responses for multiple sequential Actions without writing a step plan. ` +
-			`One Action may use at most ${this._actionResponseLimit} completed model responses; when that budget is exhausted, continue_action is forbidden and control must return. ` +
-			'Schemas: {"kind":"create_frame","statement":string,"falsifier":string,"horizon":integer}; ' +
-			"revise_frame and replace_frame also require reason; falsify_frame, kill_frame, continue_action, " +
+			`For create_frame, revise_frame, or replace_frame, enumerate 1-${policy.maxActions} provisional bounded Actions; do not supply horizon. ` +
+			`Each provisional Action has intent, completionCondition, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. ` +
+			"One evidence round is one model response that emits one or more independent evidence-producing tool calls; parallel read-only calls in that response count once. A later round is valid only when its probe depends on a result unavailable before the preceding round. " +
+			"Complexity, uncertainty, file count, or tool-call count do not justify extra rounds. Unknown source locations require a discovery-only Action before source reading. " +
+			`The harness derives horizon within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}: initial control ${policy.initialControlAllowance} + per Action authorization ${policy.actionAuthorizationCost} + evidence rounds + terminal adjudication ${policy.actionTerminalAdjudicationCost} + final Frame adjudication ${policy.finalFrameAdjudicationCost}. ` +
+			"When an accepted evidence-round estimate is exhausted, continue_action is forbidden and control must return without automatic renewal. " +
+			'Schemas: {"kind":"create_frame","statement":string,"falsifier":string,"actions":[{"intent":string,"completionCondition":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
+			"revise_frame and replace_frame use the same actions array and also require reason; falsify_frame, kill_frame, continue_action, " +
 			"complete_action, unresolvable_action, authorize_final, and report_inability require reason; " +
-			"revise_anchor requires statement and reason; authorize_action requires intent and completionCondition; " +
+			"revise_anchor requires statement and reason; authorize_action requires intent and completionCondition matching one unused provisional contract; " +
 			"escalate_action requires challenge (anchor or frame) and reason. A Frame must assert one provisional causal or " +
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
 			"the requested deliverable. Its falsifier names an exact observable world result that contradicts that relation, not " +
 			"an inability to finish the investigation. An Action is one bounded episode with one externally checkable completion " +
-			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. Split evidence collection, " +
-			"mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
+			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. Before authorize_action, " +
+			"ensure its exact contract matches the accepted provisional calculation. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
+			"Split evidence collection, mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
 			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
 			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
 			"outside its scope; such execution cannot merge a later Action into the current episode. After complete_action, " +
@@ -1109,9 +1153,36 @@ export class AgentSession {
 		return value as PieControlDecision;
 	}
 
-	private _clampControllerFrame(definition: FrameDefinition): FrameDefinition {
-		this._validateFrameDefinition(definition);
-		const anchor = restoreEpistemicState(this.sessionManager.getBranch()).anchor;
+	private _prepareControllerFrame(
+		definition: Extract<PieControlDecision, { kind: "create_frame" | "revise_frame" | "replace_frame" }>,
+		state: ReturnType<typeof restoreEpistemicState>,
+	): { frame: FrameDefinition; budget: ActiveFrameLeaseBudget } {
+		if ("horizon" in definition) {
+			throw new Error(
+				"Production Frame horizon is derived from provisional Actions; do not supply horizon directly.",
+			);
+		}
+		if (
+			typeof definition.statement !== "string" ||
+			typeof definition.falsifier !== "string" ||
+			!Array.isArray(definition.actions)
+		) {
+			throw new Error("Production Frame decision requires statement, falsifier, and provisional actions.");
+		}
+		for (const candidate of definition.actions) {
+			if (
+				!candidate ||
+				typeof candidate !== "object" ||
+				typeof candidate.intent !== "string" ||
+				typeof candidate.completionCondition !== "string" ||
+				typeof candidate.budgetReason !== "string"
+			) {
+				throw new Error(
+					"Each provisional Action requires a valid contract, expectedEvidenceRounds, and budgetReason.",
+				);
+			}
+		}
+		const anchor = state.anchor;
 		const statement = this._normalizeSemanticText(definition.statement);
 		const anchorStatement = anchor ? this._normalizeSemanticText(anchor.statement) : "";
 		const startsWithTaskVerb =
@@ -1155,10 +1226,30 @@ export class AgentSession {
 				"Frame falsifier must name a concrete observable result that contradicts, rather than restates, the Frame relation.",
 			);
 		}
-		return {
+		for (const candidate of definition.actions ?? []) this._validateControllerAction(candidate, state);
+		const calculation = deriveFrameLease(definition.actions ?? []);
+		if (calculation.horizon < this._frameHorizonRange.min || calculation.horizon > this._frameHorizonRange.max) {
+			throw new Error(
+				`Derived Frame horizon ${calculation.horizon} is outside ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}; narrow the Frame or choose a smaller provisional Action set.`,
+			);
+		}
+		const frame = {
 			statement: definition.statement.trim(),
 			falsifier: definition.falsifier.trim(),
-			horizon: Math.min(this._frameHorizonRange.max, Math.max(this._frameHorizonRange.min, definition.horizon)),
+			horizon: calculation.horizon,
+		};
+		return {
+			frame,
+			budget: {
+				frameRevisionEntryId: "",
+				calculation,
+				actions: definition.actions.map((candidate) => ({
+					...candidate,
+					intent: candidate.intent.trim(),
+					completionCondition: candidate.completionCondition.trim(),
+					budgetReason: candidate.budgetReason.trim(),
+				})),
+			},
 		};
 	}
 
@@ -1181,6 +1272,41 @@ export class AgentSession {
 				"Action must authorize one finite episode with one checkable result, not the whole task or a bundled deliverable.",
 			);
 		}
+	}
+
+	private _consumedEvidenceRounds(actionStartEntryId: string): number {
+		const branch = this.sessionManager.getBranch();
+		const startIndex = branch.findIndex((entry) => entry.id === actionStartEntryId);
+		if (startIndex < 0) return 0;
+		let rounds = 0;
+		for (let index = startIndex + 1; index < branch.length; index++) {
+			const entry = branch[index]!;
+			if (entry.type === "action_transition" && entry.startEntryId === actionStartEntryId) break;
+			if (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some((part) => part.type === "toolCall")
+			) {
+				rounds++;
+			}
+		}
+		return rounds;
+	}
+
+	private _leaseBudgetForFrame(frame: Frame | undefined): ActiveFrameLeaseBudget | undefined {
+		return frame && this._frameLeaseBudget?.frameRevisionEntryId === frame.revisionEntryId
+			? this._frameLeaseBudget
+			: undefined;
+	}
+
+	private _leaseBudgetForAction(
+		state: ReturnType<typeof restoreEpistemicState>,
+	): (ProvisionalActionContract & { actionStartEntryId: string }) | undefined {
+		if (!state.action) return undefined;
+		return this._leaseBudgetForFrame(state.frame)?.actions.find(
+			(candidate): candidate is ProvisionalActionContract & { actionStartEntryId: string } =>
+				candidate.actionStartEntryId === state.action?.startEntryId,
+		);
 	}
 
 	private _expireProductionFrame(sourceEventId: string): boolean {
@@ -1212,22 +1338,28 @@ export class AgentSession {
 		switch (decision.kind) {
 			case "create_frame": {
 				if (state.frame) throw new Error("A Frame is already active; revise or replace it explicitly.");
-				const frame = this._clampControllerFrame(decision);
-				this._applyFrameDirective({ type: "create", ...frame }, sourceEventId, undefined);
+				const prepared = this._prepareControllerFrame(decision, state);
+				this._applyFrameDirective({ type: "create", ...prepared.frame }, sourceEventId, undefined);
+				const created = restoreEpistemicState(this.sessionManager.getBranch()).frame!;
+				prepared.budget.frameRevisionEntryId = created.revisionEntryId;
+				this._frameLeaseBudget = prepared.budget;
 				return "epistemic";
 			}
 			case "revise_frame":
 			case "replace_frame": {
 				if (state.action) throw new Error("Terminate the active Action before changing its Frame.");
 				if (!state.frame) throw new Error(`Cannot ${decision.kind} because no Frame is active.`);
-				const frame = this._clampControllerFrame(decision);
+				const prepared = this._prepareControllerFrame(decision, state);
 				this._applyFrameDirective(
 					decision.kind === "revise_frame"
-						? { type: "revise", ...frame, revisionReason: reason }
-						: { type: "replace", ...frame, reason: reason! },
+						? { type: "revise", ...prepared.frame, revisionReason: reason }
+						: { type: "replace", ...prepared.frame, reason: reason! },
 					sourceEventId,
 					state.frame,
 				);
+				const revised = restoreEpistemicState(this.sessionManager.getBranch()).frame!;
+				prepared.budget.frameRevisionEntryId = revised.revisionEntryId;
+				this._frameLeaseBudget = prepared.budget;
 				return "epistemic";
 			}
 			case "falsify_frame":
@@ -1261,8 +1393,26 @@ export class AgentSession {
 				if (state.action) throw new Error("An Action episode is already active.");
 				if (!state.frame) throw new Error("Create an admissible Frame before authorizing an Action.");
 				this._validateControllerAction(decision, state);
+				const leaseBudget = this._leaseBudgetForFrame(state.frame);
+				if (!leaseBudget) {
+					throw new Error(
+						"Frame lease derivation is unavailable after restoration; revise the Frame before authorizing another Action.",
+					);
+				}
+				const planned = leaseBudget.actions.find(
+					(candidate) =>
+						candidate.actionStartEntryId === undefined &&
+						candidate.intent === decision.intent.trim() &&
+						candidate.completionCondition === decision.completionCondition.trim(),
+				);
+				if (!planned) {
+					throw new Error(
+						"Authorized Action must match one unused provisional contract from the current Frame lease calculation; revise the Frame when new evidence changes the candidate set.",
+					);
+				}
 				this._appendActionStart(decision, sourceEventId, state.frame);
 				state = restoreEpistemicState(this.sessionManager.getBranch());
+				planned.actionStartEntryId = state.action?.startEntryId;
 				this._operationalActionId = state.action?.id;
 				this._operationalRepairAttempts = 0;
 				this._latestOperationalError = undefined;
@@ -1270,18 +1420,29 @@ export class AgentSession {
 				this._ambiguousMutation = undefined;
 				return "execution";
 			}
-			case "continue_action":
+			case "continue_action": {
 				if (!state.action) throw new Error("No Action is active to continue.");
-				if (state.action.completedModelResponses >= this._actionResponseLimit) {
+				const actionBudget = this._leaseBudgetForAction(state);
+				const consumedRounds = this._consumedEvidenceRounds(state.action.startEntryId);
+				const exhausted = actionBudget
+					? consumedRounds >= actionBudget.expectedEvidenceRounds ||
+						state.action.completedModelResponses >=
+							actionBudget.expectedEvidenceRounds + DEFAULT_FRAME_LEASE_POLICY.actionTerminalAdjudicationCost
+					: state.action.completedModelResponses >= this._actionResponseLimit;
+				if (exhausted) {
+					const budgetDescription = actionBudget
+						? `${actionBudget.expectedEvidenceRounds}-round serial evidence budget`
+						: `${this._actionResponseLimit}-response legacy execution budget`;
 					this._appendActionTransition(
 						state.action,
 						"unresolvable",
 						sourceEventId,
-						`Action reached its ${this._actionResponseLimit}-response execution budget without establishing the frozen completion condition.`,
+						`Action reached its ${budgetDescription} without establishing the frozen completion condition.`,
 					);
 					return "epistemic";
 				}
 				return "execution";
+			}
 			case "complete_action":
 			case "unresolvable_action":
 			case "escalate_action":
@@ -1427,7 +1588,17 @@ export class AgentSession {
 				const sourceEventId = this._latestAssistantEventId();
 				if (this._expireProductionFrame(sourceEventId)) return { nextRole: "epistemic" };
 				const state = restoreEpistemicState(this.sessionManager.getBranch());
-				if (!state.action || state.action.completedModelResponses >= this._actionResponseLimit - 1) {
+				if (!state.action) return { nextRole: "epistemic" };
+				const actionBudget = this._leaseBudgetForAction(state);
+				if (actionBudget) {
+					if (
+						this._consumedEvidenceRounds(state.action.startEntryId) >= actionBudget.expectedEvidenceRounds ||
+						state.action.completedModelResponses >=
+							actionBudget.expectedEvidenceRounds + DEFAULT_FRAME_LEASE_POLICY.actionTerminalAdjudicationCost - 1
+					) {
+						return { nextRole: "epistemic" };
+					}
+				} else if (state.action.completedModelResponses >= this._actionResponseLimit - 1) {
 					return { nextRole: "epistemic" };
 				}
 				if (toolResults.length > 0) return { nextRole: "execution" };
@@ -2140,6 +2311,21 @@ export class AgentSession {
 				};
 			}
 		}
+		const frameLeaseBudget =
+			this._leaseBudgetForFrame(state.frame) ?? (!state.frame ? this._frameLeaseBudget : undefined);
+		const activeActionBudget = this._leaseBudgetForAction(state);
+		const consumedEvidenceRounds = state.action ? this._consumedEvidenceRounds(state.action.startEntryId) : undefined;
+		const unusedEvidenceRounds = frameLeaseBudget?.actions.reduce(
+			(sum, candidate) =>
+				sum +
+				(candidate.actionStartEntryId
+					? Math.max(
+							0,
+							candidate.expectedEvidenceRounds - this._consumedEvidenceRounds(candidate.actionStartEntryId),
+						)
+					: candidate.expectedEvidenceRounds),
+			0,
+		);
 		const observationProvenance = (observation: Observation): ObservationProvenanceDiagnostic[] =>
 			observation.sourceEventIds.flatMap((sourceEventId): ObservationProvenanceDiagnostic[] => {
 				const source = branch.find((entry) => entry.id === sourceEventId);
@@ -2242,6 +2428,24 @@ export class AgentSession {
 						outputMessageTokens: manifest.budget.outputMessageTokens,
 					}
 				: undefined,
+			leaseBudget: frameLeaseBudget
+				? {
+						derivation: "available",
+						frameRevisionEntryId: frameLeaseBudget.frameRevisionEntryId,
+						provisionalActionCount: frameLeaseBudget.calculation.provisionalActionCount,
+						expectedEvidenceRounds: frameLeaseBudget.calculation.expectedEvidenceRounds,
+						consumedEvidenceRounds,
+						activeExpectedEvidenceRounds: activeActionBudget?.expectedEvidenceRounds,
+						activeBudgetReason: activeActionBudget?.budgetReason,
+						unusedEvidenceRounds,
+						costs: frameLeaseBudget.calculation.costs,
+					}
+				: state.frame
+					? {
+							derivation: "unavailable",
+							frameRevisionEntryId: state.frame.revisionEntryId,
+						}
+					: undefined,
 		};
 	}
 

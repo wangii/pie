@@ -72,25 +72,36 @@ describe("context compiler provider boundary", () => {
 		});
 		try {
 			const decision = (value: Record<string, unknown>) => fauxAssistantMessage(JSON.stringify(value));
+			const ownership = {
+				intent: "Inspect cache ownership",
+				completionCondition: "Exact repository results identify the owning process",
+			};
+			const invalidation = {
+				intent: "Inspect cache invalidation",
+				completionCondition: "An exact runtime result establishes invalidation behavior",
+			};
 			harness.setResponses([
 				decision({
 					kind: "create_frame",
 					statement: "Worker cache lifetime controls authorization behavior",
 					falsifier: "A clean worker restart preserves the authorization failure",
-					horizon: 20,
+					actions: [
+						{
+							...ownership,
+							expectedEvidenceRounds: 1,
+							budgetReason: "One response can issue all known ownership probes",
+						},
+						{
+							...invalidation,
+							expectedEvidenceRounds: 1,
+							budgetReason: "One response can issue all known invalidation probes",
+						},
+					],
 				}),
-				decision({
-					kind: "authorize_action",
-					intent: "Inspect cache ownership",
-					completionCondition: "Exact repository results identify the owning process",
-				}),
+				decision({ kind: "authorize_action", ...ownership }),
 				fauxAssistantMessage("first low-level episode trace"),
 				decision({ kind: "complete_action", reason: "The owning process was identified" }),
-				decision({
-					kind: "authorize_action",
-					intent: "Inspect cache invalidation",
-					completionCondition: "An exact runtime result establishes invalidation behavior",
-				}),
+				decision({ kind: "authorize_action", ...invalidation }),
 				fauxAssistantMessage("second episode result"),
 				decision({ kind: "complete_action", reason: "Invalidation behavior was established" }),
 				decision({ kind: "authorize_final", reason: "Both bounded results satisfy the request" }),

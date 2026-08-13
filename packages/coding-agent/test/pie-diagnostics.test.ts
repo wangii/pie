@@ -85,6 +85,23 @@ const diagnostics: EpistemicDiagnostics = {
 		availableInputTokens: 12_000,
 		outputMessageTokens: 8_400,
 	},
+	leaseBudget: {
+		derivation: "available",
+		frameRevisionEntryId: "frame-event",
+		provisionalActionCount: 2,
+		expectedEvidenceRounds: [2, 3],
+		consumedEvidenceRounds: 1,
+		activeExpectedEvidenceRounds: 2,
+		activeBudgetReason: "The second probe depends on the location returned by the first result",
+		unusedEvidenceRounds: 1,
+		costs: {
+			initialControl: 0,
+			actionAuthorization: 2,
+			execution: 5,
+			actionTerminalAdjudication: 4,
+			finalFrameAdjudication: 2,
+		},
+	},
 };
 
 describe("Pie diagnostics UI projections", () => {
@@ -94,7 +111,7 @@ describe("Pie diagnostics UI projections", () => {
 		const session = { getEpistemicDiagnostics: () => diagnostics };
 		const status = formatPieStatus(session as never);
 		expect(status).toBe(
-			"Pie · TOOL EXECUTION · ACTION running · Frame responses 7/24 · ctx 8.4k/12k · omitted 41 · repair 1/3 completed negative result",
+			"Pie · TOOL EXECUTION · ACTION running · Frame responses 7/24 · evidence rounds 1/2 · ctx 8.4k/12k · omitted 41 · repair 1/3 completed negative result",
 		);
 	});
 
@@ -115,6 +132,11 @@ describe("Pie diagnostics UI projections", () => {
 		expect(output).toContain("retained output:\nfailed assertion");
 		expect(output).toContain("budget=37");
 		expect(output).toContain("input budget: 12000");
+		expect(output).toContain("Model-response lease: derived · 2 provisional Actions · evidence rounds 2 + 3");
+		expect(output).toContain(
+			"serial dependency: The second probe depends on the location returned by the first result",
+		);
+		expect(output).toContain("unused evidence rounds returned: 1");
 	});
 
 	it("renders collapsible transition markers and restoration receipts without conversation messages", () => {

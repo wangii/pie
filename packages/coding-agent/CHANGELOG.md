@@ -20,6 +20,7 @@
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.
 - Added configurable Pie model routing for epistemic requests and Action-local continuations.
 - Added Phase 7 production control with semantic Frame decisions, bounded response leases, finite multi-response Action episodes, explicit terminal control transfer, and final-answer authorization.
+- Added Phase 8 deterministic model-response leases derived from provisional Action contracts and bounded serial evidence rounds, with read-only budget diagnostics.
 
 ### Changed
 
@@ -30,6 +31,7 @@
 
 ### Fixed
 
+- Fixed production Frame horizons underfunding sequential Actions by deriving leases from explicit authorization, serial evidence-round, terminal-adjudication, and Frame-adjudication costs instead of an LLM-supplied total.
 - Fixed production Frames and Actions collapsing back into task-sized wrappers by validating relation/falsifier separation, rejecting bundled whole-task Actions, bounding each Action independently of its Frame lease, and preserving explicit Frame adjudication at the lease boundary.
 - Fixed `/vf` not listing the Actions authorized by the selected Frame.
 - Fixed inherited GitHub Copilot login triggering API rate limits while enabling model policies by limiting concurrent policy updates ([#6187](https://github.com/earendil-works/pi/issues/6187)).
