@@ -3,6 +3,7 @@
 ## 本地运行环境:
 - 本地使用 localhost:7890 作为proxy
 - 本机为 macOS,第三方工具可通过homebrew 来安装,更新
+- 在调用模型进行测试时,使用deepseek-v4-flash, auth 从 ~/.pi/agent/auth.json  中读取;
 
 ## Conversational Style
 
