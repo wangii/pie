@@ -943,6 +943,7 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
+	private restoredFromExistingFile = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -979,6 +980,7 @@ export class SessionManager {
 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			this.restoredFromExistingFile = true;
 			this.fileEntries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty, initialize it with a valid session header. If it was
@@ -1012,6 +1014,7 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		this.restoredFromExistingFile = false;
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -1094,6 +1097,11 @@ export class SessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
+	}
+
+	/** True only when this manager loaded an already-existing session file. */
+	wasRestoredFromExistingFile(): boolean {
+		return this.restoredFromExistingFile;
 	}
 
 	_persist(entry: SessionEntry): void {

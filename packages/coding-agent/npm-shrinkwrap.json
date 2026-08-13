@@ -36,7 +36,7 @@
 			},
 			"bin": {
 				"pi": "dist/cli.js",
-				"pie": "dist/cli.js"
+				"pie": "dist/pie-cli.js"
 			},
 			"engines": {
 				"node": ">=22.19.0"

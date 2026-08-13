@@ -76,6 +76,16 @@ describe("Phase 4 Observation provider boundary", () => {
 					"Contract: frozen for this episode. Tools and execution strategy may change; intent and completion condition may not. " +
 					"If the condition cannot be met under the current Frame and constraints, return exactly UNRESOLVABLE.",
 			]);
+			expect(harness.session.getEpistemicDiagnostics().state.observations[0]?.provenance).toEqual([
+				expect.objectContaining({
+					rawEventId: resultEntry!.id,
+					toolCallId: "call-1",
+					toolName: "inspect",
+					arguments: {},
+					isError: false,
+					output: "worker cache TTL is 30 seconds",
+				}),
+			]);
 			expect(harness.session.latestContextManifest).toMatchObject({
 				compilerVersion: "pie-phase-4-observation/v1",
 				epistemicState: {

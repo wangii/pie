@@ -14,6 +14,9 @@ export {
 	type FrameDirective,
 	type ModelCycleResult,
 	type ObservationDefinition,
+	type ObservationProvenanceDiagnostic,
+	type OperationalErrorClass,
+	type OperationalErrorStatus,
 	type PromptOptions,
 	type SessionStats,
 } from "./agent-session.ts";

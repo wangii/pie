@@ -66,6 +66,8 @@ describe("loadEntriesFromFile", () => {
 		expect(entries).toHaveLength(2);
 		expect(entries[0].type).toBe("session");
 		expect(entries[1].type).toBe("message");
+		const manager = SessionManager.open(file, tempDir);
+		expect(manager.wasRestoredFromExistingFile()).toBe(true);
 	});
 
 	it("skips malformed lines but keeps valid ones", () => {
@@ -314,6 +316,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		writeFileSync(emptyFile, "");
 
 		const sm = SessionManager.open(emptyFile, tempDir);
+		expect(sm.wasRestoredFromExistingFile()).toBe(false);
 
 		// Should have created a new session with valid header
 		expect(sm.getSessionId()).toBeTruthy();

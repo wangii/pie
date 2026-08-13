@@ -22,6 +22,220 @@ const echoTool: AgentTool = {
 };
 
 describe("Phase 6 production loop ownership", () => {
+	it("automatically drives the surviving epistemic stack for a production request", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage("production request complete"),
+				fauxAssistantMessage("follow-up complete"),
+			]);
+
+			await harness.session.prompt("implement the requested fix");
+
+			let diagnostics = harness.session.getEpistemicDiagnostics();
+			expect(diagnostics.state.anchor?.statement).toBe("implement the requested fix");
+			expect(diagnostics.state.frame?.statement).toContain("implement the requested fix");
+			expect(diagnostics.state.action).toBeUndefined();
+			expect(diagnostics.state.observations).toEqual([]);
+			expect(harness.providerContexts[0]!.messages.map(getMessageText)).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining("[ANCHOR]"),
+					expect.stringContaining("[CURRENT FRAME]"),
+					expect.stringContaining("[CURRENT ACTION]"),
+				]),
+			);
+
+			await harness.session.prompt("now verify the follow-up behavior");
+
+			diagnostics = harness.session.getEpistemicDiagnostics();
+			expect(diagnostics.state.anchor).toMatchObject({
+				revision: 2,
+				statement: "now verify the follow-up behavior",
+			});
+			expect(diagnostics.state.action).toBeUndefined();
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({ transition: "completed" }),
+				expect.objectContaining({ transition: "completed" }),
+			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("preserves explicit epistemic directives instead of applying production defaults", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage("explicit state retained")]);
+
+			await harness.session.prompt("raw request text", {
+				anchor: { statement: "explicit success semantics" },
+				frame: {
+					type: "create",
+					statement: "explicit investigation",
+					falsifier: "explicit contradiction",
+					horizon: 4,
+				},
+				action: {
+					type: "start",
+					intent: "explicit intent",
+					completionCondition: "explicit completion",
+				},
+			});
+
+			const diagnostics = harness.session.getEpistemicDiagnostics();
+			expect(diagnostics.state.anchor?.statement).toBe("explicit success semantics");
+			expect(diagnostics.state.frame?.statement).toBe("explicit investigation");
+			expect(diagnostics.state.action).toMatchObject({
+				intent: "explicit intent",
+				completionCondition: "explicit completion",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("restores an interrupted persisted Action without replaying it or presenting it as completed", async () => {
+		const first = await createHarness({
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+		});
+		const manager = first.sessionManager;
+		try {
+			first.setResponses([fauxAssistantMessage("checkpoint")]);
+			await first.session.prompt("persist an active episode", {
+				anchor: { statement: "preserve restart state" },
+				frame: {
+					type: "create",
+					statement: "restart should restore state",
+					falsifier: "state is missing after restart",
+					horizon: 4,
+				},
+				action: { type: "start", intent: "inspect restart", completionCondition: "state is restored" },
+			});
+		} finally {
+			first.cleanup();
+		}
+
+		const resumed = await createHarness({
+			sessionManager: manager,
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+		});
+		try {
+			const restored = resumed.session.getEpistemicDiagnostics();
+			expect(restored.state.action).toMatchObject({ intent: "inspect restart" });
+			expect(restored.state.lastAction?.transition).toBeUndefined();
+			expect(resumed.providerContexts).toHaveLength(0);
+
+			resumed.setResponses([fauxAssistantMessage("new request complete")]);
+			await resumed.session.prompt("continue with a new bounded request");
+
+			expect(resumed.providerContexts).toHaveLength(1);
+			expect(manager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({ transition: "unresolvable", reason: expect.stringContaining("superseded") }),
+				expect.objectContaining({ transition: "completed" }),
+			]);
+		} finally {
+			resumed.cleanup();
+		}
+	});
+
+	it("returns interrupted automatic Actions as UNRESOLVABLE provenance", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage("cancelled", { stopReason: "aborted" })]);
+
+			await harness.session.prompt("run until interrupted");
+
+			expect(harness.session.action).toBeUndefined();
+			expect(harness.sessionManager.getBranch().find((entry) => entry.type === "action_transition")).toMatchObject({
+				type: "action_transition",
+				transition: "unresolvable",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("preserves the frozen Action across bounded provider retry", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("recovered"),
+			]);
+
+			await harness.session.prompt("recover without weakening the request");
+
+			expect(harness.providerContexts).toHaveLength(2);
+			expect(harness.session.action).toBeUndefined();
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_start")).toHaveLength(1);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({ transition: "completed" }),
+			]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("returns UNRESOLVABLE after bounded provider recovery is exhausted", async () => {
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			]);
+
+			await harness.session.prompt("fail in bounded time");
+
+			expect(harness.providerContexts).toHaveLength(2);
+			expect(harness.session.action).toBeUndefined();
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({ transition: "unresolvable" }),
+			]);
+			expect(harness.session.isIdle).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("owns provider requests and tool continuation without invoking the stock loop", async () => {
 		const harness = await createHarness({
 			pieProductionLoop: true,
@@ -48,10 +262,129 @@ describe("Phase 6 production loop ownership", () => {
 			expect(harness.providerContexts).toHaveLength(2);
 			expect(harness.providerContexts[0]!.messages.map(getMessageText)).toContain("run the production loop");
 			expect(harness.providerContexts[1]!.messages.map(getMessageText)).toContain("world-result");
-			expect(states).toContainEqual({ event: "tool_execution_start", state: "executing_tools" });
-			expect(states).toContainEqual({ event: "agent_end", state: "finished" });
-			expect((loop as PieProductionLoop).state).toBe("idle");
+			expect(states).toContainEqual({ event: "tool_execution_start", state: "tool_execution" });
+			expect(states).toContainEqual({ event: "agent_end", state: "completed" });
+			expect((loop as PieProductionLoop).state).toBe("completed");
 			expect(harness.session.latestContextManifest?.compilerVersion).toBe("pie-phase-0/v1");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("classifies operational failures without changing the frozen Action contract", async () => {
+		const cases = [
+			{
+				name: "bash",
+				args: { command: "missing-command" },
+				message: "sh: missing-command: command not found\nCommand exited with code 127",
+				expected: "invocation_failure",
+			},
+			{
+				name: "bash",
+				args: { command: "run-tests" },
+				message: "tests failed\nCommand exited with code 1",
+				expected: "completed_negative_result",
+			},
+			{
+				name: "read",
+				args: { path: "fixture.txt" },
+				message: "Operation aborted",
+				expected: "interrupted_execution",
+			},
+			{
+				name: "write",
+				args: { path: "fixture.txt", content: "changed" },
+				message: "I/O failure after write may have completed",
+				expected: "ambiguous_mutation",
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const tool: AgentTool = {
+				name: testCase.name,
+				label: testCase.name,
+				description: "Fail predictably",
+				parameters: Type.Object({}, { additionalProperties: true }),
+				execute: async () => {
+					throw new Error(testCase.message);
+				},
+			};
+			const harness = await createHarness({
+				pieProductionLoop: true,
+				anchorEnabled: true,
+				frameEnabled: true,
+				actionEnabled: true,
+				observationEnabled: true,
+				tools: [tool],
+			});
+			try {
+				harness.setResponses([
+					fauxAssistantMessage(fauxToolCall(testCase.name, testCase.args, { id: `call-${testCase.expected}` }), {
+						stopReason: "toolUse",
+					}),
+					fauxAssistantMessage("local repair complete"),
+				]);
+				await harness.session.prompt(`exercise ${testCase.expected}`);
+
+				expect(harness.eventsOfType("operational_error")).toContainEqual(
+					expect.objectContaining({
+						classification: testCase.expected,
+						attempt: 1,
+						maxAttempts: 3,
+						frozenContract: true,
+					}),
+				);
+				expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_start")).toHaveLength(1);
+			} finally {
+				harness.cleanup();
+			}
+		}
+	});
+
+	it("blocks blind ambiguous-mutation replay and returns UNRESOLVABLE when repair is exhausted", async () => {
+		const writeTool: AgentTool = {
+			name: "write",
+			label: "write",
+			description: "Ambiguous write fixture",
+			parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+			execute: async () => {
+				throw new Error("I/O failure after mutation may have completed");
+			},
+		};
+		const harness = await createHarness({
+			pieProductionLoop: true,
+			anchorEnabled: true,
+			frameEnabled: true,
+			actionEnabled: true,
+			observationEnabled: true,
+			tools: [writeTool],
+		});
+		try {
+			const call = { path: "state.txt", content: "changed" };
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("write", call, { id: "write-1" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("write", call, { id: "write-2" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("write", call, { id: "write-3" }), { stopReason: "toolUse" }),
+			]);
+
+			await harness.session.prompt("perform a bounded mutation");
+
+			const errors = harness.eventsOfType("operational_error");
+			expect(errors.map((event) => event.classification)).toEqual([
+				"ambiguous_mutation",
+				"pre_execution_rejection",
+				"pre_execution_rejection",
+			]);
+			expect(errors.at(-1)).toMatchObject({ attempt: 3, maxAttempts: 3 });
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({
+					transition: "unresolvable",
+					reason: expect.stringContaining("Operational repair exhausted after 3/3"),
+				}),
+			]);
+			expect(harness.providerContexts).toHaveLength(3);
+			expect((harness.session.agent.loopRunner as PieProductionLoop).state).toBe("failed");
+			expect(harness.session.isIdle).toBe(true);
 		} finally {
 			harness.cleanup();
 		}

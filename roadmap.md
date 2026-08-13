@@ -372,6 +372,61 @@ Adapt the current `pi-tui` interactive mode to the new loop's events and command
 
 Existing TUI components should be reused where their event assumptions still hold. Compatibility glue belongs at the UI/runtime boundary; it must not translate epistemic state back into a synthetic transcript.
 
+#### 6.2.1 Make Pie's commitments and context ownership visible
+
+The TUI currently exposes ordinary transcript activity but not the relations that distinguish Pie from Pi. Dogfood users must be able to answer four questions without inspecting JSONL: what Pie is committed to, why execution is continuing, when reconsideration is mandatory, and what the model actually saw.
+
+**P0 — required for dependable dogfood:**
+
+1. Add a compact persistent status surface sourced from production-loop state and `ContextCompiler` diagnostics. At minimum show:
+   - authoritative loop state: idle, model streaming, tool execution, reconsidering, completed, cancelled, or failed;
+   - whether an Action is active and its terminal result when it ends;
+   - current Frame horizon consumption;
+   - compiler input budget, selected-token estimate, and omitted-event count;
+   - bounded recovery state such as retry attempt, `UNRESOLVABLE`, or returned-to-input-ready.
+
+   Context pressure must be computed from the latest compiler manifest, not from transcript size. A compact form may look like:
+
+   ```text
+   Pie · ACTION running · Frame 7/24 · ctx 8.4k/12k · omitted 41
+   ```
+
+2. Add a read-only `/pie` diagnostics panel backed by `AgentSession.getEpistemicDiagnostics()`. It should present the current Anchor, Frame and falsifier, Action and frozen completion condition, durable Observations, compiler version, selected and omitted event counts, omission reasons, and budget estimates. IDs and exact provenance should be copyable or expandable, but the panel must not edit canonical state.
+
+3. Render concise, collapsible state-transition markers in the transcript, for example:
+
+   ```text
+   Anchor revised · r2
+   Frame replaced · v3
+   Action started
+   Observation materialized · O17
+   Action UNRESOLVABLE
+   ```
+
+   These markers explain progression but are derived UI events, not synthetic conversation messages and not persisted cognition.
+
+**P1 — recovery and failure clarity:**
+
+4. On process restart or session switch, show a one-time restoration receipt containing restored primitive identities, active or terminal Action state, raw and branch event counts, and whether legacy summaries were ignored. An interrupted persisted Action must never be silently presented as completed or automatically replayed.
+
+5. Show operational error class and bounded recovery progress without introducing epistemic types. Distinguish pre-execution rejection, invocation failure, completed negative result, interrupted execution, and ambiguous mutation. Make clear that the Action contract remains frozen, that ambiguous mutations will be inspected instead of blindly replayed, and when repair exhaustion returns `UNRESOLVABLE`.
+
+6. Allow each Observation to expand to exact finalized-result provenance: raw event identity, tool-call/result identity, tool name, relevant arguments or command, exit/error/cancellation status, and retained output. The display must not imply that tool name, success, or `isError` alone justified materialization.
+
+**P2 — sustained-use efficiency:**
+
+7. When budget pressure reduces projection, emit one concise notice such as:
+
+   ```text
+   Projection reduced: 37 older events omitted; raw log unchanged.
+   ```
+
+   Do not use compaction language or generate a prose account of omitted history.
+
+8. Collapse an Action's execution-local trace by default while preserving expansion to every attempt, repair, streamed update, and finalized result. The summary should report structural counts and terminal status, not narratively summarize the episode.
+
+The UI must not add editable state forms, confidence or belief displays, claim graphs, automatic transcript summaries, or automatic Observation badges for ordinary tool results. Feature visibility is useful only when it remains a projection of loop, compiler, durable state, and raw provenance rather than becoming another context owner.
+
 ### 6.3 Re-plan tool contracts for the new loop
 
 Inventory every built-in tool before wiring it into the production loop. Do not classify a tool itself as "execution" or "observation": every invocation occurs inside Action-local execution, while only the meaning of a particular world result relative to the current Anchor and Frame can justify materializing an Observation.
@@ -466,7 +521,24 @@ Implemented in this checkpoint:
 - the package exposes a dedicated `pie` executable alongside the existing compatibility entry point;
 - deterministic Phase 6 tests were added for loop identity, state transitions, tool continuation, compiler-produced provider requests, and queued steering.
 
-Per the explicit implementation instruction, no tests, `npm run check`, generated-lock verification, or manual TUI validation have been run for this checkpoint. The code is therefore recorded as unverified. Next work is to move automatic Anchor/Frame/Action/Observation transitions into the new owner, implement the command-error classification and bounded-repair matrix, then run the deterministic and sustained-use gates.
+The initial seam was subsequently verified and extended:
+
+- the dedicated `pie` entry now resolves through `dist/pie-cli.js`, presents itself as Pie, and has a source-tree dogfood launcher at `./pie-test.sh`;
+- ordinary production requests automatically create or revise an Anchor, create or revise a finite Frame, start a frozen Action, and terminate that Action on final completion or interruption; explicit SDK/eval epistemic directives remain authoritative and bypass these defaults;
+- deterministic production-loop coverage passes 7/7 for automatic lifecycle, explicit-directive preservation, cancellation, bounded provider retry with one frozen Action, exhausted-retry `UNRESOLVABLE` return, tool continuation, compiler ownership, and steering;
+- `npm run check` passed, generated shrinkwrap/install-lock artifacts were verified, and source-tree CLI help/version smoke checks passed;
+- real `deepseek/deepseek-v4-flash` print-mode requests returned through `pie`; one persisted raw session contains the exact user event followed by Anchor, Frame, Action, assistant response, and completed Action transition, and a two-process resume smoke produced two append-only revisions/episodes without replay;
+- the existing TUI started as `pie v0.84.1` and returned to an input-ready screen without creating a second UI framework.
+
+Phase 6.2.1's P0/P1 visibility and recovery surface is now implemented:
+
+- a persistent Pie status row projects authoritative production-loop state, active or terminal Action state, Frame horizon consumption, the latest compiler budget/selection estimate, omissions, and bounded recovery progress;
+- read-only `/pie` diagnostics expose Anchor, Frame/falsifier, frozen Action contract, compiler selection and omission reasons, and durable Observations with exact finalized raw-result provenance;
+- derived collapsible transition markers and one-time persisted-session restoration receipts render without creating synthetic conversation messages or persisted cognition;
+- operational failures are classified as pre-execution rejection, invocation failure, completed negative result, interruption, or ambiguous mutation; repair is bounded to three failed attempts per Action, exhaustion returns `UNRESOLVABLE`, and exact ambiguous mutation replay is blocked until read-only inspection;
+- deterministic production-loop, Observation provenance, diagnostics UI, footer, interactive status, and session-file restoration tests pass, and `npm run check` passes.
+
+The application gate remains open. Next work is the full seven-built-in tool matrix, broader application-boundary cancellation/resume coverage, and the required sustained manual soak. Observation remains selective and is not inferred from tool name, success, or error status.
 
 ## Evaluation matrix
 

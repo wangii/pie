@@ -117,6 +117,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
+import { PieProductionLoop, type PieProductionLoopState } from "./pie-agent-loop.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
@@ -157,6 +158,25 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 	};
 }
 
+export type OperationalErrorClass =
+	| "pre_execution_rejection"
+	| "invocation_failure"
+	| "completed_negative_result"
+	| "interrupted_execution"
+	| "ambiguous_mutation";
+
+export interface OperationalErrorStatus {
+	classification: OperationalErrorClass;
+	toolCallId: string;
+	toolName: string;
+	attempt: number;
+	maxAttempts: number;
+	actionId?: string;
+	message: string;
+	frozenContract: boolean;
+	requiresInspection: boolean;
+}
+
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
@@ -173,6 +193,8 @@ export type AgentSessionEvent =
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
+	| { type: "context_compiled"; manifest: ContextSelectionManifest }
+	| ({ type: "operational_error" } & OperationalErrorStatus)
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
@@ -349,6 +371,18 @@ export interface SessionStats {
 }
 
 /** Concise, derived diagnostics for Pie's active state and most recent context projection. */
+export interface ObservationProvenanceDiagnostic {
+	rawEventId: string;
+	toolCallId?: string;
+	toolName: string;
+	arguments?: unknown;
+	command?: string;
+	isError?: boolean;
+	exitCode?: number;
+	cancelled?: boolean;
+	output: string;
+}
+
 export interface EpistemicDiagnostics {
 	enabled: {
 		anchor: boolean;
@@ -358,13 +392,33 @@ export interface EpistemicDiagnostics {
 	};
 	state: {
 		anchor?: Pick<Anchor, "id" | "revision" | "statement" | "revisionEntryId">;
-		frame?: Pick<Frame, "id" | "version" | "statement" | "revisionEntryId" | "horizon" | "completedModelResponses">;
+		frame?: Pick<
+			Frame,
+			"id" | "version" | "statement" | "falsifier" | "revisionEntryId" | "horizon" | "completedModelResponses"
+		>;
 		action?: Pick<Action, "id" | "intent" | "completionCondition" | "startEntryId" | "completedModelResponses">;
-		observations: Array<Pick<Observation, "id" | "statement" | "entryId" | "sourceEventIds">>;
+		lastAction?: {
+			id: string;
+			startEntryId: string;
+			transition?: ActionTerminalTransition;
+			transitionEntryId?: string;
+			reason?: string;
+		};
+		observations: Array<
+			Pick<Observation, "id" | "statement" | "entryId" | "sourceEventIds"> & {
+				provenance: ObservationProvenanceDiagnostic[];
+			}
+		>;
 	};
 	provenance: {
 		rawEventCount: number;
 		activeBranchEventCount: number;
+		legacySummaryCount: number;
+	};
+	runtime?: {
+		loopState: PieProductionLoopState;
+		inputReady: boolean;
+		recovery?: OperationalErrorStatus;
 	};
 	context?: {
 		compilerVersion: string;
@@ -432,6 +486,15 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	private readonly _maxOperationalRepairAttempts = 3;
+	private _operationalRepairAttempts = 0;
+	private _operationalActionId: string | undefined;
+	private _latestOperationalError: OperationalErrorStatus | undefined;
+	private _pendingRepairExhaustion:
+		| { actionId: string; toolCallId: string; classification: OperationalErrorClass }
+		| undefined;
+	private _toolInvocationArgs = new Map<string, unknown>();
+	private _ambiguousMutation: { actionId: string; signature: string } | undefined;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -469,6 +532,7 @@ export class AgentSession {
 	private _pendingFrameDirective: FrameDirective | undefined;
 	private _pendingActionDirective: ActionDirective | undefined;
 	private _pendingObservation: ObservationDefinition | undefined;
+	private _automaticActionRequest = false;
 	private _latestContextManifest: ContextSelectionManifest | undefined;
 	private readonly _configuredContextInputTokenLimit: number | undefined;
 	private _contextInputTokenLimit: number | undefined;
@@ -533,6 +597,7 @@ export class AgentSession {
 		this._installContextCompiler();
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._bindPieProductionLifecycle();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -830,8 +895,243 @@ export class AgentSession {
 				transformMessages,
 			});
 			this._latestContextManifest = compilation.manifest;
+			this._emit({ type: "context_compiled", manifest: compilation.manifest });
 			return compilation.messages;
 		};
+	}
+
+	private _bindPieProductionLifecycle(): void {
+		if (!(this.agent.loopRunner instanceof PieProductionLoop)) return;
+
+		this.agent.loopRunner.bindLifecycle({
+			beginRequest: (messages) => {
+				if (!this._anchorEnabled || !this._frameEnabled || !this._actionEnabled) return;
+				if (
+					this._pendingAnchorRevision ||
+					this._pendingFrameDirective ||
+					this._pendingActionDirective ||
+					this._pendingObservation
+				) {
+					return;
+				}
+				const branch = this.sessionManager.getBranch();
+				let state = restoreEpistemicState(branch);
+				const sourceEventId = branch
+					.slice()
+					.reverse()
+					.find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
+				if (!sourceEventId) throw new Error("Pie production request requires a persisted user event.");
+
+				const statement = messages
+					.filter((message) => message.role === "user")
+					.map((message) => contentText(message.content, ""))
+					.filter((text) => text.trim().length > 0)
+					.join("\n\n");
+				if (!statement) throw new Error("Pie production request requires non-empty task-success semantics.");
+
+				if (state.action) {
+					this._appendActionTransition(
+						state.action,
+						"unresolvable",
+						sourceEventId,
+						"A new user request superseded the active Action before its completion condition was met.",
+					);
+					state = restoreEpistemicState(this.sessionManager.getBranch());
+				}
+
+				if (!state.anchor) {
+					this._emitAppendedEntry(
+						this.sessionManager.appendAnchorRevision({
+							anchorId: `anchor-${sourceEventId}`,
+							revision: 1,
+							statement,
+							previousRevisionId: null,
+							sourceEventId,
+						}),
+					);
+				} else {
+					this._emitAppendedEntry(
+						this.sessionManager.appendAnchorRevision({
+							anchorId: state.anchor.id,
+							revision: state.anchor.revision + 1,
+							statement,
+							previousRevisionId: state.anchor.revisionEntryId,
+							sourceEventId,
+							revisionReason: "New production-loop user request.",
+						}),
+					);
+				}
+				state = restoreEpistemicState(this.sessionManager.getBranch());
+
+				const frameDefinition = {
+					statement: `Complete the current user request without weakening its stated success semantics: ${statement}`,
+					falsifier:
+						"A world result shows the request cannot be completed under the current repository and runtime constraints.",
+					horizon: 24,
+				};
+				if (state.frame) {
+					this._applyFrameDirective(
+						{
+							type: "revise",
+							...frameDefinition,
+							revisionReason: "Authorize the new production-loop request.",
+						},
+						sourceEventId,
+						state.frame,
+					);
+				} else {
+					this._applyFrameDirective({ type: "create", ...frameDefinition }, sourceEventId, undefined);
+				}
+				state = restoreEpistemicState(this.sessionManager.getBranch());
+				this._appendActionStart(
+					{
+						intent: statement,
+						completionCondition: `Produce a user-visible final answer only after completing this request: ${statement}`,
+					},
+					sourceEventId,
+					state.frame!,
+				);
+				const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
+				this._operationalActionId = action?.id;
+				this._operationalRepairAttempts = 0;
+				this._latestOperationalError = undefined;
+				this._pendingRepairExhaustion = undefined;
+				this._ambiguousMutation = undefined;
+				this._automaticActionRequest = true;
+			},
+			completeRequest: () => {
+				if (!this._automaticActionRequest) return;
+				this._latestOperationalError = undefined;
+				this._ambiguousMutation = undefined;
+				const branch = this.sessionManager.getBranch();
+				const state = restoreEpistemicState(branch);
+				const sourceEventId = branch
+					.slice()
+					.reverse()
+					.find((entry) => entry.type === "message" && entry.message.role === "assistant")?.id;
+				if (state.action && sourceEventId) {
+					this._appendActionTransition(
+						state.action,
+						"completed",
+						sourceEventId,
+						"The production loop emitted a user-visible final answer for the frozen request.",
+					);
+				}
+				this._automaticActionRequest = false;
+			},
+			interruptRequest: (reason) => {
+				if (!this._automaticActionRequest) return;
+				const branch = this.sessionManager.getBranch();
+				const state = restoreEpistemicState(branch);
+				const sourceEventId = branch.at(-1)?.id;
+				if (state.action && sourceEventId && sourceEventId !== state.action.startEntryId) {
+					this._appendActionTransition(state.action, "unresolvable", sourceEventId, reason);
+				}
+				this._automaticActionRequest = false;
+			},
+			shouldContinueAfterToolResults: () => {
+				if (!this._actionEnabled) return true;
+				const action = restoreEpistemicState(this.sessionManager.getBranch()).action;
+				if (action) return true;
+				this._automaticActionRequest = false;
+				return false;
+			},
+		});
+	}
+
+	private _toolCallSignature(toolName: string, args: unknown): string {
+		try {
+			return `${toolName}\0${JSON.stringify(args)}`;
+		} catch {
+			return `${toolName}\0[unserializable]`;
+		}
+	}
+
+	private _executionResultText(result: unknown): string {
+		if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content)) return "";
+		return result.content
+			.flatMap((part) =>
+				part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part
+					? [String(part.text)]
+					: [],
+			)
+			.join("\n");
+	}
+
+	private _isPotentialMutation(toolName: string, args: unknown): boolean {
+		if (toolName === "edit" || toolName === "write") return true;
+		if (toolName !== "bash" || !args || typeof args !== "object" || !("command" in args)) return false;
+		const command = String(args.command);
+		return /(?:^|[;&|]\s*|\s)(?:rm|mv|cp|install|mkdir|touch|truncate|chmod|chown|git\s+(?:add|commit|checkout|restore|reset|clean)|npm\s+(?:install|uninstall)|(?:python|node|perl|ruby)\s+-e)\b|(?:^|[^<])>{1,2}/.test(
+			command,
+		);
+	}
+
+	private _classifyOperationalError(toolName: string, args: unknown, result: unknown): OperationalErrorClass {
+		const text = this._executionResultText(result).toLowerCase();
+		if (/aborted|cancelled|canceled|timed out|timeout|signal/.test(text)) return "interrupted_execution";
+		if (
+			/not executed|not replayed|not found$|schema|validation|invalid tool arguments|required property|execution was blocked|blocked command|policy/.test(
+				text,
+			)
+		) {
+			return "pre_execution_rejection";
+		}
+		if (this._isPotentialMutation(toolName, args)) return "ambiguous_mutation";
+		if (
+			/command not found|enoent|no such file|permission denied|invalid (?:path|option)|unknown option|spawn/.test(
+				text,
+			)
+		) {
+			return "invocation_failure";
+		}
+		return "completed_negative_result";
+	}
+
+	private _recordOperationalError(event: Extract<AgentEvent, { type: "tool_execution_end" }>): void {
+		const args = this._toolInvocationArgs.get(event.toolCallId);
+		this._toolInvocationArgs.delete(event.toolCallId);
+		if (!event.isError) {
+			this._latestOperationalError = undefined;
+			if (["read", "grep", "find", "ls"].includes(event.toolName)) this._ambiguousMutation = undefined;
+			return;
+		}
+		const action = this._actionEnabled ? restoreEpistemicState(this.sessionManager.getBranch()).action : undefined;
+		if (this._operationalActionId !== action?.id) {
+			this._operationalActionId = action?.id;
+			this._operationalRepairAttempts = 0;
+			this._latestOperationalError = undefined;
+			this._ambiguousMutation = undefined;
+		}
+		this._operationalRepairAttempts++;
+		const boundedAttempt = Math.min(this._operationalRepairAttempts, this._maxOperationalRepairAttempts);
+		const classification = this._classifyOperationalError(event.toolName, args, event.result);
+		const status: OperationalErrorStatus = {
+			classification,
+			toolCallId: event.toolCallId,
+			toolName: event.toolName,
+			attempt: boundedAttempt,
+			maxAttempts: this._maxOperationalRepairAttempts,
+			actionId: action?.id,
+			message: this._executionResultText(event.result) || "Tool execution failed.",
+			frozenContract: action !== undefined,
+			requiresInspection: classification === "ambiguous_mutation",
+		};
+		this._latestOperationalError = status;
+		this._emit({ type: "operational_error", ...status });
+		if (classification === "ambiguous_mutation" && action) {
+			this._ambiguousMutation = {
+				actionId: action.id,
+				signature: this._toolCallSignature(event.toolName, args),
+			};
+		}
+		if (
+			action &&
+			this._operationalRepairAttempts >= this._maxOperationalRepairAttempts &&
+			!this._pendingRepairExhaustion
+		) {
+			this._pendingRepairExhaustion = { actionId: action.id, toolCallId: event.toolCallId, classification };
+		}
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -906,6 +1206,19 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			this._toolInvocationArgs.set(toolCall.id, args);
+			const action = this._actionEnabled ? restoreEpistemicState(this.sessionManager.getBranch()).action : undefined;
+			if (
+				this._ambiguousMutation &&
+				action?.id === this._ambiguousMutation.actionId &&
+				this._toolCallSignature(toolCall.name, args) === this._ambiguousMutation.signature
+			) {
+				return {
+					block: true,
+					reason:
+						"Ambiguous mutation was not replayed. Inspect current world state with a read-only tool or return UNRESOLVABLE; the Action contract remains frozen.",
+				};
+			}
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -927,6 +1240,9 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			if (!isError && ["read", "grep", "find", "ls"].includes(toolCall.name)) {
+				this._ambiguousMutation = undefined;
+			}
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
 				? await runner.emitToolResult({
@@ -1063,6 +1379,7 @@ export class AgentSession {
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		if (event.type === "tool_execution_end") this._recordOperationalError(event);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -1087,6 +1404,26 @@ export class AgentSession {
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			// Track assistant message for auto-compaction (checked on agent_end)
+			if (
+				event.message.role === "toolResult" &&
+				persistedMessageEntryId &&
+				this._pendingRepairExhaustion?.toolCallId === event.message.toolCallId
+			) {
+				const pending = this._pendingRepairExhaustion;
+				const action = this._actionEnabled
+					? restoreEpistemicState(this.sessionManager.getBranch()).action
+					: undefined;
+				if (action?.id === pending.actionId) {
+					this._appendActionTransition(
+						action,
+						"unresolvable",
+						persistedMessageEntryId,
+						`Operational repair exhausted after ${this._maxOperationalRepairAttempts}/${this._maxOperationalRepairAttempts} failed attempts; last class: ${pending.classification}. The frozen completion condition was not weakened.`,
+					);
+				}
+				this._pendingRepairExhaustion = undefined;
+			}
+
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
 
@@ -1354,6 +1691,66 @@ export class AgentSession {
 		for (const omission of manifest?.omissions ?? []) {
 			omissionsByReason[omission.reason] = (omissionsByReason[omission.reason] ?? 0) + 1;
 		}
+		const toolCalls = new Map<string, { name: string; arguments: unknown }>();
+		let lastAction:
+			| {
+					id: string;
+					startEntryId: string;
+					transition?: ActionTerminalTransition;
+					transitionEntryId?: string;
+					reason?: string;
+			  }
+			| undefined;
+		for (const entry of branch) {
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				for (const part of entry.message.content) {
+					if (part.type === "toolCall") {
+						toolCalls.set(part.id, { name: part.name, arguments: part.arguments });
+					}
+				}
+			} else if (entry.type === "action_start") {
+				lastAction = { id: entry.actionId, startEntryId: entry.id };
+			} else if (entry.type === "action_transition" && lastAction?.startEntryId === entry.startEntryId) {
+				lastAction = {
+					...lastAction,
+					transition: entry.transition,
+					transitionEntryId: entry.id,
+					reason: entry.reason,
+				};
+			}
+		}
+		const observationProvenance = (observation: Observation): ObservationProvenanceDiagnostic[] =>
+			observation.sourceEventIds.flatMap((sourceEventId): ObservationProvenanceDiagnostic[] => {
+				const source = branch.find((entry) => entry.id === sourceEventId);
+				if (source?.type !== "message") return [];
+				if (source.message.role === "toolResult") {
+					const call = toolCalls.get(source.message.toolCallId);
+					return [
+						{
+							rawEventId: source.id,
+							toolCallId: source.message.toolCallId,
+							toolName: source.message.toolName || call?.name || "unknown",
+							arguments: call?.arguments,
+							isError: source.message.isError,
+							output: contentText(source.message.content, ""),
+						},
+					];
+				}
+				if (source.message.role === "bashExecution") {
+					return [
+						{
+							rawEventId: source.id,
+							toolName: "bash",
+							command: source.message.command,
+							exitCode: source.message.exitCode,
+							cancelled: source.message.cancelled,
+							isError: source.message.cancelled || source.message.exitCode !== 0,
+							output: source.message.output,
+						},
+					];
+				}
+				return [];
+			});
 		return {
 			enabled: {
 				anchor: this._anchorEnabled,
@@ -1375,6 +1772,7 @@ export class AgentSession {
 							id: state.frame.id,
 							version: state.frame.version,
 							statement: state.frame.statement,
+							falsifier: state.frame.falsifier,
 							revisionEntryId: state.frame.revisionEntryId,
 							horizon: state.frame.horizon,
 							completedModelResponses: state.frame.completedModelResponses,
@@ -1389,17 +1787,30 @@ export class AgentSession {
 							completedModelResponses: state.action.completedModelResponses,
 						}
 					: undefined,
+				lastAction,
 				observations: (state.observations ?? []).map((observation) => ({
 					id: observation.id,
 					statement: observation.statement,
 					entryId: observation.entryId,
 					sourceEventIds: observation.sourceEventIds,
+					provenance: observationProvenance(observation),
 				})),
 			},
 			provenance: {
 				rawEventCount: this.sessionManager.getEntries().length,
 				activeBranchEventCount: branch.length,
+				legacySummaryCount: this.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "compaction" || entry.type === "branch_summary").length,
 			},
+			runtime:
+				this.agent.loopRunner instanceof PieProductionLoop
+					? {
+							loopState: this.agent.loopRunner.state,
+							inputReady: this.isIdle,
+							recovery: this._latestOperationalError,
+						}
+					: undefined,
 			context: manifest
 				? {
 						compilerVersion: manifest.compilerVersion,
@@ -1798,6 +2209,20 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
+			if (this._automaticActionRequest) {
+				const branch = this.sessionManager.getBranch();
+				const action = restoreEpistemicState(branch).action;
+				const sourceEventId = branch.at(-1)?.id;
+				if (action && sourceEventId && sourceEventId !== action.startEntryId) {
+					this._appendActionTransition(
+						action,
+						"unresolvable",
+						sourceEventId,
+						"The production request settled after bounded recovery without meeting its completion condition.",
+					);
+				}
+				this._automaticActionRequest = false;
+			}
 			this._pendingAnchorRevision = undefined;
 			this._pendingFrameDirective = undefined;
 			this._pendingActionDirective = undefined;

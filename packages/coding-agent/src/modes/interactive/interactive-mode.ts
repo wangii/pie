@@ -134,6 +134,14 @@ import {
 	formatAuthSelectorProviderType,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.ts";
+import {
+	formatOperationalError,
+	isPieStateTransitionEntry,
+	PieDiagnosticsComponent,
+	PieRestorationReceiptComponent,
+	PieStateTransitionComponent,
+	PieStatusComponent,
+} from "./components/pie-diagnostics.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -203,10 +211,33 @@ type CompactionQueuedMessage = {
 	mode: "steer" | "followUp";
 };
 
-type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }>;
+type PieTransitionEntry = Extract<
+	SessionEntry,
+	{
+		type:
+			| "anchor_revision"
+			| "frame_revision"
+			| "frame_transition"
+			| "action_start"
+			| "action_transition"
+			| "observation";
+	}
+>;
+type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }> | PieTransitionEntry;
 
-function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
-	return "type" in item && item.type === "custom";
+function isSessionEntry(
+	item: RenderSessionItem,
+): item is Extract<SessionEntry, { type: "custom" }> | PieTransitionEntry {
+	return (
+		"type" in item &&
+		(item.type === "custom" ||
+			item.type === "anchor_revision" ||
+			item.type === "frame_revision" ||
+			item.type === "frame_transition" ||
+			item.type === "action_start" ||
+			item.type === "action_transition" ||
+			item.type === "observation")
+	);
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -409,6 +440,8 @@ export class InteractiveMode {
 	private footer: FooterComponent;
 	private footerContainer: Container;
 	private footerDataProvider: FooterDataProvider;
+	private pieStatus: PieStatusComponent;
+	private pieStatusContainer: Container;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -429,6 +462,7 @@ export class InteractiveMode {
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
 	private anthropicSubscriptionWarningShown = false;
+	private restorationReceiptSession: AgentSession | undefined;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
@@ -575,6 +609,9 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerContainer = new Container();
 		this.footerContainer.addChild(this.footer);
+		this.pieStatus = new PieStatusComponent(this.session);
+		this.pieStatusContainer = new Container();
+		this.pieStatusContainer.addChild(this.pieStatus);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -882,6 +919,7 @@ export class InteractiveMode {
 			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 3 },
 			{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
+			{ component: this.pieStatusContainer, shrink: 1, minSize: 0 },
 			{ component: this.footerContainer, shrink: 1, minSize: 1 },
 		]);
 		this.fullscreenLayoutRoot = new TuiLayouts.VStack([
@@ -895,6 +933,7 @@ export class InteractiveMode {
 			this.widgetContainerAbove,
 			this.editorContainer,
 			this.widgetContainerBelow,
+			this.pieStatusContainer,
 			this.footerContainer,
 		]);
 		this.ui.setFocus(this.editor);
@@ -975,6 +1014,7 @@ export class InteractiveMode {
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
+		this.showRestorationReceipt();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -1903,6 +1943,7 @@ export class InteractiveMode {
 		this.applyFullscreenScrollbarSetting();
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.pieStatus.setSession(this.session);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
@@ -1966,6 +2007,7 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
+		this.showRestorationReceipt();
 	}
 
 	/**
@@ -2922,6 +2964,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/pie") {
+				this.handlePieCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -3071,6 +3118,7 @@ export class InteractiveMode {
 		}
 
 		this.footer.invalidate();
+		this.pieStatus.invalidate();
 
 		switch (event.type) {
 			case "agent_start":
@@ -3107,8 +3155,31 @@ export class InteractiveMode {
 				if (event.entry.type === "custom") {
 					this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
+				} else if (isPieStateTransitionEntry(event.entry)) {
+					const marker = new PieStateTransitionComponent(event.entry, this.toolOutputExpanded);
+					this.chatContainer.addChild(marker);
+					this.ui.requestRender();
 				}
 				break;
+
+			case "context_compiled":
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+
+			case "operational_error": {
+				const marker = new ExpandableText(
+					() => formatOperationalError(event),
+					() => formatOperationalError(event, true),
+					this.toolOutputExpanded,
+					1,
+					0,
+				);
+				this.chatContainer.addChild(marker);
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+			}
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
@@ -3578,8 +3649,12 @@ export class InteractiveMode {
 		}
 
 		for (const item of items) {
-			if (isCustomSessionEntry(item)) {
-				this.addCustomEntryToChat(item);
+			if (isSessionEntry(item)) {
+				if (item.type === "custom") {
+					this.addCustomEntryToChat(item);
+				} else {
+					this.chatContainer.addChild(new PieStateTransitionComponent(item, this.toolOutputExpanded));
+				}
 				continue;
 			}
 
@@ -3656,8 +3731,8 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
-			if (entry.type === "custom") {
-				return [entry];
+			if (entry.type === "custom" || isPieStateTransitionEntry(entry)) {
+				return [entry as Extract<SessionEntry, { type: "custom" }> | PieTransitionEntry];
 			}
 			return sessionEntryToContextMessages(entry);
 		});
@@ -5993,6 +6068,31 @@ export class InteractiveMode {
 		}
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${sessionName ?? name}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	private showRestorationReceipt(): void {
+		const diagnostics = this.session.getEpistemicDiagnostics();
+		if (
+			!diagnostics.runtime ||
+			diagnostics.provenance.rawEventCount === 0 ||
+			!this.sessionManager.wasRestoredFromExistingFile()
+		) {
+			return;
+		}
+		if (this.restorationReceiptSession === this.session) return;
+		this.restorationReceiptSession = this.session;
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new PieRestorationReceiptComponent(diagnostics, this.toolOutputExpanded));
+		this.ui.requestRender();
+	}
+
+	private handlePieCommand(): void {
+		const diagnostics = this.session.getEpistemicDiagnostics();
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(new PieDiagnosticsComponent(diagnostics, true));
+		this.chatContainer.addChild(new DynamicBorder());
 		this.ui.requestRender();
 	}
 

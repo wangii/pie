@@ -485,9 +485,12 @@ try {
 }
 
 const piConfigName: string | undefined = pkg.piConfig?.name;
+const isPieEntryPoint =
+	(globalThis as Record<symbol, unknown>)[Symbol.for("pie.application.entry")] === true ||
+	/^pie-cli\.(?:[cm]?[jt]s)$/.test(basename(process.argv[1] ?? ""));
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
-export const APP_NAME: string = piConfigName || "pi";
-export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
+export const APP_NAME: string = piConfigName || (isPieEntryPoint ? "pie" : "pi");
+export const APP_TITLE: string = piConfigName || isPieEntryPoint ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
 export const VERSION: string = pkg.version || "0.0.0";
 
