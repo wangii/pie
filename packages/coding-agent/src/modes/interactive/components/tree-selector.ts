@@ -94,6 +94,19 @@ function renderHorizontalViewport(rows: HorizontalViewportRow[], width: number):
 /** Filter mode for tree display */
 export type FilterMode = "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 
+export interface TreeSelectorOptions {
+	/** Heading shown above the tree. */
+	title?: string;
+	/** Optional diagnostic detail shown below the heading. */
+	description?: string;
+	/** Keep navigation, folding, search, and copy while hiding session mutation/filter controls. */
+	readOnly?: boolean;
+	/** Close shortly after opening an empty tree. Defaults to true for the session navigator. */
+	closeOnEmpty?: boolean;
+	/** Override the text copied for a selected node. */
+	copyText?: (node: SessionTreeNode) => string | undefined;
+}
+
 /**
  * Tree list component with selection and ASCII art visualization
  */
@@ -119,6 +132,8 @@ class TreeList implements Component {
 	private visibleChildrenMap: Map<string | null, string[]> = new Map();
 	private lastSelectedId: string | null = null;
 	private foldedNodes: Set<string> = new Set();
+	private readOnly: boolean;
+	private copyText?: (node: SessionTreeNode) => string | undefined;
 
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
@@ -131,10 +146,14 @@ class TreeList implements Component {
 		maxVisibleLines: number,
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
+		readOnly = false,
+		copyText?: (node: SessionTreeNode) => string | undefined,
 	) {
 		this.currentLeafId = currentLeafId;
 		this.maxVisibleLines = maxVisibleLines;
 		this.filterMode = initialFilterMode ?? "default";
+		this.readOnly = readOnly;
+		this.copyText = copyText;
 		this.multipleRoots = tree.length > 1;
 		this.flatNodes = this.flattenTree(tree);
 		this.buildActivePath();
@@ -626,7 +645,7 @@ class TreeList implements Component {
 
 	copySelected(): void {
 		const node = this.getSelectedNode();
-		this.onCopy?.(node ? this.getEntryCopyText(node) : undefined);
+		this.onCopy?.(node ? (this.copyText?.(node) ?? this.getEntryCopyText(node)) : undefined);
 	}
 
 	updateNodeLabel(entryId: string, label: string | undefined, labelTimestamp?: string): void {
@@ -1036,39 +1055,39 @@ class TreeList implements Component {
 			} else {
 				this.onCancel?.();
 			}
-		} else if (kb.matches(keyData, "app.tree.filter.default")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.default")) {
 			// Direct filter: default
 			this.filterMode = "default";
 			this.foldedNodes.clear();
 			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.noTools")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.noTools")) {
 			// Toggle filter: no-tools ↔ default
 			this.filterMode = this.filterMode === "no-tools" ? "default" : "no-tools";
 			this.foldedNodes.clear();
 			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.userOnly")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.userOnly")) {
 			// Toggle filter: user-only ↔ default
 			this.filterMode = this.filterMode === "user-only" ? "default" : "user-only";
 			this.foldedNodes.clear();
 			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.labeledOnly")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.labeledOnly")) {
 			// Toggle filter: labeled-only ↔ default
 			this.filterMode = this.filterMode === "labeled-only" ? "default" : "labeled-only";
 			this.foldedNodes.clear();
 			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.all")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.all")) {
 			// Toggle filter: all ↔ default
 			this.filterMode = this.filterMode === "all" ? "default" : "all";
 			this.foldedNodes.clear();
 			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.cycleBackward")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.cycleBackward")) {
 			// Cycle filter backwards
 			const modes: FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
 			const currentIndex = modes.indexOf(this.filterMode);
 			this.filterMode = modes[(currentIndex - 1 + modes.length) % modes.length];
 			this.foldedNodes.clear();
 			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.cycleForward")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.filter.cycleForward")) {
 			// Cycle filter forwards: default → no-tools → user-only → labeled-only → all → default
 			const modes: FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
 			const currentIndex = modes.indexOf(this.filterMode);
@@ -1081,12 +1100,12 @@ class TreeList implements Component {
 				this.foldedNodes.clear();
 				this.applyFilter();
 			}
-		} else if (kb.matches(keyData, "app.tree.editLabel")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.editLabel")) {
 			const selected = this.filteredNodes[this.selectedIndex];
 			if (selected && this.onLabelEdit) {
 				this.onLabelEdit(selected.node.entry.id, selected.node.label);
 			}
-		} else if (kb.matches(keyData, "app.tree.toggleLabelTimestamp")) {
+		} else if (!this.readOnly && kb.matches(keyData, "app.tree.toggleLabelTimestamp")) {
 			this.showLabelTimestamps = !this.showLabelTimestamps;
 		} else {
 			const hasControlChars = [...keyData].some((ch) => {
@@ -1176,10 +1195,17 @@ class SearchLine implements Component {
 
 /** Component that renders tree help as semantic rows with chunk-aware wrapping */
 class TreeHelp implements Component {
+	private readOnly: boolean;
+
+	constructor(readOnly: boolean) {
+		this.readOnly = readOnly;
+	}
+
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const items = TREE_HELP_ITEMS.map(({ keys, label, labelFirst }) => {
+		const helpItems = this.readOnly ? READ_ONLY_TREE_HELP_ITEMS : TREE_HELP_ITEMS;
+		const items = helpItems.map(({ keys, label, labelFirst }) => {
 			const text = formatHelpKeys(keys);
 			if (!text) return label;
 			return labelFirst ? `${label} ${text}` : `${text} ${label}`;
@@ -1213,6 +1239,14 @@ class TreeHelp implements Component {
 		return lines.map((line) => theme.fg("muted", line));
 	}
 }
+
+const READ_ONLY_TREE_HELP_ITEMS: Array<{ keys: Keybinding[]; label: string; labelFirst?: boolean }> = [
+	{ keys: ["tui.select.up", "tui.select.down"], label: "move" },
+	{ keys: ["tui.editor.cursorLeft", "tui.editor.cursorRight"], label: "page" },
+	{ keys: ["app.tree.foldOrUp", "app.tree.unfoldOrDown"], label: "branch" },
+	{ keys: ["app.message.copy"], label: "copy" },
+	{ keys: ["tui.select.confirm", "tui.select.cancel"], label: "close" },
+];
 
 const TREE_HELP_ITEMS: Array<{ keys: Keybinding[]; label: string; labelFirst?: boolean }> = [
 	{ keys: ["tui.select.up", "tui.select.down"], label: "move" },
@@ -1355,17 +1389,29 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		onLabelChange?: (entryId: string, label: string | undefined) => void,
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
+		options: TreeSelectorOptions = {},
 	) {
 		super();
 
 		this.onLabelChangeCallback = onLabelChange;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
+		const readOnly = options.readOnly ?? false;
 
-		this.treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialSelectedId, initialFilterMode);
+		this.treeList = new TreeList(
+			tree,
+			currentLeafId,
+			maxVisibleLines,
+			initialSelectedId,
+			initialFilterMode,
+			readOnly,
+			options.copyText,
+		);
 		this.treeList.onSelect = onSelect;
 		this.treeList.onCancel = onCancel;
 		this.treeList.onCopy = (text) => this.onCopy?.(text);
-		this.treeList.onLabelEdit = (entryId, currentLabel) => this.showLabelInput(entryId, currentLabel);
+		if (!readOnly) {
+			this.treeList.onLabelEdit = (entryId, currentLabel) => this.showLabelInput(entryId, currentLabel);
+		}
 
 		this.treeContainer = new Container();
 		this.treeContainer.addChild(this.treeList);
@@ -1374,8 +1420,9 @@ export class TreeSelectorComponent extends Container implements Focusable {
 
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
-		this.addChild(new TreeHelp());
+		this.addChild(new Text(theme.bold(`  ${options.title ?? "Session Tree"}`), 1, 0));
+		if (options.description) this.addChild(new Text(theme.fg("dim", options.description), 1, 0));
+		this.addChild(new TreeHelp(readOnly));
 		this.addChild(new SearchLine(this.treeList));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -1384,7 +1431,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 
-		if (tree.length === 0) {
+		if (tree.length === 0 && (options.closeOnEmpty ?? true)) {
 			setTimeout(() => onCancel(), 100);
 		}
 	}

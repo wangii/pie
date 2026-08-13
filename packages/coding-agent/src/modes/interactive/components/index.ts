@@ -20,6 +20,7 @@ export {
 	type FirstTimeSetupResult,
 } from "./first-time-setup.ts";
 export { FooterComponent } from "./footer.ts";
+export { buildFrameActionGraphTree, FrameActionGraphSelectorComponent } from "./frame-action-graph-selector.ts";
 export { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
 export { LoginDialogComponent } from "./login-dialog.ts";
 export { ModelSelectorComponent } from "./model-selector.ts";
@@ -32,7 +33,7 @@ export { SkillInvocationMessageComponent } from "./skill-invocation-message.ts";
 export { ThemeSelectorComponent } from "./theme-selector.ts";
 export { ThinkingSelectorComponent } from "./thinking-selector.ts";
 export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execution.ts";
-export { TreeSelectorComponent } from "./tree-selector.ts";
+export { TreeSelectorComponent, type TreeSelectorOptions } from "./tree-selector.ts";
 export { TrustSelectorComponent } from "./trust-selector.ts";
 export { UserMessageComponent } from "./user-message.ts";
 export { UserMessageSelectorComponent } from "./user-message-selector.ts";

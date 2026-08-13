@@ -46,6 +46,22 @@ describe("createAgentSession session manager defaults", () => {
 		session.dispose();
 	});
 
+	it("activates the Frame/Action graph tool by default", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+
+		expect(session.getActiveToolNames()).toContain("view_frame_action_graph");
+
+		session.dispose();
+	});
+
 	it("keeps an explicit sessionManager override", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeTruthy();

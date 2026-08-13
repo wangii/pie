@@ -1,31 +1,66 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
+import type { FrameActionGraph } from "../src/core/tools/frame-action-graph.ts";
 
-const externalEditorMocks = vi.hoisted(() => ({
-	editInExternalEditor: vi.fn(),
+const clipboardMocks = vi.hoisted(() => ({
+	copyToClipboard: vi.fn(),
 }));
 
-vi.mock("../src/modes/interactive/external-editor.ts", () => externalEditorMocks);
+vi.mock("../src/utils/clipboard.ts", () => clipboardMocks);
 
+import { FrameActionGraphSelectorComponent } from "../src/modes/interactive/components/frame-action-graph-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+
+const graph: FrameActionGraph = {
+	branchEventCount: 2,
+	active: { frameRevisionEntryId: "frame-entry", actionStartEntryId: "action-entry" },
+	nodes: [
+		{
+			kind: "frame",
+			id: "frame-entry",
+			frameId: "frame-1",
+			version: 1,
+			statement: "cache survives logout",
+			falsifier: "restart preserves the failure",
+			horizon: 8,
+			completedModelResponses: 2,
+			status: "active",
+			sourceEventId: "request-1",
+		},
+		{
+			kind: "action",
+			id: "action-entry",
+			actionId: "action-1",
+			frameRevisionEntryId: "frame-entry",
+			intent: "inspect cache lifetime",
+			completionCondition: "identify the cache TTL",
+			completedModelResponses: 1,
+			status: "active",
+			sourceEventId: "request-1",
+		},
+	],
+	edges: [{ from: "frame-entry", to: "action-entry", relation: "authorizes" }],
+};
 
 type ViewFrameActionGraphContext = {
 	agent: {
 		state: {
 			tools: Array<{
 				name: string;
-				execute: (
-					toolCallId: string,
-					params: object,
-				) => Promise<{
-					content: Array<{ type: "text"; text: string }>;
-				}>;
+				execute: (toolCallId: string, params: object) => Promise<{ details?: { graph: FrameActionGraph } }>;
 			}>;
 		};
 	};
-	settingsManager: { getExternalEditorCommand: () => string };
-	ui: { stop: () => void; start: () => void; requestRender: (force?: boolean) => void };
+	ui: { terminal: { rows: number }; requestRender: (force?: boolean) => void };
+	showSelector: (
+		create: (done: () => void) => {
+			component: FrameActionGraphSelectorComponent;
+			focus: FrameActionGraphSelectorComponent;
+		},
+	) => void;
 	showError: (message: string) => void;
+	showStatus: (message: string) => void;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as {
@@ -33,43 +68,42 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as {
 };
 
 describe("InteractiveMode /vf command", () => {
+	beforeAll(() => initTheme("dark"));
+
 	beforeEach(() => {
-		externalEditorMocks.editInExternalEditor.mockReset();
-		externalEditorMocks.editInExternalEditor.mockResolvedValue({ status: "complete", content: "ignored edits" });
+		clipboardMocks.copyToClipboard.mockReset();
+		clipboardMocks.copyToClipboard.mockResolvedValue(undefined);
 	});
 
 	it("registers the built-in command", () => {
 		expect(BUILTIN_SLASH_COMMANDS).toContainEqual({
 			name: "vf",
-			description: "View the Frame/Action graph in an external editor",
+			description: "View the Frame/Action graph",
 		});
 	});
 
-	it("runs view_frame_action_graph and opens its text output externally", async () => {
-		const execute = vi.fn(async () => ({
-			content: [{ type: "text" as const, text: '{"nodes":[]}' }],
-		}));
-		const stop = vi.fn();
-		const start = vi.fn();
+	it("runs view_frame_action_graph and displays it with the tree selector infrastructure", async () => {
+		const execute = vi.fn(async () => ({ details: { graph } }));
 		const requestRender = vi.fn();
 		const showError = vi.fn();
+		const showStatus = vi.fn();
+		let component: FrameActionGraphSelectorComponent | undefined;
 		const context: ViewFrameActionGraphContext = {
 			agent: { state: { tools: [{ name: "view_frame_action_graph", execute }] } },
-			settingsManager: { getExternalEditorCommand: () => "code --wait" },
-			ui: { stop, start, requestRender },
+			ui: { terminal: { rows: 24 }, requestRender },
+			showSelector: (create) => {
+				component = create(() => {}).component;
+			},
 			showError,
+			showStatus,
 		};
 
 		await interactiveModePrototype.handleViewFrameActionGraphCommand.call(context);
 
 		expect(execute).toHaveBeenCalledWith(expect.stringMatching(/^vf-/), {});
-		expect(externalEditorMocks.editInExternalEditor).toHaveBeenCalledWith({
-			command: "code --wait",
-			content: '{"nodes":[]}',
-		});
-		expect(stop).toHaveBeenCalledOnce();
-		expect(start).toHaveBeenCalledOnce();
-		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(component).toBeInstanceOf(FrameActionGraphSelectorComponent);
+		expect(component!.getTreeList().getSelectedNode()?.entry.id).toBe("action-entry");
+		expect(component!.render(120).join("\n")).toContain("Frame / Action Graph · 2 state nodes · 1 edges");
 		expect(showError).not.toHaveBeenCalled();
 	});
 
@@ -77,14 +111,15 @@ describe("InteractiveMode /vf command", () => {
 		const showError = vi.fn();
 		const context: ViewFrameActionGraphContext = {
 			agent: { state: { tools: [] } },
-			settingsManager: { getExternalEditorCommand: () => "nano" },
-			ui: { stop: vi.fn(), start: vi.fn(), requestRender: vi.fn() },
+			ui: { terminal: { rows: 24 }, requestRender: vi.fn() },
+			showSelector: vi.fn(),
 			showError,
+			showStatus: vi.fn(),
 		};
 
 		await interactiveModePrototype.handleViewFrameActionGraphCommand.call(context);
 
 		expect(showError).toHaveBeenCalledWith("view_frame_action_graph is not available in this session.");
-		expect(externalEditorMocks.editInExternalEditor).not.toHaveBeenCalled();
+		expect(context.showSelector).not.toHaveBeenCalled();
 	});
 });

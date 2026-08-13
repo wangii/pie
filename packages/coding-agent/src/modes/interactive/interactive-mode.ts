@@ -126,6 +126,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
+import { FrameActionGraphSelectorComponent } from "./components/frame-action-graph-selector.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -6168,38 +6169,37 @@ export class InteractiveMode {
 			return;
 		}
 
-		let content: string;
 		try {
 			const result = await tool.execute(`vf-${crypto.randomUUID()}`, {});
-			content = result.content
-				.filter((part): part is Extract<(typeof result.content)[number], { type: "text" }> => part.type === "text")
-				.map((part) => part.text)
-				.join("\n");
+			const graph = (result.details as { graph?: unknown } | undefined)?.graph;
+			if (!graph || typeof graph !== "object" || !("nodes" in graph) || !("edges" in graph)) {
+				this.showError("view_frame_action_graph returned no graph output.");
+				return;
+			}
+
+			this.showSelector((done) => {
+				const selector = new FrameActionGraphSelectorComponent(
+					graph as ConstructorParameters<typeof FrameActionGraphSelectorComponent>[0],
+					this.ui.terminal.rows,
+					() => {
+						done();
+						this.ui.requestRender();
+					},
+				);
+				selector.onCopy = async (text) => {
+					if (!text) return;
+					try {
+						await copyToClipboard(text);
+						this.showStatus("Copied selected Frame/Action node to clipboard");
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				};
+				return { component: selector, focus: selector };
+			});
 		} catch (error: unknown) {
 			this.showError(`view_frame_action_graph failed: ${error instanceof Error ? error.message : String(error)}`);
-			return;
 		}
-
-		if (!content) {
-			this.showError("view_frame_action_graph returned no text output.");
-			return;
-		}
-
-		this.ui.stop();
-		let editorError: string | undefined;
-		try {
-			const result = await editInExternalEditor({
-				command: this.settingsManager.getExternalEditorCommand(),
-				content,
-			});
-			if (result.status === "failed") editorError = "External editor exited unsuccessfully.";
-		} catch (error: unknown) {
-			editorError = `External editor failed: ${error instanceof Error ? error.message : String(error)}`;
-		} finally {
-			this.ui.start();
-			this.ui.requestRender(true);
-		}
-		if (editorError) this.showError(editorError);
 	}
 
 	private handleSessionCommand(): void {
