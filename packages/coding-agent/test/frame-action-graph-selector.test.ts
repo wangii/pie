@@ -92,9 +92,21 @@ describe("FrameActionGraphSelectorComponent", () => {
 		expect(rendered).toContain("branch");
 		expect(rendered).toContain("copy");
 		expect(rendered).not.toContain("filters");
+		expect(rendered).not.toContain("Actions under Frame");
 		expect(lines.every((line) => visibleWidth(line) <= 58)).toBe(true);
 
 		selector.handleInput("cache");
 		expect(selector.render(120).map(stripVTControlCharacters).join("\n")).toContain("cache");
+	});
+
+	it("shows the Actions authorized by the selected Frame", () => {
+		const selector = new FrameActionGraphSelectorComponent(graph, 24, () => {});
+
+		selector.handleInput("\x1b[A");
+
+		expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("frame-v2");
+		const rendered = selector.render(120).map(stripVTControlCharacters).join("\n");
+		expect(rendered).toContain("Actions under Frame frame-1 v2 (1)");
+		expect(rendered).toContain("[active] Action action-2: trace logout invalidation");
 	});
 });

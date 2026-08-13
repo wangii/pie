@@ -1,3 +1,4 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { CustomMessageEntry, SessionTreeNode } from "../../../core/session-manager.ts";
 import type {
 	FrameActionGraph,
@@ -5,6 +6,7 @@ import type {
 	FrameActionGraphFrameNode,
 	FrameActionGraphNode,
 } from "../../../core/tools/frame-action-graph.ts";
+import { theme } from "../theme/theme.ts";
 import { TreeSelectorComponent } from "./tree-selector.ts";
 
 const FRAME_ACTION_GRAPH_TIMESTAMP = new Date(0).toISOString();
@@ -24,6 +26,37 @@ function formatAction(node: FrameActionGraphActionNode): string {
 	if (node.challenge) parts.push(`challenges: ${node.challenge}`);
 	if (node.transitionReason) parts.push(`reason: ${node.transitionReason}`);
 	return parts.join(" · ");
+}
+
+function formatSelectedFrameActions(
+	graph: FrameActionGraph,
+	selectedNode: SessionTreeNode | undefined,
+	width: number,
+): string[] {
+	const selected = graph.nodes.find((node) => node.id === selectedNode?.entry.id);
+	if (!selected || selected.kind !== "frame") return [];
+
+	const actions = graph.nodes.filter(
+		(node): node is FrameActionGraphActionNode => node.kind === "action" && node.frameRevisionEntryId === selected.id,
+	);
+	const heading = `  Actions under Frame ${selected.frameId} v${selected.version} (${actions.length})`;
+	if (actions.length === 0) {
+		return [
+			truncateToWidth(theme.bold(heading), width, ""),
+			truncateToWidth(theme.fg("muted", "    None"), width, ""),
+		];
+	}
+
+	return [
+		truncateToWidth(theme.bold(heading), width, ""),
+		...actions.map((action) =>
+			truncateToWidth(
+				`    ${theme.fg(action.status === "active" ? "success" : "muted", `[${action.status}]`)} ${theme.fg("customMessageLabel", `Action ${action.actionId}:`)} ${action.intent}`,
+				width,
+				"",
+			),
+		),
+	];
 }
 
 function toEntry(node: FrameActionGraphNode, parentId: string | null): CustomMessageEntry {
@@ -95,6 +128,7 @@ export class FrameActionGraphSelectorComponent extends TreeSelectorComponent {
 					const node = graph.nodes.find((candidate) => candidate.id === treeNode.entry.id);
 					return node ? JSON.stringify(node, null, 2) : undefined;
 				},
+				selectionDetails: (treeNode, width) => formatSelectedFrameActions(graph, treeNode, width),
 			},
 		);
 	}

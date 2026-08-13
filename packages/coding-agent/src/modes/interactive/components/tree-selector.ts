@@ -105,6 +105,8 @@ export interface TreeSelectorOptions {
 	closeOnEmpty?: boolean;
 	/** Override the text copied for a selected node. */
 	copyText?: (node: SessionTreeNode) => string | undefined;
+	/** Render details derived from the currently selected node below the tree. */
+	selectionDetails?: (node: SessionTreeNode | undefined, width: number) => string[];
 }
 
 /**
@@ -1193,6 +1195,22 @@ class SearchLine implements Component {
 	handleInput(_keyData: string): void {}
 }
 
+class SelectedNodeDetails implements Component {
+	private treeList: TreeList;
+	private renderDetails: NonNullable<TreeSelectorOptions["selectionDetails"]>;
+
+	constructor(treeList: TreeList, renderDetails: NonNullable<TreeSelectorOptions["selectionDetails"]>) {
+		this.treeList = treeList;
+		this.renderDetails = renderDetails;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		return this.renderDetails(this.treeList.getSelectedNode(), width).map((line) => truncateToWidth(line, width, ""));
+	}
+}
+
 /** Component that renders tree help as semantic rows with chunk-aware wrapping */
 class TreeHelp implements Component {
 	private readOnly: boolean;
@@ -1428,6 +1446,9 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 		this.addChild(this.treeContainer);
 		this.addChild(this.labelInputContainer);
+		if (options.selectionDetails) {
+			this.addChild(new SelectedNodeDetails(this.treeList, options.selectionDetails));
+		}
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 
