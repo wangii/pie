@@ -74,6 +74,7 @@ import {
 	PhaseThreeContextCompiler,
 	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
+	summarizeContextSelection,
 } from "./context-compiler.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
@@ -441,9 +442,9 @@ export interface EpistemicDiagnostics {
 	};
 	context?: {
 		compilerVersion: string;
+		inputEventCount: number;
 		selectedEventCount: number;
-		budgetOmittedEventCount: number;
-		structuralExcludedEventCount: number;
+		excludedEventCount: number;
 		omissionsByReason: Partial<Record<ContextOmissionReason, number>>;
 		availableInputTokens: number;
 		outputMessageTokens: number;
@@ -2301,12 +2302,7 @@ export class AgentSession {
 		const branch = this.sessionManager.getBranch();
 		const state = this._anchorEnabled ? restoreEpistemicState(branch) : {};
 		const manifest = this._latestContextManifest;
-		const omissionsByReason: Partial<Record<ContextOmissionReason, number>> = {};
-		for (const omission of manifest?.omissions ?? []) {
-			omissionsByReason[omission.reason] = (omissionsByReason[omission.reason] ?? 0) + 1;
-		}
-		const budgetOmittedEventCount = omissionsByReason.budget ?? 0;
-		const structuralExcludedEventCount = (manifest?.omissions.length ?? 0) - budgetOmittedEventCount;
+		const contextCounts = manifest ? summarizeContextSelection(manifest) : undefined;
 		const toolCalls = new Map<string, { name: string; arguments: unknown }>();
 		let lastAction:
 			| {
@@ -2442,17 +2438,15 @@ export class AgentSession {
 							recovery: this._latestOperationalError,
 						}
 					: undefined,
-			context: manifest
-				? {
-						compilerVersion: manifest.compilerVersion,
-						selectedEventCount: manifest.selectedEventIds.length,
-						budgetOmittedEventCount,
-						structuralExcludedEventCount,
-						omissionsByReason,
-						availableInputTokens: manifest.budget.availableInputTokens,
-						outputMessageTokens: manifest.budget.outputMessageTokens,
-					}
-				: undefined,
+			context:
+				manifest && contextCounts
+					? {
+							compilerVersion: manifest.compilerVersion,
+							...contextCounts,
+							availableInputTokens: manifest.budget.availableInputTokens,
+							outputMessageTokens: manifest.budget.outputMessageTokens,
+						}
+					: undefined,
 			leaseBudget: frameLeaseBudget
 				? {
 						derivation: "available",

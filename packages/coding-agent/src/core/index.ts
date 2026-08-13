@@ -103,6 +103,10 @@ export {
 	type FrameActionGraphFrameNode,
 	type FrameActionGraphFrameStatus,
 	type FrameActionGraphNode,
+	type FrameActionGraphPlannedActionNode,
+	type FrameActionGraphResponseNode,
+	type FrameActionGraphToolCallNode,
 	type FrameActionGraphToolDetails,
 	type FrameActionGraphToolOptions,
+	type FrameActionGraphToolResultNode,
 } from "./tools/frame-action-graph.ts";

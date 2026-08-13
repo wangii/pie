@@ -99,6 +99,61 @@ describe("FrameActionGraphSelectorComponent", () => {
 		expect(selector.render(120).map(stripVTControlCharacters).join("\n")).toContain("cache");
 	});
 
+	it("maps response, tool-call, and tool-result nodes below their Action", () => {
+		const detailed: FrameActionGraph = {
+			...graph,
+			nodes: [
+				...graph.nodes,
+				{
+					kind: "response",
+					id: "response-2",
+					actionStartEntryId: "action-2",
+					stopReason: "toolUse",
+					text: "reading cache",
+					textCharacters: 13,
+					textTruncated: false,
+					toolCallCount: 1,
+				},
+				{
+					kind: "toolCall",
+					id: "response-2:call:call-2",
+					actionStartEntryId: "action-2",
+					responseEntryId: "response-2",
+					toolCallId: "call-2",
+					toolName: "read",
+					arguments: { path: "cache.ts" },
+				},
+				{
+					kind: "toolResult",
+					id: "result-2",
+					actionStartEntryId: "action-2",
+					toolCallId: "call-2",
+					toolName: "read",
+					isError: false,
+					output: "ttl = 30",
+					outputCharacters: 8,
+					outputTruncated: false,
+				},
+			],
+			edges: [
+				...graph.edges,
+				{ from: "action-2", to: "response-2", relation: "contains" },
+				{ from: "response-2", to: "response-2:call:call-2", relation: "invokes" },
+				{ from: "response-2:call:call-2", to: "result-2", relation: "returns" },
+			],
+		};
+		const tree = buildFrameActionGraphTree(detailed);
+		const action = tree[0]!.children[0]!.children.find((node) => node.entry.id === "action-2");
+		expect(action?.children[0]?.entry.id).toBe("response-2");
+		expect(action?.children[0]?.children[0]?.entry.id).toBe("response-2:call:call-2");
+		expect(action?.children[0]?.children[0]?.children[0]?.entry.id).toBe("result-2");
+
+		const selector = new FrameActionGraphSelectorComponent(graph, 24, () => {});
+		selector.updateGraph(detailed);
+		expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("action-2");
+		expect(selector.render(160).map(stripVTControlCharacters).join("\n")).toContain("3 execution nodes");
+	});
+
 	it("shows the Actions authorized by the selected Frame", () => {
 		const selector = new FrameActionGraphSelectorComponent(graph, 24, () => {});
 
@@ -106,7 +161,7 @@ describe("FrameActionGraphSelectorComponent", () => {
 
 		expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("frame-v2");
 		const rendered = selector.render(120).map(stripVTControlCharacters).join("\n");
-		expect(rendered).toContain("Actions under Frame frame-1 v2 (1)");
+		expect(rendered).toContain("Action contracts under Frame frame-1 v2 (0 planned · 1 episodes)");
 		expect(rendered).toContain("[active] Action action-2: trace logout invalidation");
 	});
 });

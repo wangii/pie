@@ -1,5 +1,6 @@
 import { type Component, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentSession, EpistemicDiagnostics, OperationalErrorStatus } from "../../../core/agent-session.ts";
+import type { ContextOmissionReason } from "../../../core/context-compiler.ts";
 import type { SessionEntry } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -33,6 +34,22 @@ function loopLabel(state: NonNullable<EpistemicDiagnostics["runtime"]>["loopStat
 	return state.replaceAll("_", " ").toUpperCase();
 }
 
+const OMISSION_LABELS: Record<ContextOmissionReason, string> = {
+	budget: "budget pressure",
+	historical_summary: "legacy summary",
+	not_model_facing: "non-model-facing event",
+	runtime_excluded: "failed/truncated runtime response",
+	invalid_tool_sequence: "invalid tool sequence",
+	outside_action_episode: "outside Action episode",
+	role_projection: "request-role projection",
+};
+
+function formatOmissionReasons(omissions: NonNullable<EpistemicDiagnostics["context"]>["omissionsByReason"]): string {
+	return Object.entries(omissions)
+		.map(([reason, count]) => `${OMISSION_LABELS[reason as keyof typeof OMISSION_LABELS]}=${count}`)
+		.join(", ");
+}
+
 export function formatPieStatus(session: AgentSession): string | undefined {
 	const source = session as { getEpistemicDiagnostics?: () => EpistemicDiagnostics; retryAttempt?: number };
 	if (!source.getEpistemicDiagnostics) return undefined;
@@ -58,8 +75,10 @@ export function formatPieStatus(session: AgentSession): string | undefined {
 		parts.push(
 			`ctx ${formatTokenCount(diagnostics.context.outputMessageTokens)}/${formatTokenCount(diagnostics.context.availableInputTokens)}`,
 		);
-		parts.push(`budget omitted ${diagnostics.context.budgetOmittedEventCount}`);
-		parts.push(`structural excluded ${diagnostics.context.structuralExcludedEventCount}`);
+		parts.push(`events ${diagnostics.context.selectedEventCount}/${diagnostics.context.inputEventCount}`);
+		if (diagnostics.context.excludedEventCount > 0) {
+			parts.push(`excluded ${diagnostics.context.excludedEventCount}`);
+		}
 	}
 	if ((source.retryAttempt ?? 0) > 0) parts.push(`provider retry ${source.retryAttempt}`);
 	if (diagnostics.runtime.recovery) {
@@ -157,11 +176,9 @@ function formatDiagnostics(diagnostics: EpistemicDiagnostics): string {
 		`${theme.fg("dim", "Provenance:")} raw ${diagnostics.provenance.rawEventCount} · branch ${diagnostics.provenance.activeBranchEventCount} · legacy summaries ignored ${diagnostics.provenance.legacySummaryCount}`,
 	);
 	if (diagnostics.context) {
-		const omissions = Object.entries(diagnostics.context.omissionsByReason)
-			.map(([reason, count]) => `${reason}=${count}`)
-			.join(", ");
+		const omissions = formatOmissionReasons(diagnostics.context.omissionsByReason);
 		lines.push(
-			`${theme.fg("dim", "Compiler:")} ${diagnostics.context.compilerVersion}\n  selected events: ${diagnostics.context.selectedEventCount}\n  budget-omitted events: ${diagnostics.context.budgetOmittedEventCount}\n  structurally excluded events: ${diagnostics.context.structuralExcludedEventCount}${omissions ? ` (${omissions})` : ""}\n  selected token estimate: ${diagnostics.context.outputMessageTokens}\n  input budget: ${diagnostics.context.availableInputTokens}`,
+			`${theme.fg("dim", "Compiler:")} ${diagnostics.context.compilerVersion}\n  input events: ${diagnostics.context.inputEventCount}\n  selected raw events: ${diagnostics.context.selectedEventCount}\n  excluded raw events: ${diagnostics.context.excludedEventCount}${omissions ? `\n  exclusions by policy: ${omissions}` : ""}\n  selected token estimate: ${diagnostics.context.outputMessageTokens}\n  input budget: ${diagnostics.context.availableInputTokens}`,
 		);
 	} else {
 		lines.push(`${theme.fg("dim", "Compiler:")} no request compiled yet`);

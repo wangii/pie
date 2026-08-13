@@ -44,6 +44,7 @@ const graph: FrameActionGraph = {
 };
 
 type ViewFrameActionGraphContext = {
+	activeFrameActionGraphSelector?: FrameActionGraphSelectorComponent;
 	agent: {
 		state: {
 			tools: Array<{
@@ -65,6 +66,11 @@ type ViewFrameActionGraphContext = {
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as {
 	handleViewFrameActionGraphCommand(this: ViewFrameActionGraphContext): Promise<void>;
+	scheduleFrameActionGraphRefresh(this: {
+		activeFrameActionGraphSelector?: { updateGraph: (graph: FrameActionGraph) => void };
+		sessionManager: { getBranch: () => [] };
+		ui: { requestRender: () => void };
+	}): void;
 };
 
 describe("InteractiveMode /vf command", () => {
@@ -102,9 +108,32 @@ describe("InteractiveMode /vf command", () => {
 
 		expect(execute).toHaveBeenCalledWith(expect.stringMatching(/^vf-/), {});
 		expect(component).toBeInstanceOf(FrameActionGraphSelectorComponent);
+		expect(context.activeFrameActionGraphSelector).toBe(component);
 		expect(component!.getTreeList().getSelectedNode()?.entry.id).toBe("action-entry");
-		expect(component!.render(120).join("\n")).toContain("Frame / Action Graph · 2 state nodes · 1 edges");
+		expect(component!.render(120).join("\n")).toContain(
+			"Frame / Action Graph · 1 Frames · 0 contracts · 1 Actions · 0 execution nodes",
+		);
 		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("refreshes an open panel from finalized branch entries without polling", async () => {
+		const updateGraph = vi.fn();
+		const requestRender = vi.fn();
+		interactiveModePrototype.scheduleFrameActionGraphRefresh.call({
+			activeFrameActionGraphSelector: { updateGraph },
+			sessionManager: { getBranch: () => [] },
+			ui: { requestRender },
+		});
+
+		await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+		expect(updateGraph).toHaveBeenCalledWith({
+			branchEventCount: 0,
+			active: { frameRevisionEntryId: undefined, actionStartEntryId: undefined },
+			nodes: [],
+			edges: [],
+		});
+		expect(requestRender).toHaveBeenCalledOnce();
 	});
 
 	it("reports when the graph tool is unavailable", async () => {

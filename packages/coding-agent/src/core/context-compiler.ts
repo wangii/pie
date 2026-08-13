@@ -103,6 +103,28 @@ export interface ContextSelectionManifest {
 	};
 }
 
+export interface ContextSelectionCounts {
+	inputEventCount: number;
+	selectedEventCount: number;
+	excludedEventCount: number;
+	omissionsByReason: Partial<Record<ContextOmissionReason, number>>;
+}
+
+export function summarizeContextSelection(
+	manifest: Pick<ContextSelectionManifest, "inputEventIds" | "selectedEventIds" | "omissions">,
+): ContextSelectionCounts {
+	const omissionsByReason: Partial<Record<ContextOmissionReason, number>> = {};
+	for (const omission of manifest.omissions) {
+		omissionsByReason[omission.reason] = (omissionsByReason[omission.reason] ?? 0) + 1;
+	}
+	return {
+		inputEventCount: manifest.inputEventIds.length,
+		selectedEventCount: manifest.selectedEventIds.length,
+		excludedEventCount: manifest.omissions.length,
+		omissionsByReason,
+	};
+}
+
 export interface ContextCompilerInput {
 	rawEvents: readonly SessionEntry[];
 	epistemicState: EpistemicState;

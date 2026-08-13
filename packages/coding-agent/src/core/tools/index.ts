@@ -37,9 +37,13 @@ export {
 	type FrameActionGraphFrameNode,
 	type FrameActionGraphFrameStatus,
 	type FrameActionGraphNode,
+	type FrameActionGraphPlannedActionNode,
+	type FrameActionGraphResponseNode,
+	type FrameActionGraphToolCallNode,
 	type FrameActionGraphToolDetails,
 	type FrameActionGraphToolInput,
 	type FrameActionGraphToolOptions,
+	type FrameActionGraphToolResultNode,
 } from "./frame-action-graph.ts";
 export {
 	createGrepTool,

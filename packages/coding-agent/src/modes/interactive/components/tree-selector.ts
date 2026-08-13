@@ -650,6 +650,16 @@ class TreeList implements Component {
 		this.onCopy?.(node ? (this.copyText?.(node) ?? this.getEntryCopyText(node)) : undefined);
 	}
 
+	updateTree(tree: SessionTreeNode[], currentLeafId: string | null): void {
+		this.currentLeafId = currentLeafId;
+		this.multipleRoots = tree.length > 1;
+		this.flatNodes = this.flattenTree(tree);
+		const nodeIds = new Set(this.flatNodes.map((node) => node.node.entry.id));
+		this.foldedNodes = new Set([...this.foldedNodes].filter((id) => nodeIds.has(id)));
+		this.buildActivePath();
+		this.applyFilter();
+	}
+
 	updateNodeLabel(entryId: string, label: string | undefined, labelTimestamp?: string): void {
 		for (const flatNode of this.flatNodes) {
 			if (flatNode.node.entry.id === entryId) {
@@ -1382,6 +1392,8 @@ export class TreeSelectorComponent extends Container implements Focusable {
 	private labelInput: LabelInput | null = null;
 	private labelInputContainer: Container;
 	private treeContainer: Container;
+	private titleComponent: Text;
+	private descriptionComponent?: Text;
 	private onLabelChangeCallback?: (entryId: string, label: string | undefined) => void;
 	public onCopy?: (text: string | undefined) => void;
 
@@ -1438,8 +1450,12 @@ export class TreeSelectorComponent extends Container implements Focusable {
 
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(`  ${options.title ?? "Session Tree"}`), 1, 0));
-		if (options.description) this.addChild(new Text(theme.fg("dim", options.description), 1, 0));
+		this.titleComponent = new Text(theme.bold(`  ${options.title ?? "Session Tree"}`), 1, 0);
+		this.addChild(this.titleComponent);
+		if (options.description) {
+			this.descriptionComponent = new Text(theme.fg("dim", options.description), 1, 0);
+			this.addChild(this.descriptionComponent);
+		}
 		this.addChild(new TreeHelp(readOnly));
 		this.addChild(new SearchLine(this.treeList));
 		this.addChild(new DynamicBorder());
@@ -1487,6 +1503,18 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		} else {
 			this.treeList.handleInput(keyData);
 		}
+	}
+
+	updateTree(tree: SessionTreeNode[], currentLeafId: string | null): void {
+		this.treeList.updateTree(tree, currentLeafId);
+	}
+
+	setTitle(title: string): void {
+		this.titleComponent.setText(theme.bold(`  ${title}`));
+	}
+
+	setDescription(description: string): void {
+		this.descriptionComponent?.setText(theme.fg("dim", description));
 	}
 
 	getTreeList(): TreeList {

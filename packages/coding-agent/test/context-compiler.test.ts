@@ -8,6 +8,7 @@ import {
 	PhaseThreeContextCompiler,
 	PhaseTwoContextCompiler,
 	PhaseZeroContextCompiler,
+	summarizeContextSelection,
 } from "../src/core/context-compiler.ts";
 import { restoreEpistemicState } from "../src/core/epistemic-state.ts";
 import { type SessionEntry, SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
@@ -126,6 +127,12 @@ describe("PhaseZeroContextCompiler", () => {
 			eventId: "compact",
 			eventType: "compaction",
 			reason: "historical_summary",
+		});
+		expect(summarizeContextSelection(result.manifest)).toEqual({
+			inputEventCount: 4,
+			selectedEventCount: 3,
+			excludedEventCount: 1,
+			omissionsByReason: { historical_summary: 1 },
 		});
 	});
 

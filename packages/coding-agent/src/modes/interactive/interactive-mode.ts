@@ -96,6 +96,7 @@ import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import { buildFrameActionGraph, type FrameActionGraph } from "../../core/tools/frame-action-graph.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
@@ -440,6 +441,7 @@ export class InteractiveMode {
 	private editorContainer: Container;
 	private activeSelectorToken?: object;
 	private activeSelectorDispose?: () => void;
+	private activeFrameActionGraphSelector?: FrameActionGraphSelectorComponent;
 	private footer: FooterComponent;
 	private footerContainer: Container;
 	private footerDataProvider: FooterDataProvider;
@@ -3129,6 +3131,9 @@ export class InteractiveMode {
 			await this.init();
 		}
 
+		if (event.type === "entry_appended" || event.type === "message_end") {
+			this.scheduleFrameActionGraphRefresh();
+		}
 		this.footer.invalidate();
 		this.pieStatus.invalidate();
 
@@ -4485,6 +4490,7 @@ export class InteractiveMode {
 		const dispose = this.activeSelectorDispose;
 		this.activeSelectorToken = undefined;
 		this.activeSelectorDispose = undefined;
+		this.activeFrameActionGraphSelector = undefined;
 		dispose?.();
 	}
 
@@ -6162,6 +6168,16 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private scheduleFrameActionGraphRefresh(): void {
+		if (!this.activeFrameActionGraphSelector) return;
+		queueMicrotask(() => {
+			const selector = this.activeFrameActionGraphSelector;
+			if (!selector) return;
+			selector.updateGraph(buildFrameActionGraph(this.sessionManager.getBranch()));
+			this.ui.requestRender();
+		});
+	}
+
 	private async handleViewFrameActionGraphCommand(): Promise<void> {
 		const tool = this.agent.state.tools.find((candidate) => candidate.name === "view_frame_action_graph");
 		if (!tool) {
@@ -6177,15 +6193,17 @@ export class InteractiveMode {
 				return;
 			}
 
+			let liveSelector: FrameActionGraphSelectorComponent | undefined;
 			this.showSelector((done) => {
-				const selector = new FrameActionGraphSelectorComponent(
-					graph as ConstructorParameters<typeof FrameActionGraphSelectorComponent>[0],
-					this.ui.terminal.rows,
-					() => {
-						done();
-						this.ui.requestRender();
-					},
-				);
+				let selector: FrameActionGraphSelectorComponent;
+				selector = new FrameActionGraphSelectorComponent(graph as FrameActionGraph, this.ui.terminal.rows, () => {
+					if (this.activeFrameActionGraphSelector === selector) {
+						this.activeFrameActionGraphSelector = undefined;
+					}
+					done();
+					this.ui.requestRender();
+				});
+				liveSelector = selector;
 				selector.onCopy = async (text) => {
 					if (!text) return;
 					try {
@@ -6195,8 +6213,17 @@ export class InteractiveMode {
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
 				};
-				return { component: selector, focus: selector };
+				return {
+					component: selector,
+					focus: selector,
+					dispose: () => {
+						if (this.activeFrameActionGraphSelector === selector) {
+							this.activeFrameActionGraphSelector = undefined;
+						}
+					},
+				};
 			});
+			this.activeFrameActionGraphSelector = liveSelector;
 		} catch (error: unknown) {
 			this.showError(`view_frame_action_graph failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
