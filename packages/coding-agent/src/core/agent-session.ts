@@ -862,6 +862,44 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * The terminal outcome of a controller-authored Action is execution feedback:
+	 * what the episode found that blocks completion (unresolvable) or challenges the
+	 * Frame/Anchor (escalated). Materialize it as a durable Observation so the next
+	 * epistemic decision can act on it instead of re-deriving or losing it.
+	 *
+	 * Harness-generated terminal transitions (lease expiry, round exhaustion) never
+	 * reach this path; they are bounded-return mechanics, not controller feedback.
+	 * An episode with no finalized execution result has no provenance to cite, so
+	 * nothing is materialized. `complete_action` does not call this method: success
+	 * is progress, not feedback.
+	 */
+	private _materializeTerminalActionFeedback(
+		state: ReturnType<typeof restoreEpistemicState>,
+		action: Action,
+		reason: string,
+	): void {
+		if (!this._observationEnabled || !state.anchor || !state.frame) return;
+		const branch = this.sessionManager.getBranch();
+		const startIndex = branch.findIndex((entry) => entry.id === action.startEntryId);
+		if (startIndex < 0) return;
+		const sourceEventIds: string[] = [];
+		for (let index = startIndex + 1; index < branch.length; index++) {
+			const entry = branch[index]!;
+			if (
+				entry.type === "message" &&
+				(entry.message.role === "toolResult" || entry.message.role === "bashExecution")
+			) {
+				sourceEventIds.push(entry.id);
+			}
+		}
+		if (sourceEventIds.length === 0) return;
+		// Terminal feedback is task-level evidence: it bears on both the current
+		// Frame (why the episode ended) and the Anchor (what the world showed), so
+		// it stays relevant after the Frame dies.
+		this._appendObservation({ statement: reason, affects: "anchor_and_frame", sourceEventIds }, state);
+	}
+
 	private _installContextCompiler(): void {
 		const transformMessages = this.agent.transformContext;
 		this.agent.transformContext = async (runtimeMessages, signal) => {
@@ -1094,7 +1132,12 @@ export class AgentSession {
 			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
 			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
 			"outside its scope; such execution cannot merge a later Action into the current episode. After complete_action, " +
-			"reconsider separately before authorizing the next Action."
+			"reconsider separately before authorizing the next Action. After unresolvable_action, treat the reason as evidence " +
+			"against the Frame: if it contradicts the Frame's premise or establishes its falsifier, falsify_frame or kill_frame " +
+			"instead of authorizing a remaining Action whose completion condition presupposes the contradicted premise. " +
+			"Use escalate_action only when the finalized results themselves contradict or undermine the Frame relation or the " +
+			"Anchor success semantics; use unresolvable_action when the episode cannot complete under current constraints, " +
+			"naming in reason what was found and what remains unknown."
 		);
 	}
 
@@ -1466,21 +1509,19 @@ export class AgentSession {
 				}
 				return "execution";
 			}
-			case "complete_action":
 			case "unresolvable_action":
+				if (!state.action) throw new Error("Cannot unresolvable_action because no Action is active.");
+				this._materializeTerminalActionFeedback(state, state.action, reason!);
+				this._appendActionTransition(state.action, "unresolvable", sourceEventId, reason!);
+				return "epistemic";
 			case "escalate_action":
-				if (!state.action) throw new Error(`Cannot ${decision.kind} because no Action is active.`);
-				this._appendActionTransition(
-					state.action,
-					decision.kind === "complete_action"
-						? "completed"
-						: decision.kind === "unresolvable_action"
-							? "unresolvable"
-							: "escalated",
-					sourceEventId,
-					reason!,
-					decision.kind === "escalate_action" ? decision.challenge : undefined,
-				);
+				if (!state.action) throw new Error("Cannot escalate_action because no Action is active.");
+				this._materializeTerminalActionFeedback(state, state.action, reason!);
+				this._appendActionTransition(state.action, "escalated", sourceEventId, reason!, decision.challenge);
+				return "epistemic";
+			case "complete_action":
+				if (!state.action) throw new Error("Cannot complete_action because no Action is active.");
+				this._appendActionTransition(state.action, "completed", sourceEventId, reason!);
 				return "epistemic";
 			case "authorize_final":
 			case "report_inability":

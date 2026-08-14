@@ -654,4 +654,217 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.manifest.omissions.filter(({ reason }) => reason === "outside_action_episode")).toHaveLength(2);
 		expect(result.manifest.epistemicState.action).toMatchObject({ id: "action-1", startEntryId: "as1" });
 	});
+
+	it("projects terminal Frame outcomes with falsifier and reason into the epistemic breadth projection", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("diagnose authorization", 1));
+		manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "diagnose authorization",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+		const frameControlId = manager.appendMessage(assistant('{"kind":"create_frame"}', 2));
+		const frameRevisionId = manager.appendFrameRevision({
+			frameId: "frame-1",
+			version: 1,
+			statement: "Worker cache lifetime controls authorization",
+			falsifier: "A clean worker restart preserves the failure",
+			horizon: 12,
+			previousRevisionId: null,
+			sourceEventId: frameControlId,
+		});
+		const actionControlId = manager.appendMessage(assistant('{"kind":"authorize_action"}', 3));
+		const actionStartId = manager.appendActionStart({
+			actionId: "action-1",
+			intent: "Inspect cache ownership",
+			completionCondition: "The owning process is identified",
+			frameRevisionEntryId: frameRevisionId,
+			sourceEventId: actionControlId,
+		});
+		manager.appendMessage(assistant("low-level episode trace", 4));
+		const unresolvableControlId = manager.appendMessage(assistant('{"kind":"unresolvable_action"}', 5));
+		manager.appendActionTransition({
+			actionId: "action-1",
+			startEntryId: actionStartId,
+			transition: "unresolvable",
+			sourceEventId: unresolvableControlId,
+			reason: "The owning process cannot be identified under the current constraints",
+		});
+		const killControlId = manager.appendMessage(assistant('{"kind":"falsify_frame"}', 6));
+		manager.appendFrameTransition({
+			frameId: "frame-1",
+			version: 1,
+			revisionEntryId: frameRevisionId,
+			transition: "expired",
+			sourceEventId: killControlId,
+			reason: "Frame reached its 12-response horizon before any Action satisfied its completion condition",
+		});
+		const events = manager.getBranch();
+		const epistemicState = restoreEpistemicState(events);
+
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState,
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(1_000),
+			systemPrompt: "",
+			tools: [],
+			projectionRole: "epistemic",
+			reservedOutputTokens: 8,
+		});
+		const texts = result.messages.map(text);
+
+		expect(epistemicState.frame).toBeUndefined();
+		expect(result.manifest.projection).toMatchObject({
+			role: "epistemic",
+			frameOutcomes: {
+				selected: [{ frameId: "frame-1", transition: "expired" }],
+				omitted: [],
+			},
+		});
+		expect(texts.join("\n")).toContain("[FRAME OUTCOME frame-1]");
+		expect(texts.join("\n")).toContain("[ACTION OUTCOME action-1]");
+		expect(texts.join("\n")).toContain("Worker cache lifetime controls authorization");
+		expect(texts.join("\n")).toContain("A clean worker restart preserves the failure");
+		expect(texts.join("\n")).toContain("reached its 12-response horizon");
+	});
+
+	it("omits terminal Frame outcomes from the default transcript projection", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("diagnose authorization", 1));
+		manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "diagnose authorization",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+		const frameControlId = manager.appendMessage(assistant('{"kind":"create_frame"}', 2));
+		const frameRevisionId = manager.appendFrameRevision({
+			frameId: "frame-1",
+			version: 1,
+			statement: "Worker cache lifetime controls authorization",
+			falsifier: "A clean worker restart preserves the failure",
+			horizon: 12,
+			previousRevisionId: null,
+			sourceEventId: frameControlId,
+		});
+		const killControlId = manager.appendMessage(assistant('{"kind":"falsify_frame"}', 3));
+		manager.appendFrameTransition({
+			frameId: "frame-1",
+			version: 1,
+			revisionEntryId: frameRevisionId,
+			transition: "falsified",
+			sourceEventId: killControlId,
+			reason: "The falsifier fired",
+		});
+		const events = manager.getBranch();
+
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: restoreEpistemicState(events),
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(1_000),
+			systemPrompt: "",
+			tools: [],
+			reservedOutputTokens: 8,
+		});
+
+		expect(result.messages.map(text).join("\n")).not.toContain("[FRAME OUTCOME");
+		expect(result.manifest.projection.frameOutcomes).toBeUndefined();
+	});
+
+	it("retains finalized tool results from a terminal Action episode in the epistemic projection", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("diagnose authorization", 1));
+		manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "diagnose authorization",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+		const frameControlId = manager.appendMessage(assistant('{"kind":"create_frame"}', 2));
+		const frameRevisionId = manager.appendFrameRevision({
+			frameId: "frame-1",
+			version: 1,
+			statement: "Worker cache lifetime controls authorization",
+			falsifier: "A clean worker restart preserves the failure",
+			horizon: 12,
+			previousRevisionId: null,
+			sourceEventId: frameControlId,
+		});
+		const actionControlId = manager.appendMessage(assistant('{"kind":"authorize_action"}', 3));
+		const actionStartId = manager.appendActionStart({
+			actionId: "action-1",
+			intent: "Inspect cache ownership",
+			completionCondition: "The owning process is identified",
+			frameRevisionEntryId: frameRevisionId,
+			sourceEventId: actionControlId,
+		});
+
+		const firstCall = assistant("", 4);
+		firstCall.content = [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "a.ts" } }];
+		firstCall.stopReason = "toolUse";
+		manager.appendMessage(firstCall);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-1",
+			toolName: "read",
+			content: [{ type: "text", text: "first evidence" }],
+			details: {},
+			isError: false,
+			timestamp: 5,
+		});
+
+		const secondCall = assistant("", 6);
+		secondCall.content = [{ type: "toolCall", id: "read-2", name: "read", arguments: { path: "b.ts" } }];
+		secondCall.stopReason = "toolUse";
+		manager.appendMessage(secondCall);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-2",
+			toolName: "read",
+			content: [{ type: "text", text: "second evidence" }],
+			details: {},
+			isError: false,
+			timestamp: 7,
+		});
+
+		const unresolvableControlId = manager.appendMessage(assistant('{"kind":"unresolvable_action"}', 8));
+		manager.appendActionTransition({
+			actionId: "action-1",
+			startEntryId: actionStartId,
+			transition: "unresolvable",
+			sourceEventId: unresolvableControlId,
+			reason: "The completion condition cannot be met under the current constraints",
+		});
+		const killControlId = manager.appendMessage(assistant('{"kind":"falsify_frame"}', 9));
+		manager.appendFrameTransition({
+			frameId: "frame-1",
+			version: 1,
+			revisionEntryId: frameRevisionId,
+			transition: "expired",
+			sourceEventId: killControlId,
+			reason: "Frame reached its horizon",
+		});
+		const events = manager.getBranch();
+
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: restoreEpistemicState(events),
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(1_000),
+			systemPrompt: "",
+			tools: [],
+			projectionRole: "epistemic",
+			reservedOutputTokens: 8,
+		});
+		const texts = result.messages.map(text);
+
+		expect(texts).toContain("first evidence");
+		expect(texts).toContain("second evidence");
+	});
 });

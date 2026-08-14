@@ -15,6 +15,7 @@ export const FRAME_CONTEXT_MESSAGE_TYPE = "pie.frame";
 export const ACTION_CONTEXT_MESSAGE_TYPE = "pie.action";
 export const OBSERVATION_CONTEXT_MESSAGE_TYPE = "pie.observation";
 export const ACTION_OUTCOME_CONTEXT_MESSAGE_TYPE = "pie.action-outcome";
+export const FRAME_OUTCOME_CONTEXT_MESSAGE_TYPE = "pie.frame-outcome";
 
 export type ContextProjectionRole = "default" | "execution" | "epistemic" | "finalAnswer";
 
@@ -50,6 +51,17 @@ export interface ContextSelectionManifest {
 				tokens: number;
 			}>;
 			omitted: Array<{ actionId: string; startEntryId: string; reason: "budget" }>;
+		};
+		frameOutcomes?: {
+			selected: Array<{
+				frameId: string;
+				version: number;
+				revisionEntryId: string;
+				transitionEntryId: string;
+				transition: "replaced" | "died" | "falsified" | "expired";
+				tokens: number;
+			}>;
+			omitted: Array<{ frameId: string; revisionEntryId: string; reason: "budget" }>;
 		};
 	};
 	inputEventIds: string[];
@@ -200,6 +212,17 @@ type ProjectedActionOutcome = {
 	order: number;
 };
 
+type ProjectedFrameOutcome = {
+	frameId: string;
+	version: number;
+	revisionEntryId: string;
+	transitionEntryId: string;
+	transition: "replaced" | "died" | "falsified" | "expired";
+	message: AgentMessage;
+	tokens: number;
+	order: number;
+};
+
 const CONTROL_DECISION_KINDS = new Set([
 	"create_frame",
 	"revise_frame",
@@ -286,6 +309,26 @@ function controlSourceEventIds(events: readonly SessionEntry[]): Set<string> {
 	return ids;
 }
 
+/**
+ * The episode whose world evidence a broad projection should retain. When an
+ * Action is active its start entry is the boundary; otherwise the most recent
+ * terminal failure transition (`unresolvable` or `escalated`) marks the
+ * episode the next epistemic decision must be able to inspect.
+ */
+function episodeBoundary(events: readonly SessionEntry[], action: Action | undefined): string | undefined {
+	if (action) return action.startEntryId;
+	for (let index = events.length - 1; index >= 0; index--) {
+		const event = events[index]!;
+		if (
+			event.type === "action_transition" &&
+			(event.transition === "unresolvable" || event.transition === "escalated")
+		) {
+			return event.startEntryId;
+		}
+	}
+	return undefined;
+}
+
 function selectBroadRawEventIds(
 	events: readonly SessionEntry[],
 	action: Action | undefined,
@@ -299,11 +342,29 @@ function selectBroadRawEventIds(
 			break;
 		}
 	}
-	if (role === "finalAnswer" || !action) return selected;
+	if (role === "finalAnswer") return selected;
 
-	const actionStartIndex = events.findIndex((event) => event.id === action.startEntryId);
+	const startEntryId = episodeBoundary(events, action);
+	if (!startEntryId) return selected;
+	const actionStartIndex = events.findIndex((event) => event.id === startEntryId);
+	if (actionStartIndex < 0) return selected;
+
 	const controlSources = controlSourceEventIds(events);
-	let feedbackIndex = -1;
+	for (let index = actionStartIndex + 1; index < events.length; index++) {
+		const event = events[index]!;
+		if (event.type !== "message") continue;
+		if (event.message.role === "toolResult") {
+			selected.add(event.id);
+		} else if (
+			event.message.role === "assistant" &&
+			!controlSources.has(event.id) &&
+			!isControlDecisionMessage(event) &&
+			event.message.content.some((part) => part.type === "toolCall")
+		) {
+			selected.add(event.id);
+		}
+	}
+
 	for (let index = events.length - 1; index > actionStartIndex; index--) {
 		const event = events[index]!;
 		if (
@@ -312,20 +373,8 @@ function selectBroadRawEventIds(
 			!controlSources.has(event.id) &&
 			!isControlDecisionMessage(event)
 		) {
-			feedbackIndex = index;
 			selected.add(event.id);
 			break;
-		}
-	}
-	if (feedbackIndex < 0) return selected;
-
-	const feedback = events[feedbackIndex]!;
-	if (feedback.type !== "message" || feedback.message.role !== "assistant") return selected;
-	const pending = new Set(feedback.message.content.flatMap((part) => (part.type === "toolCall" ? [part.id] : [])));
-	for (let index = feedbackIndex + 1; index < events.length && pending.size > 0; index++) {
-		const event = events[index]!;
-		if (event.type === "message" && event.message.role === "toolResult" && pending.delete(event.message.toolCallId)) {
-			selected.add(event.id);
 		}
 	}
 	return selected;
@@ -491,6 +540,55 @@ function projectActionOutcomes(
 	return outcomes;
 }
 
+function frameOutcomeMessage(
+	revision: Extract<SessionEntry, { type: "frame_revision" }>,
+	transition: Extract<SessionEntry, { type: "frame_transition" }>,
+): AgentMessage {
+	const replacement = transition.replacementFrameId ? `\nReplacement: ${transition.replacementFrameId}` : "";
+	return {
+		role: "custom",
+		customType: FRAME_OUTCOME_CONTEXT_MESSAGE_TYPE,
+		content:
+			`[FRAME OUTCOME ${transition.frameId}]\nCommitment: ${revision.statement}\n` +
+			`Falsifier: ${revision.falsifier}\nOutcome: ${transition.transition}${replacement}\n` +
+			`Terminal reason: ${transition.reason}`,
+		display: false,
+		details: {
+			frameId: transition.frameId,
+			version: transition.version,
+			revisionEntryId: transition.revisionEntryId,
+			transitionEntryId: transition.id,
+			sourceEventId: transition.sourceEventId,
+		},
+		timestamp: new Date(transition.timestamp).getTime(),
+	};
+}
+
+function projectFrameOutcomes(events: readonly SessionEntry[]): ProjectedFrameOutcome[] {
+	const revisions = new Map<string, Extract<SessionEntry, { type: "frame_revision" }>>();
+	const outcomes: ProjectedFrameOutcome[] = [];
+	for (const [order, event] of events.entries()) {
+		if (event.type === "frame_revision") {
+			revisions.set(event.id, event);
+		} else if (event.type === "frame_transition") {
+			const revision = revisions.get(event.revisionEntryId);
+			if (!revision) continue;
+			const message = frameOutcomeMessage(revision, event);
+			outcomes.push({
+				frameId: event.frameId,
+				version: event.version,
+				revisionEntryId: event.revisionEntryId,
+				transitionEntryId: event.id,
+				transition: event.transition,
+				message,
+				tokens: estimateMessagesTokens([message]),
+				order,
+			});
+		}
+	}
+	return outcomes;
+}
+
 function observationMessage(observation: Observation, anchorRelevant: boolean, frameRelevant: boolean): AgentMessage {
 	const relevance =
 		frameRelevant && anchorRelevant ? "current Frame and Anchor" : frameRelevant ? "current Frame" : "Anchor";
@@ -616,6 +714,7 @@ async function compileProjection(
 	}
 
 	const projectedActionOutcomes = broadProjection ? projectActionOutcomes(input.rawEvents, frame) : [];
+	const projectedFrameOutcomes = broadProjection ? projectFrameOutcomes(input.rawEvents) : [];
 	const projectedObservations: ProjectedObservation[] = observations.map((observation, order) => {
 		const anchorRelevant = anchor !== undefined && observation.anchorRevisionEntryId === anchor.revisionEntryId;
 		const frameRelevant = frame !== undefined && observation.frameRevisionEntryId === frame.revisionEntryId;
@@ -651,9 +750,23 @@ async function compileProjection(
 		selectedObservationIds.has(candidate.observation.id),
 	);
 	const observationMessages = selectedObservations.map((candidate) => candidate.message);
+	const selectedFrameOutcomeIds = new Set<string>();
+	let selectedFrameOutcomeTokens = 0;
+	const frameOutcomeBudget = Math.max(0, observationBudget - selectedObservationTokens);
+	const prioritizedFrameOutcomes = [...projectedFrameOutcomes].sort((left, right) => right.order - left.order);
+	for (const candidate of prioritizedFrameOutcomes) {
+		if (selectedFrameOutcomeTokens + candidate.tokens <= frameOutcomeBudget) {
+			selectedFrameOutcomeIds.add(candidate.transitionEntryId);
+			selectedFrameOutcomeTokens += candidate.tokens;
+		}
+	}
+	const selectedFrameOutcomes = projectedFrameOutcomes.filter((candidate) =>
+		selectedFrameOutcomeIds.has(candidate.transitionEntryId),
+	);
+	const frameOutcomeMessages = selectedFrameOutcomes.map((candidate) => candidate.message);
 	const selectedActionOutcomeIds = new Set<string>();
 	let selectedActionOutcomeTokens = 0;
-	const actionOutcomeBudget = Math.max(0, observationBudget - selectedObservationTokens);
+	const actionOutcomeBudget = Math.max(0, frameOutcomeBudget - selectedFrameOutcomeTokens);
 	const prioritizedActionOutcomes = [...projectedActionOutcomes].sort((left, right) => {
 		if (left.currentFrame !== right.currentFrame) return left.currentFrame ? -1 : 1;
 		return right.order - left.order;
@@ -671,11 +784,13 @@ async function compileProjection(
 	const retainedMessages = [
 		...anchorMessages,
 		...frameMessages,
+		...frameOutcomeMessages,
 		...observationMessages,
 		...actionOutcomeMessages,
 		...actionMessages,
 	];
-	const retainedStateTokens = requiredStateTokens + selectedObservationTokens + selectedActionOutcomeTokens;
+	const retainedStateTokens =
+		requiredStateTokens + selectedObservationTokens + selectedFrameOutcomeTokens + selectedActionOutcomeTokens;
 	const messageBudget = Math.max(0, availableInputTokens - requiredTokens - retainedStateTokens);
 	const selectedIds = new Set<string>();
 	let selectedEventTokens = 0;
@@ -748,6 +863,26 @@ async function compileProjection(
 									.map((candidate) => ({
 										actionId: candidate.actionId,
 										startEntryId: candidate.startEntryId,
+										reason: "budget" as const,
+									})),
+							}
+						: undefined,
+				frameOutcomes:
+					projectedFrameOutcomes.length > 0
+						? {
+								selected: selectedFrameOutcomes.map((candidate) => ({
+									frameId: candidate.frameId,
+									version: candidate.version,
+									revisionEntryId: candidate.revisionEntryId,
+									transitionEntryId: candidate.transitionEntryId,
+									transition: candidate.transition,
+									tokens: candidate.tokens,
+								})),
+								omitted: projectedFrameOutcomes
+									.filter((candidate) => !selectedFrameOutcomeIds.has(candidate.transitionEntryId))
+									.map((candidate) => ({
+										frameId: candidate.frameId,
+										revisionEntryId: candidate.revisionEntryId,
 										reason: "budget" as const,
 									})),
 							}
