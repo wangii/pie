@@ -1059,7 +1059,11 @@ export class AgentSession {
 				"As soon as the exact completion condition is established, stop this generation immediately: do not call another " +
 				"tool, do not begin the next task step, and do not produce the user's final answer. A provider stop ends only this " +
 				"generation; it does not complete the Action or authorize a final answer. Return exactly UNRESOLVABLE only when " +
-				"the frozen completion condition cannot be met under current constraints."
+				"the frozen completion condition cannot be met under current constraints. If it is unmeetable because it demands an " +
+				"unbounded enumeration (every/all occurrences or a complete catalog) rather than because the world contradicts it, do not " +
+				"fabricate completion: return UNRESOLVABLE whose reason names (a) the bounded result you did establish and (b) the " +
+				"narrower single-observable condition that remains. This is the controlled scope-narrowing exit; never silently widen, " +
+				"narrow, or rewrite the frozen condition while executing under it."
 			);
 		}
 		if (role === "finalAnswer") {
@@ -1126,7 +1130,12 @@ export class AgentSession {
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
 			"the requested deliverable. Its falsifier names an exact observable world result that contradicts that relation, not " +
 			"an inability to finish the investigation. An Action is one bounded episode with one externally checkable completion " +
-			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. For authorize_action, " +
+			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. A completion condition is bounded only when one observable result can " +
+			"confirm it: a single file read in full, a single symbol's declaration, or a single diff or command output. Do not " +
+			"write a condition that enumerates every or all occurrences, every declaration site, or a complete inventory; such a " +
+			"condition is unbounded and cannot finish inside its evidence-round budget. A read or discovery episode's completion is " +
+			"the read itself (its tool calls and results are already recorded in the transcript), not an extracted catalog of " +
+			"everything it contains; perform synthesis in the control decision that follows, not inside the episode. For authorize_action, " +
 			"select a listed actionContractId instead of regenerating contract text. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
 			"Split evidence collection, mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
 			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
@@ -1135,6 +1144,9 @@ export class AgentSession {
 			"reconsider separately before authorizing the next Action. After unresolvable_action, treat the reason as evidence " +
 			"against the Frame: if it contradicts the Frame's premise or establishes its falsifier, falsify_frame or kill_frame " +
 			"instead of authorizing a remaining Action whose completion condition presupposes the contradicted premise. " +
+			"When an unresolvable reason shows the completion condition was over-scoped (unbounded enumeration) rather than " +
+			"contradicted by the world, authorize a new, narrower Action that establishes the bounded sub-result named in the reason; " +
+			"do not re-authorize the same over-scoped contract. " +
 			"Use escalate_action only when the finalized results themselves contradict or undermine the Frame relation or the " +
 			"Anchor success semantics; use unresolvable_action when the episode cannot complete under current constraints, " +
 			"naming in reason what was found and what remains unknown."
@@ -1332,9 +1344,21 @@ export class AgentSession {
 				completion,
 			) ||
 			/(?:完整|全部|整个)(?:任务|请求|调查)|最终答案|诊断.*修复|修复.*验证/u.test(`${intent} ${completion}`);
+		const enumeratesUnbounded =
+			/(?:every|enumerate|exhaustive|comprehensive|no unaccounted|no remaining|complete (?:list|inventory|catalog|map)|catalog)/u.test(
+				`${intent} ${completion}`,
+			) ||
+			/(?:每个|每一|所有|全部|无遗漏|无剩余|穷举|逐一|完整(?:清单|目录|映射)|详尽|枚举)/u.test(
+				`${intent} ${completion}`,
+			);
 		if (intent === anchor || bundlesWholeTask) {
 			throw new Error(
 				"Action must authorize one finite episode with one checkable result, not the whole task or a bundled deliverable.",
+			);
+		}
+		if (enumeratesUnbounded) {
+			throw new Error(
+				"Action completion condition must be confirmable by one bounded observable result; drop universal enumeration (every/all/no-unaccounted/complete catalog) and name the single file, symbol, or diff this episode will establish.",
 			);
 		}
 	}
