@@ -64,6 +64,7 @@ export interface PieProductionLoopLifecycle {
 	): Promise<PieControlResult> | PieControlResult;
 	completeFinalAnswer(message: AssistantMessage): Promise<void> | void;
 	interruptRequest(reason: string): Promise<void> | void;
+	exhaustControlBudget(reason: string): Promise<PieControlResult> | PieControlResult;
 }
 
 /**
@@ -234,7 +235,16 @@ export class PieProductionLoop implements AgentLoopRunner {
 			if (this._requestRole === "epistemic") {
 				controlResponses++;
 				if (controlResponses > this.maxControlResponses) {
-					throw new Error(`Pie epistemic control exceeded ${this.maxControlResponses} bounded decisions.`);
+					const result = await lifecycle.exhaustControlBudget(
+						`Pie epistemic control exceeded ${this.maxControlResponses} bounded decisions.`,
+					);
+					this._requestRole = result.nextRole;
+					if (result.terminal) {
+						this._state = result.terminal;
+						await request.emit({ type: "agent_end", messages: newMessages });
+						return newMessages;
+					}
+					continue;
 				}
 				const result = await lifecycle.handleControlResponse(message);
 				this._requestRole = result.nextRole;

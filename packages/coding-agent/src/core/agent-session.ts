@@ -1727,6 +1727,17 @@ export class AgentSession {
 				}
 				this._automaticActionRequest = false;
 			},
+			exhaustControlBudget: (reason) => {
+				const branch = this.sessionManager.getBranch();
+				const state = restoreEpistemicState(branch);
+				const sourceEventId = branch.at(-1)?.id;
+				if (state.action && sourceEventId && sourceEventId !== state.action.startEntryId) {
+					this._appendActionTransition(state.action, "unresolvable", sourceEventId, reason);
+				}
+				this._automaticActionRequest = false;
+				this._pendingFinalAuthorization = { kind: "inability", reason };
+				return { nextRole: "finalAnswer" };
+			},
 		});
 	}
 

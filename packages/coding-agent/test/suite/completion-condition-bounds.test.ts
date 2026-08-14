@@ -184,4 +184,35 @@ describe("completion condition bounds", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("terminates gracefully with a final report when the epistemic budget is exhausted", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			const frame = {
+				kind: "create_frame",
+				statement: "The loop's LLM call entry points are in two files",
+				falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+			};
+			const revise = {
+				kind: "revise_frame",
+				statement: "The loop's LLM call entry points are in two files",
+				falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+				reason: "keep investigating",
+			};
+			harness.setResponses([
+				control(frame),
+				...Array.from({ length: 24 }, () => control(revise)),
+				fauxAssistantMessage("The epistemic budget was exhausted; partial report follows."),
+			]);
+
+			await harness.session.prompt("check the prompt entry sites in the loop");
+
+			expect(harness.session.getLastAssistantText()).toBe(
+				"The epistemic budget was exhausted; partial report follows.",
+			);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
 });
