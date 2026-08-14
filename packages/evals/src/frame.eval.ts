@@ -31,7 +31,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "create",
 					statement:
 						"Worker-local authorization state survives logout. The authorized next action is NEXT_ACTION=INSPECT_WORKER_CACHE.",
-					falsifier: "A clean worker restart preserves the authorization failure.",
+					expectation: "A clean worker restart preserves the authorization failure.",
 					horizon: 4,
 				},
 			},
@@ -53,7 +53,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "create",
 					statement:
 						"The read replica lags the primary. The authorized next action is NEXT_ACTION=COMPARE_REPLICA_POSITION.",
-					falsifier: "Primary and replica positions match during a stale read.",
+					expectation: "Primary and replica positions match during a stale read.",
 					horizon: 4,
 				},
 			},
@@ -73,14 +73,14 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 				frame: {
 					type: "create",
 					statement: "Worker caching is causal. The authorized next action is NEXT_ACTION=INSPECT_WORKER_CACHE.",
-					falsifier: "The failure survives a clean worker restart.",
+					expectation: "The failure survives a clean worker restart.",
 					horizon: 3,
 				},
 			},
 			{
 				type: "prompt",
 				content:
-					"A clean worker restart preserved the failure, satisfying the declared falsifier. Reply exactly ACK.",
+					"A clean worker restart preserved the failure, satisfying the declared expectation. Reply exactly ACK.",
 				frame: { type: "falsify", reason: "The clean worker restart preserved the failure." },
 			},
 			{
@@ -90,7 +90,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "create",
 					statement:
 						"Replica lag now authorizes the investigation. The authorized next action is NEXT_ACTION=COMPARE_REPLICA_POSITION.",
-					falsifier: "Primary and replica positions match during the failure.",
+					expectation: "Primary and replica positions match during the failure.",
 					horizon: 3,
 				},
 			},

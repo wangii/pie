@@ -84,7 +84,7 @@ describe("context compiler provider boundary", () => {
 				decision({
 					kind: "create_frame",
 					statement: "Worker cache lifetime controls authorization behavior",
-					falsifier: "A clean worker restart preserves the authorization failure",
+					expectation: "A clean worker restart preserves the authorization failure",
 					actions: [
 						{
 							...ownership,

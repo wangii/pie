@@ -141,7 +141,7 @@ await session.prompt("Investigate the logout failure", {
   frame: {
     type: "create",
     statement: "Worker-local state survives logout.",
-    falsifier: "A clean worker restart preserves the failure.",
+    expectation: "A clean worker restart preserves the failure.",
     horizon: 8,
   },
   action: {

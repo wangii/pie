@@ -137,7 +137,7 @@ export interface FrameRevisionEntry extends SessionEntryBase {
 	frameId: string;
 	version: number;
 	statement: string;
-	falsifier: string;
+	expectation: string;
 	horizon: number;
 	previousRevisionId: string | null;
 	sourceEventId: string;
@@ -156,13 +156,17 @@ export interface FrameTransitionEntry extends SessionEntryBase {
 	replacementFrameId?: string;
 }
 
-/** Frozen contract for one finite Action episode under an exact Frame version. */
+/** Frozen contract for one finite Action episode under an exact Frame version or the Anchor. */
 export interface ActionStartEntry extends SessionEntryBase {
 	type: "action_start";
 	actionId: string;
 	intent: string;
 	completionCondition: string;
-	frameRevisionEntryId: string;
+	/** The predicted fact for a pre-Frame `explore` episode, materialized as an Observation on completion. */
+	expectation?: string;
+	/** Exactly one binding target: the Frame revision, or the Anchor revision (pre-Frame `explore`). */
+	frameRevisionEntryId?: string;
+	anchorRevisionEntryId?: string;
 	sourceEventId: string;
 }
 
@@ -1279,9 +1283,9 @@ export class SessionManager {
 	/** Append an explicit immutable Frame version with raw-event provenance. */
 	appendFrameRevision(revision: Omit<FrameRevisionEntry, keyof SessionEntryBase | "type">): string {
 		const statement = revision.statement.trim();
-		const falsifier = revision.falsifier.trim();
+		const expectation = revision.expectation.trim();
 		if (!statement) throw new Error("Frame statement must not be empty.");
-		if (!falsifier) throw new Error("Frame falsifier must not be empty.");
+		if (!expectation) throw new Error("Frame expectation must not be empty.");
 		if (!Number.isSafeInteger(revision.horizon) || revision.horizon < 1) {
 			throw new Error("Frame horizon must be a positive integer.");
 		}
@@ -1328,7 +1332,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			...revision,
 			statement,
-			falsifier,
+			expectation,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1385,10 +1389,13 @@ export class SessionManager {
 		}
 		let currentFrame: FrameRevisionEntry | undefined;
 		let currentFrameResponses = 0;
+		let currentAnchor: AnchorRevisionEntry | undefined;
 		let currentAction: ActionStartEntry | undefined;
 		const seenActionIds = new Set<string>();
 		for (const entry of branch) {
-			if (entry.type === "frame_revision") {
+			if (entry.type === "anchor_revision") {
+				currentAnchor = entry;
+			} else if (entry.type === "frame_revision") {
 				currentFrame = entry;
 				currentFrameResponses = 0;
 			} else if (entry.type === "frame_transition" && currentFrame?.id === entry.revisionEntryId) {
@@ -1402,12 +1409,21 @@ export class SessionManager {
 				currentAction = undefined;
 			}
 		}
-		if (
-			!currentFrame ||
-			action.frameRevisionEntryId !== currentFrame.id ||
-			currentFrameResponses >= currentFrame.horizon
-		) {
-			throw new Error("Action must bind to a current admissible Frame version.");
+		const bindsToFrame = action.frameRevisionEntryId !== undefined;
+		const bindsToAnchor = action.anchorRevisionEntryId !== undefined;
+		if (bindsToFrame === bindsToAnchor) {
+			throw new Error("Action must bind to exactly one of a current Frame version or the Anchor.");
+		}
+		if (bindsToFrame) {
+			if (
+				!currentFrame ||
+				action.frameRevisionEntryId !== currentFrame.id ||
+				currentFrameResponses >= currentFrame.horizon
+			) {
+				throw new Error("Action must bind to a current admissible Frame version.");
+			}
+		} else if (!currentAnchor || action.anchorRevisionEntryId !== currentAnchor.id) {
+			throw new Error("Action must bind to the current Anchor revision.");
 		}
 		if (currentAction) throw new Error("An Action episode is already active.");
 		if (seenActionIds.has(action.actionId)) throw new Error("Action identity must not be reused.");

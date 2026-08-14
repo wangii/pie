@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { createHarness, getMessageText } from "./harness.ts";
@@ -70,7 +70,7 @@ describe("completion condition bounds", () => {
 				control({
 					kind: "create_frame",
 					statement: "Prompt construction in the loop is produced only by externally injected messages",
-					falsifier: "The loop source shows a prompt template or assembly routine inside the class",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
 					actions: [
 						actionBudget({
 							intent: "Record every prompt site in the loop source",
@@ -82,7 +82,7 @@ describe("completion condition bounds", () => {
 				control({
 					kind: "create_frame",
 					statement: "Prompt construction in the loop is produced only by externally injected messages",
-					falsifier: "The loop source shows a prompt template or assembly routine inside the class",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
 					actions: [actionBudget(action)],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
@@ -121,7 +121,7 @@ describe("completion condition bounds", () => {
 				control({
 					kind: "create_frame",
 					statement: "Prompt construction in the loop is produced only by externally injected messages",
-					falsifier: "The loop source shows a prompt template or assembly routine inside the class",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
 					actions: [actionBudget(action)],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
@@ -155,13 +155,13 @@ describe("completion condition bounds", () => {
 				control({
 					kind: "create_frame",
 					statement: "All prompt sources for the loop are defined locally in exactly two files",
-					falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+					expectation: "A full read of one file shows a referenced symbol is imported from a further module",
 					actions: [actionBudget(action)],
 				}),
 				control({
 					kind: "create_frame",
 					statement: "The loop's LLM call entry points are in two files",
-					falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+					expectation: "A full read of one file shows a referenced symbol is imported from a further module",
 					actions: [actionBudget(action)],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
@@ -193,12 +193,12 @@ describe("completion condition bounds", () => {
 			const frame = {
 				kind: "create_frame",
 				statement: "The loop's LLM call entry points are in two files",
-				falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+				expectation: "A full read of one file shows a referenced symbol is imported from a further module",
 			};
 			const revise = {
 				kind: "revise_frame",
 				statement: "The loop's LLM call entry points are in two files",
-				falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+				expectation: "A full read of one file shows a referenced symbol is imported from a further module",
 				reason: "keep investigating",
 			};
 			harness.setResponses([
@@ -224,12 +224,12 @@ describe("completion condition bounds", () => {
 			const frame = {
 				kind: "create_frame",
 				statement: "The loop's LLM call entry points are in two files",
-				falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+				expectation: "A full read of one file shows a referenced symbol is imported from a further module",
 			};
 			const revise = {
 				kind: "revise_frame",
 				statement: "The loop's LLM call entry points are in two files",
-				falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+				expectation: "A full read of one file shows a referenced symbol is imported from a further module",
 				reason: "keep investigating",
 			};
 			harness.setResponses([
@@ -248,7 +248,7 @@ describe("completion condition bounds", () => {
 		}
 	});
 
-	it("rejects a discovery-probe falsifier and accepts a grounded rewrite", async () => {
+	it("rejects a discovery-probe expectation and accepts a grounded rewrite", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
 			harness.setResponses([
@@ -256,14 +256,15 @@ describe("completion condition bounds", () => {
 					kind: "create_frame",
 					statement:
 						"Prompt text used by the loop is concentrated in identifiable files a single search can surface",
-					falsifier: "The discovery rg over packages for prompt tokens returns zero matches anywhere",
+					expectation: "The discovery rg over packages for prompt tokens returns zero matches anywhere",
 					actions: [actionBudget(action)],
 				}),
 				control({
 					kind: "create_frame",
 					statement:
 						"Prompt text used by the loop is concentrated in identifiable files a single search can surface",
-					falsifier: "Reading the surfaced files shows each prompt literal is independent with no shared template",
+					expectation:
+						"Reading the surfaced files shows each prompt literal is independent with no shared template",
 					actions: [actionBudget(action)],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
@@ -276,7 +277,7 @@ describe("completion condition bounds", () => {
 			await harness.session.prompt("locate the prompt entry sites in the loop");
 
 			expect(harness.providerContexts[1]!.systemPrompt).toContain(
-				"previous decision was rejected: Frame falsifier must not be a discovery probe",
+				"previous decision was rejected: Frame expectation must not be a discovery probe",
 			);
 		} finally {
 			harness.cleanup();
@@ -291,7 +292,8 @@ describe("completion condition bounds", () => {
 					kind: "create_frame",
 					statement:
 						"Prompt text used by the loop is concentrated in identifiable files a single search can surface",
-					falsifier: "Reading the surfaced files shows each prompt literal is independent with no shared template",
+					expectation:
+						"Reading the surfaced files shows each prompt literal is independent with no shared template",
 					actions: [
 						actionBudget({
 							intent: "Run one broad discovery search over the package sources",
@@ -304,7 +306,8 @@ describe("completion condition bounds", () => {
 					kind: "create_frame",
 					statement:
 						"Prompt text used by the loop is concentrated in identifiable files a single search can surface",
-					falsifier: "Reading the surfaced files shows each prompt literal is independent with no shared template",
+					expectation:
+						"Reading the surfaced files shows each prompt literal is independent with no shared template",
 					actions: [actionBudget(action)],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
@@ -332,12 +335,13 @@ describe("completion condition bounds", () => {
 					kind: "create_frame",
 					statement:
 						"Prompt text used by the loop is concentrated in identifiable files a single search can surface",
-					falsifier: "Reading the surfaced files shows each prompt literal is independent with no shared template",
+					expectation:
+						"Reading the surfaced files shows each prompt literal is independent with no shared template",
 					actions: [actionBudget(action)],
 				}),
-				control({ kind: "revise_frame", statement: "A different statement", reason: "fix missing falsifier" }),
-				control({ kind: "revise_frame", statement: "A different statement", reason: "fix missing falsifier" }),
-				control({ kind: "revise_frame", statement: "A different statement", reason: "fix missing falsifier" }),
+				control({ kind: "revise_frame", statement: "A different statement", reason: "fix missing expectation" }),
+				control({ kind: "revise_frame", statement: "A different statement", reason: "fix missing expectation" }),
+				control({ kind: "revise_frame", statement: "A different statement", reason: "fix missing expectation" }),
 				fauxAssistantMessage("Control decisions kept failing; here is a bounded report."),
 			]);
 
@@ -363,7 +367,7 @@ describe("completion condition bounds", () => {
 				control({
 					kind: "create_frame",
 					statement: "Prompt construction in the loop is produced only by externally injected messages",
-					falsifier: "The loop source shows a prompt template or assembly routine inside the class",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
 					actions: [actionBudget(action)],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
@@ -384,6 +388,238 @@ describe("completion condition bounds", () => {
 			);
 			expect(groundingContexts).toHaveLength(1);
 			expect(groundingContexts[0]).toBe(harness.providerContexts[0]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("injects a harness-derived state snapshot into epistemic control turns", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "Prompt construction in the loop is produced only by externally injected messages",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "replace_frame",
+					statement: "Prompt construction in the loop is produced only by externally injected messages",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
+					reason: "advance to the next slice",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			const controlTexts = harness.providerContexts.map((context) =>
+				context.messages.map(getMessageText).join("\n"),
+			);
+			// The initial control turn carries the Anchor (no Frame yet).
+			expect(controlTexts.some((text) => text.includes("Anchor (revision 1)"))).toBe(true);
+			// Once a Frame exists it is restated with its expectation and lease.
+			expect(controlTexts.some((text) => text.includes("Frame v1"))).toBe(true);
+			// After the first Action completes, the next control turn names the last
+			// Action and its outcome instead of forcing the model to re-derive it.
+			expect(controlTexts.some((text) => text.includes("Last Action:"))).toBe(true);
+			expect(controlTexts.some((text) => text.includes("Outcome: completed"))).toBe(true);
+			// The snapshot is always prefixed with the explicit use-directly directive.
+			expect(controlTexts.some((text) => text.includes("[CURRENT EPISTEMIC STATE"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("advances a Frame to new Actions without re-asserting its proposition", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "Prompt construction in the loop is produced only by externally injected messages",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "advance_frame",
+					reason: "read the next prompt site",
+					actions: [
+						actionBudget({
+							intent: "Read the next prompt site file in full",
+							completionCondition: "One read returns that file in full with its path shown in the result",
+						}),
+					],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The next file was read in full."),
+				control({ kind: "complete_action", reason: "A single full read established the next site" }),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			const revisions = harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_revision");
+			expect(revisions).toHaveLength(2);
+			const [created, advanced] = revisions;
+			// advance_frame keeps the Frame identity and proposition, opening only a new version.
+			expect(advanced.frameId).toBe(created.frameId);
+			expect(advanced.statement).toBe(created.statement);
+			expect(advanced.expectation).toBe(created.expectation);
+			expect(advanced.version).toBe(created.version + 1);
+			// The new provisional Action contract is what actually changed.
+			const starts = harness.sessionManager.getBranch().filter((entry) => entry.type === "action_start");
+			expect(starts[1]).toMatchObject({ intent: "Read the next prompt site file in full" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("explores comprehension before any Frame and rejects a duplicate target", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			const explore = (intent: string) =>
+				control({
+					kind: "explore",
+					expectation: `Reading the prompt-construction surface shows ${intent}`,
+					intent,
+					completionCondition: "One grep records file locations and per-file match counts for the prompt markers",
+					expectedEvidenceRounds: 1,
+					budgetReason: "A single grep over the package tree is one independent evidence round",
+				});
+			harness.setResponses([
+				explore("Grep packages/coding-agent/src for prompt-definition markers"),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "prompt-sites" }, { id: "call-1" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("grep recorded the prompt sites"),
+				control({ kind: "complete_action", reason: "The grep recorded the prompt sites" }),
+				explore("Grep packages/coding-agent/src for prompt-definition markers"),
+				control({ kind: "authorize_final", reason: "Comprehension is sufficient; the Anchor is satisfied" }),
+				fauxAssistantMessage("The prompt sites are system-prompt.ts and agent-session.ts."),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			const branch = harness.sessionManager.getBranch();
+			// explore never required a Frame: exactly one comprehension episode, no frame revision.
+			expect(branch.filter((entry) => entry.type === "action_start")).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "frame_revision")).toHaveLength(0);
+			// The completed explore is durable: its predicted fact became an Anchor Observation.
+			const observations = branch.filter((entry) => entry.type === "observation");
+			expect(observations).toHaveLength(1);
+			expect(observations[0]).toMatchObject({
+				statement: expect.stringContaining("prompt-construction surface"),
+			});
+			expect(observations[0].anchorRevisionEntryId).toBeDefined();
+			expect(observations[0].frameRevisionEntryId).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe(
+				"The prompt sites are system-prompt.ts and agent-session.ts.",
+			);
+			// The duplicate explore was rejected by the information-gain gate.
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes("explore must add new information"),
+				),
+			).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects an explore whose predicted fact is already established (result-level information gain)", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			const explore = (intent: string, expectation: string) =>
+				control({
+					kind: "explore",
+					expectation,
+					intent,
+					completionCondition: "One grep records file locations and per-file match counts for the prompt markers",
+					expectedEvidenceRounds: 1,
+					budgetReason: "A single grep over the package tree is one independent evidence round",
+				});
+			harness.setResponses([
+				explore("Grep for prompt strings", "Prompt literals live in system-prompt.ts and agent-session.ts"),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "prompt-sites" }, { id: "call-1" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("grep recorded the prompt sites"),
+				control({ kind: "complete_action", reason: "recorded the prompt sites" }),
+				// Different intent, but the expectation repeats the already-established fact.
+				explore("List files that define prompts", "Prompt literals live in system-prompt.ts and agent-session.ts"),
+				control({ kind: "authorize_final", reason: "Comprehension is sufficient" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("find the prompts");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes("explore must add new information"),
+				),
+			).toBe(true);
+			// Only the first explore survived; the redundant one never started an episode.
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_start")).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("asks a clarifying question before committing a Frame", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "ask",
+					question: "Should 'all prompts' mean an exhaustive inventory or a representative analysis?",
+				}),
+				fauxAssistantMessage("Should 'all prompts' mean an exhaustive inventory or a representative analysis?"),
+			]);
+
+			await harness.session.prompt("check all the prompts");
+
+			expect(harness.session.getLastAssistantText()).toBe(
+				"Should 'all prompts' mean an exhaustive inventory or a representative analysis?",
+			);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("decomposes the Anchor into explicit subgoals", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "decompose",
+					subgoals: ["Identify the base system prompt", "Identify the per-role control prompts"],
+					reason: "split the inventory into checkable slices",
+				}),
+				control({ kind: "authorize_final", reason: "slices established" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("check all the prompts");
+
+			const anchors = harness.sessionManager.getBranch().filter((entry) => entry.type === "anchor_revision");
+			expect(anchors).toHaveLength(2);
+			expect(anchors[1].statement).toContain("1. Identify the base system prompt");
+			expect(anchors[1].statement).toContain("2. Identify the per-role control prompts");
 		} finally {
 			harness.cleanup();
 		}

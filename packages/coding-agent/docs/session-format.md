@@ -215,7 +215,7 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 Pie stores its surviving epistemic primitives as append-only entries on the same raw session tree:
 
 - `anchor_revision`: one immutable revision of task-success semantics, linked to its prior revision and source event.
-- `frame_revision`: one immutable Frame version with a required falsifier and finite response horizon.
+- `frame_revision`: one immutable Frame version with a required expectation and finite response horizon.
 - `frame_transition`: explicit `replaced`, `died`, `falsified`, or `expired` termination of one exact Frame version.
 - `action_start`: a frozen intent and completion condition bound to one exact Frame revision.
 - `action_transition`: explicit `completed`, `unresolvable`, or `escalated` return from one Action episode.

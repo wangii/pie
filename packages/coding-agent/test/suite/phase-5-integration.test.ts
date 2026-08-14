@@ -41,7 +41,7 @@ async function collectObservation(
 		frame: {
 			type: "create",
 			statement: `${branchName} state survives logout`,
-			falsifier: `a clean restart contradicts ${branchName}`,
+			expectation: `a clean restart contradicts ${branchName}`,
 			horizon: 20,
 		},
 		action: {
@@ -291,7 +291,7 @@ describe("Phase 5 integrated epistemic flow", () => {
 								frame: {
 									type: "create" as const,
 									statement: "the repeated probe remains informative",
-									falsifier: "a probe result contradicts the repeated pattern",
+									expectation: "a probe result contradicts the repeated pattern",
 									horizon: 80,
 								},
 							}

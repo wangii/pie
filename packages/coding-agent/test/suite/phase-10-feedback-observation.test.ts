@@ -32,7 +32,7 @@ const actionContract = {
 const frame = {
 	kind: "create_frame",
 	statement: "The implementation boundary controls the observed behavior",
-	falsifier: "An exact result shows the behavior is controlled by runtime config, not a static boundary",
+	expectation: "An exact result shows the behavior is controlled by runtime config, not a static boundary",
 	actions: [
 		{
 			...actionContract,
@@ -115,7 +115,7 @@ describe("Phase 10 execution feedback observation", () => {
 					challenge: "frame",
 					reason: "The exact result contradicts the Frame relation",
 				}),
-				control({ kind: "falsify_frame", reason: "The falsifier is established by the escalated result" }),
+				control({ kind: "falsify_frame", reason: "The expectation is established by the escalated result" }),
 				control({ kind: "report_inability", reason: "A corrected Frame must be authorized separately" }),
 				fauxAssistantMessage("reconsider under a corrected commitment"),
 			]);
@@ -203,7 +203,7 @@ describe("Phase 10 execution feedback observation", () => {
 				control({
 					kind: "create_frame",
 					statement: "The boundary is supplied at runtime by configuration",
-					falsifier: "An exact result shows the boundary is statically defined",
+					expectation: "An exact result shows the boundary is statically defined",
 					actions: [
 						{
 							...actionContract,

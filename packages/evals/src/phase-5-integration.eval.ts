@@ -45,7 +45,7 @@ const codingScenarios: Array<{
 	task: string;
 	anchor: string;
 	frame: string;
-	falsifier: string;
+	expectation: string;
 	longSession?: boolean;
 }> = [
 	{
@@ -67,7 +67,7 @@ console.log("PASS");
 		task: "Fix the regression: numeric identifier 0 is valid, while only null and undefined are absent. Inspect the implementation, edit it, and run npm test.",
 		anchor: "normalizeIds must preserve every valid numeric identifier, including 0, and pass the regression test.",
 		frame: "The truthiness filter incorrectly conflates numeric zero with an absent identifier.",
-		falsifier: "The regression still fails after filtering only null and undefined.",
+		expectation: "The regression still fails after filtering only null and undefined.",
 	},
 	{
 		name: "lets explicit request headers override defaults",
@@ -92,7 +92,7 @@ console.log("PASS");
 		anchor:
 			"Explicit request headers must override defaults without dropping unrelated defaults, and the regression test must pass.",
 		frame: "The object spread order restores defaults after applying explicit request overrides.",
-		falsifier: "The authorization override still loses after reversing the merge precedence.",
+		expectation: "The authorization override still loses after reversing the merge precedence.",
 	},
 	{
 		name: "handles the expiration boundary through a long restarted session",
@@ -114,7 +114,7 @@ console.log("PASS");
 		task: "Fix expiration semantics: a token is expired when now is equal to or later than expiresAt. Inspect the implementation, edit it, and run npm test.",
 		anchor: "Expiration must be inclusive at expiresAt and the boundary regression test must pass.",
 		frame: "The strict greater-than comparison leaves tokens valid at their exact expiration timestamp.",
-		falsifier: "The equal-timestamp regression still fails after making the boundary inclusive.",
+		expectation: "The equal-timestamp regression still fails after making the boundary inclusive.",
 		longSession: true,
 	},
 ];
@@ -137,7 +137,7 @@ function codingSteps(scenario: (typeof codingScenarios)[number]): PiCodingAgentI
 			frame: {
 				type: "create",
 				statement: scenario.frame,
-				falsifier: scenario.falsifier,
+				expectation: scenario.expectation,
 				horizon: 50,
 			},
 			action: {
@@ -192,19 +192,19 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput; coding: boolea
 					type: "create",
 					statement:
 						"Worker-local authorization state survives logout. Without durable contradictory evidence, DECISION=KEEP_FRAME.",
-					falsifier: "A clean worker restart preserves the authorization failure.",
+					expectation: "A clean worker restart preserves the authorization failure.",
 					horizon: 8,
 				},
 				action: {
 					type: "start",
-					intent: "run the clean-worker falsifier probe",
+					intent: "run the clean-worker expectation probe",
 					completionCondition: "the post-restart authorization result is captured",
 				},
 			},
 			{
 				type: "observe_latest_action_results",
 				statement:
-					"A clean worker restart preserved the authorization failure, so the current Frame's declared falsifier occurred. Durable adjudication is DECISION=REJECT_FRAME.",
+					"A clean worker restart preserved the authorization failure, so the current Frame's declared expectation occurred. Durable adjudication is DECISION=REJECT_FRAME.",
 				affects: "frame",
 			},
 			{ type: "complete_current_action", reason: "the restart result was captured" },

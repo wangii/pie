@@ -7,7 +7,7 @@ import { createHarness, getMessageText } from "./harness.ts";
 const frame = {
 	type: "create" as const,
 	statement: "worker-local state survives logout",
-	falsifier: "a worker restart preserves the authorization failure",
+	expectation: "a worker restart preserves the authorization failure",
 	horizon: 5,
 };
 
@@ -66,7 +66,7 @@ describe("Phase 4 Observation provider boundary", () => {
 			expect(harness.providerContexts.at(-1)!.messages.map(getMessageText).slice(0, 4)).toEqual([
 				"[ANCHOR]\nlogout must revoke authorization",
 				"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
-					"Falsifier: a worker restart preserves the authorization failure\n" +
+					"Expectation: a worker restart preserves the authorization failure\n" +
 					"Response lease: 2/5 completed; 3 model responses remain",
 				`[OBSERVATION ${observation.id}]\nworker-local authorization cache survives logout for 30 seconds\n` +
 					"Relevance: current Frame and Anchor",

@@ -24,7 +24,7 @@ function initializeAction(manager: SessionManager): {
 		frameId: "frame-1",
 		version: 1,
 		statement: "worker-local cache survives logout",
-		falsifier: "a worker restart preserves the authorization failure",
+		expectation: "a worker restart preserves the authorization failure",
 		horizon: 4,
 		previousRevisionId: null,
 		sourceEventId,

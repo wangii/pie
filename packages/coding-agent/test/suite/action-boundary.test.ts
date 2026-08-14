@@ -7,7 +7,7 @@ import { createHarness, getMessageText } from "./harness.ts";
 const initialFrame = {
 	type: "create" as const,
 	statement: "worker-local state survives logout",
-	falsifier: "a clean worker preserves the authorization failure",
+	expectation: "a clean worker preserves the authorization failure",
 	horizon: 4,
 };
 
@@ -36,7 +36,7 @@ describe("Phase 3 Action provider boundary", () => {
 			expect(contextTexts.slice(0, 3)).toEqual([
 				"[ANCHOR]\nlogout must revoke authorization",
 				"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
-					"Falsifier: a clean worker preserves the authorization failure\n" +
+					"Expectation: a clean worker preserves the authorization failure\n" +
 					"Response lease: 1/4 completed; 3 model responses remain",
 				"[CURRENT ACTION]\n" +
 					"Intent: determine whether logout invalidates worker-local authorization state\n" +
@@ -169,7 +169,7 @@ describe("Phase 3 Action provider boundary", () => {
 				frame: {
 					type: "replace",
 					statement: "the replica serves stale authorization state",
-					falsifier: "primary and replica positions match",
+					expectation: "primary and replica positions match",
 					horizon: 3,
 					reason: "the Action escalated contradictory world evidence",
 				},

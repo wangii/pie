@@ -22,7 +22,7 @@ const graph: FrameActionGraph = {
 			frameId: "frame-1",
 			version: 1,
 			statement: "cache survives logout",
-			falsifier: "restart preserves the failure",
+			expectation: "restart preserves the failure",
 			horizon: 8,
 			completedModelResponses: 2,
 			status: "active",

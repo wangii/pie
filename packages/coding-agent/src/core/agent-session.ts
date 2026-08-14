@@ -321,7 +321,7 @@ export interface ExtensionBindings {
 
 export interface FrameDefinition {
 	statement: string;
-	falsifier: string;
+	expectation: string;
 	/** Positive number of completed model responses before mandatory reconsideration. */
 	horizon: number;
 }
@@ -423,7 +423,7 @@ export interface EpistemicDiagnostics {
 		anchor?: Pick<Anchor, "id" | "revision" | "statement" | "revisionEntryId">;
 		frame?: Pick<
 			Frame,
-			"id" | "version" | "statement" | "falsifier" | "revisionEntryId" | "horizon" | "completedModelResponses"
+			"id" | "version" | "statement" | "expectation" | "revisionEntryId" | "horizon" | "completedModelResponses"
 		>;
 		action?: Pick<Action, "id" | "intent" | "completionCondition" | "startEntryId" | "completedModelResponses">;
 		lastAction?: {
@@ -594,7 +594,7 @@ export class AgentSession {
 	private _controlRepairAttempts = 0;
 	private readonly _maxControlRepairAttempts = 3;
 	private _lastControlError: string | undefined;
-	private _pendingFinalAuthorization: { kind: "satisfied" | "inability"; reason: string } | undefined;
+	private _pendingFinalAuthorization: { kind: "satisfied" | "inability" | "question"; reason: string } | undefined;
 	private _productionControlEnabled = false;
 	private _pendingAnchorRevision: { statement: string; revisionReason?: string } | undefined;
 	private _pendingFrameDirective: FrameDirective | undefined;
@@ -721,7 +721,7 @@ export class AgentSession {
 				frameId,
 				version: (current?.version ?? 0) + 1,
 				statement: definition.statement,
-				falsifier: definition.falsifier,
+				expectation: definition.expectation,
 				horizon: definition.horizon,
 				previousRevisionId: current?.revisionEntryId ?? null,
 				sourceEventId,
@@ -782,6 +782,30 @@ export class AgentSession {
 				intent: definition.intent,
 				completionCondition: definition.completionCondition,
 				frameRevisionEntryId: frame.revisionEntryId,
+				sourceEventId,
+			}),
+		);
+	}
+
+	/**
+	 * Start a pre-Frame comprehension Action bound to the Anchor (the `explore`
+	 * operator). It reuses the Action episode machinery so execution and terminal
+	 * adjudication stay identical, but carries no Frame identity: the episode
+	 * gathers code facts before any falsifiable solution hypothesis exists.
+	 */
+	private _appendExploreStart(
+		definition: ActionDefinition,
+		expectation: string,
+		sourceEventId: string,
+		anchor: Anchor,
+	): void {
+		this._emitAppendedEntry(
+			this.sessionManager.appendActionStart({
+				actionId: `action-${randomUUID()}`,
+				intent: definition.intent,
+				completionCondition: definition.completionCondition,
+				expectation,
+				anchorRevisionEntryId: anchor.revisionEntryId,
 				sourceEventId,
 			}),
 		);
@@ -921,9 +945,35 @@ export class AgentSession {
 	}
 
 	/**
+	 * Materialize a completed pre-Frame `explore` as a durable Anchor Observation.
+	 * Comprehension is constructive, not falsifiable: the episode's predicted fact
+	 * (its expectation) becomes established evidence the next decision can cite and
+	 * the information-gain gate can dedupe against, so exploration cannot loop
+	 * without adding new facts.
+	 */
+	private _materializeExploreObservation(state: ReturnType<typeof restoreEpistemicState>, action: Action): void {
+		if (!this._observationEnabled || !state.anchor || !action.expectation) return;
+		const branch = this.sessionManager.getBranch();
+		const startIndex = branch.findIndex((entry) => entry.id === action.startEntryId);
+		if (startIndex < 0) return;
+		const sourceEventIds: string[] = [];
+		for (let index = startIndex + 1; index < branch.length; index++) {
+			const entry = branch[index]!;
+			if (
+				entry.type === "message" &&
+				(entry.message.role === "toolResult" || entry.message.role === "bashExecution")
+			) {
+				sourceEventIds.push(entry.id);
+			}
+		}
+		if (sourceEventIds.length === 0) return;
+		this._appendObservation({ statement: action.expectation, affects: "anchor", sourceEventIds }, state);
+	}
+
+	/**
 	 * Lazily compute a bounded, deterministic inventory of the project's source
 	 * files. This grounds the initial Frame decision, which otherwise runs with
-	 * no tool access and must assert a statement/falsifier from memory alone.
+	 * no tool access and must assert a statement/expectation from memory alone.
 	 * Failures are swallowed: grounding is a best-effort aid, never a hard
 	 * dependency, so an unreadable working directory must not block the loop.
 	 */
@@ -1135,11 +1185,16 @@ export class AgentSession {
 		}
 		if (role === "finalAnswer") {
 			const authorization = this._pendingFinalAuthorization;
-			return authorization?.kind === "inability"
-				? `Epistemic control authorized a bounded inability report: ${authorization.reason}. Give the user a concise actionable report. Do not call tools.`
-				: `Epistemic control established Anchor satisfaction and authorized the final answer: ${authorization?.reason ?? "authorized"}. Give only the user-visible final answer. Do not call tools.`;
+			if (authorization?.kind === "inability") {
+				return `Epistemic control authorized a bounded inability report: ${authorization.reason}. Give the user a concise actionable report. Do not call tools.`;
+			}
+			if (authorization?.kind === "question") {
+				return `Epistemic control needs to clarify the Anchor before proceeding. Ask the user exactly this clarifying question and nothing else: ${authorization.reason}. Do not call tools and do not proceed to a solution.`;
+			}
+			return `Epistemic control established Anchor satisfaction and authorized the final answer: ${authorization?.reason ?? "authorized"}. Give only the user-visible final answer. Do not call tools.`;
 		}
 		const state = restoreEpistemicState(this.sessionManager.getBranch());
+		const stateSnapshot = this._epistemicControlSnapshot(state);
 		const activeActionBudget = this._leaseBudgetForAction(state);
 		const consumedEvidenceRounds = state.action ? this._consumedEvidenceRounds(state.action.startEntryId) : 0;
 		const actionBudgetExhausted =
@@ -1171,39 +1226,41 @@ export class AgentSession {
 				? "complete_action, unresolvable_action, or escalate_action"
 				: "continue_action, complete_action, unresolvable_action, or escalate_action"
 			: state.frame
-				? "authorize_action, revise_frame, replace_frame, falsify_frame, kill_frame, authorize_final, or report_inability"
+				? "authorize_action, advance_frame, revise_frame, replace_frame, falsify_frame, kill_frame, authorize_final, or report_inability"
 				: state.anchor
-					? "create_frame, revise_anchor, authorize_final, or report_inability"
+					? "explore, ask, decompose, create_frame, revise_anchor, authorize_final, or report_inability"
 					: "report_inability";
 		return (
-			"PIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
+			stateSnapshot +
+			"\n\nPIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
 			"do not call or simulate tools, and do not output requested answer tokens. Return exactly one JSON object, with " +
 			"the discriminator property named exactly kind, and no prose or markdown. The first character must be { and the " +
 			"last character must be }. " +
 			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
 			`The current state permits only: ${allowed}.` +
 			availableActionContractsPrompt +
-			` For create_frame, revise_frame, or replace_frame, enumerate 1-${policy.maxActions} provisional bounded Actions; do not supply horizon. ` +
+			` For create_frame, advance_frame, revise_frame, or replace_frame, enumerate 1-${policy.maxActions} provisional bounded Actions; do not supply horizon. ` +
 			`Each provisional Action has intent, completionCondition, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. ` +
 			"One evidence round is one model response that emits one or more independent evidence-producing tool calls; parallel read-only calls in that response count once. A later round is valid only when its probe depends on a result unavailable before the preceding round. " +
 			"Complexity, uncertainty, file count, or tool-call count do not justify extra rounds. Unknown source locations require a discovery-only Action before source reading. " +
 			`The harness derives horizon within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}: initial control ${policy.initialControlAllowance} + per Action authorization ${policy.actionAuthorizationCost} + evidence rounds + terminal adjudication ${policy.actionTerminalAdjudicationCost} + final Frame adjudication ${policy.finalFrameAdjudicationCost}. ` +
 			"When an accepted evidence-round estimate is exhausted, continue_action is forbidden and control must return without automatic renewal. " +
-			'Schemas: {"kind":"create_frame","statement":string,"falsifier":string,"actions":[{"intent":string,"completionCondition":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
-			"revise_frame and replace_frame use the same actions array and also require reason; falsify_frame, kill_frame, continue_action, " +
+			'Schemas: {"kind":"create_frame","statement":string,"expectation":string,"actions":[{"intent":string,"completionCondition":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
+			"explore requires expectation, intent, completionCondition, expectedEvidenceRounds (integer), and budgetReason (one bounded comprehension episode before any Frame); ask requires question; decompose requires subgoals (array of non-empty strings) and reason; " +
+			"revise_frame and replace_frame use the same actions array and also require reason; advance_frame carries only actions and reason (it keeps the current Frame's statement and expectation unchanged, so the proposition is not re-asserted); falsify_frame, kill_frame, continue_action, " +
 			"complete_action, unresolvable_action, authorize_final, and report_inability require reason; " +
 			"revise_anchor requires statement and reason; authorize_action requires only actionContractId from one listed unused provisional contract; " +
 			"escalate_action requires challenge (anchor or frame) and reason. A Frame must assert one provisional causal or " +
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
-			"the requested deliverable. Its falsifier names an exact observable world result that contradicts that relation, not " +
-			"an inability to finish the investigation. A Frame must not assert an unbounded completeness claim (for example that " +
+			"the requested deliverable. Its expectation names the exact observable world result you predict confirms that relation, " +
+			"not an inability to finish the investigation; if the check does not produce that result, the Frame is falsified. A Frame must not assert an unbounded completeness claim (for example that " +
 			"some set of files contains all prompt sources, that every entry point is in one place, or that a list is exhaustive). " +
 			"When the Anchor asks for an exhaustive inventory (all, every, complete), decompose it: each Frame asserts one bounded, " +
 			"checkable slice of the Anchor and leaves the remaining slices to subsequent Frames; authorize_final only when every " +
 			"slice you intend to cover has been established. Ground the Frame before asserting it: when the Anchor asks where prompts are defined or built, first " +
-			"authorize a bounded discovery Action (search/grep) that records the actual file locations and their match counts, then form the Frame's statement and falsifier " +
-			'from that observed structure. Never make the discovery probe itself the falsifier (for example a falsifier of "the search returns zero matches" is ungrounded ' +
-			"and must not be used). An Action is one bounded episode with one externally checkable completion " +
+			"authorize a bounded discovery Action (search/grep) that records the actual file locations and their match counts, then form the Frame's statement and expectation " +
+			'from that observed structure. Never make a discovery probe itself the expectation (for example an expectation of "the search returns zero matches" is a discovery probe, not a grounded prediction, ' +
+			"and must not be used). Use explore only to gather a NEW comprehension fact you still need in order to form a grounded Frame: each explore must add information no prior explore already established, so do not re-explore the same target, and once you understand enough to assert a solution Frame, stop exploring and create_frame (or authorize_final) instead of expanding further. An Action is one bounded episode with one externally checkable completion " +
 			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. A completion condition is bounded only when one observable result can " +
 			"confirm it: a single file read in full, a single symbol's declaration, or a single diff or command output. Do not " +
 			"write a condition that enumerates every or all occurrences, every declaration site, or a complete inventory; such a " +
@@ -1217,7 +1274,7 @@ export class AgentSession {
 			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
 			"outside its scope; such execution cannot merge a later Action into the current episode. After complete_action, " +
 			"reconsider separately before authorizing the next Action. After unresolvable_action, treat the reason as evidence " +
-			"against the Frame: if it contradicts the Frame's premise or establishes its falsifier, falsify_frame or kill_frame " +
+			"against the Frame: if it contradicts the Frame's premise or refutes its expectation, falsify_frame or kill_frame " +
 			"instead of authorizing a remaining Action whose completion condition presupposes the contradicted premise. " +
 			"When an unresolvable reason shows the completion condition was over-scoped (unbounded enumeration) rather than " +
 			"contradicted by the world, authorize a new, narrower Action that establishes the bounded sub-result named in the reason; " +
@@ -1225,6 +1282,81 @@ export class AgentSession {
 			"Use escalate_action only when the finalized results themselves contradict or undermine the Frame relation or the " +
 			"Anchor success semantics; use unresolvable_action when the episode cannot complete under current constraints, " +
 			"naming in reason what was found and what remains unknown."
+		);
+	}
+
+	private _lastActionTransition():
+		| {
+				transition: ActionTerminalTransition;
+				reason?: string;
+				intent: string;
+		  }
+		| undefined {
+		const branch = this.sessionManager.getBranch();
+		let intent: string | undefined;
+		let startEntryId: string | undefined;
+		let result: { transition: ActionTerminalTransition; reason?: string } | undefined;
+		for (const entry of branch) {
+			if (entry.type === "action_start") {
+				intent = entry.intent;
+				startEntryId = entry.id;
+			} else if (entry.type === "action_transition" && entry.startEntryId === startEntryId) {
+				result = { transition: entry.transition, reason: entry.reason };
+			}
+		}
+		if (!result || intent === undefined) return undefined;
+		return { ...result, intent };
+	}
+
+	/**
+	 * A compact, harness-derived summary of the current epistemic state, injected
+	 * into the epistemic control request so the control model does not have to
+	 * re-derive "where am I" from the raw transcript. It restates only what the
+	 * next control decision must know: the Anchor, the current Frame (statement,
+	 * expectation, lease), the active or just-finished Action, and established
+	 * observations. The context compiler still carries the full structured state
+	 * ([ANCHOR]/[CURRENT FRAME]/[ACTION OUTCOME]/[OBSERVATION]); this block is
+	 * placed adjacent to the decision instruction as a single authoritative
+	 * reference, which measurably reduces control-turn reasoning churn.
+	 */
+	private _epistemicControlSnapshot(state: ReturnType<typeof restoreEpistemicState>): string {
+		const lines: string[] = [];
+		if (state.anchor) {
+			lines.push(`Anchor (revision ${state.anchor.revision}): ${state.anchor.statement}`);
+		}
+		if (state.frame) {
+			const remaining = Math.max(0, state.frame.horizon - state.frame.completedModelResponses);
+			lines.push(
+				`Frame v${state.frame.version} (${state.frame.completedModelResponses}/${state.frame.horizon} responses used, ${remaining} remain): ${state.frame.statement}`,
+			);
+			lines.push(`  Expectation: ${state.frame.expectation}`);
+		}
+		if (state.action) {
+			const budget = this._leaseBudgetForAction(state);
+			const consumed = this._consumedEvidenceRounds(state.action.startEntryId);
+			const rounds = budget
+				? `${consumed}/${budget.expectedEvidenceRounds} evidence rounds`
+				: `${consumed} responses`;
+			lines.push(`Active Action (${rounds}): ${state.action.intent}`);
+			lines.push(`  Completion condition: ${state.action.completionCondition}`);
+		} else {
+			const last = this._lastActionTransition();
+			if (last) {
+				lines.push(`Last Action: ${last.intent}`);
+				lines.push(`  Outcome: ${last.transition} — ${last.reason ?? "no reason recorded"}`);
+			}
+		}
+		const observations = state.observations ?? [];
+		if (observations.length > 0) {
+			const latest = observations[observations.length - 1]!;
+			lines.push(`Established observations (${observations.length}): ${latest.statement}`);
+		}
+		if (lines.length === 0) {
+			return "[CURRENT EPISTEMIC STATE] empty (no Anchor, Frame, or Action yet).";
+		}
+		return (
+			"[CURRENT EPISTEMIC STATE — derived by the harness; use it directly, do not reconstruct it from the transcript]\n" +
+			lines.join("\n")
 		);
 	}
 
@@ -1315,10 +1447,10 @@ export class AgentSession {
 		}
 		if (
 			typeof definition.statement !== "string" ||
-			typeof definition.falsifier !== "string" ||
+			typeof definition.expectation !== "string" ||
 			!Array.isArray(definition.actions)
 		) {
-			throw new Error("Production Frame decision requires statement, falsifier, and provisional actions.");
+			throw new Error("Production Frame decision requires statement, expectation, and provisional actions.");
 		}
 		for (const candidate of definition.actions) {
 			if (
@@ -1345,7 +1477,8 @@ export class AgentSession {
 			(anchor !== undefined &&
 				anchorStatement.length >= 80 &&
 				this._semanticCharacterContainment(definition.statement, anchor.statement) >= 0.72);
-		const predictsOwnFalsifier = /\bfalsifier\b/u.test(statement) || /(?:反证|证伪结果|否证结果)/u.test(statement);
+		const predictsOwnExpectation =
+			/\bexpectation\b/u.test(statement) || /(?:反证|证伪结果|否证结果)/u.test(statement);
 		const conditionsTruthOnProbe =
 			/\b(?:accurate(?:ly)?|correct(?:ly)?|true|valid|explains?)\b.*\b(?:only if|if and only if|provided that)\b/u.test(
 				statement,
@@ -1355,7 +1488,7 @@ export class AgentSession {
 			statement.length < 12 ||
 			startsWithTaskVerb ||
 			repeatsAnchor ||
-			predictsOwnFalsifier ||
+			predictsOwnExpectation ||
 			conditionsTruthOnProbe
 		) {
 			throw new Error(
@@ -1376,29 +1509,29 @@ export class AgentSession {
 				"Frame statement must assert one bounded slice of the Anchor, not an unbounded completeness claim over all sources, files, or entry points; decompose the Anchor and leave the remaining slices to subsequent Frames.",
 			);
 		}
-		const falsifier = this._normalizeSemanticText(definition.falsifier);
+		const expectation = this._normalizeSemanticText(definition.expectation);
 		const probesAbsenceFromSearch =
-			/\b(?:rg|grep|ripgrep|search|query|discovery|scan|inspection)\b/u.test(falsifier) &&
+			/\b(?:rg|grep|ripgrep|search|query|discovery|scan|inspection)\b/u.test(expectation) &&
 			/\b(?:returns?|yields?|finds?|produces?|surfaces?|reveals?|shows?|gives?)\b.{0,48}\b(?:zero|no|nothing|none|empty|nil)\b/u.test(
-				falsifier,
+				expectation,
 			);
 		if (probesAbsenceFromSearch) {
 			throw new Error(
-				"Frame falsifier must not be a discovery probe (a search/scan that returns zero or no results); name an exact observable world result that contradicts a relation you already assert, grounded in evidence rather than in a search you have not yet run.",
+				"Frame expectation must not be a discovery probe (a search/scan that returns zero or no results); predict the observable world result that confirms a relation you already assert, grounded in evidence rather than in a search you have not yet run.",
 			);
 		}
 		if (
-			falsifier.length < 12 ||
-			this._semanticCharacterContainment(definition.statement, definition.falsifier) >= 0.7 ||
+			expectation.length < 12 ||
+			this._semanticCharacterContainment(definition.statement, definition.expectation) >= 0.7 ||
 			/^(?:cannot|can not|unable to|failure to|no (?:specific |concrete )?)(?:complete|finish|locate|find|identify|mismatch|ambiguity|site|cause|fix|edit)/u.test(
-				falsifier,
+				expectation,
 			) ||
-			/^(?:无法|不能|未能|没有找到|找不到|无具体)(?:完成|定位|发现|识别|问题|原因|修复)/u.test(falsifier) ||
-			falsifier === "the frame is wrong" ||
-			falsifier === "this is not true"
+			/^(?:无法|不能|未能|没有找到|找不到|无具体)(?:完成|定位|发现|识别|问题|原因|修复)/u.test(expectation) ||
+			expectation === "the frame is wrong" ||
+			expectation === "this is not true"
 		) {
 			throw new Error(
-				"Frame falsifier must name a concrete observable result that contradicts, rather than restates, the Frame relation.",
+				"Frame expectation must name the concrete observable result you predict confirms, rather than restates, the Frame relation.",
 			);
 		}
 		for (const candidate of definition.actions ?? []) this._validateControllerAction(candidate, state);
@@ -1410,7 +1543,7 @@ export class AgentSession {
 		}
 		const frame = {
 			statement: definition.statement.trim(),
-			falsifier: definition.falsifier.trim(),
+			expectation: definition.expectation.trim(),
 			horizon: calculation.horizon,
 		};
 		return {
@@ -1558,6 +1691,34 @@ export class AgentSession {
 				this._frameLeaseBudget = prepared.budget;
 				return "epistemic";
 			}
+			case "advance_frame": {
+				// Advance keeps the current Frame's proposition (statement + expectation)
+				// and only replaces its provisional Action contracts, so the controller
+				// does not have to re-assert an unchanged commitment just to gather the
+				// next slice of evidence. It still opens a new Frame version (and thus a
+				// fresh derived lease), but the falsifiable claim is untouched.
+				if (state.action) throw new Error("Terminate the active Action before advancing its Frame.");
+				if (!state.frame) throw new Error("Cannot advance_frame because no Frame is active.");
+				const prepared = this._prepareControllerFrame(
+					{
+						kind: "revise_frame",
+						statement: state.frame.statement,
+						expectation: state.frame.expectation,
+						actions: decision.actions,
+						reason: reason!,
+					},
+					state,
+				);
+				this._applyFrameDirective(
+					{ type: "revise", ...prepared.frame, revisionReason: reason },
+					sourceEventId,
+					state.frame,
+				);
+				const advanced = restoreEpistemicState(this.sessionManager.getBranch()).frame!;
+				prepared.budget.frameRevisionEntryId = advanced.revisionEntryId;
+				this._frameLeaseBudget = prepared.budget;
+				return "epistemic";
+			}
 			case "falsify_frame":
 			case "kill_frame":
 				if (state.action) throw new Error("Terminate the active Action before terminating its Frame.");
@@ -1569,6 +1730,79 @@ export class AgentSession {
 					reason!,
 				);
 				return "epistemic";
+			case "ask":
+				if (state.action || state.frame) throw new Error("Clarify the Anchor before committing a Frame or Action.");
+				if (!state.anchor) throw new Error("No Anchor is active to clarify.");
+				if (!decision.question?.trim()) throw new Error("Clarification question must not be empty.");
+				this._pendingFinalAuthorization = { kind: "question", reason: decision.question.trim() };
+				return "finalAnswer";
+			case "decompose": {
+				if (state.action || state.frame)
+					throw new Error("Decompose the Anchor before committing a Frame or Action.");
+				if (!state.anchor) throw new Error("No Anchor is active to decompose.");
+				if (!Array.isArray(decision.subgoals) || decision.subgoals.length === 0) {
+					throw new Error("Decompose requires at least one explicit subgoal.");
+				}
+				const subgoals = decision.subgoals.map((subgoal) => subgoal.trim()).filter((subgoal) => subgoal.length > 0);
+				if (subgoals.length === 0) throw new Error("Decompose subgoals must be non-empty strings.");
+				this._emitAppendedEntry(
+					this.sessionManager.appendAnchorRevision({
+						anchorId: state.anchor.id,
+						revision: state.anchor.revision + 1,
+						statement: subgoals.map((subgoal, index) => `${index + 1}. ${subgoal}`).join("\n"),
+						previousRevisionId: state.anchor.revisionEntryId,
+						sourceEventId,
+						revisionReason: reason ?? `Decomposed into ${subgoals.length} checkable subgoals.`,
+					}),
+				);
+				return "epistemic";
+			}
+			case "explore": {
+				if (state.action) throw new Error("An Action episode is already active.");
+				if (state.frame)
+					throw new Error(
+						"explore is a pre-Frame comprehension operator; under an active Frame use authorize_action instead.",
+					);
+				if (!state.anchor) throw new Error("No Anchor is active to explore under.");
+				const definition = {
+					intent: decision.intent.trim(),
+					completionCondition: decision.completionCondition.trim(),
+				};
+				const expectation = decision.expectation.trim();
+				this._validateActionDefinition(definition);
+				if (!expectation) throw new Error("explore requires a non-empty expectation (the fact it predicts).");
+				// Information-gain gate: refuse an explore whose intent repeats a prior
+				// episode, or whose predicted fact is already established by a durable
+				// Anchor Observation from a completed explore.
+				const priorExploreIntents = this.sessionManager
+					.getBranch()
+					.flatMap((entry) =>
+						entry.type === "action_start" &&
+						entry.frameRevisionEntryId === undefined &&
+						entry.anchorRevisionEntryId !== undefined
+							? [entry.intent]
+							: [],
+					);
+				const establishedFacts = (state.observations ?? [])
+					.filter((observation) => observation.anchorRevisionEntryId === state.anchor?.revisionEntryId)
+					.map((observation) => observation.statement);
+				const redundantIntent = priorExploreIntents.some(
+					(prior) => this._semanticCharacterContainment(definition.intent, prior) >= 0.7,
+				);
+				const redundantFact = establishedFacts.some(
+					(fact) => this._semanticCharacterContainment(expectation, fact) >= 0.7,
+				);
+				if (redundantIntent || redundantFact) {
+					throw new Error(
+						"explore must add new information: this episode repeats a prior exploration or re-predicts an already-established fact. Propose a Frame, decompose, or ask instead of re-exploring.",
+					);
+				}
+				this._appendExploreStart(definition, expectation, sourceEventId, state.anchor);
+				this._operationalActionId = restoreEpistemicState(this.sessionManager.getBranch()).action?.id;
+				this._operationalRepairAttempts = 0;
+				this._latestOperationalError = undefined;
+				return "execution";
+			}
 			case "revise_anchor":
 				if (state.action || state.frame)
 					throw new Error("Terminate the active Action and Frame before revising the Anchor.");
@@ -1652,6 +1886,12 @@ export class AgentSession {
 				return "epistemic";
 			case "complete_action":
 				if (!state.action) throw new Error("Cannot complete_action because no Action is active.");
+				// A completed pre-Frame explore is durable comprehension: materialize its
+				// predicted fact as an Anchor Observation so later decisions (and the
+				// information-gain gate) act on the result, not the raw transcript.
+				if (state.action.anchorRevisionEntryId !== undefined && state.action.expectation) {
+					this._materializeExploreObservation(state, state.action);
+				}
 				this._appendActionTransition(state.action, "completed", sourceEventId, reason!);
 				return "epistemic";
 			case "authorize_final":
@@ -1747,7 +1987,8 @@ export class AgentSession {
 							decision.kind === "escalate_action");
 					const explicitFrameDecision =
 						!state.action &&
-						(decision.kind === "revise_frame" ||
+						(decision.kind === "advance_frame" ||
+							decision.kind === "revise_frame" ||
 							decision.kind === "replace_frame" ||
 							decision.kind === "falsify_frame" ||
 							decision.kind === "kill_frame" ||
@@ -2592,7 +2833,7 @@ export class AgentSession {
 							id: state.frame.id,
 							version: state.frame.version,
 							statement: state.frame.statement,
-							falsifier: state.frame.falsifier,
+							expectation: state.frame.expectation,
 							revisionEntryId: state.frame.revisionEntryId,
 							horizon: state.frame.horizon,
 							completedModelResponses: state.frame.completedModelResponses,
@@ -2712,7 +2953,7 @@ export class AgentSession {
 
 	private _validateFrameDefinition(definition: FrameDefinition): void {
 		if (!definition.statement.trim()) throw new Error("Frame statement must not be empty.");
-		if (!definition.falsifier.trim()) throw new Error("Frame falsifier must not be empty.");
+		if (!definition.expectation.trim()) throw new Error("Frame expectation must not be empty.");
 		if (!Number.isSafeInteger(definition.horizon) || definition.horizon < 1) {
 			throw new Error("Frame horizon must be a positive integer.");
 		}

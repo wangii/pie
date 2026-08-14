@@ -60,7 +60,7 @@ function actionBudget(definition: { intent: string; completionCondition: string 
 const frame = {
 	kind: "create_frame",
 	statement: "Repository behavior is controlled by the persisted cache boundary",
-	falsifier: "A restart test shows the failure persists after every cache instance is recreated",
+	expectation: "A restart test shows the failure persists after every cache instance is recreated",
 	actions: [actionBudget(action), actionBudget(secondAction, 1)],
 } as const;
 
@@ -96,7 +96,7 @@ describe("Phase 7 production control flow", () => {
 			const startedAction = branch.find((entry) => entry.type === "action_start");
 			expect(createdFrame).toMatchObject({
 				statement: frame.statement,
-				falsifier: frame.falsifier,
+				expectation: frame.expectation,
 				horizon: 12,
 			});
 			expect(createdFrame?.type === "frame_revision" ? createdFrame.statement : undefined).not.toBe(
@@ -126,14 +126,14 @@ describe("Phase 7 production control flow", () => {
 					kind: "create_frame",
 					statement:
 						"Investigate the frame/action degeneration regression: trace state transitions, locate the root cause, and deliver a diagnosis with a fix.",
-					falsifier:
+					expectation:
 						"No concrete degeneration site or root cause can be located after inspecting the transition paths.",
 					horizon: 16,
 				}),
 				control({
 					kind: "create_frame",
 					statement: "Action lifetime is controlled only by the containing Frame response lease",
-					falsifier: "A distinct Action response budget returns control before the Frame lease expires",
+					expectation: "A distinct Action response budget returns control before the Frame lease expires",
 					actions: [
 						actionBudget({
 							intent: "Trace the Frame and Action transition paths end to end",
@@ -145,7 +145,7 @@ describe("Phase 7 production control flow", () => {
 				control({
 					kind: "create_frame",
 					statement: "Action lifetime is controlled only by the containing Frame response lease",
-					falsifier: "A distinct Action response budget returns control before the Frame lease expires",
+					expectation: "A distinct Action response budget returns control before the Frame lease expires",
 					actions: [
 						actionBudget({
 							intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
@@ -194,13 +194,13 @@ describe("Phase 7 production control flow", () => {
 				control({
 					kind: "create_frame",
 					statement: "调查工具说明如何适配认识循环和执行循环并给出具体修改",
-					falsifier: "没有发现工具说明与两个循环之间的具体差异",
+					expectation: "没有发现工具说明与两个循环之间的具体差异",
 					horizon: 12,
 				}),
 				control({
 					kind: "create_frame",
 					statement: "工具调用结果的意义而非工具名称决定其所属循环",
-					falsifier: "同一工具的所有结果都被运行时固定归入同一个循环",
+					expectation: "同一工具的所有结果都被运行时固定归入同一个循环",
 					horizon: 12,
 				}),
 				control(authorizeFirstAction),
@@ -221,27 +221,27 @@ describe("Phase 7 production control flow", () => {
 		}
 	});
 
-	it("requires a contradictory falsifier and preserves explicit adjudication under a derived Frame lease", async () => {
+	it("requires a contradictory expectation and preserves explicit adjudication under a derived Frame lease", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
 			harness.setResponses([
 				control({
 					kind: "create_frame",
 					statement: "The restart probe produces a cache-invalidating result",
-					falsifier: "Running the restart probe produces the cache-invalidating result",
+					expectation: "Running the restart probe produces the cache-invalidating result",
 					horizon: 1,
 				}),
 				control({
 					kind: "create_frame",
 					statement:
-						"The concrete falsifier prescribed by the report will occur when its restart probe runs, contradicting worker-local cache persistence",
-					falsifier: "The authorization failure persists after a clean worker restart",
+						"The concrete expectation prescribed by the report will occur when its restart probe runs, contradicting worker-local cache persistence",
+					expectation: "The authorization failure persists after a clean worker restart",
 					horizon: 1,
 				}),
 				control({
 					kind: "create_frame",
 					statement: "Worker-local cache persistence explains the authorization failure",
-					falsifier: "The authorization failure persists after a clean worker restart",
+					expectation: "The authorization failure persists after a clean worker restart",
 					horizon: 1,
 				}),
 				control({
@@ -260,7 +260,7 @@ describe("Phase 7 production control flow", () => {
 				expect.objectContaining({ transition: "falsified" }),
 			]);
 			expect(harness.providerContexts[1]!.systemPrompt).toContain(
-				"previous decision was rejected: Frame falsifier must name a concrete observable result that contradicts",
+				"previous decision was rejected: Frame expectation must name the concrete observable result you predict confirms",
 			);
 			expect(harness.providerContexts[2]!.systemPrompt).toContain(
 				"previous decision was rejected: Frame statement must assert one provisional world relation",
@@ -411,7 +411,7 @@ describe("Phase 7 production control flow", () => {
 					kind: "create_frame",
 					statement:
 						"The report accurately identifies worker-local cache as the cause only if its restart probe reproduces the failure",
-					falsifier: "Running the restart probe does not reproduce the authorization failure",
+					expectation: "Running the restart probe does not reproduce the authorization failure",
 					horizon: 16,
 				}),
 				control(frame),
@@ -419,7 +419,7 @@ describe("Phase 7 production control flow", () => {
 				fauxAssistantMessage("The conditional Frame was rejected."),
 			]);
 
-			await harness.session.prompt("verify that the restart probe remains a falsifier");
+			await harness.session.prompt("verify that the restart probe remains a expectation");
 
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_revision")).toEqual([
 				expect.objectContaining({ statement: frame.statement }),
@@ -570,7 +570,7 @@ describe("Phase 7 production control flow", () => {
 		const databaseAction = await run({
 			kind: "create_frame",
 			statement: "Authorization failure is controlled by stale database replica reads",
-			falsifier: "A primary-database trace shows the same stale authorization value",
+			expectation: "A primary-database trace shows the same stale authorization value",
 			actions: [actionBudget(databaseCandidate)],
 		});
 
@@ -654,11 +654,11 @@ describe("Phase 7 production control flow", () => {
 				control({
 					kind: "create_frame",
 					statement: "repair malformed control",
-					falsifier: "cannot complete the request",
+					expectation: "cannot complete the request",
 					horizon: 9,
 				}),
 				fauxAssistantMessage("not json"),
-				control({ kind: "create_frame", statement: "repair malformed control", falsifier: "wrong", horizon: 9 }),
+				control({ kind: "create_frame", statement: "repair malformed control", expectation: "wrong", horizon: 9 }),
 				fauxAssistantMessage("A bounded inability report."),
 			]);
 

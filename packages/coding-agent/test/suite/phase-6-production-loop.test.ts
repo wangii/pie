@@ -22,7 +22,7 @@ const productionAction = {
 const productionFrame = {
 	kind: "create_frame",
 	statement: "Repository behavior is controlled by the current implementation boundary",
-	falsifier: "An exact repository or runtime result shows a different boundary controls the behavior",
+	expectation: "An exact repository or runtime result shows a different boundary controls the behavior",
 	actions: [
 		{
 			...productionActionContract,
@@ -141,7 +141,7 @@ describe("Phase 6 production loop ownership", () => {
 				frame: {
 					type: "create",
 					statement: "explicit investigation",
-					falsifier: "explicit contradiction",
+					expectation: "explicit contradiction",
 					horizon: 4,
 				},
 				action: {
@@ -179,7 +179,7 @@ describe("Phase 6 production loop ownership", () => {
 				frame: {
 					type: "create",
 					statement: "restart should restore state",
-					falsifier: "state is missing after restart",
+					expectation: "state is missing after restart",
 					horizon: 4,
 				},
 				action: { type: "start", intent: "inspect restart", completionCondition: "state is restored" },

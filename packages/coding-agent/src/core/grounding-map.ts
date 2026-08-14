@@ -6,10 +6,10 @@ import nodePath from "path";
  * Deterministic, bounded codebase grounding for Pie's initial Frame decision.
  *
  * The epistemic control role has no tool access, so the model would otherwise
- * form a Frame's statement/falsifier from memory alone. This inventory gives it
+ * form a Frame's statement/expectation from memory alone. This inventory gives it
  * a compact factual basis — the largest source files in the project — so it can
  * assert a grounded relation and scope its first discovery Action instead of
- * writing an ungrounded "search returns zero matches" falsifier.
+ * writing an ungrounded "search returns zero matches" expectation.
  */
 
 /** Directory names excluded from traversal. */

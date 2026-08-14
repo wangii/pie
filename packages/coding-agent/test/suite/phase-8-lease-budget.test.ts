@@ -52,7 +52,7 @@ function frame(actions: ProvisionalActionContract[]) {
 	return {
 		kind: "create_frame",
 		statement: "Repository behavior is controlled by one implementation boundary",
-		falsifier: "A runtime trace shows behavior bypasses that implementation boundary",
+		expectation: "A runtime trace shows behavior bypasses that implementation boundary",
 		actions,
 	};
 }
@@ -216,7 +216,7 @@ describe("Phase 8 model-response lease derivation", () => {
 				control({
 					kind: "revise_frame",
 					statement: "Repository behavior is controlled by a revised implementation boundary",
-					falsifier: "A runtime trace shows behavior bypasses the revised implementation boundary",
+					expectation: "A runtime trace shows behavior bypasses the revised implementation boundary",
 					actions: [budget(secondAction, 2)],
 					reason: "New evidence changed the bounded candidate set",
 				}),

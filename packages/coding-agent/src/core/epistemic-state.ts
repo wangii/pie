@@ -24,7 +24,7 @@ export interface Frame {
 	id: string;
 	version: number;
 	statement: string;
-	falsifier: string;
+	expectation: string;
 	/** Maximum completed model responses for which this version remains admissible. */
 	horizon: number;
 	revisionEntryId: string;
@@ -39,13 +39,15 @@ export interface Frame {
 
 export type FrameTerminalTransition = FrameTransitionEntry["transition"];
 
-/** One active, frozen investigation intent executed under an exact Frame version. */
+/** One active, frozen investigation intent executed under an exact Frame version or the Anchor. */
 export interface Action {
 	id: string;
 	intent: string;
 	completionCondition: string;
 	startEntryId: string;
-	frameRevisionEntryId: string;
+	expectation?: string;
+	frameRevisionEntryId?: string;
+	anchorRevisionEntryId?: string;
 	sourceEventId: string;
 	timestamp: string;
 	/** Derived from raw events after startEntryId; it is not persisted as canonical state. */
@@ -96,7 +98,7 @@ function frameFromEntry(entry: FrameRevisionEntry): Frame {
 		id: entry.frameId,
 		version: entry.version,
 		statement: entry.statement,
-		falsifier: entry.falsifier,
+		expectation: entry.expectation,
 		horizon: entry.horizon,
 		revisionEntryId: entry.id,
 		previousRevisionId: entry.previousRevisionId,
@@ -113,7 +115,9 @@ function actionFromEntry(entry: ActionStartEntry): Action {
 		intent: entry.intent,
 		completionCondition: entry.completionCondition,
 		startEntryId: entry.id,
+		expectation: entry.expectation,
 		frameRevisionEntryId: entry.frameRevisionEntryId,
+		anchorRevisionEntryId: entry.anchorRevisionEntryId,
 		sourceEventId: entry.sourceEventId,
 		timestamp: entry.timestamp,
 		completedModelResponses: 0,
@@ -172,15 +176,25 @@ function validateFrameTransition(entry: FrameTransitionEntry, frame: Frame | und
 function validateActionStart(
 	entry: ActionStartEntry,
 	frame: Frame | undefined,
+	anchor: Anchor | undefined,
 	action: Action | undefined,
 	seenActionIds: Set<string>,
 ): Action {
-	if (
-		!frame ||
-		entry.frameRevisionEntryId !== frame.revisionEntryId ||
-		frame.completedModelResponses >= frame.horizon
-	) {
-		throw new Error(`Action start ${entry.id} does not bind to a current admissible Frame version.`);
+	const bindsToFrame = entry.frameRevisionEntryId !== undefined;
+	const bindsToAnchor = entry.anchorRevisionEntryId !== undefined;
+	if (bindsToFrame === bindsToAnchor) {
+		throw new Error(`Action start ${entry.id} must bind to exactly one of a current Frame version or the Anchor.`);
+	}
+	if (bindsToFrame) {
+		if (
+			!frame ||
+			entry.frameRevisionEntryId !== frame.revisionEntryId ||
+			frame.completedModelResponses >= frame.horizon
+		) {
+			throw new Error(`Action start ${entry.id} does not bind to a current admissible Frame version.`);
+		}
+	} else if (!anchor || entry.anchorRevisionEntryId !== anchor.revisionEntryId) {
+		throw new Error(`Action start ${entry.id} does not bind to the current Anchor revision.`);
 	}
 	if (action || seenActionIds.has(entry.actionId)) {
 		throw new Error(`Action start ${entry.id} does not start a new finite episode.`);
@@ -261,7 +275,7 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 					`Action start ${entry.id} references source event ${entry.sourceEventId}, which is not earlier on the active branch.`,
 				);
 			}
-			action = validateActionStart(entry, frame, action, seenActionIds);
+			action = validateActionStart(entry, frame, anchor, action, seenActionIds);
 		} else if (entry.type === "action_transition") {
 			if (
 				!precedingEventIds.has(entry.sourceEventId) ||

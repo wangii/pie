@@ -24,7 +24,7 @@ describe("Phase 8 production model-response lease budgeting", () => {
 				control({
 					kind: "create_frame",
 					statement: "Prompt construction paths determine which constraints reach each model role",
-					falsifier: "A provider payload shows every model role receives one identical constraint source",
+					expectation: "A provider payload shows every model role receives one identical constraint source",
 					actions: [
 						{
 							...action,

@@ -30,7 +30,7 @@ function singleLine(text: string): string {
 function formatFrame(node: FrameActionGraphFrameNode): string {
 	const parts = [
 		node.statement,
-		`falsifier: ${node.falsifier}`,
+		`expectation: ${node.expectation}`,
 		`responses used: ${node.completedModelResponses}/${node.horizon}`,
 	];
 	if (node.transitionReason) parts.push(`reason: ${node.transitionReason}`);

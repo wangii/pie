@@ -24,22 +24,37 @@ export type PieProductionLoopState =
 export type PieProductionRequestRole = "epistemic" | "execution" | "finalAnswer";
 
 export type PieControlDecision =
-	| { kind: "create_frame"; statement: string; falsifier: string; actions: ProvisionalActionContract[] }
+	| { kind: "create_frame"; statement: string; expectation: string; actions: ProvisionalActionContract[] }
 	| {
 			kind: "revise_frame";
 			statement: string;
-			falsifier: string;
+			expectation: string;
 			actions: ProvisionalActionContract[];
 			reason: string;
 	  }
 	| {
 			kind: "replace_frame";
 			statement: string;
-			falsifier: string;
+			expectation: string;
+			actions: ProvisionalActionContract[];
+			reason: string;
+	  }
+	| {
+			kind: "advance_frame";
 			actions: ProvisionalActionContract[];
 			reason: string;
 	  }
 	| { kind: "falsify_frame" | "kill_frame"; reason: string }
+	| {
+			kind: "explore";
+			expectation: string;
+			intent: string;
+			completionCondition: string;
+			expectedEvidenceRounds: number;
+			budgetReason: string;
+	  }
+	| { kind: "ask"; question: string }
+	| { kind: "decompose"; subgoals: string[]; reason: string }
 	| { kind: "revise_anchor"; statement: string; reason: string }
 	| { kind: "authorize_action"; actionContractId: string }
 	| { kind: "continue_action"; reason: string }

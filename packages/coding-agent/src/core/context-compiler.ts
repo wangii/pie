@@ -47,7 +47,7 @@ export interface ContextSelectionManifest {
 				actionId: string;
 				startEntryId: string;
 				transitionEntryId: string;
-				frameRevisionEntryId: string;
+				frameRevisionEntryId: string | undefined;
 				transition: "completed" | "unresolvable" | "escalated";
 				tokens: number;
 			}>;
@@ -89,7 +89,7 @@ export interface ContextSelectionManifest {
 		action?: {
 			id: string;
 			startEntryId: string;
-			frameRevisionEntryId: string;
+			frameRevisionEntryId: string | undefined;
 			sourceEventId: string;
 			completedModelResponses: number;
 			tokens: number;
@@ -207,7 +207,7 @@ type ProjectedActionOutcome = {
 	actionId: string;
 	startEntryId: string;
 	transitionEntryId: string;
-	frameRevisionEntryId: string;
+	frameRevisionEntryId: string | undefined;
 	transition: "completed" | "unresolvable" | "escalated";
 	message: AgentMessage;
 	tokens: number;
@@ -230,6 +230,10 @@ const CONTROL_DECISION_KINDS = new Set([
 	"create_frame",
 	"revise_frame",
 	"replace_frame",
+	"advance_frame",
+	"explore",
+	"ask",
+	"decompose",
 	"falsify_frame",
 	"kill_frame",
 	"revise_anchor",
@@ -448,7 +452,7 @@ function frameMessage(frame: Frame): AgentMessage {
 		role: "custom",
 		customType: FRAME_CONTEXT_MESSAGE_TYPE,
 		content:
-			`[CURRENT FRAME]\nCommitment: ${frame.statement}\nFalsifier: ${frame.falsifier}\n` +
+			`[CURRENT FRAME]\nCommitment: ${frame.statement}\nExpectation: ${frame.expectation}\n` +
 			`Response lease: ${frame.completedModelResponses}/${frame.horizon} completed; ${remainingModelResponses} model responses remain`,
 		display: false,
 		details: {
@@ -526,7 +530,7 @@ function projectActionOutcomes(
 		} else if (event.type === "action_transition") {
 			const start = starts.get(event.startEntryId);
 			if (!start) continue;
-			const message = actionOutcomeMessage(start, event, frames.get(start.frameRevisionEntryId));
+			const message = actionOutcomeMessage(start, event, frames.get(start.frameRevisionEntryId ?? ""));
 			outcomes.push({
 				actionId: start.actionId,
 				startEntryId: start.id,
@@ -553,7 +557,7 @@ function frameOutcomeMessage(
 		customType: FRAME_OUTCOME_CONTEXT_MESSAGE_TYPE,
 		content:
 			`[FRAME OUTCOME ${transition.frameId}]\nCommitment: ${revision.statement}\n` +
-			`Falsifier: ${revision.falsifier}\nOutcome: ${transition.transition}${replacement}\n` +
+			`Expectation: ${revision.expectation}\nOutcome: ${transition.transition}${replacement}\n` +
 			`Terminal reason: ${transition.reason}`,
 		display: false,
 		details: {

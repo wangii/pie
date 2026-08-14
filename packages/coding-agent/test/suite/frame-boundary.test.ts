@@ -6,7 +6,7 @@ import { createHarness, getMessageText } from "./harness.ts";
 const initialFrame = {
 	type: "create" as const,
 	statement: "worker-local state survives logout",
-	falsifier: "a worker restart preserves the authorization failure",
+	expectation: "a worker restart preserves the authorization failure",
 	horizon: 3,
 };
 
@@ -23,7 +23,7 @@ describe("Phase 2 Frame provider boundary", () => {
 			expect(harness.providerContexts[0]!.messages.map(getMessageText)).toEqual([
 				"[ANCHOR]\nlogout must revoke authorization",
 				"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
-					"Falsifier: a worker restart preserves the authorization failure\n" +
+					"Expectation: a worker restart preserves the authorization failure\n" +
 					"Response lease: 0/3 completed; 3 model responses remain",
 				"diagnose logout authorization",
 			]);
@@ -54,7 +54,7 @@ describe("Phase 2 Frame provider boundary", () => {
 				frame: {
 					type: "revise",
 					statement: "the middleware cache survives logout",
-					falsifier: "middleware bypass still reproduces the failure",
+					expectation: "middleware bypass still reproduces the failure",
 					horizon: 2,
 					revisionReason: "cache ownership was localized",
 				},
@@ -64,7 +64,7 @@ describe("Phase 2 Frame provider boundary", () => {
 				frame: {
 					type: "replace",
 					statement: "the replica serves stale session state",
-					falsifier: "primary and replica positions match",
+					expectation: "primary and replica positions match",
 					horizon: 4,
 					reason: "cache bypass contradicted the old commitment",
 				},
@@ -102,7 +102,7 @@ describe("Phase 2 Frame provider boundary", () => {
 			});
 			const frame = harness.session.frame!;
 			await harness.session.prompt("worker restart preserved the failure", {
-				frame: { type: "falsify", reason: "the declared falsifier occurred" },
+				frame: { type: "falsify", reason: "the declared expectation occurred" },
 			});
 
 			expect(harness.session.frame).toBeUndefined();

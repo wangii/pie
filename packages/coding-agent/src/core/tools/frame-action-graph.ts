@@ -19,7 +19,7 @@ export interface FrameActionGraphFrameNode {
 	frameId: string;
 	version: number;
 	statement: string;
-	falsifier: string;
+	expectation: string;
 	horizon: number;
 	completedModelResponses: number;
 	status: FrameActionGraphFrameStatus;
@@ -46,7 +46,7 @@ export interface FrameActionGraphActionNode {
 	kind: "action";
 	id: string;
 	actionId: string;
-	frameRevisionEntryId: string;
+	frameRevisionEntryId: string | undefined;
 	intent: string;
 	completionCondition: string;
 	completedModelResponses: number;
@@ -218,7 +218,7 @@ export function buildFrameActionGraph(entries: readonly SessionEntry[]): FrameAc
 				frameId: entry.frameId,
 				version: entry.version,
 				statement: entry.statement,
-				falsifier: entry.falsifier,
+				expectation: entry.expectation,
 				horizon: entry.horizon,
 				completedModelResponses: 0,
 				status: "active",
@@ -281,7 +281,7 @@ export function buildFrameActionGraph(entries: readonly SessionEntry[]): FrameAc
 
 		if (entry.type === "action_start") {
 			const matchingPlan = plansByFrameRevisionEntryId
-				.get(entry.frameRevisionEntryId)
+				.get(entry.frameRevisionEntryId ?? "")
 				?.find(
 					(candidate) =>
 						candidate.status === "planned" &&
@@ -307,7 +307,7 @@ export function buildFrameActionGraph(entries: readonly SessionEntry[]): FrameAc
 			nodes.push(node);
 			actionsByStartEntryId.set(entry.id, node);
 			edges.push({
-				from: matchingPlan?.id ?? entry.frameRevisionEntryId,
+				from: matchingPlan?.id ?? entry.frameRevisionEntryId ?? entry.anchorRevisionEntryId ?? entry.id,
 				to: entry.id,
 				relation: matchingPlan ? "instantiates" : "authorizes",
 			});

@@ -145,7 +145,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 				frame: {
 					type: "create",
 					statement: "Worker-local authorization state survives logout.",
-					falsifier: "A clean worker restart preserves the authorization failure.",
+					expectation: "A clean worker restart preserves the authorization failure.",
 					horizon: 40,
 				},
 			},
@@ -179,7 +179,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 				frame: {
 					type: "create",
 					statement: "The read replica lags the primary.",
-					falsifier: "Primary and replica positions match during a stale read.",
+					expectation: "Primary and replica positions match during a stale read.",
 					horizon: 40,
 				},
 			},
@@ -232,7 +232,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 				frame: {
 					type: "create",
 					statement: "The transient deploy lock blocks restart until the orchestrator releases it.",
-					falsifier: "A local restart attempt clears the lock.",
+					expectation: "A local restart attempt clears the lock.",
 					horizon: 20,
 				},
 			},

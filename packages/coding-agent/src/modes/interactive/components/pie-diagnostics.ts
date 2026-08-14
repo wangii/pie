@@ -125,7 +125,7 @@ function formatDiagnostics(diagnostics: EpistemicDiagnostics): string {
 	const frame = diagnostics.state.frame;
 	lines.push(
 		frame
-			? `${theme.fg("dim", "Frame:")} ${frame.id} · v${frame.version} · responses ${frame.completedModelResponses}/${frame.horizon}\n  ${frame.statement}\n  falsifier: ${frame.falsifier}\n  revision event: ${frame.revisionEntryId}`
+			? `${theme.fg("dim", "Frame:")} ${frame.id} · v${frame.version} · responses ${frame.completedModelResponses}/${frame.horizon}\n  ${frame.statement}\n  expectation: ${frame.expectation}\n  revision event: ${frame.revisionEntryId}`
 			: `${theme.fg("dim", "Frame:")} none`,
 	);
 	const action = diagnostics.state.action;
@@ -230,7 +230,7 @@ function markerText(entry: SessionEntry): { collapsed: string; expanded: string 
 		const label = entry.version === 1 ? "Frame created" : "Frame revised";
 		return {
 			collapsed: `${label} · v${entry.version}`,
-			expanded: `${label} · v${entry.version}\n  ${entry.statement}\n  falsifier: ${entry.falsifier}\n  response lease: ${entry.horizon}\n  id: ${entry.frameId}\n  event: ${entry.id}`,
+			expanded: `${label} · v${entry.version}\n  ${entry.statement}\n  expectation: ${entry.expectation}\n  response lease: ${entry.horizon}\n  id: ${entry.frameId}\n  event: ${entry.id}`,
 		};
 	}
 	if (entry.type === "frame_transition") {

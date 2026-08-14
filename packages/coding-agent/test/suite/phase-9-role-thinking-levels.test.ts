@@ -66,7 +66,7 @@ function runSequence() {
 		control({
 			kind: "create_frame",
 			statement: "Prompt construction in the loop is produced only by externally injected messages",
-			falsifier: "The loop source shows a prompt template or assembly routine inside the class",
+			expectation: "The loop source shows a prompt template or assembly routine inside the class",
 			actions: [actionBudget(action)],
 		}),
 		control({ kind: "authorize_action", actionContractId: "A1" }),

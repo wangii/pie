@@ -29,7 +29,7 @@ const diagnostics: EpistemicDiagnostics = {
 			id: "frame-1",
 			version: 3,
 			statement: "cache survives logout",
-			falsifier: "restart preserves failure",
+			expectation: "restart preserves failure",
 			revisionEntryId: "frame-event",
 			horizon: 24,
 			completedModelResponses: 7,
@@ -126,7 +126,7 @@ describe("Pie diagnostics UI projections", () => {
 	it("renders read-only state, omission reasons, and exact Observation provenance", () => {
 		const output = plain(new PieDiagnosticsComponent(diagnostics).render(200));
 		expect(output).toContain("Pie diagnostics (read-only)");
-		expect(output).toContain("falsifier: restart preserves failure");
+		expect(output).toContain("expectation: restart preserves failure");
 		expect(output).toContain("frozen completion: identify TTL");
 		expect(output).toContain("source result-event · bash · call call-1");
 		expect(output).toContain('args: {"command":"npm test"}');

@@ -26,7 +26,7 @@ type Scenario = {
 	name: string;
 	files: Record<string, string>;
 	task: string;
-	baselineFrame: { statement: string; falsifier: string };
+	baselineFrame: { statement: string; expectation: string };
 	baselineAction: { intent: string; completionCondition: string };
 	expectMultipleActions: boolean;
 	expectFrameTermination: boolean;
@@ -64,7 +64,7 @@ console.log("PASS");
 			"Diagnose the exact defect before changing the implementation. End the final answer with a line containing only PASS.",
 		baselineFrame: {
 			statement: "Complete the current user request without weakening its success semantics",
-			falsifier: "A world result shows the whole request cannot be completed",
+			expectation: "A world result shows the whole request cannot be completed",
 		},
 		baselineAction: {
 			intent: "Fix the identifier regression and verify the complete user request",
@@ -78,7 +78,7 @@ console.log("PASS");
 		files: {
 			"package.json": packageJson,
 			"reports/initial.txt":
-				"Attractive initial report: worker-local cache survives logout. Required falsifier: run scripts/restart-probe.sh.\n",
+				"Attractive initial report: worker-local cache survives logout. Required expectation: run scripts/restart-probe.sh.\n",
 			"scripts/restart-probe.sh": "#!/bin/sh\necho 'RESULT: failure persists after a clean worker restart'\n",
 			"src/subject.js": `function authorizationSource(primaryPosition, replicaPosition) {
   return primaryPosition === replicaPosition ? "fresh" : "stale-replica";
@@ -93,12 +93,12 @@ console.log("PASS");
 		},
 		task:
 			"Diagnose the authorization failure. The attractive initial report in reports/initial.txt favors worker-local cache. " +
-			"Inspect it and run its required restart probe before relying on that commitment. If the concrete falsifier occurs, " +
+			"Inspect it and run its required restart probe before relying on that commitment. If the concrete expectation occurs, " +
 			"explicitly terminate that Frame, reconsider in the same run, inspect the implementation and test, and run npm test. " +
 			"End the final answer with a line containing only PASS.",
 		baselineFrame: {
 			statement: "Worker-local cache survives logout and explains the authorization failure",
-			falsifier: "A clean worker restart preserves the authorization failure",
+			expectation: "A clean worker restart preserves the authorization failure",
 		},
 		baselineAction: {
 			intent: "Complete the entire diagnosis, probe, implementation inspection, and verification request",
@@ -185,7 +185,8 @@ function createSemanticHarness(name: string, baseline: boolean) {
 			const positions = new Map(branch.map((entry, index) => [entry.id, index] as const));
 			const actionsPerFrame: Record<string, number> = {};
 			for (const action of actionStarts) {
-				actionsPerFrame[action.frameRevisionEntryId] = (actionsPerFrame[action.frameRevisionEntryId] ?? 0) + 1;
+				const frameKey = action.frameRevisionEntryId ?? "anchor";
+				actionsPerFrame[frameKey] = (actionsPerFrame[frameKey] ?? 0) + 1;
 			}
 			const modelResponsesPerAction = actionStarts.map((action) => {
 				const start = positions.get(action.id) ?? -1;

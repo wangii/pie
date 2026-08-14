@@ -239,7 +239,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.manifest.epistemicState.anchor).toMatchObject({ id: "anchor-1", revision: 1 });
 	});
 
-	it("retains the current Frame with its falsifier and finite remaining horizon", async () => {
+	it("retains the current Frame with its expectation and finite remaining horizon", async () => {
 		const event = messageEntry("u1", null, user("inspect the failure", 1));
 		const result = await new PhaseTwoContextCompiler().compile({
 			rawEvents: [event],
@@ -257,7 +257,7 @@ describe("PhaseZeroContextCompiler", () => {
 					id: "frame-1",
 					version: 2,
 					statement: "worker-local state survives logout",
-					falsifier: "a worker restart preserves the authorization",
+					expectation: "a worker restart preserves the authorization",
 					horizon: 3,
 					revisionEntryId: "fr2",
 					previousRevisionId: "fr1",
@@ -276,7 +276,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.messages.map(text)).toEqual([
 			"[ANCHOR]\nrestore authorization correctness",
 			"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
-				"Falsifier: a worker restart preserves the authorization\nResponse lease: 1/3 completed; 2 model responses remain",
+				"Expectation: a worker restart preserves the authorization\nResponse lease: 1/3 completed; 2 model responses remain",
 			"inspect the failure",
 		]);
 		expect(result.manifest.epistemicState.frame).toMatchObject({
@@ -305,7 +305,7 @@ describe("PhaseZeroContextCompiler", () => {
 					id: "frame-1",
 					version: 1,
 					statement: "worker cache survives logout",
-					falsifier: "worker restart preserves the failure",
+					expectation: "worker restart preserves the failure",
 					horizon: 4,
 					revisionEntryId: "fr1",
 					previousRevisionId: null,
@@ -353,7 +353,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.messages.map(text).slice(0, 4)).toEqual([
 			"[ANCHOR]\nlogout revokes authorization",
 			"[CURRENT FRAME]\nCommitment: worker cache survives logout\n" +
-				"Falsifier: worker restart preserves the failure\nResponse lease: 0/4 completed; 4 model responses remain",
+				"Expectation: worker restart preserves the failure\nResponse lease: 0/4 completed; 4 model responses remain",
 			"[OBSERVATION anchor-evidence]\nauthorization remains after logout\nRelevance: Anchor",
 			"[OBSERVATION frame-evidence]\nworker cache TTL is 30 seconds\nRelevance: current Frame",
 		]);
@@ -390,7 +390,7 @@ describe("PhaseZeroContextCompiler", () => {
 					id: "frame-1",
 					version: 1,
 					statement: "worker cache survives logout",
-					falsifier: "worker restart preserves the failure",
+					expectation: "worker restart preserves the failure",
 					horizon: 4,
 					revisionEntryId: "fr1",
 					previousRevisionId: null,
@@ -452,7 +452,7 @@ describe("PhaseZeroContextCompiler", () => {
 				JSON.stringify({
 					kind: "create_frame",
 					statement: "Worker cache lifetime controls authorization",
-					falsifier: "A clean worker restart preserves the failure",
+					expectation: "A clean worker restart preserves the failure",
 					horizon: 8,
 				}),
 				2,
@@ -462,7 +462,7 @@ describe("PhaseZeroContextCompiler", () => {
 			frameId: "frame-1",
 			version: 1,
 			statement: "Worker cache lifetime controls authorization",
-			falsifier: "A clean worker restart preserves the failure",
+			expectation: "A clean worker restart preserves the failure",
 			horizon: 8,
 			previousRevisionId: null,
 			sourceEventId: frameControlId,
@@ -539,7 +539,7 @@ describe("PhaseZeroContextCompiler", () => {
 			frameId: "frame-1",
 			version: 1,
 			statement: "Worker cache lifetime controls authorization",
-			falsifier: "A clean worker restart preserves the failure",
+			expectation: "A clean worker restart preserves the failure",
 			horizon: 12,
 			previousRevisionId: null,
 			sourceEventId: frameControlId,
@@ -622,7 +622,7 @@ describe("PhaseZeroContextCompiler", () => {
 					id: "frame-1",
 					version: 1,
 					statement: "the cache is stale",
-					falsifier: "cache bypass reproduces the failure",
+					expectation: "cache bypass reproduces the failure",
 					horizon: 4,
 					revisionEntryId: "fr1",
 					previousRevisionId: null,
@@ -655,7 +655,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.manifest.epistemicState.action).toMatchObject({ id: "action-1", startEntryId: "as1" });
 	});
 
-	it("projects terminal Frame outcomes with falsifier and reason into the epistemic breadth projection", async () => {
+	it("projects terminal Frame outcomes with expectation and reason into the epistemic breadth projection", async () => {
 		const manager = SessionManager.inMemory();
 		const userId = manager.appendMessage(user("diagnose authorization", 1));
 		manager.appendAnchorRevision({
@@ -670,7 +670,7 @@ describe("PhaseZeroContextCompiler", () => {
 			frameId: "frame-1",
 			version: 1,
 			statement: "Worker cache lifetime controls authorization",
-			falsifier: "A clean worker restart preserves the failure",
+			expectation: "A clean worker restart preserves the failure",
 			horizon: 12,
 			previousRevisionId: null,
 			sourceEventId: frameControlId,
@@ -746,7 +746,7 @@ describe("PhaseZeroContextCompiler", () => {
 			frameId: "frame-1",
 			version: 1,
 			statement: "Worker cache lifetime controls authorization",
-			falsifier: "A clean worker restart preserves the failure",
+			expectation: "A clean worker restart preserves the failure",
 			horizon: 12,
 			previousRevisionId: null,
 			sourceEventId: frameControlId,
@@ -758,7 +758,7 @@ describe("PhaseZeroContextCompiler", () => {
 			revisionEntryId: frameRevisionId,
 			transition: "falsified",
 			sourceEventId: killControlId,
-			reason: "The falsifier fired",
+			reason: "The expectation fired",
 		});
 		const events = manager.getBranch();
 
@@ -791,7 +791,7 @@ describe("PhaseZeroContextCompiler", () => {
 			frameId: "frame-1",
 			version: 1,
 			statement: "Worker cache lifetime controls authorization",
-			falsifier: "A clean worker restart preserves the failure",
+			expectation: "A clean worker restart preserves the failure",
 			horizon: 12,
 			previousRevisionId: null,
 			sourceEventId: frameControlId,

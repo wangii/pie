@@ -24,7 +24,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 				type: "seed",
 				files: {
 					"evidence.txt":
-						"Probe: clean worker restart\nResult: authorization failure persists after restart\nConclusion: the declared worker-cache falsifier occurred\n",
+						"Probe: clean worker restart\nResult: authorization failure persists after restart\nConclusion: the declared worker-cache expectation occurred\n",
 				},
 			},
 			{
@@ -35,19 +35,19 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "create",
 					statement:
 						"Worker-local authorization state survives logout. Without durable contradictory evidence, DECISION=KEEP_FRAME.",
-					falsifier: "A clean worker restart preserves the authorization failure.",
+					expectation: "A clean worker restart preserves the authorization failure.",
 					horizon: 8,
 				},
 				action: {
 					type: "start",
-					intent: "run the clean-worker falsifier probe",
+					intent: "run the clean-worker expectation probe",
 					completionCondition: "the post-restart authorization result is captured",
 				},
 			},
 			{
 				type: "observe_latest_action_results",
 				statement:
-					"A clean worker restart preserved the authorization failure, so the current Frame's declared falsifier occurred and DECISION=REJECT_FRAME.",
+					"A clean worker restart preserved the authorization failure, so the current Frame's declared expectation occurred and DECISION=REJECT_FRAME.",
 				affects: "frame",
 			},
 			{ type: "complete_current_action", reason: "the restart result was captured" },
@@ -82,7 +82,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "create",
 					statement:
 						"Replica lag causes the stale reads. Without durable contradictory evidence, DECISION=KEEP_FRAME.",
-					falsifier: "Primary and replica positions match during a stale read.",
+					expectation: "Primary and replica positions match during a stale read.",
 					horizon: 8,
 				},
 				action: {
@@ -94,7 +94,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 			{
 				type: "observe_latest_action_results",
 				statement:
-					"Primary and replica positions matched during the stale read, so the current Frame's declared falsifier occurred and DECISION=REJECT_FRAME.",
+					"Primary and replica positions matched during the stale read, so the current Frame's declared expectation occurred and DECISION=REJECT_FRAME.",
 				affects: "frame",
 			},
 			{ type: "complete_current_action", reason: "both positions were captured" },

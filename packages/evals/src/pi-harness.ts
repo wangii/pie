@@ -322,7 +322,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 					}
 					if (decision === "REJECT_FRAME") {
 						evalSession.terminateFrame("falsified", {
-							reason: "the adjudication Action found that the declared falsifier occurred",
+							reason: "the adjudication Action found that the declared expectation occurred",
 							sourceEventId,
 						});
 					}
