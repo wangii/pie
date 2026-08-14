@@ -100,6 +100,8 @@ export interface CreateAgentSessionOptions {
 	observationEnabled?: boolean;
 	/** Initial compiler input budget override for controlled evaluations. */
 	contextInputTokenLimit?: number;
+	/** Upper bound on epistemic control decisions per production request. Default: 24. */
+	maxControlResponses?: number;
 }
 
 /** Result from createAgentSession */
@@ -386,7 +388,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		transport: settingsManager.getTransport(),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-		loopRunner: createPieProductionLoop(),
+		loopRunner: createPieProductionLoop(options.maxControlResponses),
 	});
 
 	// Restore messages if session has existing data

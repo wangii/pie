@@ -1142,6 +1142,7 @@ export class AgentSession {
 			"the read itself (its tool calls and results are already recorded in the transcript), not an extracted catalog of " +
 			"everything it contains; perform synthesis in the control decision that follows, not inside the episode. For authorize_action, " +
 			"select a listed actionContractId instead of regenerating contract text. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
+			"When the Anchor asks where prompt text is defined or built, do not read candidate files expecting to find the text; first authorize one broad search (grep/rg) over the relevant package for the string literals and prompt-building patterns, and read only the matches. " +
 			"Split evidence collection, mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
 			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
 			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +

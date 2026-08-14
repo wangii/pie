@@ -80,7 +80,11 @@ export class PieProductionLoop implements AgentLoopRunner {
 	private _state: PieProductionLoopState = "idle";
 	private _requestRole: PieProductionRequestRole = "epistemic";
 	private lifecycle: PieProductionLoopLifecycle | undefined;
-	private readonly maxControlResponses = 24;
+	private readonly maxControlResponses: number;
+
+	constructor(maxControlResponses = 24) {
+		this.maxControlResponses = maxControlResponses;
+	}
 
 	get state(): PieProductionLoopState {
 		return this._state;
@@ -304,6 +308,6 @@ export class PieProductionLoop implements AgentLoopRunner {
 	}
 }
 
-export function createPieProductionLoop(): PieProductionLoop {
-	return new PieProductionLoop();
+export function createPieProductionLoop(maxControlResponses?: number): PieProductionLoop {
+	return new PieProductionLoop(maxControlResponses);
 }

@@ -87,6 +87,8 @@ export interface HarnessOptions {
 	actionResponseLimit?: number;
 	/** Existing raw session used by restart and branch integration tests. */
 	sessionManager?: SessionManager;
+	/** Upper bound on epistemic control decisions per production request. */
+	maxControlResponses?: number;
 }
 
 export interface Harness {
@@ -200,7 +202,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (!runner) return messages;
 			return runner.emitContext(messages);
 		},
-		loopRunner: options.pieProductionLoop ? createPieProductionLoop() : undefined,
+		loopRunner: options.pieProductionLoop ? createPieProductionLoop(options.maxControlResponses) : undefined,
 	});
 	const extensionsResult = options.extensionFactories
 		? await createTestExtensionsResult(options.extensionFactories, tempDir)
