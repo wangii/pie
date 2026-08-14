@@ -11,6 +11,7 @@ export const PHASE_TWO_CONTEXT_COMPILER_VERSION = "pie-phase-2-frame/v1";
 export const PHASE_THREE_CONTEXT_COMPILER_VERSION = "pie-phase-3-action/v1";
 export const PHASE_FOUR_CONTEXT_COMPILER_VERSION = "pie-phase-4-observation/v1";
 export const ANCHOR_CONTEXT_MESSAGE_TYPE = "pie.anchor";
+export const GROUNDING_CONTEXT_MESSAGE_TYPE = "pie.grounding";
 export const FRAME_CONTEXT_MESSAGE_TYPE = "pie.frame";
 export const ACTION_CONTEXT_MESSAGE_TYPE = "pie.action";
 export const OBSERVATION_CONTEXT_MESSAGE_TYPE = "pie.observation";
@@ -146,6 +147,8 @@ export interface ContextCompilerInput {
 	tools: readonly AgentTool[];
 	/** Compiler-owned transient request instruction; never persisted as a raw event. */
 	requestInstruction?: AgentMessage;
+	/** Transient codebase grounding, injected only while the initial Frame is being formed. */
+	grounding?: AgentMessage;
 	/** Role-specific projection. Omitted for the transcript-compatible baseline. */
 	projectionRole?: ContextProjectionRole;
 	reservedOutputTokens: number;
@@ -692,14 +695,17 @@ async function compileProjection(
 	);
 	const requiredTokens = estimateRequiredTokens(input.systemPrompt, input.tools);
 	const anchorMessages = anchor ? [anchorMessage(anchor)] : [];
+	const groundingMessages =
+		input.grounding && projectionRole === "epistemic" && anchor && !frame ? [input.grounding] : [];
 	const frameMessages = frame ? [frameMessage(frame)] : [];
 	const actionMessages = action ? [actionMessage(action)] : [];
 	const requestInstructionMessages = input.requestInstruction ? [input.requestInstruction] : [];
 	const anchorTokens = estimateMessagesTokens(anchorMessages);
+	const groundingTokens = estimateMessagesTokens(groundingMessages);
 	const frameTokens = estimateMessagesTokens(frameMessages);
 	const actionTokens = estimateMessagesTokens(actionMessages);
 	const requestInstructionTokens = estimateMessagesTokens(requestInstructionMessages);
-	const requiredStateTokens = anchorTokens + frameTokens + actionTokens + requestInstructionTokens;
+	const requiredStateTokens = anchorTokens + groundingTokens + frameTokens + actionTokens + requestInstructionTokens;
 	const windows = buildCoherentWindows(projectedEvents);
 	const newestWindow = windows.at(-1);
 	if (newestWindow && !newestWindow.valid) {
@@ -783,6 +789,7 @@ async function compileProjection(
 	const actionOutcomeMessages = selectedActionOutcomes.map((candidate) => candidate.message);
 	const retainedMessages = [
 		...anchorMessages,
+		...groundingMessages,
 		...frameMessages,
 		...frameOutcomeMessages,
 		...observationMessages,

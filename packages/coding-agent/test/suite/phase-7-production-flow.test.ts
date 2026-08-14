@@ -647,7 +647,7 @@ describe("Phase 7 production control flow", () => {
 		}
 	});
 
-	it("repairs malformed Frame decisions in bounded time without a generic fallback", async () => {
+	it("converges to a bounded inability report when malformed Frame decisions exhaust repair attempts", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
 			harness.setResponses([
@@ -659,13 +659,15 @@ describe("Phase 7 production control flow", () => {
 				}),
 				fauxAssistantMessage("not json"),
 				control({ kind: "create_frame", statement: "repair malformed control", falsifier: "wrong", horizon: 9 }),
+				fauxAssistantMessage("A bounded inability report."),
 			]);
 
 			await harness.session.prompt("repair malformed control");
-			expect(harness.session.state.errorMessage).toContain("failed validation after 3 bounded attempts");
+			expect(harness.session.state.errorMessage).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe("A bounded inability report.");
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_revision")).toHaveLength(0);
 			expect(harness.providerContexts[1]!.systemPrompt).toContain("previous decision was rejected");
-			expect(harness.providerContexts).toHaveLength(3);
+			expect(harness.providerContexts).toHaveLength(4);
 		} finally {
 			harness.cleanup();
 		}

@@ -6,7 +6,7 @@ import { createInMemoryModelRegistry, createModelRegistry, getModelRuntime } fro
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type {
 	Context,
@@ -83,6 +83,8 @@ export interface HarnessOptions {
 	/** Use Pie's production loop instead of agent-core's transcript loop. */
 	pieProductionLoop?: boolean;
 	pieModelRouteIds?: Partial<Record<PieModelRole, string>>;
+	/** Per-role thinking levels for the production loop (see AgentSessionConfig). */
+	pieRoleThinkingLevels?: Partial<Record<PieModelRole, ThinkingLevel>>;
 	frameHorizonRange?: { min: number; max: number };
 	actionResponseLimit?: number;
 	/** Existing raw session used by restart and branch integration tests. */
@@ -106,6 +108,7 @@ export interface Harness {
 	events: AgentSessionEvent[];
 	providerContexts: Context[];
 	providerModelIds: string[];
+	providerReasoningLevels: (ThinkingLevel | undefined)[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
 	cleanup: () => void;
@@ -129,6 +132,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 	const providerContexts: Context[] = [];
 	const providerModelIds: string[] = [];
+	const providerReasoningLevels: (ThinkingLevel | undefined)[] = [];
 
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
@@ -165,6 +169,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		getApiKey: () => (withConfiguredAuth ? "faux-key" : undefined),
 		streamFn: (requestModel, context, streamOptions) => {
 			providerModelIds.push(requestModel.id);
+			providerReasoningLevels.push(streamOptions?.reasoning);
 			providerContexts.push({
 				...context,
 				messages: structuredClone(context.messages),
@@ -244,6 +249,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		observationEnabled: options.observationEnabled ?? false,
 		contextInputTokenLimit: options.contextInputTokenLimit,
 		pieModelRoutes,
+		pieRoleThinkingLevels: options.pieRoleThinkingLevels,
 		frameHorizonRange: options.frameHorizonRange,
 		actionResponseLimit: options.actionResponseLimit,
 	});
@@ -267,6 +273,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		events,
 		providerContexts,
 		providerModelIds,
+		providerReasoningLevels,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},

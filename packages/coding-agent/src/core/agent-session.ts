@@ -69,6 +69,7 @@ import {
 	type ContextCompiler,
 	type ContextOmissionReason,
 	type ContextSelectionManifest,
+	GROUNDING_CONTEXT_MESSAGE_TYPE,
 	PhaseFourContextCompiler,
 	PhaseOneContextCompiler,
 	PhaseThreeContextCompiler,
@@ -121,6 +122,7 @@ import {
 	type FrameLeaseCalculation,
 	type ProvisionalActionContract,
 } from "./frame-lease-budget.ts";
+import { buildGroundingMap } from "./grounding-map.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -295,6 +297,13 @@ export interface AgentSessionConfig {
 	contextInputTokenLimit?: number;
 	/** Resolved production-loop model routes. Undefined routes follow the session model. */
 	pieModelRoutes?: PieModelRoutes;
+	/**
+	 * Per-role thinking levels for the production loop. Undefined roles default to
+	 * the configured default for control vs execution roles (control roles use a
+	 * lower level by default since they emit small structured decisions). A level
+	 * unsupported by the routed model is clamped upward by clampThinkingLevel.
+	 */
+	pieRoleThinkingLevels?: Partial<Record<PieModelRole, ThinkingLevel>>;
 	/** Inclusive bounds for the deterministically derived production Frame lease. */
 	frameHorizonRange?: { min: number; max: number };
 	/** Legacy fallback when a restored Frame has no transient lease derivation. */
@@ -489,6 +498,13 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 const DEFAULT_ACTION_RESPONSE_LIMIT = 6;
 const DEFAULT_MAX_FRAME_HORIZON = 32;
+/**
+ * Thinking level for production-loop control roles (epistemic, observation,
+ * verification, finalAnswer). They emit small structured decisions rather than
+ * doing the execution work, so they default below the execution level. A model
+ * that does not support "low" clamps upward via clampThinkingLevel.
+ */
+const DEFAULT_CONTROL_THINKING_LEVEL: ThinkingLevel = "low";
 
 // ============================================================================
 // AgentSession Class
@@ -569,6 +585,7 @@ export class AgentSession {
 	private readonly _actionEnabled: boolean;
 	private readonly _observationEnabled: boolean;
 	private readonly _pieModelRoutes: PieModelRoutes;
+	private readonly _pieRoleThinkingLevels: Partial<Record<PieModelRole, ThinkingLevel>>;
 	private _activeRequestModel: Model<any> | undefined;
 	private _activeProductionRequestRole: PieProductionRequestRole | undefined;
 	private readonly _frameHorizonRange: { min: number; max: number };
@@ -588,6 +605,8 @@ export class AgentSession {
 	private readonly _configuredContextInputTokenLimit: number | undefined;
 	private _contextInputTokenLimit: number | undefined;
 	private _contextBudgetModelKey: string | undefined;
+	private _groundingMap: string | undefined;
+	private _groundingMapLoaded = false;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -628,6 +647,7 @@ export class AgentSession {
 				verification: undefined,
 				finalAnswer: undefined,
 			} satisfies PieModelRoutes);
+		this._pieRoleThinkingLevels = config.pieRoleThinkingLevels ?? {};
 		if (this._frameEnabled && !this._anchorEnabled) {
 			throw new Error("Frame requires Anchor to be enabled.");
 		}
@@ -900,6 +920,24 @@ export class AgentSession {
 		this._appendObservation({ statement: reason, affects: "anchor_and_frame", sourceEventIds }, state);
 	}
 
+	/**
+	 * Lazily compute a bounded, deterministic inventory of the project's source
+	 * files. This grounds the initial Frame decision, which otherwise runs with
+	 * no tool access and must assert a statement/falsifier from memory alone.
+	 * Failures are swallowed: grounding is a best-effort aid, never a hard
+	 * dependency, so an unreadable working directory must not block the loop.
+	 */
+	private async _getGroundingMap(): Promise<string | undefined> {
+		if (this._groundingMapLoaded) return this._groundingMap;
+		this._groundingMapLoaded = true;
+		try {
+			this._groundingMap = await buildGroundingMap(this._cwd);
+		} catch {
+			this._groundingMap = undefined;
+		}
+		return this._groundingMap;
+	}
+
 	private _installContextCompiler(): void {
 		const transformMessages = this.agent.transformContext;
 		this.agent.transformContext = async (runtimeMessages, signal) => {
@@ -994,6 +1032,22 @@ export class AgentSession {
 				rawEvents = this.sessionManager.getBranch();
 				epistemicState = restoreEpistemicState(rawEvents);
 			}
+			let groundingMessage: AgentMessage | undefined;
+			if (this._activeProductionRequestRole === "epistemic" && epistemicState.anchor && !epistemicState.frame) {
+				const groundingText = await this._getGroundingMap();
+				if (groundingText) {
+					groundingMessage = {
+						role: "custom",
+						customType: GROUNDING_CONTEXT_MESSAGE_TYPE,
+						content:
+							"[CODEBASE GROUNDING]\nThe largest source files in this repository (deterministic inventory; node_modules, .git, dist, and build artifacts excluded):\n" +
+							groundingText,
+						display: false,
+						details: { source: "deterministic-file-inventory" },
+						timestamp: Date.now(),
+					};
+				}
+			}
 			const compilation = await this._contextCompiler.compile({
 				rawEvents,
 				epistemicState,
@@ -1007,6 +1061,7 @@ export class AgentSession {
 						? []
 						: this.agent.state.tools,
 				projectionRole: this._activeProductionRequestRole ?? "default",
+				grounding: groundingMessage,
 				requestInstruction: this._activeProductionRequestRole
 					? {
 							role: "custom",
@@ -1034,6 +1089,18 @@ export class AgentSession {
 
 	private _pieModelForRole(role: PieModelRole): Model<any> {
 		return this._pieModelRoutes[role] ?? this.agent.state.model;
+	}
+
+	/**
+	 * Resolve the thinking level for a production-loop role. Control roles emit
+	 * small structured decisions, so they default to a lower level than execution;
+	 * an explicit per-role override always wins. A level the routed model does not
+	 * support is clamped upward by clampThinkingLevel at request time.
+	 */
+	private _thinkingLevelForRole(role: PieModelRole): ThinkingLevel {
+		const explicit = this._pieRoleThinkingLevels[role];
+		if (explicit !== undefined) return explicit;
+		return role === "execution" ? this.agent.state.thinkingLevel : DEFAULT_CONTROL_THINKING_LEVEL;
 	}
 
 	private _productionSystemPrompt(role: PieProductionRequestRole): string {
@@ -1133,8 +1200,10 @@ export class AgentSession {
 			"some set of files contains all prompt sources, that every entry point is in one place, or that a list is exhaustive). " +
 			"When the Anchor asks for an exhaustive inventory (all, every, complete), decompose it: each Frame asserts one bounded, " +
 			"checkable slice of the Anchor and leaves the remaining slices to subsequent Frames; authorize_final only when every " +
-			"slice you intend to cover has been established. Prefer a discovery Frame first that settles the bounded fact of where " +
-			"the LLM call entry points are, before Frames that enumerate their prompt sources. An Action is one bounded episode with one externally checkable completion " +
+			"slice you intend to cover has been established. Ground the Frame before asserting it: when the Anchor asks where prompts are defined or built, first " +
+			"authorize a bounded discovery Action (search/grep) that records the actual file locations and their match counts, then form the Frame's statement and falsifier " +
+			'from that observed structure. Never make the discovery probe itself the falsifier (for example a falsifier of "the search returns zero matches" is ungrounded ' +
+			"and must not be used). An Action is one bounded episode with one externally checkable completion " +
 			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. A completion condition is bounded only when one observable result can " +
 			"confirm it: a single file read in full, a single symbol's declaration, or a single diff or command output. Do not " +
 			"write a condition that enumerates every or all occurrences, every declaration site, or a complete inventory; such a " +
@@ -1142,7 +1211,7 @@ export class AgentSession {
 			"the read itself (its tool calls and results are already recorded in the transcript), not an extracted catalog of " +
 			"everything it contains; perform synthesis in the control decision that follows, not inside the episode. For authorize_action, " +
 			"select a listed actionContractId instead of regenerating contract text. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
-			"When the Anchor asks where prompt text is defined or built, do not read candidate files expecting to find the text; first authorize one broad search (grep/rg) over the relevant package for the string literals and prompt-building patterns, and read only the matches. " +
+			"When the Anchor asks where prompt text is defined or built, do not read candidate files expecting to find the text; first authorize one bounded search (grep/rg) over the relevant package for the string literals and prompt-building patterns, requesting files-with-matches and per-file match counts rather than a full line dump, and read only the matches. " +
 			"Split evidence collection, mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
 			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
 			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
@@ -1308,6 +1377,16 @@ export class AgentSession {
 			);
 		}
 		const falsifier = this._normalizeSemanticText(definition.falsifier);
+		const probesAbsenceFromSearch =
+			/\b(?:rg|grep|ripgrep|search|query|discovery|scan|inspection)\b/u.test(falsifier) &&
+			/\b(?:returns?|yields?|finds?|produces?|surfaces?|reveals?|shows?|gives?)\b.{0,48}\b(?:zero|no|nothing|none|empty|nil)\b/u.test(
+				falsifier,
+			);
+		if (probesAbsenceFromSearch) {
+			throw new Error(
+				"Frame falsifier must not be a discovery probe (a search/scan that returns zero or no results); name an exact observable world result that contradicts a relation you already assert, grounded in evidence rather than in a search you have not yet run.",
+			);
+		}
 		if (
 			falsifier.length < 12 ||
 			this._semanticCharacterContainment(definition.statement, definition.falsifier) >= 0.7 ||
@@ -1371,6 +1450,9 @@ export class AgentSession {
 			/(?:每个|每一|所有|全部|无遗漏|无剩余|穷举|逐一|完整(?:清单|目录|映射)|详尽|枚举)/u.test(
 				`${intent} ${completion}`,
 			);
+		const demandsFullTranscriptMaterialization =
+			/\b(?:full|complete|entire|whole|verbatim)\b/u.test(completion) &&
+			/\b(?:present|recorded|materiali[sz]ed|verbatim|in (?:the )?transcript)\b/u.test(completion);
 		if (intent === anchor || bundlesWholeTask) {
 			throw new Error(
 				"Action must authorize one finite episode with one checkable result, not the whole task or a bundled deliverable.",
@@ -1379,6 +1461,11 @@ export class AgentSession {
 		if (enumeratesUnbounded) {
 			throw new Error(
 				"Action completion condition must be confirmable by one bounded observable result; drop universal enumeration (every/all/no-unaccounted/complete catalog) and name the single file, symbol, or diff this episode will establish.",
+			);
+		}
+		if (demandsFullTranscriptMaterialization) {
+			throw new Error(
+				"Action completion condition must not require the full output or complete contents to be materialized in the transcript; the episode's own tool results are already recorded. Name the single bounded result this episode establishes instead of demanding a verbatim dump.",
 			);
 		}
 	}
@@ -1597,7 +1684,7 @@ export class AgentSession {
 					tools: requestRole === "finalAnswer" || requestRole === "epistemic" ? [] : context.tools,
 				},
 				model,
-				thinkingLevel: clampThinkingLevel(model, this.agent.state.thinkingLevel) as ThinkingLevel,
+				thinkingLevel: clampThinkingLevel(model, this._thinkingLevelForRole(modelRole)) as ThinkingLevel,
 			};
 		};
 
@@ -1680,9 +1767,19 @@ export class AgentSession {
 					this._controlRepairAttempts++;
 					this._lastControlError = error instanceof Error ? error.message : String(error);
 					if (this._controlRepairAttempts >= this._maxControlRepairAttempts) {
-						throw new Error(
-							`Pie epistemic control failed validation after ${this._maxControlRepairAttempts} bounded attempts: ${this._lastControlError}`,
-						);
+						// A controller that repeatedly emits invalid decisions must not crash the
+						// session into an empty error message. Converge to a bounded inability
+						// report instead, mirroring exhaustControlBudget: terminate any active
+						// Action and hand off to finalAnswer for a user-visible explanation.
+						const reason = `Epistemic control could not produce a valid decision after ${this._maxControlRepairAttempts} bounded attempts: ${this._lastControlError}`;
+						const state = restoreEpistemicState(this.sessionManager.getBranch());
+						const latestEntryId = this.sessionManager.getBranch().at(-1)?.id;
+						if (state.action && latestEntryId && latestEntryId !== state.action.startEntryId) {
+							this._appendActionTransition(state.action, "unresolvable", latestEntryId, reason);
+						}
+						this._automaticActionRequest = false;
+						this._pendingFinalAuthorization = { kind: "inability", reason };
+						return { nextRole: "finalAnswer" };
 					}
 					return { nextRole: "epistemic" };
 				}
