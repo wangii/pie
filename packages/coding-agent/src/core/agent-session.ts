@@ -1129,7 +1129,12 @@ export class AgentSession {
 			"escalate_action requires challenge (anchor or frame) and reason. A Frame must assert one provisional causal or " +
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
 			"the requested deliverable. Its falsifier names an exact observable world result that contradicts that relation, not " +
-			"an inability to finish the investigation. An Action is one bounded episode with one externally checkable completion " +
+			"an inability to finish the investigation. A Frame must not assert an unbounded completeness claim (for example that " +
+			"some set of files contains all prompt sources, that every entry point is in one place, or that a list is exhaustive). " +
+			"When the Anchor asks for an exhaustive inventory (all, every, complete), decompose it: each Frame asserts one bounded, " +
+			"checkable slice of the Anchor and leaves the remaining slices to subsequent Frames; authorize_final only when every " +
+			"slice you intend to cover has been established. Prefer a discovery Frame first that settles the bounded fact of where " +
+			"the LLM call entry points are, before Frames that enumerate their prompt sources. An Action is one bounded episode with one externally checkable completion " +
 			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. A completion condition is bounded only when one observable result can " +
 			"confirm it: a single file read in full, a single symbol's declaration, or a single diff or command output. Do not " +
 			"write a condition that enumerates every or all occurrences, every declaration site, or a complete inventory; such a " +
@@ -1285,6 +1290,20 @@ export class AgentSession {
 		) {
 			throw new Error(
 				"Frame statement must assert one provisional world relation rather than restate or execute the Anchor.",
+			);
+		}
+		const assertsCompleteness =
+			(/\b(?:all|every|each)\b/u.test(statement) &&
+				/\b(?:prompt|source|file|site|entry|path|location|definition|call|module|layer|tool|message|template)s?\b/u.test(
+					statement,
+				)) ||
+			/\b(?:complete|exhaustive|entire|no (?:other|additional|further|unaccounted|remaining)|the only|only these)\b/u.test(
+				statement,
+			) ||
+			/(?:所有|全部|每个|每一|唯一|无(?:遗漏|其他|剩余)|完整|穷举)/u.test(statement);
+		if (assertsCompleteness) {
+			throw new Error(
+				"Frame statement must assert one bounded slice of the Anchor, not an unbounded completeness claim over all sources, files, or entry points; decompose the Anchor and leave the remaining slices to subsequent Frames.",
 			);
 		}
 		const falsifier = this._normalizeSemanticText(definition.falsifier);

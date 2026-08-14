@@ -138,6 +138,48 @@ describe("completion condition bounds", () => {
 				),
 			).toBe(true);
 			expect(contexts.some((prompt) => prompt.includes("controlled scope-narrowing exit"))).toBe(true);
+			expect(
+				contexts.some((prompt) => prompt.includes("A Frame must not assert an unbounded completeness claim")),
+			).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects a frame statement that asserts an unbounded completeness claim and accepts the bounded rewrite", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "All prompt sources for the loop are defined locally in exactly two files",
+					falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+					actions: [actionBudget(action)],
+				}),
+				control({
+					kind: "create_frame",
+					statement: "The loop's LLM call entry points are in two files",
+					falsifier: "A full read of one file shows a referenced symbol is imported from a further module",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The entry point files were read in full."),
+				control({ kind: "complete_action", reason: "A single full read established the entry points" }),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("The loop's LLM call entry points are in two files."),
+			]);
+
+			await harness.session.prompt("check the prompt entry sites in the loop");
+
+			const branch = harness.sessionManager.getBranch();
+			expect(branch.filter((entry) => entry.type === "frame_revision")).toEqual([
+				expect.objectContaining({
+					statement: "The loop's LLM call entry points are in two files",
+				}),
+			]);
+			expect(harness.providerContexts[1]!.systemPrompt).toContain(
+				"previous decision was rejected: Frame statement must assert one bounded slice of the Anchor",
+			);
 		} finally {
 			harness.cleanup();
 		}
