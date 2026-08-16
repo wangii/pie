@@ -41,6 +41,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "determine whether the worker cache survives logout",
 					completionCondition: "The required completion marker is CANONICAL_COMPLETION=IDENTIFY_CACHE_LIFETIME.",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			prompt(
@@ -71,6 +72,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					intent: "compare primary and replica positions during a stale read",
 					completionCondition:
 						"The required completion marker is CANONICAL_COMPLETION=CAPTURE_POSITION_DIVERGENCE.",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			prompt(

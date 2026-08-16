@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import type { EpistemicDiagnostics } from "../src/core/agent-session.ts";
-import type { ActionTransitionEntry } from "../src/core/session-manager.ts";
+import type { ActionTransitionEntry, AnchorRevisionEntry, FrameRevisionEntry } from "../src/core/session-manager.ts";
 import {
 	formatOperationalError,
 	formatPieStatus,
@@ -170,6 +170,45 @@ describe("Pie diagnostics UI projections", () => {
 		expect(plain(receipt.render(200))).toContain("action-1 (interrupted persisted Action; not replayed)");
 		receipt.setExpanded(true);
 		expect(plain(receipt.render(200))).toContain("Legacy summaries ignored for cognition: 2");
+	});
+
+	it("surfaces the controller's reasoning on Anchor and Frame revision markers", () => {
+		const anchor: AnchorRevisionEntry = {
+			type: "anchor_revision",
+			id: "anchor-rev-event",
+			parentId: "anchor-event",
+			timestamp: new Date(0).toISOString(),
+			anchorId: "anchor-1",
+			revision: 2,
+			statement: "ship the fix",
+			previousRevisionId: "anchor-event",
+			sourceEventId: "control-event",
+			revisionReason: "user changed the requested outcome",
+		};
+		const frame: FrameRevisionEntry = {
+			type: "frame_revision",
+			id: "frame-rev-event",
+			parentId: "frame-event",
+			timestamp: new Date(0).toISOString(),
+			frameId: "frame-1",
+			version: 2,
+			statement: "cache survives logout",
+			expectation: "restart preserves failure",
+			horizon: 6,
+			previousRevisionId: "frame-event",
+			sourceEventId: "control-event",
+			revisionReason: "new evidence narrowed the candidate set",
+		};
+
+		const anchorMarker = new PieStateTransitionComponent(anchor);
+		expect(plain(anchorMarker.render(120))).toContain("ship the fix");
+		anchorMarker.setExpanded(true);
+		expect(plain(anchorMarker.render(120))).toContain("why: user changed the requested outcome");
+
+		const frameMarker = new PieStateTransitionComponent(frame);
+		expect(plain(frameMarker.render(120))).toContain("cache survives logout");
+		frameMarker.setExpanded(true);
+		expect(plain(frameMarker.render(120))).toContain("why: new evidence narrowed the candidate set");
 	});
 
 	it("renders the epistemic control prompt as a collapsible section", () => {

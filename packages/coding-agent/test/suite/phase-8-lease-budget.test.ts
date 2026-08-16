@@ -28,14 +28,16 @@ const inspectTool: AgentTool = {
 const firstAction = {
 	intent: "Discover source locations for the implementation entry point",
 	completionCondition: "Exact paths identify the implementation entry point",
+	expectation: "Exact paths identify the implementation entry point",
 };
 const secondAction = {
 	intent: "Inspect behavior at the located entry point",
 	completionCondition: "Exact source evidence establishes the implementation behavior",
+	expectation: "Exact source evidence establishes the implementation behavior",
 };
 
 function budget(
-	action: { intent: string; completionCondition: string },
+	action: { intent: string; completionCondition: string; expectation: string },
 	expectedEvidenceRounds: number,
 ): ProvisionalActionContract {
 	return {
@@ -124,7 +126,13 @@ describe("Phase 8 model-response lease derivation", () => {
 					return control({ kind: "authorize_action", actionContractId: "A1" });
 				},
 				fauxAssistantMessage("The exact path is established."),
-				control({ kind: "complete_action", reason: "The listed contract condition was established" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The listed contract condition was established by the exact path result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The bounded request is satisfied" }),
 				fauxAssistantMessage("Located."),
 			]);
@@ -161,7 +169,13 @@ describe("Phase 8 model-response lease derivation", () => {
 							: "round count missing",
 						{ stopReason: "toolUse" },
 					),
-				control({ kind: "unresolvable_action", reason: "The accepted two-round estimate is exhausted" }),
+				control({
+					kind: "unresolvable_action",
+					predictionError: {
+						sign: "refuted",
+						detail: "The accepted two-round estimate is exhausted without the dependent result",
+					},
+				}),
 				control({ kind: "report_inability", reason: "The bounded probe remains inconclusive" }),
 				fauxAssistantMessage("Bounded evidence gathering ended."),
 			]);
@@ -191,7 +205,13 @@ describe("Phase 8 model-response lease derivation", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("The exact path is established."),
-				control({ kind: "complete_action", reason: "The completion condition was established early" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The completion condition was established early by the exact entry result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested location is established" }),
 				fauxAssistantMessage("Located."),
 			]);

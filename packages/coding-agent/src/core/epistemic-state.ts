@@ -5,6 +5,7 @@ import type {
 	FrameRevisionEntry,
 	FrameTransitionEntry,
 	ObservationEntry,
+	PredictionErrorSign,
 	SessionEntry,
 } from "./session-manager.ts";
 
@@ -45,7 +46,7 @@ export interface Action {
 	intent: string;
 	completionCondition: string;
 	startEntryId: string;
-	expectation?: string;
+	expectation: string;
 	frameRevisionEntryId?: string;
 	anchorRevisionEntryId?: string;
 	sourceEventId: string;
@@ -62,6 +63,10 @@ export interface Observation {
 	id: string;
 	entryId: string;
 	statement: string;
+	/** The frozen expectation the terminal Action predicted; present on controller-authored terminal Observations. */
+	expectation?: string;
+	/** The structured sign of the prediction error carried by `statement`. */
+	predictionErrorSign?: PredictionErrorSign;
 	sourceEventIds: readonly string[];
 	anchorId?: string;
 	anchorRevisionEntryId?: string;
@@ -129,6 +134,8 @@ function observationFromEntry(entry: ObservationEntry): Observation {
 		id: entry.observationId,
 		entryId: entry.id,
 		statement: entry.statement,
+		expectation: entry.expectation,
+		predictionErrorSign: entry.predictionErrorSign,
 		sourceEventIds: [...entry.sourceEventIds],
 		anchorId: entry.anchorId,
 		anchorRevisionEntryId: entry.anchorRevisionEntryId,
@@ -180,6 +187,9 @@ function validateActionStart(
 	action: Action | undefined,
 	seenActionIds: Set<string>,
 ): Action {
+	if (!entry.expectation?.trim()) {
+		throw new Error(`Action start ${entry.id} requires a non-empty frozen expectation.`);
+	}
 	const bindsToFrame = entry.frameRevisionEntryId !== undefined;
 	const bindsToAnchor = entry.anchorRevisionEntryId !== undefined;
 	if (bindsToFrame === bindsToAnchor) {

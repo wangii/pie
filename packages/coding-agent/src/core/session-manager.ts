@@ -162,8 +162,8 @@ export interface ActionStartEntry extends SessionEntryBase {
 	actionId: string;
 	intent: string;
 	completionCondition: string;
-	/** The predicted fact for a pre-Frame `explore` episode, materialized as an Observation on completion. */
-	expectation?: string;
+	/** The single observable this Action predicts it will find; frozen before the probe runs. */
+	expectation: string;
 	/** Exactly one binding target: the Frame revision, or the Anchor revision (pre-Frame `explore`). */
 	frameRevisionEntryId?: string;
 	anchorRevisionEntryId?: string;
@@ -181,11 +181,25 @@ export interface ActionTransitionEntry extends SessionEntryBase {
 	challenge?: "anchor" | "frame";
 }
 
+/** The sign of a terminal Action's prediction error relative to its frozen expectation. */
+export type PredictionErrorSign = "confirmed" | "refuted" | "refined";
+
+/** The controller's structured account of how reality diverged from a frozen expectation. */
+export interface PredictionError {
+	sign: PredictionErrorSign;
+	detail: string;
+}
+
 /** Immutable durable world evidence with exact raw execution-result provenance. */
 export interface ObservationEntry extends SessionEntryBase {
 	type: "observation";
 	observationId: string;
+	/** Rendered canonical text: `Expectation: ...\nPrediction error: <sign> <detail>`. */
 	statement: string;
+	/** The frozen expectation the terminal Action predicted; denormalized from ActionStartEntry. */
+	expectation?: string;
+	/** The structured sign of the prediction error carried by `statement`. */
+	predictionErrorSign?: PredictionErrorSign;
 	sourceEventIds: string[];
 	anchorId?: string;
 	anchorRevisionEntryId?: string;

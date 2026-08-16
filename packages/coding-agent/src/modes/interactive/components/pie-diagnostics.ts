@@ -21,6 +21,11 @@ function singleLine(text: string): string {
 		.trim();
 }
 
+function truncateMarker(text: string, max = 72): string {
+	const line = singleLine(text);
+	return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+}
+
 function formatUnknown(value: unknown): string {
 	if (value === undefined) return "";
 	try {
@@ -254,15 +259,15 @@ function markerText(entry: SessionEntry): { collapsed: string; expanded: string 
 	if (entry.type === "anchor_revision") {
 		const label = entry.revision === 1 ? "Anchor created" : "Anchor revised";
 		return {
-			collapsed: `${label} · r${entry.revision}`,
-			expanded: `${label} · r${entry.revision}\n  ${entry.statement}\n  id: ${entry.anchorId}\n  event: ${entry.id}\n  source: ${entry.sourceEventId}`,
+			collapsed: `${label} · r${entry.revision} — ${truncateMarker(entry.statement)}`,
+			expanded: `${label} · r${entry.revision}\n  ${entry.statement}${entry.revisionReason ? `\n  why: ${singleLine(entry.revisionReason)}` : ""}\n  id: ${entry.anchorId}\n  event: ${entry.id}\n  source: ${entry.sourceEventId}`,
 		};
 	}
 	if (entry.type === "frame_revision") {
 		const label = entry.version === 1 ? "Frame created" : "Frame revised";
 		return {
-			collapsed: `${label} · v${entry.version}`,
-			expanded: `${label} · v${entry.version}\n  ${entry.statement}\n  expectation: ${entry.expectation}\n  response lease: ${entry.horizon}\n  id: ${entry.frameId}\n  event: ${entry.id}`,
+			collapsed: `${label} · v${entry.version} — ${truncateMarker(entry.statement)}`,
+			expanded: `${label} · v${entry.version}\n  ${entry.statement}\n  expectation: ${entry.expectation}${entry.revisionReason ? `\n  why: ${singleLine(entry.revisionReason)}` : ""}\n  response lease: ${entry.horizon}\n  id: ${entry.frameId}\n  event: ${entry.id}`,
 		};
 	}
 	if (entry.type === "frame_transition") {

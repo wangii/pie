@@ -37,6 +37,7 @@ describe("Action episode persistence", () => {
 				actionId: "action-1",
 				intent: "determine whether the worker cache survives logout",
 				completionCondition: "a cache lifetime is identified or cache survival is ruled out",
+				expectation: "a cache lifetime is identified",
 				frameRevisionEntryId,
 				sourceEventId,
 			});
@@ -64,6 +65,7 @@ describe("Action episode persistence", () => {
 			actionId: "action-1",
 			intent: "reproduce the failure",
 			completionCondition: "a deterministic reproducer exists",
+			expectation: "a deterministic reproducer exists",
 			frameRevisionEntryId,
 			sourceEventId,
 		});
@@ -94,6 +96,7 @@ describe("Action episode persistence", () => {
 			actionId: "action-1",
 			intent: "inspect the cache",
 			completionCondition: "cache ownership is identified",
+			expectation: "cache ownership is identified",
 			frameRevisionEntryId,
 			sourceEventId,
 		});

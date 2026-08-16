@@ -35,20 +35,24 @@ const inspectTool: AgentTool = {
 const action = {
 	intent: "Inspect cache lifetime and the restart boundary",
 	completionCondition: "The cache lifetime and restart behavior are established by exact tool results",
+	expectation: "A restart test result shows the failure persists across the cache lifetime boundary",
 } as const;
 
 const secondAction = {
 	intent: "Inspect whether invalidation crosses the worker boundary",
 	completionCondition: "An exact result establishes whether worker invalidation occurs",
+	expectation: "An exact result shows invalidation crosses the worker boundary",
 } as const;
 
 const authorizeFirstAction = { kind: "authorize_action", actionContractId: "A1" } as const;
 const authorizeSecondAction = { kind: "authorize_action", actionContractId: "A2" } as const;
 
-function actionBudget(definition: { intent: string; completionCondition: string }, expectedEvidenceRounds = 3) {
+function actionBudget(
+	definition: { intent: string; completionCondition: string; expectation: string },
+	expectedEvidenceRounds = 3,
+) {
 	return {
-		intent: definition.intent,
-		completionCondition: definition.completionCondition,
+		...definition,
 		expectedEvidenceRounds,
 		budgetReason:
 			expectedEvidenceRounds === 1
@@ -84,7 +88,13 @@ describe("Phase 7 production control flow", () => {
 				control(frame),
 				control(authorizeFirstAction),
 				fauxAssistantMessage("inspection result is ready"),
-				control({ kind: "complete_action", reason: "Exact cache lifetime evidence was collected" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "Exact cache lifetime evidence was collected from the restart test",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("The persisted cache boundary controls the behavior."),
 			]);
@@ -139,6 +149,7 @@ describe("Phase 7 production control flow", () => {
 							intent: "Trace the Frame and Action transition paths end to end",
 							completionCondition:
 								"A concrete diagnosis with code references and a proposed fix, or a confirmed absence, is delivered",
+							expectation: "The trace result shows the Frame and Action transition paths in source",
 						}),
 					],
 				}),
@@ -151,12 +162,20 @@ describe("Phase 7 production control flow", () => {
 							intent: "Inspect where Action lifetime is bounded relative to the Frame lease",
 							completionCondition:
 								"Exact source locations establish whether Action has an independent response boundary",
+							expectation:
+								"Exact source locations show the Action response boundary relative to the Frame lease",
 						}),
 					],
 				}),
 				control(authorizeFirstAction),
 				fauxAssistantMessage("The bounded source locations are established."),
-				control({ kind: "complete_action", reason: "The exact Action lifetime boundary was established" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The exact Action lifetime boundary was established in the source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("The Action boundary was verified."),
 			]);
@@ -205,7 +224,13 @@ describe("Phase 7 production control flow", () => {
 				}),
 				control(authorizeFirstAction),
 				fauxAssistantMessage("bounded result"),
-				control({ kind: "complete_action", reason: "The bounded result was established" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The bounded result was established in the runtime configuration",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
 				fauxAssistantMessage("done"),
 			]);
@@ -282,7 +307,13 @@ describe("Phase 7 production control flow", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("The exact result is now available."),
-				control({ kind: "complete_action", reason: "The exact tool result establishes the condition" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The exact tool result establishes the cache behavior condition",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "Anchor satisfaction is established" }),
 				fauxAssistantMessage("Verified from the exact result."),
 			]);
@@ -319,7 +350,13 @@ describe("Phase 7 production control flow", () => {
 						instruction ? "stopped at the current condition" : "scope instruction missing",
 					);
 				},
-				control({ kind: "complete_action", reason: "The exact current condition was established" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The exact current condition was established in the active episode",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "Scope projection was verified" }),
 				fauxAssistantMessage("Scope verified."),
 			]);
@@ -346,7 +383,13 @@ describe("Phase 7 production control flow", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("Both boundaries are established."),
-				control({ kind: "complete_action", reason: "Both exact results satisfy the frozen condition" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "Both exact results satisfy the frozen cache boundary condition",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
 				fauxAssistantMessage("Both boundaries were verified."),
 			]);
@@ -381,10 +424,22 @@ describe("Phase 7 production control flow", () => {
 				control(frame),
 				control(authorizeFirstAction),
 				fauxAssistantMessage("First result established."),
-				control({ kind: "complete_action", reason: "First bounded condition met" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The first bounded cache condition was met by the exact result",
+					},
+				}),
 				control(authorizeSecondAction),
 				fauxAssistantMessage("Second result established."),
-				control({ kind: "complete_action", reason: "Second bounded condition met" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The second bounded cache condition was met by the exact result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "Both required facts establish the Anchor" }),
 				fauxAssistantMessage("Both investigations completed."),
 			]);
@@ -439,7 +494,13 @@ describe("Phase 7 production control flow", () => {
 				control(frame),
 				control(authorizeFirstAction),
 				fauxAssistantMessage("The exact bounded result is established."),
-				control({ kind: "complete_action", reason: "The bounded result is established at the lease boundary" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The bounded result is established at the lease boundary in the active episode",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The completed Action establishes the Anchor" }),
 				fauxAssistantMessage("done"),
 			]);
@@ -486,7 +547,13 @@ describe("Phase 7 production control flow", () => {
 				control({ kind: "continue_action", reason: "Try to keep the same episode alive" }),
 				control(authorizeSecondAction),
 				fauxAssistantMessage("remaining boundary established"),
-				control({ kind: "complete_action", reason: "The remaining bounded result was established" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The remaining bounded result was established by the exact evidence",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "Both bounded results establish the Anchor" }),
 				fauxAssistantMessage("done"),
 			]);
@@ -552,7 +619,13 @@ describe("Phase 7 production control flow", () => {
 					control(candidateFrame),
 					control(authorizeFirstAction),
 					fauxAssistantMessage("bounded result"),
-					control({ kind: "complete_action", reason: "The candidate result was established" }),
+					control({
+						kind: "complete_action",
+						predictionError: {
+							sign: "confirmed",
+							detail: "The candidate result was established by the exact source evidence",
+						},
+					}),
 					control({ kind: "authorize_final", reason: "The shared Anchor is satisfied" }),
 					fauxAssistantMessage("done"),
 				]);
@@ -566,6 +639,7 @@ describe("Phase 7 production control flow", () => {
 		const databaseCandidate = {
 			intent: "Compare primary and replica authorization reads",
 			completionCondition: "Exact read results establish whether replica divergence exists",
+			expectation: "The replica read result shows an authorization value diverging from primary",
 		};
 		const databaseAction = await run({
 			kind: "create_frame",
@@ -581,9 +655,9 @@ describe("Phase 7 production control flow", () => {
 
 	it("keeps completed, UNRESOLVABLE, and escalated Action outcomes distinct", async () => {
 		for (const outcome of [
-			{ kind: "complete_action", transition: "completed" },
-			{ kind: "unresolvable_action", transition: "unresolvable" },
-			{ kind: "escalate_action", transition: "escalated", challenge: "frame" },
+			{ kind: "complete_action", transition: "completed", sign: "confirmed" },
+			{ kind: "unresolvable_action", transition: "unresolvable", sign: "refuted" },
+			{ kind: "escalate_action", transition: "escalated", challenge: "frame", sign: "refuted" },
 		] as const) {
 			const harness = await createHarness(fullStackOptions());
 			try {
@@ -593,7 +667,10 @@ describe("Phase 7 production control flow", () => {
 					fauxAssistantMessage("The bounded episode reached a controller boundary."),
 					control({
 						kind: outcome.kind,
-						reason: `Controller selected ${outcome.transition}`,
+						predictionError: {
+							sign: outcome.sign,
+							detail: `Controller selected ${outcome.transition} for the active episode`,
+						},
 						...(outcome.kind === "escalate_action" ? { challenge: outcome.challenge } : {}),
 					}),
 					control({ kind: "report_inability", reason: "Outcome distinction verified" }),

@@ -156,6 +156,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "determine whether the worker cache survives logout",
 					completionCondition: "The required completion marker is CANONICAL_COMPLETION=IDENTIFY_CACHE_LIFETIME.",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			prompt(
@@ -190,6 +191,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "determine whether the worker cache survives logout",
 					completionCondition: "The required completion marker is CANONICAL_COMPLETION=IDENTIFY_CACHE_LIFETIME.",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			prompt(
@@ -209,6 +211,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					intent: "compare primary and replica positions during a stale read",
 					completionCondition:
 						"The required completion marker is CANONICAL_COMPLETION=CAPTURE_POSITION_DIVERGENCE.",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			prompt(
@@ -243,6 +246,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "confirm whether a worker restart clears the transient lock",
 					completionCondition: "The required completion marker is CANONICAL_COMPLETION=CLEARED_AFTER_RESTART.",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			prompt(

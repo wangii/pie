@@ -481,6 +481,7 @@ describe("PhaseZeroContextCompiler", () => {
 			actionId: "action-1",
 			intent: "Inspect worker cache lifetime",
 			completionCondition: "Exact results establish the cache lifetime",
+			expectation: "Exact results establish the cache lifetime",
 			frameRevisionEntryId: frameRevisionId,
 			sourceEventId: actionControlId,
 		});
@@ -549,6 +550,7 @@ describe("PhaseZeroContextCompiler", () => {
 			actionId: "action-1",
 			intent: "Inspect cache ownership",
 			completionCondition: "The owning process is identified",
+			expectation: "The owning process is identified",
 			frameRevisionEntryId: frameRevisionId,
 			sourceEventId: firstControlId,
 		});
@@ -566,6 +568,7 @@ describe("PhaseZeroContextCompiler", () => {
 			actionId: "action-2",
 			intent: "Inspect cache invalidation",
 			completionCondition: "An exact result establishes invalidation behavior",
+			expectation: "An exact result establishes invalidation behavior",
 			frameRevisionEntryId: frameRevisionId,
 			sourceEventId: secondControlId,
 		});
@@ -634,6 +637,7 @@ describe("PhaseZeroContextCompiler", () => {
 					id: "action-1",
 					intent: "inspect cache ownership",
 					completionCondition: "the owning process is identified",
+					expectation: "the owning process is identified",
 					startEntryId: "as1",
 					frameRevisionEntryId: "fr1",
 					sourceEventId: "u2",
@@ -680,6 +684,7 @@ describe("PhaseZeroContextCompiler", () => {
 			actionId: "action-1",
 			intent: "Inspect cache ownership",
 			completionCondition: "The owning process is identified",
+			expectation: "The owning process is identified",
 			frameRevisionEntryId: frameRevisionId,
 			sourceEventId: actionControlId,
 		});
@@ -801,6 +806,7 @@ describe("PhaseZeroContextCompiler", () => {
 			actionId: "action-1",
 			intent: "Inspect cache ownership",
 			completionCondition: "The owning process is identified",
+			expectation: "The owning process is identified",
 			frameRevisionEntryId: frameRevisionId,
 			sourceEventId: actionControlId,
 		});

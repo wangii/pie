@@ -75,10 +75,12 @@ describe("context compiler provider boundary", () => {
 			const ownership = {
 				intent: "Inspect cache ownership",
 				completionCondition: "Exact repository results identify the owning process",
+				expectation: "Exact repository results identify the owning process in the source",
 			};
 			const invalidation = {
 				intent: "Inspect cache invalidation",
 				completionCondition: "An exact runtime result establishes invalidation behavior",
+				expectation: "An exact runtime result shows the invalidation behavior in the worker",
 			};
 			harness.setResponses([
 				decision({
@@ -100,10 +102,22 @@ describe("context compiler provider boundary", () => {
 				}),
 				decision({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("first low-level episode trace"),
-				decision({ kind: "complete_action", reason: "The owning process was identified" }),
+				decision({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The owning process was identified in the repository source",
+					},
+				}),
 				decision({ kind: "authorize_action", actionContractId: "A2" }),
 				fauxAssistantMessage("second episode result"),
-				decision({ kind: "complete_action", reason: "Invalidation behavior was established" }),
+				decision({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "Invalidation behavior was established by the exact runtime result",
+					},
+				}),
 				decision({ kind: "authorize_final", reason: "Both bounded results satisfy the request" }),
 				fauxAssistantMessage("final answer"),
 			]);

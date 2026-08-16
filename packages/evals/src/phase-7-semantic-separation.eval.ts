@@ -27,7 +27,7 @@ type Scenario = {
 	files: Record<string, string>;
 	task: string;
 	baselineFrame: { statement: string; expectation: string };
-	baselineAction: { intent: string; completionCondition: string };
+	baselineAction: { intent: string; completionCondition: string; expectation: string };
 	expectMultipleActions: boolean;
 	expectFrameTermination: boolean;
 };
@@ -69,6 +69,7 @@ console.log("PASS");
 		baselineAction: {
 			intent: "Fix the identifier regression and verify the complete user request",
 			completionCondition: "The implementation is fixed, npm test passes, and a final answer is produced",
+			expectation: "the completion condition is satisfiable",
 		},
 		expectMultipleActions: true,
 		expectFrameTermination: false,
@@ -103,6 +104,7 @@ console.log("PASS");
 		baselineAction: {
 			intent: "Complete the entire diagnosis, probe, implementation inspection, and verification request",
 			completionCondition: "The whole request is diagnosed, npm test passes, and a final answer is produced",
+			expectation: "the completion condition is satisfiable",
 		},
 		expectMultipleActions: false,
 		expectFrameTermination: true,

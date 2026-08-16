@@ -33,6 +33,7 @@ function initializeAction(manager: SessionManager): {
 		actionId: "action-1",
 		intent: "measure worker cache lifetime",
 		completionCondition: "the cache lifetime is identified",
+		expectation: "the cache lifetime is identified",
 		frameRevisionEntryId,
 		sourceEventId,
 	});

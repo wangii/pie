@@ -200,6 +200,7 @@ describe("InteractiveMode.renderSessionEntries", () => {
 			actionId: "action-1",
 			intent: "inspect fixture",
 			completionCondition: "identify the result",
+			expectation: "identify the result",
 			frameRevisionEntryId: "frame-1",
 			sourceEventId: "user-1",
 		};

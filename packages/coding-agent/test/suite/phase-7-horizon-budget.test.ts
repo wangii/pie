@@ -19,6 +19,7 @@ describe("Phase 8 production model-response lease budgeting", () => {
 			const action = {
 				intent: "Discover source locations for the production prompt construction entry points",
 				completionCondition: "Exact file locations identify each production prompt construction entry point",
+				expectation: "Exact file locations in the source show each production prompt construction entry point",
 			};
 			harness.setResponses([
 				control({
@@ -35,7 +36,13 @@ describe("Phase 8 production model-response lease budgeting", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The exact entry points are established."),
-				control({ kind: "complete_action", reason: "The exact entry points were established" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The exact production prompt construction entry points were established in the source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The bounded prompt audit satisfies the request" }),
 				fauxAssistantMessage("Prompt audit complete."),
 			]);

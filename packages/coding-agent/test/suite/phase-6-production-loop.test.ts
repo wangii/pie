@@ -12,6 +12,7 @@ function control(decision: Record<string, unknown>) {
 const productionActionContract = {
 	intent: "Inspect the implementation boundary relevant to the request",
 	completionCondition: "Exact repository or runtime results establish the relevant implementation behavior",
+	expectation: "An exact repository or runtime result shows the relevant implementation boundary",
 } as const;
 
 const productionAction = {
@@ -62,7 +63,13 @@ describe("Phase 6 production loop ownership", () => {
 				control(productionFrame),
 				control(productionAction),
 				fauxAssistantMessage("production request investigated"),
-				control({ kind: "complete_action", reason: "The bounded investigation condition was met" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The bounded investigation condition was met by the exact result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The first request is satisfied" }),
 				fauxAssistantMessage("production request complete"),
 				control({ kind: "kill_frame", reason: "The next request requires a distinct investigation" }),
@@ -83,7 +90,13 @@ describe("Phase 6 production loop ownership", () => {
 				}),
 				control(productionAction),
 				fauxAssistantMessage("follow-up investigated"),
-				control({ kind: "complete_action", reason: "The follow-up condition was met" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The follow-up condition was met by the exact verification result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The follow-up request is satisfied" }),
 				fauxAssistantMessage("follow-up complete"),
 			]);
@@ -131,7 +144,13 @@ describe("Phase 6 production loop ownership", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage("explicit state retained"),
-				control({ kind: "complete_action", reason: "The explicit completion condition was met" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The explicit completion condition was met by the exact result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The explicit Anchor is satisfied" }),
 				fauxAssistantMessage("explicit state retained"),
 			]);
@@ -148,6 +167,7 @@ describe("Phase 6 production loop ownership", () => {
 					type: "start",
 					intent: "explicit intent",
 					completionCondition: "explicit completion",
+					expectation: "explicit completion",
 				},
 			});
 
@@ -182,7 +202,12 @@ describe("Phase 6 production loop ownership", () => {
 					expectation: "state is missing after restart",
 					horizon: 4,
 				},
-				action: { type: "start", intent: "inspect restart", completionCondition: "state is restored" },
+				action: {
+					type: "start",
+					intent: "inspect restart",
+					completionCondition: "state is restored",
+					expectation: "state is restored",
+				},
 			});
 		} finally {
 			first.cleanup();
@@ -203,7 +228,13 @@ describe("Phase 6 production loop ownership", () => {
 			expect(resumed.providerContexts).toHaveLength(0);
 
 			resumed.setResponses([
-				control({ kind: "unresolvable_action", reason: "The new request supersedes this persisted episode" }),
+				control({
+					kind: "unresolvable_action",
+					predictionError: {
+						sign: "refuted",
+						detail: "The new request supersedes this persisted episode before its condition could be met",
+					},
+				}),
 				control({ kind: "report_inability", reason: "A new bounded investigation must be authorized separately" }),
 				fauxAssistantMessage("new request requires a separate investigation"),
 			]);
@@ -260,7 +291,13 @@ describe("Phase 6 production loop ownership", () => {
 				control(productionAction),
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 				fauxAssistantMessage("recovered"),
-				control({ kind: "complete_action", reason: "Recovery established the frozen condition" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "Recovery established the frozen condition with the retried result",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The request is satisfied after recovery" }),
 				fauxAssistantMessage("recovered final answer"),
 			]);
@@ -335,7 +372,13 @@ describe("Phase 6 production loop ownership", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("routed completion"),
-				control({ kind: "complete_action", reason: "The routed result met the condition" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The routed result met the condition in the executor episode",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The routed request is satisfied" }),
 				fauxAssistantMessage("routed final answer"),
 			]);
@@ -447,7 +490,13 @@ describe("Phase 6 production loop ownership", () => {
 						stopReason: "toolUse",
 					}),
 					fauxAssistantMessage("local repair complete"),
-					control({ kind: "complete_action", reason: "The repaired execution established the condition" }),
+					control({
+						kind: "complete_action",
+						predictionError: {
+							sign: "confirmed",
+							detail: "The repaired execution established the condition with the local result",
+						},
+					}),
 					control({ kind: "authorize_final", reason: "The request is satisfied" }),
 					fauxAssistantMessage("local repair final answer"),
 				]);

@@ -36,12 +36,15 @@ const inspectTool: AgentTool = {
 const action = {
 	intent: "Read the loop source in full to locate where prompts enter",
 	completionCondition: "A single full read of the loop source establishes where its prompts enter",
+	expectation: "The loop source shows the prompt template and the assembly routine that builds prompts",
 } as const;
 
-function actionBudget(definition: { intent: string; completionCondition: string }, expectedEvidenceRounds = 1) {
+function actionBudget(
+	definition: { intent: string; completionCondition: string; expectation: string },
+	expectedEvidenceRounds = 1,
+) {
 	return {
-		intent: definition.intent,
-		completionCondition: definition.completionCondition,
+		...definition,
 		expectedEvidenceRounds,
 		budgetReason:
 			expectedEvidenceRounds === 1
@@ -76,6 +79,7 @@ describe("completion condition bounds", () => {
 							intent: "Record every prompt site in the loop source",
 							completionCondition:
 								"A recorded list of exact file paths and line ranges covers the loop class and every prompt literal, template function, or prompt-building call it uses",
+							expectation: "The read result shows every prompt site with its exact file path and line range",
 						}),
 					],
 				}),
@@ -87,7 +91,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full; prompts enter only via injected messages."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -126,7 +136,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full; prompts enter only via injected messages."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -166,7 +182,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The entry point files were read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the entry points" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the exact entry points in the loop",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("The loop's LLM call entry points are in two files."),
 			]);
@@ -269,7 +291,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the entry points" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the exact entry points in the loop",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -299,6 +327,7 @@ describe("completion condition bounds", () => {
 							intent: "Run one broad discovery search over the package sources",
 							completionCondition:
 								"The search command completes and its full output is present in the transcript",
+							expectation: "The search result lists the package source files that define prompt literals",
 						}),
 					],
 				}),
@@ -312,7 +341,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the entry points" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the exact entry points in the loop",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -372,7 +407,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the entry points" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the exact entry points in the loop",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -405,7 +446,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({
 					kind: "replace_frame",
 					statement: "Prompt construction in the loop is produced only by externally injected messages",
@@ -415,7 +462,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -450,7 +503,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({
 					kind: "advance_frame",
 					reason: "read the next prompt site",
@@ -458,12 +517,19 @@ describe("completion condition bounds", () => {
 						actionBudget({
 							intent: "Read the next prompt site file in full",
 							completionCondition: "One read returns that file in full with its path shown in the result",
+							expectation: "The read result shows the next prompt site file in full with its path",
 						}),
 					],
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The next file was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the next site" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the next prompt site in the loop",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -504,7 +570,13 @@ describe("completion condition bounds", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("grep recorded the prompt sites"),
-				control({ kind: "complete_action", reason: "The grep recorded the prompt sites" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The grep recorded the prompt sites in system-prompt.ts and agent-session.ts",
+					},
+				}),
 				explore("Grep packages/coding-agent/src for prompt-definition markers"),
 				control({ kind: "authorize_final", reason: "Comprehension is sufficient; the Anchor is satisfied" }),
 				fauxAssistantMessage("The prompt sites are system-prompt.ts and agent-session.ts."),
@@ -556,7 +628,13 @@ describe("completion condition bounds", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("grep recorded the prompt sites"),
-				control({ kind: "complete_action", reason: "recorded the prompt sites" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The prompt sites were recorded in system-prompt.ts and agent-session.ts",
+					},
+				}),
 				// Different intent, but the expectation repeats the already-established fact.
 				explore("List files that define prompts", "Prompt literals live in system-prompt.ts and agent-session.ts"),
 				control({ kind: "authorize_final", reason: "Comprehension is sufficient" }),
@@ -639,7 +717,13 @@ describe("completion condition bounds", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("grep recorded the prompt sites"),
-				control({ kind: "complete_action", reason: "The grep recorded the prompt sites" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The grep recorded the prompt sites in system-prompt.ts and agent-session.ts",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "Comprehension is sufficient" }),
 				fauxAssistantMessage("done"),
 			]);
@@ -648,11 +732,20 @@ describe("completion condition bounds", () => {
 
 			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
 			expect(observations).toHaveLength(1);
-			// The predicted fact is retained for the information-gain gate…
-			expect(observations[0].statement).toContain("prompt-construction surface");
-			// …and the concrete established result is materialized alongside it.
-			expect(observations[0].statement).toContain("Established result:");
-			expect(observations[0].statement).toContain("observed:agent-session.ts:39");
+			// The frozen expectation is restated at the head of the canonical statement…
+			expect(observations[0].statement).toContain(
+				"Expectation: The prompt-construction surface lives in a few identifiable files",
+			);
+			// …and the confirmed prediction error names the concrete established result.
+			expect(observations[0].statement).toContain("Prediction error: confirmed: The grep recorded the prompt sites");
+			// The raw tool output is never inlined into the statement; it is referenced
+			// only through the exact provenance pointer.
+			expect(observations[0].statement).not.toContain("observed:agent-session.ts:39");
+			const resultEntry = harness.sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "message" && entry.message.role === "toolResult");
+			expect(resultEntry).toBeDefined();
+			expect((observations[0] as { sourceEventIds: string[] }).sourceEventIds).toEqual([resultEntry!.id]);
 		} finally {
 			harness.cleanup();
 		}
@@ -672,6 +765,8 @@ describe("completion condition bounds", () => {
 								"Read in full the source file from the prior grep result with the highest total count of prompt-marker terms",
 							completionCondition:
 								"The read completes and establishes whether that file contains a prompt-assembly function",
+							expectation:
+								"The read result shows the top marker-matching file contains a prompt-assembly function",
 						}),
 					],
 				}),
@@ -683,7 +778,13 @@ describe("completion condition bounds", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);
@@ -715,7 +816,13 @@ describe("completion condition bounds", () => {
 				fauxAssistantMessage(
 					'Reading agent-session.ts now.\n\n<invoke name="bash">\n<parameter name="command" string="true">wc -l agent-session.ts</parameter>\n</invoke>',
 				),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);

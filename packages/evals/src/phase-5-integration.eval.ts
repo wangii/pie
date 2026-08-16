@@ -144,6 +144,7 @@ function codingSteps(scenario: (typeof codingScenarios)[number]): PiCodingAgentI
 				type: "start",
 				intent: "repair the localized regression and execute its test",
 				completionCondition: "the implementation is corrected and npm test passes",
+				expectation: "the completion condition is satisfied",
 			},
 		},
 		{
@@ -164,6 +165,7 @@ function codingSteps(scenario: (typeof codingScenarios)[number]): PiCodingAgentI
 				type: "start",
 				intent: "verify the durable coding outcome after session restoration",
 				completionCondition: "npm test passes and the final response line is PASS",
+				expectation: "the completion condition is satisfied",
 			},
 		},
 		{ type: "complete_current_action", reason: "the restored session produced a passing verification result" },
@@ -199,6 +201,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput; coding: boolea
 					type: "start",
 					intent: "run the clean-worker expectation probe",
 					completionCondition: "the post-restart authorization result is captured",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			{
@@ -218,6 +221,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput; coding: boolea
 					type: "start",
 					intent: "adjudicate whether the current Frame remains admissible",
 					completionCondition: "output exactly KEEP_FRAME or REJECT_FRAME from durable current context",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			{ type: "adjudicate_current_frame" },

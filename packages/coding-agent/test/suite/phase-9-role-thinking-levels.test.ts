@@ -34,12 +34,15 @@ const inspectTool: AgentTool = {
 const action = {
 	intent: "Read the loop source in full to locate where prompts enter",
 	completionCondition: "A single full read of the loop source establishes where its prompts enter",
+	expectation: "The loop source shows the prompt template and assembly routine inside the class",
 } as const;
 
-function actionBudget(definition: { intent: string; completionCondition: string }, expectedEvidenceRounds = 1) {
+function actionBudget(
+	definition: { intent: string; completionCondition: string; expectation: string },
+	expectedEvidenceRounds = 1,
+) {
 	return {
-		intent: definition.intent,
-		completionCondition: definition.completionCondition,
+		...definition,
 		expectedEvidenceRounds,
 		budgetReason:
 			expectedEvidenceRounds === 1
@@ -71,7 +74,13 @@ function runSequence() {
 		}),
 		control({ kind: "authorize_action", actionContractId: "A1" }),
 		fauxAssistantMessage("The loop source was read in full."),
-		control({ kind: "complete_action", reason: "A single full read established the entry points" }),
+		control({
+			kind: "complete_action",
+			predictionError: {
+				sign: "confirmed",
+				detail: "A single full read established the prompt entry points in the loop source",
+			},
+		}),
 		control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 		fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 	];

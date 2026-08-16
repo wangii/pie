@@ -24,10 +24,12 @@ const inspectTool: AgentTool = {
 	}),
 };
 
-function actionBudget(definition: { intent: string; completionCondition: string }, expectedEvidenceRounds = 1) {
+function actionBudget(
+	definition: { intent: string; completionCondition: string; expectation: string },
+	expectedEvidenceRounds = 1,
+) {
 	return {
-		intent: definition.intent,
-		completionCondition: definition.completionCondition,
+		...definition,
 		expectedEvidenceRounds,
 		budgetReason:
 			expectedEvidenceRounds === 1
@@ -39,10 +41,12 @@ function actionBudget(definition: { intent: string; completionCondition: string 
 const firstAction = {
 	intent: "Read the loop source in full to locate where prompts enter",
 	completionCondition: "A single full read of the loop source establishes where its prompts enter",
+	expectation: "The loop source shows the prompt template and assembly routine inside the class",
 };
 const nextAction = {
 	intent: "Read the system-prompt template in full to record its structure",
 	completionCondition: "A single full read of the system-prompt template establishes its structure",
+	expectation: "The system-prompt template read shows its prompt structure in full",
 };
 
 function fullStackOptions(overrides: Record<string, unknown> = {}) {
@@ -71,12 +75,24 @@ describe("rolling planning", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				// First advance: version 1 -> 2, within the limit.
 				control({ kind: "advance_frame", reason: "read the next site", actions: [actionBudget(nextAction)] }),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The template was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the template structure" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the system-prompt template structure",
+					},
+				}),
 				// Second advance: rejected (limit reached), then control recovers by falsifying.
 				control({ kind: "advance_frame", reason: "keep rolling", actions: [actionBudget(firstAction)] }),
 				control({ kind: "falsify_frame", reason: "The proposition was re-planned past its bounded allowance" }),
@@ -110,14 +126,26 @@ describe("rolling planning", () => {
 				}),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The loop source was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
 				// Re-plan the exact same episode: rejected by the consumed-action ledger.
 				control({ kind: "advance_frame", reason: "re-read it", actions: [actionBudget(firstAction)] }),
 				// Then advance to a genuinely new wave, which is accepted.
 				control({ kind: "advance_frame", reason: "read the next site", actions: [actionBudget(nextAction)] }),
 				control({ kind: "authorize_action", actionContractId: "A1" }),
 				fauxAssistantMessage("The template was read in full."),
-				control({ kind: "complete_action", reason: "A single full read established the template structure" }),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established the system-prompt template structure",
+					},
+				}),
 				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
 			]);

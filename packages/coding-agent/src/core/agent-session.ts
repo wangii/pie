@@ -135,7 +135,14 @@ import {
 import type { PieModelRole, PieModelRoutes } from "./pie-models.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	PredictionError,
+	PredictionErrorSign,
+	SessionEntry,
+	SessionManager,
+} from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -344,6 +351,8 @@ export type FrameDirective =
 export interface ActionDefinition {
 	intent: string;
 	completionCondition: string;
+	/** The single observable this Action predicts it will find; frozen before the probe runs. */
+	expectation: string;
 }
 
 export type ActionDirective =
@@ -354,6 +363,10 @@ export type ActionDirective =
 export interface ObservationDefinition {
 	statement: string;
 	affects: "anchor" | "frame" | "anchor_and_frame";
+	/** The frozen expectation the terminal Action predicted; denormalized from ActionStartEntry. */
+	expectation?: string;
+	/** The structured sign of the prediction error carried by `statement`. */
+	predictionErrorSign?: PredictionErrorSign;
 	/** Exact toolResult or bashExecution event identities from the current Action episode. */
 	sourceEventIds: readonly string[];
 }
@@ -537,13 +550,24 @@ const DEFAULT_CONTROL_MAX_TOKENS = 8000;
 const DEFAULT_MAX_FRAME_ADVANCES = 3;
 
 /**
- * Upper bound on the concrete tool-result text an Observation stores inline.
- * Observations cite exact `sourceEventIds` for full provenance, so the inline
- * statement only needs enough of the result to let a later decision name a real
- * target (e.g. "read agent-session.ts, the highest-count match") without
- * re-running a discovery step. Anything longer is truncated with a marker.
+ * A bare confirmation that carries no named conclusion. The prediction-error
+ * detail is the only semantic carrier that crosses from the execution layer into
+ * the epistemic layer, so a single "confirmed" / "found it" token without any
+ * concrete referent is rejected. Anything substantive — a path, symbol, line,
+ * count, or a sentence naming what was found — passes.
  */
-const OBSERVATION_RESULT_CHAR_LIMIT = 8000;
+const VAGUE_PREDICTION_ERROR_PATTERN =
+	/^(?:confirmed|correct|verified|works|done|ok|okay|yes|no|true|found|found it|it works|as expected|successful(?:ly)?|completed?|matched|passed|failed)$/iu;
+
+/** Render a structured prediction error as `sign: detail` for statements and transitions. */
+function renderPredictionError(predictionError: PredictionError): string {
+	return `${predictionError.sign}: ${predictionError.detail.trim()}`;
+}
+
+/** The canonical two-part Observation statement: frozen expectation plus prediction error. */
+function renderTerminalObservationStatement(expectation: string, predictionError: PredictionError): string {
+	return `Expectation: ${expectation}\nPrediction error: ${renderPredictionError(predictionError)}`;
+}
 
 /**
  * A tool-call block emitted as literal text — e.g. `<invoke name="bash">…</invoke>`
@@ -843,6 +867,7 @@ export class AgentSession {
 				actionId: `action-${randomUUID()}`,
 				intent: definition.intent,
 				completionCondition: definition.completionCondition,
+				expectation: definition.expectation,
 				frameRevisionEntryId: frame.revisionEntryId,
 				sourceEventId,
 			}),
@@ -959,6 +984,8 @@ export class AgentSession {
 			this.sessionManager.appendObservation({
 				observationId: `observation-${randomUUID()}`,
 				statement: definition.statement,
+				expectation: definition.expectation,
+				predictionErrorSign: definition.predictionErrorSign,
 				sourceEventIds: [...definition.sourceEventIds],
 				anchorId: targetsAnchor ? state.anchor?.id : undefined,
 				anchorRevisionEntryId: targetsAnchor ? state.anchor?.revisionEntryId : undefined,
@@ -969,27 +996,56 @@ export class AgentSession {
 	}
 
 	/**
-	 * The terminal outcome of a controller-authored Action is execution feedback:
-	 * what the episode found that blocks completion (unresolvable) or challenges the
-	 * Frame/Anchor (escalated). Materialize it as a durable Observation so the next
-	 * epistemic decision can act on it instead of re-deriving or losing it.
+	 * Materialize the terminal outcome of a controller-authored Action as a durable
+	 * Observation whose statement is the epistemic record `expectation + prediction
+	 * error`. Every terminal transition — completed, unresolvable, and escalated —
+	 * is evidence: a completed Action confirms its frozen expectation (prediction
+	 * error ≈ 0, with any residual refinement), not "no information".
+	 *
+	 * Raw result text never enters the statement: `sourceEventIds` is a downward
+	 * pointer to the episode's finalized execution results, which stay at the
+	 * execution layer. The only thing that crosses into the epistemic layer is the
+	 * named conclusion carried by the prediction-error detail.
 	 *
 	 * Harness-generated terminal transitions (lease expiry, round exhaustion) never
 	 * reach this path; they are bounded-return mechanics, not controller feedback.
 	 * An episode with no finalized execution result has no provenance to cite, so
-	 * nothing is materialized. `complete_action` does not call this method: success
-	 * is progress, not feedback.
+	 * nothing is materialized.
 	 */
-	private _materializeTerminalActionFeedback(
+	private _materializeTerminalObservation(
 		state: ReturnType<typeof restoreEpistemicState>,
 		action: Action,
-		reason: string,
+		predictionError: PredictionError,
 	): void {
-		if (!this._observationEnabled || !state.anchor || !state.frame) return;
+		if (!this._observationEnabled) return;
+		const expectation = action.expectation?.trim();
+		if (!expectation) return;
+		const sourceEventIds = this._toolResultEventIdsForAction(action.startEntryId);
+		if (sourceEventIds.length === 0) return;
+		const affects =
+			action.anchorRevisionEntryId !== undefined
+				? "anchor"
+				: predictionError.sign === "refuted"
+					? "anchor_and_frame"
+					: "frame";
+		this._appendObservation(
+			{
+				statement: renderTerminalObservationStatement(expectation, predictionError),
+				affects,
+				expectation,
+				predictionErrorSign: predictionError.sign,
+				sourceEventIds,
+			},
+			state,
+		);
+	}
+
+	/** Exact finalized execution-result identities from one Action episode (downward provenance pointer). */
+	private _toolResultEventIdsForAction(actionStartEntryId: string): string[] {
 		const branch = this.sessionManager.getBranch();
-		const startIndex = branch.findIndex((entry) => entry.id === action.startEntryId);
-		if (startIndex < 0) return;
+		const startIndex = branch.findIndex((entry) => entry.id === actionStartEntryId);
 		const sourceEventIds: string[] = [];
+		if (startIndex < 0) return sourceEventIds;
 		for (let index = startIndex + 1; index < branch.length; index++) {
 			const entry = branch[index]!;
 			if (
@@ -999,67 +1055,7 @@ export class AgentSession {
 				sourceEventIds.push(entry.id);
 			}
 		}
-		if (sourceEventIds.length === 0) return;
-		// Terminal feedback is task-level evidence: it bears on both the current
-		// Frame (why the episode ended) and the Anchor (what the world showed), so
-		// it stays relevant after the Frame dies.
-		this._appendObservation({ statement: reason, affects: "anchor_and_frame", sourceEventIds }, state);
-	}
-
-	/**
-	 * Materialize a completed pre-Frame `explore` as a durable Anchor Observation.
-	 * Comprehension is constructive, not falsifiable: the episode's predicted fact
-	 * (its expectation) becomes established evidence the next decision can cite and
-	 * the information-gain gate can dedupe against, so exploration cannot loop
-	 * without adding new facts.
-	 */
-	private _materializeExploreObservation(state: ReturnType<typeof restoreEpistemicState>, action: Action): void {
-		if (!this._observationEnabled || !state.anchor || !action.expectation) return;
-		const { sourceEventIds, text } = this._toolResultTextForAction(action.startEntryId);
-		if (sourceEventIds.length === 0) return;
-		// The observation must carry the episode's concrete established result, not
-		// only the pre-action prediction. The expectation names the predicted fact;
-		// the tool-result text is the evidence that grounded it and is what a later
-		// decision (e.g. "read the highest-matching file") needs to cite a real target
-		// instead of re-running a discovery step that would burn its evidence round.
-		const established = this._boundedResultText(text);
-		const statement = established
-			? `${action.expectation}\n\nEstablished result:\n${established}`
-			: action.expectation;
-		this._appendObservation({ statement, affects: "anchor", sourceEventIds }, state);
-	}
-
-	/** Tool-result text produced during one Action episode, with its exact provenance. */
-	private _toolResultTextForAction(actionStartEntryId: string): { sourceEventIds: string[]; text: string } {
-		const branch = this.sessionManager.getBranch();
-		const startIndex = branch.findIndex((entry) => entry.id === actionStartEntryId);
-		const sourceEventIds: string[] = [];
-		const texts: string[] = [];
-		if (startIndex >= 0) {
-			for (let index = startIndex + 1; index < branch.length; index++) {
-				const entry = branch[index]!;
-				if (entry.type !== "message") continue;
-				const message = entry.message;
-				let part = "";
-				if (message.role === "toolResult") {
-					part = contentText(message.content, "").trim();
-				} else if (message.role === "bashExecution") {
-					part = (message.output ?? "").trim();
-				} else {
-					continue;
-				}
-				sourceEventIds.push(entry.id);
-				if (part) texts.push(part);
-			}
-		}
-		return { sourceEventIds, text: texts.join("\n") };
-	}
-
-	private _boundedResultText(text: string): string {
-		const trimmed = text.trim();
-		if (!trimmed) return "";
-		if (trimmed.length <= OBSERVATION_RESULT_CHAR_LIMIT) return trimmed;
-		return `${trimmed.slice(0, OBSERVATION_RESULT_CHAR_LIMIT)}\n… (truncated)`;
+		return sourceEventIds;
 	}
 
 	/**
@@ -1332,17 +1328,18 @@ export class AgentSession {
 			` For create_frame, enumerate only the first wave of independent Actions (1-${policy.maxActions}): the ones whose completion conditions are knowable and executable now, before any prior observation. Defer any Action whose completion condition depends on a result you have not yet observed, and name in the expectation which single observation gates the next wave. ` +
 			"For advance_frame, add only the next wave of independent Actions now made knowable by the prior wave's observation; never re-enumerate an already-consumed Action. revise_frame and replace_frame change the proposition and also carry actions. None of these supply horizon. " +
 			`A Frame may be advanced at most ${this._maxFrameAdvances} times before it must be falsified, replaced, or finalized; if a proposition needs more waves than that, it is probably wrong and should be falsified. ` +
-			`Each provisional Action has intent, completionCondition, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. ` +
+			`Each provisional Action has intent, completionCondition, expectation, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. Its expectation names the single observable the probe predicts it will find, distinct from intent (what to do) and completion condition (what proves done). ` +
 			"One evidence round is one model response that emits one or more independent evidence-producing tool calls; parallel read-only calls in that response count once. A later round is valid only when its probe depends on a result unavailable before the preceding round. " +
 			"Complexity, uncertainty, file count, or tool-call count do not justify extra rounds. Unknown source locations require a discovery-only Action before source reading. " +
 			`The harness derives horizon within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}: initial control ${policy.initialControlAllowance} + per Action authorization ${policy.actionAuthorizationCost} + evidence rounds + terminal adjudication ${policy.actionTerminalAdjudicationCost} + final Frame adjudication ${policy.finalFrameAdjudicationCost}. ` +
 			"When an accepted evidence-round estimate is exhausted, continue_action is forbidden and control must return without automatic renewal. " +
-			'Schemas: {"kind":"create_frame","statement":string,"expectation":string,"actions":[{"intent":string,"completionCondition":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
+			'Schemas: {"kind":"create_frame","statement":string,"expectation":string,"actions":[{"intent":string,"completionCondition":string,"expectation":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
 			"explore requires expectation, intent, completionCondition, expectedEvidenceRounds (integer), and budgetReason (one bounded comprehension episode before any Frame); ask requires question; decompose requires subgoals (array of non-empty strings) and reason; " +
 			"revise_frame and replace_frame use the same actions array and also require reason; advance_frame carries only actions and reason (it keeps the current Frame's statement and expectation unchanged, so the proposition is not re-asserted); falsify_frame, kill_frame, continue_action, " +
-			"complete_action, unresolvable_action, authorize_final, and report_inability require reason; " +
+			"authorize_final, and report_inability require reason; " +
 			"revise_anchor requires statement and reason; authorize_action requires only actionContractId from one listed unused provisional contract; " +
-			"escalate_action requires challenge (anchor or frame) and reason. A Frame must assert one provisional causal or " +
+			"complete_action, unresolvable_action, and escalate_action require predictionError {sign, detail}; escalate_action also requires challenge (anchor or frame). " +
+			"The predictionError sign is confirmed (the expectation held exactly), refined (held and reality added precision), or refuted (the world contradicted or could not satisfy it); escalate_action must be refuted, complete_action must be confirmed or refined. The detail must name the concrete referent the episode established — a file path, symbol, line number, or count — because the raw tool output stays at the execution layer and only this named conclusion crosses into epistemic context; a bare confirmation carries no evidence. A Frame must assert one provisional causal or " +
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
 			"the requested deliverable. Its expectation names the exact observable world result you predict confirms that relation, " +
 			"not an inability to finish the investigation; if the check does not produce that result, the Frame is falsified. A Frame must not assert an unbounded completeness claim (for example that " +
@@ -1595,10 +1592,11 @@ export class AgentSession {
 				typeof candidate !== "object" ||
 				typeof candidate.intent !== "string" ||
 				typeof candidate.completionCondition !== "string" ||
+				typeof candidate.expectation !== "string" ||
 				typeof candidate.budgetReason !== "string"
 			) {
 				throw new Error(
-					"Each provisional Action requires a valid contract, expectedEvidenceRounds, and budgetReason.",
+					"Each provisional Action requires a valid contract (intent, completionCondition, expectation), expectedEvidenceRounds, and budgetReason.",
 				);
 			}
 		}
@@ -1811,7 +1809,11 @@ export class AgentSession {
 				anchorId !== undefined &&
 				anchorRevisionToAnchorId.get(entry.anchorRevisionEntryId) === anchorId;
 			if (belongsToFrame || belongsToAnchor) {
-				consumed.push({ intent: entry.intent, completionCondition: entry.completionCondition });
+				consumed.push({
+					intent: entry.intent,
+					completionCondition: entry.completionCondition,
+					expectation: entry.expectation,
+				});
 			}
 		}
 		return consumed;
@@ -1841,9 +1843,11 @@ export class AgentSession {
 	private _assertActionNotConsumed(candidate: ActionDefinition, consumed: readonly ActionDefinition[]): void {
 		const candidateSignature = `${candidate.intent} ${candidate.completionCondition}`;
 		for (const done of consumed) {
-			if (
-				this._semanticCharacterContainment(candidateSignature, `${done.intent} ${done.completionCondition}`) >= 0.7
-			) {
+			const redundantExpectation =
+				this._semanticCharacterContainment(candidate.expectation, done.expectation) >= 0.7;
+			const redundantIntent =
+				this._semanticCharacterContainment(candidateSignature, `${done.intent} ${done.completionCondition}`) >= 0.7;
+			if (redundantExpectation || redundantIntent) {
 				throw new Error(
 					"Action re-plans an episode already consumed under this Frame or Anchor; advance the Frame with only the next un-consumed wave, or falsify/replace the Frame.",
 				);
@@ -1982,13 +1986,13 @@ export class AgentSession {
 						"explore is a pre-Frame comprehension operator; under an active Frame use authorize_action instead.",
 					);
 				if (!state.anchor) throw new Error("No Anchor is active to explore under.");
+				const expectation = decision.expectation.trim();
 				const definition = {
 					intent: decision.intent.trim(),
 					completionCondition: decision.completionCondition.trim(),
+					expectation,
 				};
-				const expectation = decision.expectation.trim();
 				this._validateActionDefinition(definition);
-				if (!expectation) throw new Error("explore requires a non-empty expectation (the fact it predicts).");
 				// Information-gain gate: refuse an explore whose intent repeats a prior
 				// episode, or whose predicted fact is already established by a durable
 				// Anchor Observation from a completed explore.
@@ -2002,8 +2006,12 @@ export class AgentSession {
 							: [],
 					);
 				const establishedFacts = (state.observations ?? [])
-					.filter((observation) => observation.anchorRevisionEntryId === state.anchor?.revisionEntryId)
-					.map((observation) => observation.statement);
+					.filter(
+						(observation) =>
+							observation.anchorRevisionEntryId === state.anchor?.revisionEntryId &&
+							observation.predictionErrorSign === "confirmed",
+					)
+					.map((observation) => observation.expectation ?? observation.statement);
 				const redundantIntent = priorExploreIntents.some(
 					(prior) => this._semanticCharacterContainment(definition.intent, prior) >= 0.7,
 				);
@@ -2094,23 +2102,37 @@ export class AgentSession {
 			}
 			case "unresolvable_action":
 				if (!state.action) throw new Error("Cannot unresolvable_action because no Action is active.");
-				this._materializeTerminalActionFeedback(state, state.action, reason!);
-				this._appendActionTransition(state.action, "unresolvable", sourceEventId, reason!);
+				this._validatePredictionError(decision.predictionError, "unresolvable");
+				this._materializeTerminalObservation(state, state.action, decision.predictionError);
+				this._appendActionTransition(
+					state.action,
+					"unresolvable",
+					sourceEventId,
+					renderPredictionError(decision.predictionError),
+				);
 				return "epistemic";
 			case "escalate_action":
 				if (!state.action) throw new Error("Cannot escalate_action because no Action is active.");
-				this._materializeTerminalActionFeedback(state, state.action, reason!);
-				this._appendActionTransition(state.action, "escalated", sourceEventId, reason!, decision.challenge);
+				this._validatePredictionError(decision.predictionError, "escalated");
+				this._materializeTerminalObservation(state, state.action, decision.predictionError);
+				this._appendActionTransition(
+					state.action,
+					"escalated",
+					sourceEventId,
+					renderPredictionError(decision.predictionError),
+					decision.challenge,
+				);
 				return "epistemic";
 			case "complete_action":
 				if (!state.action) throw new Error("Cannot complete_action because no Action is active.");
-				// A completed pre-Frame explore is durable comprehension: materialize its
-				// predicted fact as an Anchor Observation so later decisions (and the
-				// information-gain gate) act on the result, not the raw transcript.
-				if (state.action.anchorRevisionEntryId !== undefined && state.action.expectation) {
-					this._materializeExploreObservation(state, state.action);
-				}
-				this._appendActionTransition(state.action, "completed", sourceEventId, reason!);
+				this._validatePredictionError(decision.predictionError, "completed");
+				this._materializeTerminalObservation(state, state.action, decision.predictionError);
+				this._appendActionTransition(
+					state.action,
+					"completed",
+					sourceEventId,
+					renderPredictionError(decision.predictionError),
+				);
 				return "epistemic";
 			case "authorize_final":
 			case "report_inability":
@@ -3295,6 +3317,39 @@ export class AgentSession {
 	private _validateActionDefinition(definition: ActionDefinition): void {
 		if (!definition.intent.trim()) throw new Error("Action intent must not be empty.");
 		if (!definition.completionCondition.trim()) throw new Error("Action completion condition must not be empty.");
+		if (!definition.expectation?.trim()) throw new Error("Action expectation must not be empty.");
+	}
+
+	/**
+	 * Validate a controller-authored terminal prediction error before it is
+	 * materialized. The detail is the only semantic carrier that crosses from the
+	 * execution layer into the epistemic layer, so it must name a concrete referent
+	 * rather than a bare confirmation.
+	 */
+	private _validatePredictionError(
+		predictionError: PredictionError | undefined,
+		transition: ActionTerminalTransition,
+	): void {
+		const detail = predictionError?.detail?.trim();
+		if (!detail)
+			throw new Error(`Control decision ${transition} requires a predictionError with a non-empty detail.`);
+		const sign = predictionError!.sign;
+		if (sign !== "confirmed" && sign !== "refuted" && sign !== "refined") {
+			throw new Error("Prediction error sign must be confirmed, refuted, or refined.");
+		}
+		if (transition === "escalated" && sign !== "refuted") {
+			throw new Error(
+				"escalate_action prediction error must be refuted: the finalized results contradict the Frame or Anchor.",
+			);
+		}
+		if (transition === "completed" && sign === "refuted") {
+			throw new Error("complete_action prediction error cannot be refuted; use confirmed or refined.");
+		}
+		if (sign === "confirmed" && VAGUE_PREDICTION_ERROR_PATTERN.test(detail)) {
+			throw new Error(
+				"A confirmed prediction error must name the concrete conclusion (path, symbol, line, or count); a bare confirmation is not evidence.",
+			);
+		}
 	}
 
 	private _assertActionMutationAllowed(): void {

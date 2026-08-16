@@ -42,6 +42,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "run the clean-worker expectation probe",
 					completionCondition: "the post-restart authorization result is captured",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			{
@@ -59,6 +60,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "adjudicate whether the current Frame remains admissible",
 					completionCondition: "output exactly KEEP_FRAME or REJECT_FRAME from durable current context",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			{ type: "adjudicate_current_frame" },
@@ -89,6 +91,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "compare primary and replica positions",
 					completionCondition: "both positions during one stale read are captured",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			{
@@ -106,6 +109,7 @@ const scenarios: Array<{ name: string; steps: PiCodingAgentInput }> = [
 					type: "start",
 					intent: "adjudicate whether the current Frame remains admissible",
 					completionCondition: "output exactly KEEP_FRAME or REJECT_FRAME from durable current context",
+					expectation: "the completion condition is satisfied",
 				},
 			},
 			{ type: "adjudicate_current_frame" },

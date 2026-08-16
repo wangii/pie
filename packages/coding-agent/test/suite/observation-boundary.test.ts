@@ -15,6 +15,7 @@ const action = {
 	type: "start" as const,
 	intent: "determine whether logout invalidates worker-local authorization state",
 	completionCondition: "the worker cache lifetime is identified or cache survival is ruled out",
+	expectation: "the worker cache lifetime is identified",
 };
 
 const inspectTool: AgentTool = {

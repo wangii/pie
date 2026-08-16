@@ -502,7 +502,7 @@ function actionOutcomeMessage(
 		content:
 			`[ACTION OUTCOME ${start.actionId}]${frameRelation}\nIntent: ${start.intent}\n` +
 			`Completion condition: ${start.completionCondition}\nOutcome: ${transition.transition}${challenge}\n` +
-			`Control reason: ${transition.reason}`,
+			`Prediction error: ${transition.reason}`,
 		display: false,
 		details: {
 			actionId: start.actionId,

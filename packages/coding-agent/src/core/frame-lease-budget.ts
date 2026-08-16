@@ -1,6 +1,8 @@
 export interface ProvisionalActionContract {
 	intent: string;
 	completionCondition: string;
+	/** The single observable this Action predicts it will find; frozen before the probe runs. */
+	expectation: string;
 	expectedEvidenceRounds: number;
 	budgetReason: string;
 }
@@ -91,8 +93,10 @@ export function deriveFrameLease(
 	}
 	const contracts = new Set<string>();
 	for (const candidate of actions) {
-		if (!candidate.intent.trim() || !candidate.completionCondition.trim()) {
-			throw new Error("Each provisional Action requires a non-empty frozen contract.");
+		if (!candidate.intent.trim() || !candidate.completionCondition.trim() || !candidate.expectation.trim()) {
+			throw new Error(
+				"Each provisional Action requires a non-empty frozen contract (intent, completionCondition, expectation).",
+			);
 		}
 		if (
 			!Number.isSafeInteger(candidate.expectedEvidenceRounds) ||

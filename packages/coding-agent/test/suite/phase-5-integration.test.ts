@@ -48,6 +48,7 @@ async function collectObservation(
 			type: "start",
 			intent: `inspect ${branchName} state`,
 			completionCondition: `${branchName} lifetime is identified`,
+			expectation: `${branchName} lifetime is identified`,
 		},
 	});
 	const action = harness.session.action!;
@@ -78,6 +79,7 @@ describe("Phase 5 integrated epistemic flow", () => {
 			firstHarness.session.startAction({
 				intent: "adjudicate the durable worker evidence",
 				completionCondition: "the evidence is reconsidered",
+				expectation: "the evidence is reconsidered",
 			});
 
 			const firstKeptEntryId = manager.getBranch()[0]!.id;
@@ -300,6 +302,7 @@ describe("Phase 5 integrated epistemic flow", () => {
 						type: "start",
 						intent: `collect world result ${episode}`,
 						completionCondition: `world result ${episode} is captured`,
+						expectation: `world result ${episode} is captured`,
 					},
 				});
 				const action = harness.session.action!;

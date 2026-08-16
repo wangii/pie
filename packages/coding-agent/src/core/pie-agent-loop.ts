@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ProvisionalActionContract } from "./frame-lease-budget.ts";
+import type { PredictionError } from "./session-manager.ts";
 
 /** Runtime states owned exclusively by Pie's production loop. */
 export type PieProductionLoopState =
@@ -58,8 +59,8 @@ export type PieControlDecision =
 	| { kind: "revise_anchor"; statement: string; reason: string }
 	| { kind: "authorize_action"; actionContractId: string }
 	| { kind: "continue_action"; reason: string }
-	| { kind: "complete_action" | "unresolvable_action"; reason: string }
-	| { kind: "escalate_action"; challenge: "anchor" | "frame"; reason: string }
+	| { kind: "complete_action" | "unresolvable_action"; predictionError: PredictionError }
+	| { kind: "escalate_action"; challenge: "anchor" | "frame"; predictionError: PredictionError }
 	| { kind: "authorize_final"; reason: string }
 	| { kind: "report_inability"; reason: string };
 
