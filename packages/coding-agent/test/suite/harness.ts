@@ -87,6 +87,10 @@ export interface HarnessOptions {
 	pieRoleThinkingLevels?: Partial<Record<PieModelRole, ThinkingLevel>>;
 	frameHorizonRange?: { min: number; max: number };
 	actionResponseLimit?: number;
+	/** Output-token cap for epistemic control requests (see AgentSessionConfig). */
+	controlMaxTokens?: number;
+	/** Max times a Frame may be re-planned (advance/revise) before falsify/replace (see AgentSessionConfig). */
+	maxFrameAdvances?: number;
 	/** Existing raw session used by restart and branch integration tests. */
 	sessionManager?: SessionManager;
 	/** Upper bound on epistemic control decisions per production request. */
@@ -109,6 +113,7 @@ export interface Harness {
 	providerContexts: Context[];
 	providerModelIds: string[];
 	providerReasoningLevels: (ThinkingLevel | undefined)[];
+	providerMaxTokens: (number | undefined)[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
 	cleanup: () => void;
@@ -133,6 +138,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const providerContexts: Context[] = [];
 	const providerModelIds: string[] = [];
 	const providerReasoningLevels: (ThinkingLevel | undefined)[] = [];
+	const providerMaxTokens: (number | undefined)[] = [];
 
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
@@ -170,6 +176,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		streamFn: (requestModel, context, streamOptions) => {
 			providerModelIds.push(requestModel.id);
 			providerReasoningLevels.push(streamOptions?.reasoning);
+			providerMaxTokens.push(streamOptions?.maxTokens);
 			providerContexts.push({
 				...context,
 				messages: structuredClone(context.messages),
@@ -252,6 +259,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		pieRoleThinkingLevels: options.pieRoleThinkingLevels,
 		frameHorizonRange: options.frameHorizonRange,
 		actionResponseLimit: options.actionResponseLimit,
+		controlMaxTokens: options.controlMaxTokens,
+		maxFrameAdvances: options.maxFrameAdvances,
 	});
 
 	const events: AgentSessionEvent[] = [];
@@ -274,6 +283,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		providerContexts,
 		providerModelIds,
 		providerReasoningLevels,
+		providerMaxTokens,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},

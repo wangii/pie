@@ -107,3 +107,31 @@ describe("Pie production role thinking levels", () => {
 		}
 	});
 });
+
+describe("Pie production control token cap", () => {
+	it("caps epistemic control requests and leaves execution uncapped", async () => {
+		const harness = await createHarness({ ...options() });
+		try {
+			harness.setResponses(runSequence());
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			expect(harness.providerMaxTokens).toContain(8000);
+			expect(harness.providerMaxTokens).toContain(undefined);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("honors an explicit controlMaxTokens override", async () => {
+		const harness = await createHarness({ ...options(), controlMaxTokens: 1234 });
+		try {
+			harness.setResponses(runSequence());
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			expect(harness.providerMaxTokens).toContain(1234);
+			expect(harness.providerMaxTokens).not.toContain(8000);
+		} finally {
+			harness.cleanup();
+		}
+	});
+});

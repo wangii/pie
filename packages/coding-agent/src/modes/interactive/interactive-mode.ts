@@ -139,6 +139,7 @@ import {
 } from "./components/oauth-selector.ts";
 import {
 	formatOperationalError,
+	formatPieWorkingMessage,
 	isPieStateTransitionEntry,
 	PieDiagnosticsComponent,
 	PieProjectionReductionNoticeComponent,
@@ -2117,6 +2118,23 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Spinner label while Pie's production loop runs: an extension-set working
+	 * message wins, otherwise a phase label derived from the live control role,
+	 * otherwise the generic default.
+	 */
+	private workingPhaseMessage(): string {
+		if (this.workingMessage !== undefined) return this.workingMessage;
+		const runtime = this.session.getEpistemicDiagnostics().runtime;
+		return runtime ? formatPieWorkingMessage(runtime) : this.defaultWorkingMessage;
+	}
+
+	private refreshWorkingMessage(): void {
+		if (this.activeStatusIndicator?.kind !== "working") return;
+		this.activeStatusIndicator.setMessage(this.workingPhaseMessage());
+		this.ui.requestRender();
+	}
+
 	private setWorkingVisible(visible: boolean): void {
 		this.workingVisible = visible;
 		if (!visible) {
@@ -2126,11 +2144,7 @@ export class InteractiveMode {
 		}
 		if (this.session.isStreaming && this.activeStatusIndicator?.kind !== "working") {
 			this.showStatusIndicator(
-				new WorkingStatusIndicator(
-					this.ui,
-					this.workingMessage ?? this.defaultWorkingMessage,
-					this.workingIndicatorOptions,
-				),
+				new WorkingStatusIndicator(this.ui, this.workingPhaseMessage(), this.workingIndicatorOptions),
 			);
 		}
 		this.ui.requestRender();
@@ -3151,16 +3165,16 @@ export class InteractiveMode {
 				}
 				if (this.workingVisible) {
 					this.showStatusIndicator(
-						new WorkingStatusIndicator(
-							this.ui,
-							this.workingMessage ?? this.defaultWorkingMessage,
-							this.workingIndicatorOptions,
-						),
+						new WorkingStatusIndicator(this.ui, this.workingPhaseMessage(), this.workingIndicatorOptions),
 					);
 				} else {
 					this.clearStatusIndicator();
 				}
 				this.ui.requestRender();
+				break;
+
+			case "turn_start":
+				this.refreshWorkingMessage();
 				break;
 
 			case "queue_update":
@@ -3332,6 +3346,7 @@ export class InteractiveMode {
 				break;
 
 			case "tool_execution_start": {
+				this.refreshWorkingMessage();
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
 					component = new ToolExecutionComponent(

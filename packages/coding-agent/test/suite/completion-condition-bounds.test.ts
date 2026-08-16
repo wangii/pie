@@ -422,9 +422,7 @@ describe("completion condition bounds", () => {
 
 			await harness.session.prompt("locate the prompt entry sites in the loop");
 
-			const controlTexts = harness.providerContexts.map((context) =>
-				context.messages.map(getMessageText).join("\n"),
-			);
+			const controlTexts = harness.providerContexts.map((context) => context.systemPrompt ?? "");
 			// The initial control turn carries the Anchor (no Frame yet).
 			expect(controlTexts.some((text) => text.includes("Anchor (revision 1)"))).toBe(true);
 			// Once a Frame exists it is restated with its expectation and lease.

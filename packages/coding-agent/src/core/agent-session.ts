@@ -308,6 +308,15 @@ export interface AgentSessionConfig {
 	frameHorizonRange?: { min: number; max: number };
 	/** Legacy fallback when a restored Frame has no transient lease derivation. */
 	actionResponseLimit?: number;
+	/** Output-token cap for epistemic control requests; bounds reasoning so a decision is always emitted. */
+	controlMaxTokens?: number;
+	/**
+	 * Maximum number of times a single Frame identity may be re-planned
+	 * (advance_frame or revise_frame) before it must be falsified, replaced, or
+	 * finalized. Bounds rolling planning so a Frame cannot be advanced
+	 * indefinitely instead of being falsified. Default: 3.
+	 */
+	maxFrameAdvances?: number;
 }
 
 export interface ExtensionBindings {
@@ -446,6 +455,7 @@ export interface EpistemicDiagnostics {
 	};
 	runtime?: {
 		loopState: PieProductionLoopState;
+		requestRole: PieProductionRequestRole;
 		inputReady: boolean;
 		recovery?: OperationalErrorStatus;
 	};
@@ -505,6 +515,26 @@ const DEFAULT_MAX_FRAME_HORIZON = 32;
  * that does not support "low" clamps upward via clampThinkingLevel.
  */
 const DEFAULT_CONTROL_THINKING_LEVEL: ThinkingLevel = "low";
+/**
+ * Output-token cap for epistemic control requests. Control decisions are small
+ * JSON objects, but the control model is usually a reasoning model whose "low"
+ * thinking level is unsupported and therefore clamped upward to "high" (see
+ * clampThinkingLevel). The cap must cover the model's reasoning tokens plus the
+ * decision JSON in a single generation; a cap that only fits the JSON forces a
+ * `length` stop mid-reasoning that the control repair loop then retries from
+ * scratch, roughly doubling latency. 8000 comfortably fits a full Frame decision
+ * (≈3-4k reasoning tokens plus the contract JSON) while still bounding runaway
+ * deliberation.
+ */
+const DEFAULT_CONTROL_MAX_TOKENS = 8000;
+
+/**
+ * Maximum times a Frame may be re-planned (advance_frame or revise_frame) under
+ * one identity before control must falsify, replace, or finalize it. Keeps
+ * rolling planning bounded: after a few waves the proposition has either been
+ * established or should be abandoned rather than advanced again.
+ */
+const DEFAULT_MAX_FRAME_ADVANCES = 3;
 
 // ============================================================================
 // AgentSession Class
@@ -590,6 +620,9 @@ export class AgentSession {
 	private _activeProductionRequestRole: PieProductionRequestRole | undefined;
 	private readonly _frameHorizonRange: { min: number; max: number };
 	private readonly _actionResponseLimit: number;
+	private readonly _controlMaxTokens: number;
+	private readonly _maxFrameAdvances: number;
+	private _frameAdvanceCount = 0;
 	private _frameLeaseBudget: ActiveFrameLeaseBudget | undefined;
 	private _controlRepairAttempts = 0;
 	private readonly _maxControlRepairAttempts = 3;
@@ -675,6 +708,18 @@ export class AgentSession {
 			throw new Error("Action response limit must be an integer of at least 2 so control transfer remains bounded.");
 		}
 		this._actionResponseLimit = actionResponseLimit;
+		const controlMaxTokens = config.controlMaxTokens ?? DEFAULT_CONTROL_MAX_TOKENS;
+		if (!Number.isSafeInteger(controlMaxTokens) || controlMaxTokens < 256) {
+			throw new Error(
+				"Control max tokens must be an integer of at least 256 to bound reasoning while leaving room for a decision.",
+			);
+		}
+		this._controlMaxTokens = controlMaxTokens;
+		const maxFrameAdvances = config.maxFrameAdvances ?? DEFAULT_MAX_FRAME_ADVANCES;
+		if (!Number.isSafeInteger(maxFrameAdvances) || maxFrameAdvances < 0) {
+			throw new Error("Max frame advances must be a non-negative integer.");
+		}
+		this._maxFrameAdvances = maxFrameAdvances;
 		const frameHorizonRange = config.frameHorizonRange ?? { min: 1, max: DEFAULT_MAX_FRAME_HORIZON };
 		if (
 			!Number.isSafeInteger(frameHorizonRange.min) ||
@@ -1112,16 +1157,6 @@ export class AgentSession {
 						: this.agent.state.tools,
 				projectionRole: this._activeProductionRequestRole ?? "default",
 				grounding: groundingMessage,
-				requestInstruction: this._activeProductionRequestRole
-					? {
-							role: "custom",
-							customType: "pie.production-request",
-							content: `[PIE ${this._activeProductionRequestRole.toUpperCase()} REQUEST]\n${this._productionSystemPrompt(this._activeProductionRequestRole)}`,
-							display: false,
-							details: { role: this._activeProductionRequestRole },
-							timestamp: Date.now(),
-						}
-					: undefined,
 				reservedOutputTokens: Math.min(
 					this.settingsManager.getCompactionReserveTokens(),
 					model.maxTokens,
@@ -1221,6 +1256,13 @@ export class AgentSession {
 						.join("\n")}\nAuthorize one by its actionContractId; do not reproduce or paraphrase its text.`
 				: " No unused provisional Action contracts remain for the current Frame."
 			: "";
+		const consumedActionContracts = this._consumedActionContracts(state);
+		const consumedActionContractsPrompt =
+			consumedActionContracts.length > 0
+				? ` Already-consumed Actions (do not re-plan or re-enumerate these; advance_frame may add only new waves):\n${consumedActionContracts
+						.map((done) => JSON.stringify({ intent: done.intent, completionCondition: done.completionCondition }))
+						.join("\n")}\n`
+				: "";
 		const allowed = state.action
 			? actionBudgetExhausted
 				? "complete_action, unresolvable_action, or escalate_action"
@@ -1239,7 +1281,10 @@ export class AgentSession {
 			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
 			`The current state permits only: ${allowed}.` +
 			availableActionContractsPrompt +
-			` For create_frame, advance_frame, revise_frame, or replace_frame, enumerate 1-${policy.maxActions} provisional bounded Actions; do not supply horizon. ` +
+			consumedActionContractsPrompt +
+			` For create_frame, enumerate only the first wave of independent Actions (1-${policy.maxActions}): the ones whose completion conditions are knowable and executable now, before any prior observation. Defer any Action whose completion condition depends on a result you have not yet observed, and name in the expectation which single observation gates the next wave. ` +
+			"For advance_frame, add only the next wave of independent Actions now made knowable by the prior wave's observation; never re-enumerate an already-consumed Action. revise_frame and replace_frame change the proposition and also carry actions. None of these supply horizon. " +
+			`A Frame may be advanced at most ${this._maxFrameAdvances} times before it must be falsified, replaced, or finalized; if a proposition needs more waves than that, it is probably wrong and should be falsified. ` +
 			`Each provisional Action has intent, completionCondition, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. ` +
 			"One evidence round is one model response that emits one or more independent evidence-producing tool calls; parallel read-only calls in that response count once. A later round is valid only when its probe depends on a result unavailable before the preceding round. " +
 			"Complexity, uncertainty, file count, or tool-call count do not justify extra rounds. Unknown source locations require a discovery-only Action before source reading. " +
@@ -1496,10 +1541,13 @@ export class AgentSession {
 			);
 		}
 		const assertsCompleteness =
-			(/\b(?:all|every|each)\b/u.test(statement) &&
-				/\b(?:prompt|source|file|site|entry|path|location|definition|call|module|layer|tool|message|template)s?\b/u.test(
-					statement,
-				)) ||
+			// A universal quantifier must directly modify one of the artifact nouns;
+			// bare co-occurrence across clauses (e.g. "each model role" in a statement
+			// that also mentions "prompt construction") is a causal relation, not a
+			// completeness claim, so the quantifier and noun must sit in one clause.
+			/\b(?:all|every|each)\b[a-z0-9\s]{0,20}\b(?:prompt|source|file|site|entry|path|location|definition|call|module|layer|tool|message|template)s?\b/u.test(
+				statement,
+			) ||
 			/\b(?:complete|exhaustive|entire|no (?:other|additional|further|unaccounted|remaining)|the only|only these)\b/u.test(
 				statement,
 			) ||
@@ -1534,7 +1582,11 @@ export class AgentSession {
 				"Frame expectation must name the concrete observable result you predict confirms, rather than restates, the Frame relation.",
 			);
 		}
-		for (const candidate of definition.actions ?? []) this._validateControllerAction(candidate, state);
+		const consumed = this._consumedActionContracts(state);
+		for (const candidate of definition.actions ?? []) {
+			this._validateControllerAction(candidate, state);
+			this._assertActionNotConsumed(candidate, consumed);
+		}
 		const calculation = deriveFrameLease(definition.actions ?? []);
 		if (calculation.horizon < this._frameHorizonRange.min || calculation.horizon > this._frameHorizonRange.max) {
 			throw new Error(
@@ -1638,6 +1690,75 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * Actions already consumed under the current Frame identity (across all its
+	 * advance/revise revisions) or under the current Anchor (pre-Frame explores).
+	 * These are frozen episodes whose evidence is already recorded; rolling
+	 * planning must not re-plan them. The current Frame's unused provisional
+	 * contracts are NOT included — those live in the lease budget until authorized.
+	 */
+	private _consumedActionContracts(state: ReturnType<typeof restoreEpistemicState>): Array<ActionDefinition> {
+		const branch = this.sessionManager.getBranch();
+		const frameRevisionToFrameId = new Map<string, string>();
+		const anchorRevisionToAnchorId = new Map<string, string>();
+		for (const entry of branch) {
+			if (entry.type === "frame_revision") frameRevisionToFrameId.set(entry.id, entry.frameId);
+			else if (entry.type === "anchor_revision") anchorRevisionToAnchorId.set(entry.id, entry.anchorId);
+		}
+		const frameId = state.frame?.id;
+		const anchorId = state.anchor?.id;
+		const consumed: Array<ActionDefinition> = [];
+		for (const entry of branch) {
+			if (entry.type !== "action_start") continue;
+			const belongsToFrame =
+				entry.frameRevisionEntryId !== undefined &&
+				frameId !== undefined &&
+				frameRevisionToFrameId.get(entry.frameRevisionEntryId) === frameId;
+			const belongsToAnchor =
+				entry.anchorRevisionEntryId !== undefined &&
+				anchorId !== undefined &&
+				anchorRevisionToAnchorId.get(entry.anchorRevisionEntryId) === anchorId;
+			if (belongsToFrame || belongsToAnchor) {
+				consumed.push({ intent: entry.intent, completionCondition: entry.completionCondition });
+			}
+		}
+		return consumed;
+	}
+
+	/**
+	 * Rolling-planning guard: refuse to advance a Frame that has already been
+	 * advanced up to the per-identity cap. Prevents advance_frame from rolling the
+	 * same proposition indefinitely instead of falsifying, replacing, or
+	 * finalizing it. The counter is transient (reset on a fresh session restore),
+	 * like the derived lease budget; maxControlResponses still bounds the total
+	 * number of epistemic decisions regardless.
+	 */
+	private _assertFrameAdvanceAllowed(): void {
+		if (this._frameAdvanceCount >= this._maxFrameAdvances) {
+			throw new Error(
+				`Frame has already been advanced ${this._frameAdvanceCount} time(s) (limit ${this._maxFrameAdvances}); falsify, replace, or authorize_final instead of advancing again.`,
+			);
+		}
+	}
+
+	/**
+	 * Information-gain guard for frame Actions: refuse a candidate contract that
+	 * re-plans an episode already consumed under the current Frame or Anchor, so
+	 * rolling advance_frame can only add genuinely new evidence.
+	 */
+	private _assertActionNotConsumed(candidate: ActionDefinition, consumed: readonly ActionDefinition[]): void {
+		const candidateSignature = `${candidate.intent} ${candidate.completionCondition}`;
+		for (const done of consumed) {
+			if (
+				this._semanticCharacterContainment(candidateSignature, `${done.intent} ${done.completionCondition}`) >= 0.7
+			) {
+				throw new Error(
+					"Action re-plans an episode already consumed under this Frame or Anchor; advance the Frame with only the next un-consumed wave, or falsify/replace the Frame.",
+				);
+			}
+		}
+	}
+
 	private _expireProductionFrame(sourceEventId: string): boolean {
 		let state = restoreEpistemicState(this.sessionManager.getBranch());
 		const frame = state.frame;
@@ -1672,6 +1793,7 @@ export class AgentSession {
 				const created = restoreEpistemicState(this.sessionManager.getBranch()).frame!;
 				prepared.budget.frameRevisionEntryId = created.revisionEntryId;
 				this._frameLeaseBudget = prepared.budget;
+				this._frameAdvanceCount = 0;
 				return "epistemic";
 			}
 			case "revise_frame":
@@ -1689,6 +1811,7 @@ export class AgentSession {
 				const revised = restoreEpistemicState(this.sessionManager.getBranch()).frame!;
 				prepared.budget.frameRevisionEntryId = revised.revisionEntryId;
 				this._frameLeaseBudget = prepared.budget;
+				if (decision.kind === "replace_frame") this._frameAdvanceCount = 0;
 				return "epistemic";
 			}
 			case "advance_frame": {
@@ -1699,6 +1822,7 @@ export class AgentSession {
 				// fresh derived lease), but the falsifiable claim is untouched.
 				if (state.action) throw new Error("Terminate the active Action before advancing its Frame.");
 				if (!state.frame) throw new Error("Cannot advance_frame because no Frame is active.");
+				this._assertFrameAdvanceAllowed();
 				const prepared = this._prepareControllerFrame(
 					{
 						kind: "revise_frame",
@@ -1717,6 +1841,7 @@ export class AgentSession {
 				const advanced = restoreEpistemicState(this.sessionManager.getBranch()).frame!;
 				prepared.budget.frameRevisionEntryId = advanced.revisionEntryId;
 				this._frameLeaseBudget = prepared.budget;
+				this._frameAdvanceCount++;
 				return "epistemic";
 			}
 			case "falsify_frame":
@@ -1729,6 +1854,7 @@ export class AgentSession {
 					sourceEventId,
 					reason!,
 				);
+				this._frameAdvanceCount = 0;
 				return "epistemic";
 			case "ask":
 				if (state.action || state.frame) throw new Error("Clarify the Anchor before committing a Frame or Action.");
@@ -1925,6 +2051,7 @@ export class AgentSession {
 				},
 				model,
 				thinkingLevel: clampThinkingLevel(model, this._thinkingLevelForRole(modelRole)) as ThinkingLevel,
+				maxTokens: requestRole === "epistemic" ? this._controlMaxTokens : undefined,
 			};
 		};
 
@@ -2868,6 +2995,7 @@ export class AgentSession {
 				this.agent.loopRunner instanceof PieProductionLoop
 					? {
 							loopState: this.agent.loopRunner.state,
+							requestRole: this.agent.loopRunner.requestRole,
 							inputReady: this.isIdle,
 							recovery: this._latestOperationalError,
 						}

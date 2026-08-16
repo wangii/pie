@@ -167,6 +167,13 @@ export interface AgentLoopTurnUpdate {
 	model?: Model<any>;
 	/** Thinking level for the next provider request. */
 	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Output-token cap for the next provider request. Undefined means the routed
+	 * model's default ceiling applies. Control roles use this to bound reasoning
+	 * so a structured decision is always emitted instead of deliberating away the
+	 * whole response.
+	 */
+	maxTokens?: number;
 }
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}

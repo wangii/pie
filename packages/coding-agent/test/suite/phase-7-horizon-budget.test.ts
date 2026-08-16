@@ -46,7 +46,7 @@ describe("Phase 8 production model-response lease budgeting", () => {
 			if (!frame) throw new Error("Expected the production controller to create a Frame.");
 			expect(frame).toMatchObject({ horizon: 7 });
 			const initialPrompt = harness.providerContexts[0]!.systemPrompt;
-			expect(initialPrompt).toContain("do not supply horizon");
+			expect(initialPrompt).toContain("supply horizon");
 			expect(initialPrompt).toContain("expectedEvidenceRounds (integer 1-5)");
 			expect(initialPrompt).toContain("parallel read-only calls in that response count once");
 		} finally {

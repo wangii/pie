@@ -34,6 +34,14 @@ function loopLabel(state: NonNullable<EpistemicDiagnostics["runtime"]>["loopStat
 	return state.replaceAll("_", " ").toUpperCase();
 }
 
+/** Spinner label reflecting what Pie's production loop is currently doing. */
+export function formatPieWorkingMessage(runtime: NonNullable<EpistemicDiagnostics["runtime"]>): string {
+	if (runtime.requestRole === "finalAnswer") return "Writing final answer...";
+	if (runtime.requestRole === "epistemic") return "Deciding anchor & frame...";
+	if (runtime.loopState === "tool_execution") return "Running tools...";
+	return "Executing action...";
+}
+
 const OMISSION_LABELS: Record<ContextOmissionReason, string> = {
 	budget: "budget pressure",
 	historical_summary: "legacy summary",

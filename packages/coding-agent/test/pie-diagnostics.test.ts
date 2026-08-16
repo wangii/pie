@@ -4,6 +4,7 @@ import type { ActionTransitionEntry } from "../src/core/session-manager.ts";
 import {
 	formatOperationalError,
 	formatPieStatus,
+	formatPieWorkingMessage,
 	PieDiagnosticsComponent,
 	PieProjectionReductionNoticeComponent,
 	PieRestorationReceiptComponent,
@@ -64,6 +65,7 @@ const diagnostics: EpistemicDiagnostics = {
 	provenance: { rawEventCount: 81, activeBranchEventCount: 64, legacySummaryCount: 2 },
 	runtime: {
 		loopState: "tool_execution",
+		requestRole: "execution",
 		inputReady: false,
 		recovery: {
 			classification: "completed_negative_result",
@@ -188,5 +190,22 @@ describe("Pie diagnostics UI projections", () => {
 		expect(output).toContain("Action intent and completion condition remain frozen");
 		expect(output).toContain("blind replay is blocked");
 		expect(output).toContain("UNRESOLVABLE");
+	});
+});
+
+describe("Pie working-message projection", () => {
+	it("maps the control role and loop state to a spinner label", () => {
+		expect(
+			formatPieWorkingMessage({ loopState: "model_streaming", requestRole: "epistemic", inputReady: false }),
+		).toBe("Deciding anchor & frame...");
+		expect(
+			formatPieWorkingMessage({ loopState: "tool_execution", requestRole: "execution", inputReady: false }),
+		).toBe("Running tools...");
+		expect(
+			formatPieWorkingMessage({ loopState: "model_streaming", requestRole: "execution", inputReady: false }),
+		).toBe("Executing action...");
+		expect(
+			formatPieWorkingMessage({ loopState: "model_streaming", requestRole: "finalAnswer", inputReady: false }),
+		).toBe("Writing final answer...");
 	});
 });

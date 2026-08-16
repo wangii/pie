@@ -196,6 +196,7 @@ export class PieProductionLoop implements AgentLoopRunner {
 							: requestSnapshot.thinkingLevel === "off"
 								? undefined
 								: requestSnapshot.thinkingLevel,
+					maxTokens: requestSnapshot.maxTokens,
 				};
 			}
 			requestIndex++;
