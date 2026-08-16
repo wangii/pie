@@ -226,6 +226,30 @@ export class PieDiagnosticsComponent extends Text implements Expandable {
 	}
 }
 
+export class PieControlPromptComponent extends Text implements Expandable {
+	private readonly collapsed: string;
+	private readonly expanded: string;
+
+	constructor(prompt: string, diagnostics: EpistemicDiagnostics, expanded = false) {
+		const anchorId = diagnostics.state.anchor?.id ?? "none";
+		const frameId = diagnostics.state.frame?.id ?? "none";
+		const actionId = diagnostics.state.action?.id ?? diagnostics.state.lastAction?.id ?? "none";
+		const collapsed = `Pie control prompt · Anchor ${anchorId} · Frame ${frameId} · Action ${actionId}`;
+		const expandedText =
+			`${theme.bold(theme.fg("accent", "Pie control prompt (Deciding anchor & frame)"))}\n` +
+			`${theme.fg("dim", `Anchor ${anchorId} · Frame ${frameId} · Action ${actionId}`)}\n` +
+			theme.fg("dim", prompt);
+		super("", 1, 0);
+		this.collapsed = collapsed;
+		this.expanded = expandedText;
+		this.setExpanded(expanded);
+	}
+
+	setExpanded(expanded: boolean): void {
+		this.setText(expanded ? this.expanded : theme.fg("dim", this.collapsed));
+	}
+}
+
 function markerText(entry: SessionEntry): { collapsed: string; expanded: string } | undefined {
 	if (entry.type === "anchor_revision") {
 		const label = entry.revision === 1 ? "Anchor created" : "Anchor revised";

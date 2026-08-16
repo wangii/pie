@@ -536,6 +536,23 @@ const DEFAULT_CONTROL_MAX_TOKENS = 8000;
  */
 const DEFAULT_MAX_FRAME_ADVANCES = 3;
 
+/**
+ * Upper bound on the concrete tool-result text an Observation stores inline.
+ * Observations cite exact `sourceEventIds` for full provenance, so the inline
+ * statement only needs enough of the result to let a later decision name a real
+ * target (e.g. "read agent-session.ts, the highest-count match") without
+ * re-running a discovery step. Anything longer is truncated with a marker.
+ */
+const OBSERVATION_RESULT_CHAR_LIMIT = 8000;
+
+/**
+ * A tool-call block emitted as literal text — e.g. `<invoke name="bash">…</invoke>`
+ * or `<tool_call>…</tool_call>` — including its nested parameters. Matched so the
+ * final-answer sanitizer can strip it and recover the surrounding prose.
+ */
+const TOOL_CALL_BLOCK_PATTERN =
+	/<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call)\b[\s\S]*?(?:<\s*\/\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call)\s*>|$)/giu;
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -998,21 +1015,51 @@ export class AgentSession {
 	 */
 	private _materializeExploreObservation(state: ReturnType<typeof restoreEpistemicState>, action: Action): void {
 		if (!this._observationEnabled || !state.anchor || !action.expectation) return;
+		const { sourceEventIds, text } = this._toolResultTextForAction(action.startEntryId);
+		if (sourceEventIds.length === 0) return;
+		// The observation must carry the episode's concrete established result, not
+		// only the pre-action prediction. The expectation names the predicted fact;
+		// the tool-result text is the evidence that grounded it and is what a later
+		// decision (e.g. "read the highest-matching file") needs to cite a real target
+		// instead of re-running a discovery step that would burn its evidence round.
+		const established = this._boundedResultText(text);
+		const statement = established
+			? `${action.expectation}\n\nEstablished result:\n${established}`
+			: action.expectation;
+		this._appendObservation({ statement, affects: "anchor", sourceEventIds }, state);
+	}
+
+	/** Tool-result text produced during one Action episode, with its exact provenance. */
+	private _toolResultTextForAction(actionStartEntryId: string): { sourceEventIds: string[]; text: string } {
 		const branch = this.sessionManager.getBranch();
-		const startIndex = branch.findIndex((entry) => entry.id === action.startEntryId);
-		if (startIndex < 0) return;
+		const startIndex = branch.findIndex((entry) => entry.id === actionStartEntryId);
 		const sourceEventIds: string[] = [];
-		for (let index = startIndex + 1; index < branch.length; index++) {
-			const entry = branch[index]!;
-			if (
-				entry.type === "message" &&
-				(entry.message.role === "toolResult" || entry.message.role === "bashExecution")
-			) {
+		const texts: string[] = [];
+		if (startIndex >= 0) {
+			for (let index = startIndex + 1; index < branch.length; index++) {
+				const entry = branch[index]!;
+				if (entry.type !== "message") continue;
+				const message = entry.message;
+				let part = "";
+				if (message.role === "toolResult") {
+					part = contentText(message.content, "").trim();
+				} else if (message.role === "bashExecution") {
+					part = (message.output ?? "").trim();
+				} else {
+					continue;
+				}
 				sourceEventIds.push(entry.id);
+				if (part) texts.push(part);
 			}
 		}
-		if (sourceEventIds.length === 0) return;
-		this._appendObservation({ statement: action.expectation, affects: "anchor", sourceEventIds }, state);
+		return { sourceEventIds, text: texts.join("\n") };
+	}
+
+	private _boundedResultText(text: string): string {
+		const trimmed = text.trim();
+		if (!trimmed) return "";
+		if (trimmed.length <= OBSERVATION_RESULT_CHAR_LIMIT) return trimmed;
+		return `${trimmed.slice(0, OBSERVATION_RESULT_CHAR_LIMIT)}\n… (truncated)`;
 	}
 
 	/**
@@ -1472,6 +1519,11 @@ export class AgentSession {
 			}
 		}
 		if (!value || typeof value !== "object" || Array.isArray(value)) {
+			if (this._emitsToolCallSyntax(text)) {
+				throw new Error(
+					"Epistemic control response must contain one JSON decision object: the response emitted a tool call as text, but the epistemic role has no tools and cannot execute. Return exactly one JSON object with a kind discriminator (continue_action, complete_action, unresolvable_action, or escalate_action) instead of attempting the work.",
+				);
+			}
 			throw new Error("Epistemic control response must contain one JSON decision object.");
 		}
 		if (!("kind" in value) && "operation" in value && typeof value.operation === "string") {
@@ -1479,6 +1531,46 @@ export class AgentSession {
 		}
 		if (!("kind" in value)) throw new Error("Epistemic control decision requires the kind discriminator.");
 		return value as PieControlDecision;
+	}
+
+	/**
+	 * Detect tool-call syntax emitted as literal text (e.g. `<invoke name="...">` or
+	 * `<tool_call>`) rather than as a structured toolCall content part. Models in a
+	 * no-tool role (epistemic control, final answer) fall back to this when they
+	 * want to act but have no tools available; it is inert prose, not an executable
+	 * call.
+	 */
+	private _emitsToolCallSyntax(text: string): boolean {
+		return /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call)\b/iu.test(text);
+	}
+
+	/**
+	 * Repair a final-answer message that the model polluted with tool-call syntax
+	 * as literal text (the terminal role has no tools, so it could not actually
+	 * call anything). Strip the `<invoke>`/`<tool_call>` block and keep whatever
+	 * prose remains; if nothing substantive survives, fall back to a bounded
+	 * report derived from the authorization the model was given.
+	 */
+	private _sanitizeFinalAnswer(message: AssistantMessage): void {
+		const text = contentText(message.content, "");
+		if (!this._emitsToolCallSyntax(text)) return;
+		const prose = text.replace(TOOL_CALL_BLOCK_PATTERN, " ").replace(/\s+/g, " ").trim();
+		if (prose) {
+			message.content = [{ type: "text", text: prose }];
+			return;
+		}
+		message.content = [{ type: "text", text: this._finalAnswerFallbackText() }];
+	}
+
+	private _finalAnswerFallbackText(): string {
+		const authorization = this._pendingFinalAuthorization;
+		if (authorization?.kind === "inability") {
+			return `The agent could not complete this request within its bounded control loop.\n\n${authorization.reason}`;
+		}
+		if (authorization?.kind === "question") {
+			return authorization.reason;
+		}
+		return authorization?.reason ?? "The agent completed its investigation but could not produce a final answer.";
 	}
 
 	private _prepareControllerFrame(
@@ -2177,7 +2269,13 @@ export class AgentSession {
 				if (toolResults.length > 0) return { nextRole: "execution" };
 				return { nextRole: "epistemic" };
 			},
-			completeFinalAnswer: () => {
+			completeFinalAnswer: (message) => {
+				// The final-answer role is terminal and tool-less. A model that wants to
+				// keep investigating falls back to emitting tool-call syntax as inert text
+				// instead of reporting the authorized outcome (or bounded inability). Strip
+				// that markup and, when nothing substantive remains, substitute a bounded
+				// report rather than persisting a fake <invoke> fragment as the answer.
+				this._sanitizeFinalAnswer(message);
 				this._latestOperationalError = undefined;
 				this._ambiguousMutation = undefined;
 				this._automaticActionRequest = false;
@@ -3028,6 +3126,16 @@ export class AgentSession {
 						}
 					: undefined,
 		};
+	}
+
+	/**
+	 * The epistemic control prompt ("Deciding anchor & frame") for the current
+	 * branch state — the exact role prompt the production loop sends when
+	 * requestRole is "epistemic". Read-only, for the Pie TUI to inspect the
+	 * active decision instruction alongside diagnostics.
+	 */
+	getEpistemicControlPrompt(): string {
+		return this._productionSystemPrompt("epistemic");
 	}
 
 	/** Current durable Anchor on the active branch. */

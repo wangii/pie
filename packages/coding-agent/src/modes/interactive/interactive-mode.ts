@@ -141,6 +141,7 @@ import {
 	formatOperationalError,
 	formatPieWorkingMessage,
 	isPieStateTransitionEntry,
+	PieControlPromptComponent,
 	PieDiagnosticsComponent,
 	PieProjectionReductionNoticeComponent,
 	PieRestorationReceiptComponent,
@@ -6225,6 +6226,7 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder());
 		this.chatContainer.addChild(new PieDiagnosticsComponent(diagnostics, true));
+		this.chatContainer.addChild(new PieControlPromptComponent(this.session.getEpistemicControlPrompt(), diagnostics));
 		this.chatContainer.addChild(new DynamicBorder());
 		this.ui.requestRender();
 	}

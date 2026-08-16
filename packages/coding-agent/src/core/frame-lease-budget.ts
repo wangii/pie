@@ -27,6 +27,15 @@ export interface FrameLeaseCalculation {
 	};
 }
 
+/**
+ * A contract that names its probe target relationally — by rank ("highest count"),
+ * provenance ("from the prior grep result"), or a returned location — rather than
+ * directly. Such a target must first be derived from prior evidence, which is a
+ * serial step a single-round Action cannot afford.
+ */
+const DEFERRED_TARGET_PATTERN =
+	/(?:from the (?:prior|previous|same) (?:grep|search|result|observation)|(?:highest|next[- ]?highest|top) (?:total )?(?:count|match)|the (?:source )?file (?:with|from|identified|returned|recorded|named)|the (?:location|path|file) (?:returned|identified|recorded|named) by)/iu;
+
 export const DEFAULT_FRAME_LEASE_POLICY: FrameLeasePolicy = {
 	maxActions: 3,
 	maxEvidenceRounds: 5,
@@ -58,6 +67,18 @@ function validateBudgetReason(candidate: ProvisionalActionContract): void {
 		)
 	) {
 		throw new Error("Each evidence round after the first requires an inspectable serial dependency.");
+	}
+	// A single-round Action has no room for a serial "discover the target, then read
+	// it" sequence. If the contract derives its target from a prior result (by rank,
+	// provenance, or a returned location) instead of naming it directly, the only
+	// round is spent rediscovering the target and the probe never runs.
+	if (
+		candidate.expectedEvidenceRounds === 1 &&
+		DEFERRED_TARGET_PATTERN.test(`${candidate.intent} ${candidate.completionCondition}`)
+	) {
+		throw new Error(
+			"A single-round Action must name its probe target directly (a concrete file path, symbol, or command); deriving the target from a prior result needs either a discovery Action first or a higher expectedEvidenceRounds with a serial-dependency budgetReason.",
+		);
 	}
 }
 

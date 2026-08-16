@@ -622,4 +622,156 @@ describe("completion condition bounds", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("materializes an explore's concrete tool result, not only its prediction", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "explore",
+					expectation: "The prompt-construction surface lives in a few identifiable files",
+					intent: "Grep packages/coding-agent/src for prompt-definition markers",
+					completionCondition: "One grep records file locations and per-file match counts for the prompt markers",
+					expectedEvidenceRounds: 1,
+					budgetReason: "A single grep over the package tree is one independent evidence round",
+				}),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "agent-session.ts:39" }, { id: "call-1" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("grep recorded the prompt sites"),
+				control({ kind: "complete_action", reason: "The grep recorded the prompt sites" }),
+				control({ kind: "authorize_final", reason: "Comprehension is sufficient" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("find the prompts");
+
+			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
+			expect(observations).toHaveLength(1);
+			// The predicted fact is retained for the information-gain gate…
+			expect(observations[0].statement).toContain("prompt-construction surface");
+			// …and the concrete established result is materialized alongside it.
+			expect(observations[0].statement).toContain("Established result:");
+			expect(observations[0].statement).toContain("observed:agent-session.ts:39");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects a single-round Action that derives its target instead of naming it", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "The epistemic/execution-loop prompt is assembled by one primary assembly function",
+					expectation: "Reading the top marker-matching source file shows a single assembly function",
+					actions: [
+						actionBudget({
+							intent:
+								"Read in full the source file from the prior grep result with the highest total count of prompt-marker terms",
+							completionCondition:
+								"The read completes and establishes whether that file contains a prompt-assembly function",
+						}),
+					],
+				}),
+				control({
+					kind: "create_frame",
+					statement: "The epistemic/execution-loop prompt is assembled by one primary assembly function",
+					expectation: "Reading the top marker-matching source file shows a single assembly function",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			expect(harness.providerContexts[1]!.systemPrompt).toContain(
+				"previous decision was rejected: A single-round Action must name its probe target directly",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("gives a targeted repair hint when control emits a tool call as text", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "Prompt construction in the loop is produced only by externally injected messages",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				// The control model should adjudicate the finished episode but instead
+				// emits a tool call as inert text (the epistemic role has no tools).
+				fauxAssistantMessage(
+					'Reading agent-session.ts now.\n\n<invoke name="bash">\n<parameter name="command" string="true">wc -l agent-session.ts</parameter>\n</invoke>',
+				),
+				control({ kind: "complete_action", reason: "A single full read established where prompts enter" }),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("Prompts enter the loop only through externally injected messages."),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes("emitted a tool call as text"),
+				),
+			).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("strips tool-call markup from a final answer that emits it as text", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({ kind: "ask", question: "Should this be an exhaustive inventory or a representative analysis?" }),
+				fauxAssistantMessage(
+					'Let me check the sources first.\n\n<invoke name="bash">\n<parameter name="command" string="true">rg -l prompt packages</parameter>\n</invoke>',
+				),
+			]);
+
+			await harness.session.prompt("check the prompts");
+
+			// The fake <invoke> block is gone, the surrounding prose is kept.
+			expect(harness.session.getLastAssistantText()).toBe("Let me check the sources first.");
+			expect(harness.session.state.errorMessage).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("falls back to a bounded report when the final answer is only a tool call", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({ kind: "ask", question: "Should this be an exhaustive inventory or a representative analysis?" }),
+				fauxAssistantMessage(
+					'<invoke name="bash">\n<parameter name="command" string="true">rg -l prompt packages</parameter>\n</invoke>',
+				),
+			]);
+
+			await harness.session.prompt("check the prompts");
+
+			// No prose survived the strip, so the authorized clarifying question is
+			// substituted instead of an empty or broken answer.
+			expect(harness.session.getLastAssistantText()).toBe(
+				"Should this be an exhaustive inventory or a representative analysis?",
+			);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

@@ -5,6 +5,7 @@ import {
 	formatOperationalError,
 	formatPieStatus,
 	formatPieWorkingMessage,
+	PieControlPromptComponent,
 	PieDiagnosticsComponent,
 	PieProjectionReductionNoticeComponent,
 	PieRestorationReceiptComponent,
@@ -169,6 +170,19 @@ describe("Pie diagnostics UI projections", () => {
 		expect(plain(receipt.render(200))).toContain("action-1 (interrupted persisted Action; not replayed)");
 		receipt.setExpanded(true);
 		expect(plain(receipt.render(200))).toContain("Legacy summaries ignored for cognition: 2");
+	});
+
+	it("renders the epistemic control prompt as a collapsible section", () => {
+		const prompt =
+			"[CURRENT EPISTEMIC STATE]\nAnchor (revision 2): ship the fix\n\nPIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn.";
+		const component = new PieControlPromptComponent(prompt, diagnostics);
+		expect(plain(component.render(200))).toBe(
+			"Pie control prompt · Anchor anchor-1 · Frame frame-1 · Action action-1",
+		);
+		component.setExpanded(true);
+		expect(plain(component.render(200))).toContain("Pie control prompt (Deciding anchor & frame)");
+		expect(plain(component.render(200))).toContain("PIE CONTROL REQUEST");
+		expect(plain(component.render(200))).toContain("ship the fix");
 	});
 
 	it("states bounded repair and frozen-contract policy", () => {
