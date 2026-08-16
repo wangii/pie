@@ -714,9 +714,6 @@ describe("Phase 7 production control flow", () => {
 			expect(harness.providerContexts[3]!.systemPrompt).toContain(
 				"previous decision was rejected: Create an admissible Frame before authorizing an Action",
 			);
-			expect(harness.providerContexts[3]!.systemPrompt).toContain(
-				"adjudicate only that exact frozen intent and completion condition",
-			);
 		} finally {
 			harness.cleanup();
 		}

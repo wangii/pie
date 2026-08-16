@@ -168,7 +168,7 @@ describe("rolling planning", () => {
 		}
 	});
 
-	it("instructs create_frame to emit only the first wave and names the rolling operators", async () => {
+	it("names the rolling operators and delegates wave planning to the harness", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
 			harness.setResponses([
@@ -185,9 +185,9 @@ describe("rolling planning", () => {
 			await harness.session.prompt("locate the prompt entry sites in the loop");
 
 			const initialPrompt = harness.providerContexts[0]!.systemPrompt;
-			expect(initialPrompt).toContain("first wave of independent Actions");
+			expect(initialPrompt).toContain("A Frame may be advanced");
 			expect(initialPrompt).toContain("advance_frame");
-			expect(initialPrompt).toContain("never re-enumerate an already-consumed Action");
+			expect(initialPrompt).toContain("falsified or killed");
 		} finally {
 			harness.cleanup();
 		}

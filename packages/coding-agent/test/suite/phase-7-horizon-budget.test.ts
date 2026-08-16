@@ -55,7 +55,7 @@ describe("Phase 8 production model-response lease budgeting", () => {
 			const initialPrompt = harness.providerContexts[0]!.systemPrompt;
 			// Mechanics (horizon formula, advance limits, evidence-round budgets) are the
 			// harness's to enforce, not the model's to reason about.
-			expect(initialPrompt).toContain("The harness derives and enforces the Frame horizon");
+			expect(initialPrompt).toContain("The harness validates Frame validity, Action scoping");
 			expect(initialPrompt).not.toContain("initial control");
 			expect(initialPrompt).not.toContain("parallel read-only calls in that response count once");
 			expect(initialPrompt).not.toContain("integer 1-5");

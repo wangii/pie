@@ -150,15 +150,12 @@ describe("completion condition bounds", () => {
 			await harness.session.prompt("locate the prompt entry sites in the loop");
 
 			const contexts = harness.providerContexts.map((context) => context.systemPrompt ?? "");
+			// Completion bounding and Frame validity are now enforced by harness
+			// validation rather than restated as rules in the control prompt.
 			expect(
-				contexts.some((prompt) =>
-					prompt.includes("A completion condition is bounded only when one observable result"),
-				),
+				contexts.some((prompt) => prompt.includes("The harness validates Frame validity, Action scoping")),
 			).toBe(true);
 			expect(contexts.some((prompt) => prompt.includes("controlled scope-narrowing exit"))).toBe(true);
-			expect(
-				contexts.some((prompt) => prompt.includes("A Frame must not assert an unbounded completeness claim")),
-			).toBe(true);
 		} finally {
 			harness.cleanup();
 		}

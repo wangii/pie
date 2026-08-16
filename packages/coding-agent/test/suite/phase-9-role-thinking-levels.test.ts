@@ -87,12 +87,15 @@ function runSequence() {
 }
 
 describe("Pie production role thinking levels", () => {
-	it("defaults control roles below execution and honors per-role overrides", async () => {
+	it("disables control reasoning by default, keeps final answer low, and honors overrides", async () => {
 		const harness = await createHarness({ ...options(), pieRoleThinkingLevels: { execution: "high" } });
 		try {
 			harness.setResponses(runSequence());
 			await harness.session.prompt("locate the prompt entry sites in the loop");
 
+			// Epistemic control emits structured JSON, so it disables reasoning
+			// (undefined) rather than reasoning at "low"; finalAnswer keeps "low".
+			expect(harness.providerReasoningLevels).toContain(undefined);
 			expect(harness.providerReasoningLevels).toContain("low");
 			expect(harness.providerReasoningLevels).toContain("high");
 		} finally {
@@ -100,7 +103,7 @@ describe("Pie production role thinking levels", () => {
 		}
 	});
 
-	it("lets an explicit control-role override replace the default low level", async () => {
+	it("lets an explicit override disable reasoning for both control and final answer", async () => {
 		const harness = await createHarness({
 			...options(),
 			pieRoleThinkingLevels: { epistemic: "off", finalAnswer: "off" },

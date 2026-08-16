@@ -522,22 +522,28 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 const DEFAULT_ACTION_RESPONSE_LIMIT = 6;
 const DEFAULT_MAX_FRAME_HORIZON = 32;
 /**
- * Thinking level for production-loop control roles (epistemic, observation,
- * verification, finalAnswer). They emit small structured decisions rather than
- * doing the execution work, so they default below the execution level. A model
- * that does not support "low" clamps upward via clampThinkingLevel.
+ * Thinking level for the epistemic control role (and the observation/verification
+ * roles that share its structure). Control emits a single small JSON decision, not
+ * execution work. Reasoning-only models such as deepseek-v4 report only "high" and
+ * "max" in their thinkingLevelMap, so a request for "low" is clamped upward to
+ * "high" and the control model emits 15-37k characters of reasoning_content per
+ * decision — minutes of chain-of-thought to produce a hundred-byte JSON object.
+ * Disable reasoning so a control decision costs a few seconds; the harness still
+ * surfaces any structural error in the rejection reason and re-asks cheaply.
  */
-const DEFAULT_CONTROL_THINKING_LEVEL: ThinkingLevel = "low";
+const DEFAULT_CONTROL_THINKING_LEVEL: ThinkingLevel = "off";
 /**
- * Output-token cap for epistemic control requests. Control decisions are small
- * JSON objects, but the control model is usually a reasoning model whose "low"
- * thinking level is unsupported and therefore clamped upward to "high" (see
- * clampThinkingLevel). The cap must cover the model's reasoning tokens plus the
- * decision JSON in a single generation; a cap that only fits the JSON forces a
- * `length` stop mid-reasoning that the control repair loop then retries from
- * scratch, roughly doubling latency. 8000 comfortably fits a full Frame decision
- * (≈3-4k reasoning tokens plus the contract JSON) while still bounding runaway
- * deliberation.
+ * Thinking level for the finalAnswer role. It synthesizes prose from established
+ * observations rather than emitting a structured decision, so it keeps a low
+ * reasoning level (clamped upward by reasoning-only models, which is acceptable
+ * for a single terminal call).
+ */
+const DEFAULT_FINAL_ANSWER_THINKING_LEVEL: ThinkingLevel = "low";
+/**
+ * Output-token cap for epistemic control requests. Control reasoning is disabled
+ * (DEFAULT_CONTROL_THINKING_LEVEL = "off"), so this cap bounds only the decision
+ * JSON. It is deliberately generous — a large create_frame contract still fits —
+ * while capping runaway output; a valid decision effectively never reaches it.
  */
 const DEFAULT_CONTROL_MAX_TOKENS = 8000;
 
@@ -1229,15 +1235,19 @@ export class AgentSession {
 	}
 
 	/**
-	 * Resolve the thinking level for a production-loop role. Control roles emit
-	 * small structured decisions, so they default to a lower level than execution;
-	 * an explicit per-role override always wins. A level the routed model does not
-	 * support is clamped upward by clampThinkingLevel at request time.
+	 * Resolve the thinking level for a production-loop role. Epistemic control
+	 * emits a single structured JSON decision, so it defaults to no reasoning
+	 * ("off"); finalAnswer synthesizes prose and keeps a low level; execution
+	 * inherits the user's level. An explicit per-role override always wins, and a
+	 * level the routed model does not support is clamped by clampThinkingLevel at
+	 * request time.
 	 */
 	private _thinkingLevelForRole(role: PieModelRole): ThinkingLevel {
 		const explicit = this._pieRoleThinkingLevels[role];
 		if (explicit !== undefined) return explicit;
-		return role === "execution" ? this.agent.state.thinkingLevel : DEFAULT_CONTROL_THINKING_LEVEL;
+		if (role === "execution") return this.agent.state.thinkingLevel;
+		if (role === "finalAnswer") return DEFAULT_FINAL_ANSWER_THINKING_LEVEL;
+		return DEFAULT_CONTROL_THINKING_LEVEL;
 	}
 
 	private _productionSystemPrompt(role: PieProductionRequestRole): string {
@@ -1333,48 +1343,12 @@ export class AgentSession {
 			`The current state permits only: ${allowed}.` +
 			availableActionContractsPrompt +
 			consumedActionContractsPrompt +
-			" For create_frame, enumerate only the first wave of independent Actions: the ones whose completion conditions are knowable and executable now, before any prior observation. Defer any Action whose completion condition depends on a result you have not yet observed, and name in the expectation which single observation gates the next wave. " +
-			"For advance_frame, add only the next wave of independent Actions now made knowable by the prior wave's observation; never re-enumerate an already-consumed Action. revise_frame and replace_frame change the proposition and also carry actions. If a Frame keeps needing new waves, it is probably wrong; falsify or replace it rather than advancing indefinitely. " +
-			"Each provisional Action has intent, completionCondition, expectation, expectedEvidenceRounds, and budgetReason. Its expectation names the single observable the probe predicts it will find, distinct from intent (what to do) and completion condition (what proves done). Each evidence round after the first must depend on a result the preceding round produced; unknown source locations require a discovery-only Action before source reading. " +
-			"The harness derives and enforces the Frame horizon, advance limits, and evidence-round budgets mechanically; do not reason about how many responses remain or whether a wave fits — decide only the epistemically right next step, and the harness will reject any out-of-bounds decision with the reason. " +
-			'Schemas: {"kind":"create_frame","statement":string,"expectation":string,"actions":[{"intent":string,"completionCondition":string,"expectation":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
-			"explore requires expectation, intent, completionCondition, expectedEvidenceRounds (integer), and budgetReason (one bounded comprehension episode before any Frame); ask requires question; decompose requires subgoals (array of non-empty strings) and reason; " +
-			"revise_frame and replace_frame use the same actions array and also require reason; advance_frame carries only actions and reason (it keeps the current Frame's statement and expectation unchanged, so the proposition is not re-asserted); falsify_frame, kill_frame, continue_action, " +
-			"authorize_final, and report_inability require reason; " +
-			"revise_anchor requires statement and reason; authorize_action requires only actionContractId from one listed unused provisional contract; " +
-			"complete_action, unresolvable_action, and escalate_action require predictionError {sign, detail}; escalate_action also requires challenge (anchor or frame). " +
-			'The predictionError sign is judged on the expectation\'s exact observable claim, not on whether the probe was informative. confirmed means the claim was met exactly. refined means the claim WAS met and the episode added a precise detail (names, counts, mechanism) that sharpens it. refuted means the claim was NOT met — reality contradicted it or it was unsatisfiable — even when the episode still produced a useful correction, which belongs in detail. If the detail negates the expectation\'s claim ("contains no X", "does not", "rather than", "instead"), the sign is refuted, not refined. escalate_action must be refuted; complete_action must be confirmed or refined. The detail must name the concrete referent the episode established — a file path, symbol, line number, or count — because the raw tool output stays at the execution layer and only this named conclusion crosses into epistemic context; a bare confirmation carries no evidence. A Frame must assert one provisional causal or ' +
-			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
-			"the requested deliverable. Its expectation names the exact observable world result you predict confirms that relation, " +
-			"not an inability to finish the investigation; if the check does not produce that result, the Frame is falsified. A Frame must not assert an unbounded completeness claim (for example that " +
-			"some set of files contains all prompt sources, that every entry point is in one place, or that a list is exhaustive). " +
-			"When the Anchor asks for an exhaustive inventory (all, every, complete), decompose it: each Frame asserts one bounded, " +
-			"checkable slice of the Anchor and leaves the remaining slices to subsequent Frames; authorize_final only when every " +
-			"slice you intend to cover has been established. Ground the Frame before asserting it: when the Anchor asks where prompts are defined or built, first " +
-			"authorize a bounded discovery Action (search/grep) that records the actual file locations and their match counts, then form the Frame's statement and expectation " +
-			'from that observed structure. Never make a discovery probe itself the expectation (for example an expectation of "the search returns zero matches" is a discovery probe, not a grounded prediction, ' +
-			"and must not be used). Use explore only to gather a NEW comprehension fact you still need in order to form a grounded Frame: each explore must add information no prior explore already established, so do not re-explore the same target, and once you understand enough to assert a solution Frame, stop exploring and create_frame (or authorize_final) instead of expanding further. An Action is one bounded episode with one externally checkable completion " +
-			"result, not the whole task, a report, or a bundle of diagnosis, repair, and verification. A completion condition is bounded only when one observable result can " +
-			"confirm it: a single file read in full, a single symbol's declaration, or a single diff or command output. Do not " +
-			"write a condition that enumerates every or all occurrences, every declaration site, or a complete inventory; such a " +
-			"condition is unbounded and cannot finish inside its evidence-round budget. A read or discovery episode's completion is " +
-			"the read itself (its tool calls and results are already recorded in the transcript), not an extracted catalog of " +
-			"everything it contains; perform synthesis in the control decision that follows, not inside the episode. For authorize_action, " +
-			"select a listed actionContractId instead of regenerating contract text. If source locations needed by the condition are not yet known, authorize a discovery-only Action that records those locations before a source-reading or comparison Action. " +
-			"When the Anchor asks where prompt text is defined or built, do not read candidate files expecting to find the text; first authorize one bounded search (grep/rg) over the relevant package for the string literals and prompt-building patterns, requesting files-with-matches and per-file match counts rather than a full line dump, and read only the matches. " +
-			"Split evidence collection, mutation, and verification into separate Actions when they establish different results. A plain assistant stop, " +
-			"successful tool call, or final-looking prose proves neither Action completion nor Anchor satisfaction. When an Action " +
-			"is active, adjudicate only that exact frozen intent and completion condition. Ignore and do not credit execution " +
-			"outside its scope; such execution cannot merge a later Action into the current episode. After complete_action, " +
-			"reconsider separately before authorizing the next Action. After unresolvable_action, treat the reason as evidence " +
-			"against the Frame: if it contradicts the Frame's premise or refutes its expectation, falsify_frame or kill_frame " +
-			"instead of authorizing a remaining Action whose completion condition presupposes the contradicted premise. " +
-			"When an unresolvable reason shows the completion condition was over-scoped (unbounded enumeration) rather than " +
-			"contradicted by the world, authorize a new, narrower Action that establishes the bounded sub-result named in the reason; " +
-			"do not re-authorize the same over-scoped contract. " +
-			"Use escalate_action only when the finalized results themselves contradict or undermine the Frame relation or the " +
-			"Anchor success semantics; use unresolvable_action when the episode cannot complete under current constraints, " +
-			"naming in reason what was found and what remains unknown."
+			"Decide the epistemically right next step. Anchor names the task-success semantics; a Frame asserts one provisional world relation and freezes Actions whose expectations are checked against execution results. " +
+			"A Frame may be advanced (advance_frame: add the next wave of Actions, proposition unchanged), revised or replaced (revise_frame, replace_frame: change the proposition), or falsified or killed (falsify_frame, kill_frame) when its premise is contradicted. " +
+			"A terminal Action outcome is the expectation plus its prediction error: confirmed means the expectation held exactly, refined means it held and reality added a named detail, refuted means reality contradicted or could not satisfy it; escalate_action challenges the Frame or Anchor on a refuted result, unresolvable_action records an episode that could not complete under its constraints. " +
+			"When an outcome refutes the Frame's expectation or premise, falsify the Frame instead of continuing to authorize Actions that presuppose the refuted premise. " +
+			"Ground a Frame in an observed structure before asserting it: run the bounded discovery first, then assert the Frame from what you found. " +
+			"The harness validates Frame validity, Action scoping, the horizon and evidence-round budgets, and the JSON structure mechanically; read a rejection reason and correct only what it names instead of pre-checking those constraints. "
 		);
 	}
 
@@ -1588,20 +1562,27 @@ export class AgentSession {
 			typeof definition.expectation !== "string" ||
 			!Array.isArray(definition.actions)
 		) {
-			throw new Error("Production Frame decision requires statement, expectation, and provisional actions.");
+			const missing = [
+				typeof definition.statement !== "string" ? "statement" : null,
+				typeof definition.expectation !== "string" ? "expectation" : null,
+				!Array.isArray(definition.actions) ? "actions" : null,
+			].filter((field): field is string => field !== null);
+			throw new Error(`Production Frame decision is missing required field(s): ${missing.join(", ")}.`);
 		}
 		for (const candidate of definition.actions) {
-			if (
-				!candidate ||
-				typeof candidate !== "object" ||
-				typeof candidate.intent !== "string" ||
-				typeof candidate.completionCondition !== "string" ||
-				typeof candidate.expectation !== "string" ||
-				typeof candidate.budgetReason !== "string"
-			) {
+			if (!candidate || typeof candidate !== "object") {
 				throw new Error(
-					"Each provisional Action requires a valid contract (intent, completionCondition, expectation), expectedEvidenceRounds, and budgetReason.",
+					"A provisional Action must be an object with intent, completionCondition, expectation, and budgetReason.",
 				);
+			}
+			const missing = [
+				typeof candidate.intent !== "string" ? "intent" : null,
+				typeof candidate.completionCondition !== "string" ? "completionCondition" : null,
+				typeof candidate.expectation !== "string" ? "expectation" : null,
+				typeof candidate.budgetReason !== "string" ? "budgetReason" : null,
+			].filter((field): field is string => field !== null);
+			if (missing.length > 0) {
+				throw new Error(`A provisional Action is missing required field(s): ${missing.join(", ")}.`);
 			}
 		}
 		const anchor = state.anchor;
