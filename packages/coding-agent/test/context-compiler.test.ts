@@ -3,6 +3,7 @@ import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@e
 import { describe, expect, it } from "vitest";
 import {
 	ContextBudgetError,
+	EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
 	PhaseFourContextCompiler,
 	PhaseOneContextCompiler,
 	PhaseThreeContextCompiler,
@@ -781,7 +782,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.manifest.projection.frameOutcomes).toBeUndefined();
 	});
 
-	it("retains finalized tool results from a terminal Action episode in the epistemic projection", async () => {
+	it("summarizes finalized tool results from a terminal Action episode into execution evidence", async () => {
 		const manager = SessionManager.inMemory();
 		const userId = manager.appendMessage(user("diagnose authorization", 1));
 		manager.appendAnchorRevision({
@@ -870,7 +871,91 @@ describe("PhaseZeroContextCompiler", () => {
 		});
 		const texts = result.messages.map(text);
 
-		expect(texts).toContain("first evidence");
-		expect(texts).toContain("second evidence");
+		expect(texts.join("\n")).toContain("first evidence");
+		expect(texts.join("\n")).toContain("second evidence");
+	});
+
+	it("replaces raw tool-call/tool-result traffic with a bounded execution-evidence summary", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("diagnose authorization", 1));
+		manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "diagnose authorization",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+		const frameControlId = manager.appendMessage(assistant('{"kind":"create_frame"}', 2));
+		const frameRevisionId = manager.appendFrameRevision({
+			frameId: "frame-1",
+			version: 1,
+			statement: "Worker cache lifetime controls authorization",
+			expectation: "A clean worker restart preserves the failure",
+			horizon: 12,
+			previousRevisionId: null,
+			sourceEventId: frameControlId,
+		});
+		const actionControlId = manager.appendMessage(assistant('{"kind":"authorize_action"}', 3));
+		const actionStartId = manager.appendActionStart({
+			actionId: "action-1",
+			intent: "Inspect cache ownership",
+			completionCondition: "The owning process is identified",
+			expectation: "The owning process is identified",
+			frameRevisionEntryId: frameRevisionId,
+			sourceEventId: actionControlId,
+		});
+
+		const call = assistant("", 4);
+		call.content = [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "big.ts" } }];
+		call.stopReason = "toolUse";
+		manager.appendMessage(call);
+		const huge = "x".repeat(3000);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-1",
+			toolName: "read",
+			content: [{ type: "text", text: huge }],
+			details: {},
+			isError: false,
+			timestamp: 5,
+		});
+
+		const unresolvableControlId = manager.appendMessage(assistant('{"kind":"unresolvable_action"}', 6));
+		manager.appendActionTransition({
+			actionId: "action-1",
+			startEntryId: actionStartId,
+			transition: "unresolvable",
+			sourceEventId: unresolvableControlId,
+			reason: "The completion condition cannot be met under the current constraints",
+		});
+		const events = manager.getBranch();
+
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: restoreEpistemicState(events),
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(100_000),
+			systemPrompt: "",
+			tools: [],
+			projectionRole: "epistemic",
+			reservedOutputTokens: 8,
+		});
+		// Structured tool traffic never reaches the controller.
+		expect(result.messages.map((message) => message.role)).not.toContain("toolResult");
+		expect(
+			result.messages.some(
+				(message) => message.role === "assistant" && message.content.some((part) => part.type === "toolCall"),
+			),
+		).toBe(false);
+
+		// A single derived evidence message carries a bounded probe summary instead.
+		const evidence = result.messages.find(
+			(message) => message.role === "custom" && message.customType === EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
+		);
+		expect(evidence).toBeDefined();
+		const evidenceText = text(evidence!);
+		expect(evidenceText).toContain("read");
+		expect(evidenceText).toContain("[truncated");
+		expect(evidenceText).not.toContain(huge);
 	});
 });

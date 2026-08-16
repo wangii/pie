@@ -622,7 +622,7 @@ function renderTerminalObservationStatement(expectation: string, predictionError
  * final-answer sanitizer can strip it and recover the surrounding prose.
  */
 const TOOL_CALL_BLOCK_PATTERN =
-	/<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call)\b[\s\S]*?(?:<\s*\/\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call)\s*>|$)/giu;
+	/<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b[\s\S]*?(?:<\s*\/\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\s*>|$)/giu;
 
 // ============================================================================
 // AgentSession Class
@@ -1382,10 +1382,12 @@ export class AgentSession {
 		return (
 			stateSnapshot +
 			"\n\nPIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
-			"do not call or simulate tools, and do not output requested answer tokens. Return exactly one JSON object, with " +
+			"do not call or simulate tools, and do not output requested answer tokens. You have no tools: never emit tool-call or shell syntax such as <invoke> or <bash_command> — reading and running happen in the execution role. To keep the active Action running, emit continue_action; to record that its completion condition was or was not met, emit complete_action or unresolvable_action carrying its predictionError. Return exactly one JSON object, with " +
 			"the discriminator property named exactly kind, and no prose or markdown. The first character must be { and the " +
 			"last character must be }. " +
-			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
+			(this._lastControlError
+				? `\n\nREJECTED DECISION. The previous decision was rejected: ${this._lastControlError} Correct only what it names and return one JSON decision object.\n`
+				: "") +
 			`The current state permits only: ${allowed}. Emit only these fields:\n${allowedSchema}\n` +
 			availableActionContractsPrompt +
 			consumedActionContractsPrompt +
@@ -1542,7 +1544,7 @@ export class AgentSession {
 		if (!value || typeof value !== "object" || Array.isArray(value)) {
 			if (this._emitsToolCallSyntax(text)) {
 				throw new Error(
-					"Epistemic control response must contain one JSON decision object: the response emitted a tool call as text, but the epistemic role has no tools and cannot execute. Return exactly one JSON object with a kind discriminator (continue_action, complete_action, unresolvable_action, or escalate_action) instead of attempting the work.",
+					"You have no tools: do not emit tool-call or shell syntax such as <invoke>. Return exactly one JSON decision object instead.",
 				);
 			}
 			throw new Error("Epistemic control response must contain one JSON decision object.");
@@ -1562,7 +1564,7 @@ export class AgentSession {
 	 * call.
 	 */
 	private _emitsToolCallSyntax(text: string): boolean {
-		return /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call)\b/iu.test(text);
+		return /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b/iu.test(text);
 	}
 
 	/**

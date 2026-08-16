@@ -828,7 +828,7 @@ describe("completion condition bounds", () => {
 
 			expect(
 				harness.providerContexts.some((context) =>
-					(context.systemPrompt ?? "").includes("emitted a tool call as text"),
+					(context.systemPrompt ?? "").includes("do not emit tool-call or shell syntax"),
 				),
 			).toBe(true);
 		} finally {

@@ -210,6 +210,8 @@ describe("rolling planning", () => {
 			expect(initialPrompt).toContain("ask: question");
 			expect(initialPrompt).toContain("create_frame: statement, expectation, actions");
 			expect(initialPrompt).toContain("authorize_final: reason");
+			expect(initialPrompt).toContain("You have no tools");
+			expect(initialPrompt).toContain("continue_action");
 		} finally {
 			harness.cleanup();
 		}

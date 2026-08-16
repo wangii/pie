@@ -17,6 +17,7 @@ export const ACTION_CONTEXT_MESSAGE_TYPE = "pie.action";
 export const OBSERVATION_CONTEXT_MESSAGE_TYPE = "pie.observation";
 export const ACTION_OUTCOME_CONTEXT_MESSAGE_TYPE = "pie.action-outcome";
 export const FRAME_OUTCOME_CONTEXT_MESSAGE_TYPE = "pie.frame-outcome";
+export const EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE = "pie.execution-evidence";
 
 export type ContextProjectionRole = "default" | "execution" | "epistemic" | "finalAnswer";
 
@@ -300,6 +301,67 @@ function isControlDecisionMessage(event: SessionEntry): boolean {
 	}
 }
 
+/**
+ * The broad (epistemic) projection lets the controller adjudicate the active or
+ * last-terminal Action. Projecting the execution role's raw tool-call/tool-result
+ * traffic as structured messages shows the controller a "doer" transcript it then
+ * imitates — emitting <invoke> text instead of a JSON decision — because the
+ * concrete call/result pattern outweighs any "you have no tools" instruction.
+ * Replace that transcript with one compact, derived evidence message: the probes
+ * the execution role issued and what each observed, as plain text.
+ */
+const BROAD_EVIDENCE_MAX_RESULT_CHARS = 400;
+const BROAD_EVIDENCE_MAX_ENTRIES = 24;
+
+function summarizeToolArguments(arguments_: Record<string, unknown>): string {
+	const json = JSON.stringify(arguments_);
+	return json.length > 140 ? `${json.slice(0, 140)}…` : json;
+}
+
+function buildExecutionEvidenceMessage(
+	events: readonly SessionEntry[],
+	action: Action | undefined,
+): AgentMessage | undefined {
+	const startEntryId = episodeBoundary(events, action);
+	if (!startEntryId) return undefined;
+	const actionStartIndex = events.findIndex((event) => event.id === startEntryId);
+	if (actionStartIndex < 0) return undefined;
+
+	const lines: string[] = [];
+	let entries = 0;
+	for (let index = actionStartIndex + 1; index < events.length && entries < BROAD_EVIDENCE_MAX_ENTRIES; index++) {
+		const event = events[index]!;
+		if (event.type !== "message") continue;
+		const message = event.message;
+		if (message.role === "assistant") {
+			for (const part of message.content) {
+				if (part.type !== "toolCall") continue;
+				if (entries >= BROAD_EVIDENCE_MAX_ENTRIES) break;
+				lines.push(`- ${part.name} ${summarizeToolArguments(part.arguments)}`);
+				entries++;
+			}
+		} else if (message.role === "toolResult") {
+			const observed = contentText(message.content, "\n").trim();
+			const bounded =
+				observed.length > BROAD_EVIDENCE_MAX_RESULT_CHARS
+					? `${observed.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…[truncated ${observed.length - BROAD_EVIDENCE_MAX_RESULT_CHARS} characters]`
+					: observed;
+			lines.push(bounded ? `  → ${bounded}` : "  → (no text result)");
+			entries++;
+		}
+	}
+	if (lines.length === 0) return undefined;
+	const omitted = entries >= BROAD_EVIDENCE_MAX_ENTRIES ? "\n…[additional execution probes omitted]" : "";
+	return {
+		role: "custom",
+		customType: EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
+		content: `[EXECUTION EVIDENCE]\nWhat the execution role probed and observed in the current Action:\n${lines.join("\n")}${omitted}`,
+		display: false,
+		details: { actionId: action?.id, startEntryId },
+		timestamp: Date.now(),
+	};
+}
+
 function controlSourceEventIds(events: readonly SessionEntry[]): Set<string> {
 	const ids = new Set<string>();
 	for (const event of events) {
@@ -336,6 +398,9 @@ function episodeBoundary(events: readonly SessionEntry[], action: Action | undef
 	return undefined;
 }
 
+/** Tool-call/shell syntax emitted as literal text; mirrors the control-loop detector. */
+const TOOL_CALL_SYNTAX_PATTERN = /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b/iu;
+
 function selectBroadRawEventIds(
 	events: readonly SessionEntry[],
 	action: Action | undefined,
@@ -351,38 +416,25 @@ function selectBroadRawEventIds(
 	}
 	if (role === "finalAnswer") return selected;
 
+	// The episode's tool traffic is represented by a derived execution-evidence
+	// message (buildExecutionEvidenceMessage), so raw tool-call/tool-result traffic
+	// is never projected to the controller. Retain only the execution role's latest
+	// prose narration — the "established result" the controller judges against —
+	// excluding any message that carries structured tool calls or tool-call syntax.
 	const startEntryId = episodeBoundary(events, action);
 	if (!startEntryId) return selected;
 	const actionStartIndex = events.findIndex((event) => event.id === startEntryId);
 	if (actionStartIndex < 0) return selected;
 
 	const controlSources = controlSourceEventIds(events);
-	for (let index = actionStartIndex + 1; index < events.length; index++) {
-		const event = events[index]!;
-		if (event.type !== "message") continue;
-		if (event.message.role === "toolResult") {
-			selected.add(event.id);
-		} else if (
-			event.message.role === "assistant" &&
-			!controlSources.has(event.id) &&
-			!isControlDecisionMessage(event) &&
-			event.message.content.some((part) => part.type === "toolCall")
-		) {
-			selected.add(event.id);
-		}
-	}
-
 	for (let index = events.length - 1; index > actionStartIndex; index--) {
 		const event = events[index]!;
-		if (
-			event.type === "message" &&
-			event.message.role === "assistant" &&
-			!controlSources.has(event.id) &&
-			!isControlDecisionMessage(event)
-		) {
-			selected.add(event.id);
-			break;
-		}
+		if (event.type !== "message" || event.message.role !== "assistant") continue;
+		if (controlSources.has(event.id) || isControlDecisionMessage(event)) continue;
+		if (event.message.content.some((part) => part.type === "toolCall")) continue;
+		if (TOOL_CALL_SYNTAX_PATTERN.test(contentText(event.message.content, "\n"))) continue;
+		selected.add(event.id);
+		break;
 	}
 	return selected;
 }
@@ -652,9 +704,10 @@ async function compileProjection(
 			omissionsById.set(event.id, { eventId: event.id, eventType: event.type, reason: "runtime_excluded" });
 			continue;
 		}
-		const messages = sessionEntryToContextMessages(event).filter(
+		const rawMessages = sessionEntryToContextMessages(event).filter(
 			(message) => message.role !== "bashExecution" || !message.excludeFromContext,
 		);
+		const messages = rawMessages;
 		if (
 			projectionRole !== "default" &&
 			event.type === "message" &&
@@ -703,13 +756,18 @@ async function compileProjection(
 		input.grounding && projectionRole === "epistemic" && anchor && !frame ? [input.grounding] : [];
 	const frameMessages = frame ? [frameMessage(frame)] : [];
 	const actionMessages = action ? [actionMessage(action)] : [];
+	const executionEvidence =
+		projectionRole === "epistemic" ? buildExecutionEvidenceMessage(input.rawEvents, action) : undefined;
+	const executionEvidenceMessages = executionEvidence ? [executionEvidence] : [];
 	const requestInstructionMessages = input.requestInstruction ? [input.requestInstruction] : [];
 	const anchorTokens = estimateMessagesTokens(anchorMessages);
 	const groundingTokens = estimateMessagesTokens(groundingMessages);
 	const frameTokens = estimateMessagesTokens(frameMessages);
 	const actionTokens = estimateMessagesTokens(actionMessages);
+	const executionEvidenceTokens = estimateMessagesTokens(executionEvidenceMessages);
 	const requestInstructionTokens = estimateMessagesTokens(requestInstructionMessages);
-	const requiredStateTokens = anchorTokens + groundingTokens + frameTokens + actionTokens + requestInstructionTokens;
+	const requiredStateTokens =
+		anchorTokens + groundingTokens + frameTokens + actionTokens + executionEvidenceTokens + requestInstructionTokens;
 	const windows = buildCoherentWindows(projectedEvents);
 	const newestWindow = windows.at(-1);
 	if (newestWindow && !newestWindow.valid) {
@@ -799,6 +857,7 @@ async function compileProjection(
 		...observationMessages,
 		...actionOutcomeMessages,
 		...actionMessages,
+		...executionEvidenceMessages,
 	];
 	const retainedStateTokens =
 		requiredStateTokens + selectedObservationTokens + selectedFrameOutcomeTokens + selectedActionOutcomeTokens;
