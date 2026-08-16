@@ -192,4 +192,26 @@ describe("rolling planning", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("names each decision's JSON fields so control emits a parseable decision", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			const initialPrompt = harness.providerContexts[0]!.systemPrompt;
+			expect(initialPrompt).toContain(
+				"explore: expectation, intent, completionCondition, expectedEvidenceRounds, budgetReason",
+			);
+			expect(initialPrompt).toContain("ask: question");
+			expect(initialPrompt).toContain("create_frame: statement, expectation, actions");
+			expect(initialPrompt).toContain("authorize_final: reason");
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

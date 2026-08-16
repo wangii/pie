@@ -556,6 +556,38 @@ const DEFAULT_CONTROL_MAX_TOKENS = 8000;
 const DEFAULT_MAX_FRAME_ADVANCES = 3;
 
 /**
+ * The JSON field signature for each Pie control decision kind. The epistemic
+ * prompt states the permitted kind names but not their shapes; without this the
+ * control model guesses field names (it has reasoning disabled and no schema to
+ * check against) and fails every decision. These are parse contracts, not the
+ * semantic rules the harness already enforces, so they stay in the prompt.
+ */
+const PIE_CONTROL_KIND_FIELDS: Readonly<Record<string, string>> = {
+	create_frame:
+		"statement, expectation, actions: [{ intent, completionCondition, expectation, expectedEvidenceRounds, budgetReason }]",
+	revise_frame:
+		"statement, expectation, actions: [{ intent, completionCondition, expectation, expectedEvidenceRounds, budgetReason }], reason",
+	replace_frame:
+		"statement, expectation, actions: [{ intent, completionCondition, expectation, expectedEvidenceRounds, budgetReason }], reason",
+	advance_frame:
+		"actions: [{ intent, completionCondition, expectation, expectedEvidenceRounds, budgetReason }], reason",
+	falsify_frame: "reason",
+	kill_frame: "reason",
+	explore: "expectation, intent, completionCondition, expectedEvidenceRounds, budgetReason",
+	ask: "question",
+	decompose: "subgoals: [string], reason",
+	revise_anchor: "statement, reason",
+	authorize_action: "actionContractId",
+	continue_action: "reason",
+	complete_action: 'predictionError: { sign: "confirmed" | "refined" | "refuted", detail }',
+	unresolvable_action: 'predictionError: { sign: "confirmed" | "refined" | "refuted", detail }',
+	escalate_action:
+		'challenge: "anchor" | "frame", predictionError: { sign: "confirmed" | "refined" | "refuted", detail }',
+	authorize_final: "reason",
+	report_inability: "reason",
+};
+
+/**
  * A bare confirmation that carries no named conclusion. The prediction-error
  * detail is the only semantic carrier that crosses from the execution layer into
  * the epistemic layer, so a single "confirmed" / "found it" token without any
@@ -1324,15 +1356,29 @@ export class AgentSession {
 						.map((done) => JSON.stringify({ intent: done.intent, completionCondition: done.completionCondition }))
 						.join("\n")}\n`
 				: "";
-		const allowed = state.action
+		const allowedKinds = state.action
 			? actionBudgetExhausted
-				? "complete_action, unresolvable_action, or escalate_action"
-				: "continue_action, complete_action, unresolvable_action, or escalate_action"
+				? ["complete_action", "unresolvable_action", "escalate_action"]
+				: ["continue_action", "complete_action", "unresolvable_action", "escalate_action"]
 			: state.frame
-				? "authorize_action, advance_frame, revise_frame, replace_frame, falsify_frame, kill_frame, authorize_final, or report_inability"
+				? [
+						"authorize_action",
+						"advance_frame",
+						"revise_frame",
+						"replace_frame",
+						"falsify_frame",
+						"kill_frame",
+						"authorize_final",
+						"report_inability",
+					]
 				: state.anchor
-					? "explore, ask, decompose, create_frame, revise_anchor, authorize_final, or report_inability"
-					: "report_inability";
+					? ["explore", "ask", "decompose", "create_frame", "revise_anchor", "authorize_final", "report_inability"]
+					: ["report_inability"];
+		const allowed =
+			allowedKinds.length === 1
+				? allowedKinds[0]!
+				: `${allowedKinds.slice(0, -1).join(", ")}, or ${allowedKinds[allowedKinds.length - 1]}`;
+		const allowedSchema = allowedKinds.map((kind) => `  ${kind}: ${PIE_CONTROL_KIND_FIELDS[kind]}`).join("\n");
 		return (
 			stateSnapshot +
 			"\n\nPIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
@@ -1340,7 +1386,7 @@ export class AgentSession {
 			"the discriminator property named exactly kind, and no prose or markdown. The first character must be { and the " +
 			"last character must be }. " +
 			(this._lastControlError ? `The previous decision was rejected: ${this._lastControlError} ` : "") +
-			`The current state permits only: ${allowed}.` +
+			`The current state permits only: ${allowed}. Emit only these fields:\n${allowedSchema}\n` +
 			availableActionContractsPrompt +
 			consumedActionContractsPrompt +
 			"Decide the epistemically right next step. Anchor names the task-success semantics; a Frame asserts one provisional world relation and freezes Actions whose expectations are checked against execution results. " +
@@ -2122,9 +2168,10 @@ export class AgentSession {
 			case "authorize_final":
 			case "report_inability":
 				if (state.action) throw new Error("Terminate the active Action before authorizing terminal output.");
+				if (!reason) throw new Error(`Control decision ${decision.kind} requires a non-empty reason.`);
 				this._pendingFinalAuthorization = {
 					kind: decision.kind === "authorize_final" ? "satisfied" : "inability",
-					reason: reason!,
+					reason,
 				};
 				return "finalAnswer";
 			default:

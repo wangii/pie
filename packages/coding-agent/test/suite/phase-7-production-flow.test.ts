@@ -744,4 +744,24 @@ describe("Phase 7 production control flow", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("rejects a terminal authorization that omits its reason", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({ kind: "authorize_final" }),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("reject a reasonless authorization");
+
+			expect(harness.providerContexts[1]!.systemPrompt).toContain(
+				"previous decision was rejected: Control decision authorize_final requires a non-empty reason.",
+			);
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
 });
