@@ -605,6 +605,14 @@ describe("Phase 7 production control flow", () => {
 				}),
 			]);
 			expect(branch.filter((entry) => entry.type === "frame_transition")).toHaveLength(0);
+			// A budget-exhaustion unresolvable still materializes the epistemic unit —
+			// a refuted prediction error — so the controller is not left to verify raw
+			// evidence itself.
+			const refutedObservation = harness.session.observations.find(
+				(observation) => observation.predictionErrorSign === "refuted",
+			);
+			expect(refutedObservation).toBeDefined();
+			expect(refutedObservation?.statement).toContain("refuted");
 			expect(harness.session.getLastAssistantText()).toContain("evidence-round budget");
 		} finally {
 			harness.cleanup();

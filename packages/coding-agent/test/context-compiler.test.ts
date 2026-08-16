@@ -955,7 +955,80 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(evidence).toBeDefined();
 		const evidenceText = text(evidence!);
 		expect(evidenceText).toContain("read");
-		expect(evidenceText).toContain("[truncated");
+		expect(evidenceText).toContain("[excerpted");
 		expect(evidenceText).not.toContain(huge);
+	});
+
+	it("injects prior Actions' located probes into the execution projection", async () => {
+		const manager = SessionManager.inMemory();
+		const userId = manager.appendMessage(user("map prompt construction sites", 1));
+		const anchorRevisionId = manager.appendAnchorRevision({
+			anchorId: "anchor-1",
+			revision: 1,
+			statement: "map prompt construction sites",
+			previousRevisionId: null,
+			sourceEventId: userId,
+		});
+
+		// A completed explore episode that already located the compiler path.
+		const exploreControlId = manager.appendMessage(assistant('{"kind":"explore"}', 2));
+		const firstActionStartId = manager.appendActionStart({
+			actionId: "action-1",
+			intent: "Locate the compiler",
+			completionCondition: "The compiler path is known",
+			expectation: "The compiler lives under packages/coding-agent/src/core",
+			anchorRevisionEntryId: anchorRevisionId,
+			sourceEventId: exploreControlId,
+		});
+		const findCall = assistant("", 3);
+		findCall.content = [
+			{ type: "toolCall", id: "find-1", name: "find", arguments: { pattern: "context-compiler.ts" } },
+		];
+		findCall.stopReason = "toolUse";
+		manager.appendMessage(findCall);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "find-1",
+			toolName: "find",
+			content: [{ type: "text", text: "packages/coding-agent/src/core/context-compiler.ts" }],
+			details: {},
+			isError: false,
+			timestamp: 4,
+		});
+		const unresolvableControlId = manager.appendMessage(assistant('{"kind":"unresolvable_action"}', 5));
+		manager.appendActionTransition({
+			actionId: "action-1",
+			startEntryId: firstActionStartId,
+			transition: "unresolvable",
+			sourceEventId: unresolvableControlId,
+			reason: "budget exhausted",
+		});
+
+		// The active Action is a fresh episode with no memory of the prior probe.
+		const secondControlId = manager.appendMessage(assistant('{"kind":"explore"}', 6));
+		manager.appendActionStart({
+			actionId: "action-2",
+			intent: "Read the compiler",
+			completionCondition: "The compiler structure is read",
+			expectation: "The compiler structure is readable",
+			anchorRevisionEntryId: anchorRevisionId,
+			sourceEventId: secondControlId,
+		});
+
+		const events = manager.getBranch();
+		const result = await new PhaseFourContextCompiler().compile({
+			rawEvents: events,
+			epistemicState: restoreEpistemicState(events),
+			runtimeMessages: manager.buildSessionContext().messages,
+			model: model(1_000),
+			systemPrompt: "",
+			tools: [],
+			projectionRole: "execution",
+			reservedOutputTokens: 8,
+		});
+		const texts = result.messages.map(text);
+
+		expect(texts.join("\n")).toContain("[PRIOR EXECUTION EVIDENCE]");
+		expect(texts.join("\n")).toContain("context-compiler.ts");
 	});
 });

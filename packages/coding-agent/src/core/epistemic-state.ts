@@ -49,6 +49,9 @@ export interface Action {
 	expectation: string;
 	frameRevisionEntryId?: string;
 	anchorRevisionEntryId?: string;
+	/** Controller-estimated serial evidence rounds for a pre-Frame `explore`; absent on Frame-leased Actions. */
+	expectedEvidenceRounds?: number;
+	budgetReason?: string;
 	sourceEventId: string;
 	timestamp: string;
 	/** Derived from raw events after startEntryId; it is not persisted as canonical state. */
@@ -123,6 +126,8 @@ function actionFromEntry(entry: ActionStartEntry): Action {
 		expectation: entry.expectation,
 		frameRevisionEntryId: entry.frameRevisionEntryId,
 		anchorRevisionEntryId: entry.anchorRevisionEntryId,
+		expectedEvidenceRounds: entry.expectedEvidenceRounds,
+		budgetReason: entry.budgetReason,
 		sourceEventId: entry.sourceEventId,
 		timestamp: entry.timestamp,
 		completedModelResponses: 0,

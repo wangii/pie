@@ -167,6 +167,9 @@ export interface ActionStartEntry extends SessionEntryBase {
 	/** Exactly one binding target: the Frame revision, or the Anchor revision (pre-Frame `explore`). */
 	frameRevisionEntryId?: string;
 	anchorRevisionEntryId?: string;
+	/** Controller-estimated serial evidence rounds for a pre-Frame `explore`; absent on Frame-leased Actions. */
+	expectedEvidenceRounds?: number;
+	budgetReason?: string;
 	sourceEventId: string;
 }
 

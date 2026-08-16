@@ -932,6 +932,7 @@ export class AgentSession {
 		expectation: string,
 		sourceEventId: string,
 		anchor: Anchor,
+		budget?: { expectedEvidenceRounds?: number; budgetReason?: string },
 	): void {
 		this._emitAppendedEntry(
 			this.sessionManager.appendActionStart({
@@ -940,6 +941,8 @@ export class AgentSession {
 				completionCondition: definition.completionCondition,
 				expectation,
 				anchorRevisionEntryId: anchor.revisionEntryId,
+				expectedEvidenceRounds: budget?.expectedEvidenceRounds,
+				budgetReason: budget?.budgetReason,
 				sourceEventId,
 			}),
 		);
@@ -1300,7 +1303,9 @@ export class AgentSession {
 				"You may use multiple tools and model responses and may repair local execution strategy, but you must not change " +
 				"the Action intent or completion condition." +
 				responseBudget +
-				" Batch independent read-only tool calls in one response when their execution contracts permit it. Do not spend a " +
+				" When a target file or region is already named in the CURRENT ACTION or in prior execution evidence, read it " +
+				"directly: do not spend responses re-locating files with ls/find/wc/grep discovery. " +
+				"Batch independent read-only tool calls in one response when their execution contracts permit it. Do not spend a " +
 				"response only narrating progress: either gather evidence needed by the completion condition or state the established result. " +
 				"As soon as the exact completion condition is established, stop this generation immediately: do not call another " +
 				"tool, do not begin the next task step, and do not produce the user's final answer. A provider stop ends only this " +
@@ -1806,11 +1811,28 @@ export class AgentSession {
 	private _leaseBudgetForAction(
 		state: ReturnType<typeof restoreEpistemicState>,
 	): (ProvisionalActionContract & { contractId: string; actionStartEntryId: string }) | undefined {
-		if (!state.action) return undefined;
-		return this._leaseBudgetForFrame(state.frame)?.actions.find(
+		const action = state.action;
+		if (!action) return undefined;
+		const frameBudget = this._leaseBudgetForFrame(state.frame)?.actions.find(
 			(candidate): candidate is ProvisionalActionContract & { contractId: string; actionStartEntryId: string } =>
-				candidate.actionStartEntryId === state.action?.startEntryId,
+				candidate.actionStartEntryId === action.startEntryId,
 		);
+		if (frameBudget) return frameBudget;
+		// Pre-Frame `explore` Actions carry their controller-estimated evidence rounds
+		// directly on the Action; synthesize a lease-shaped budget so they are enforced
+		// (and surfaced as a countdown) the same way Frame-leased Actions are, instead of
+		// silently falling back to the flat legacy response cap.
+		const rounds = action.expectedEvidenceRounds;
+		if (typeof rounds !== "number" || !Number.isSafeInteger(rounds) || rounds < 1) return undefined;
+		return {
+			intent: action.intent,
+			completionCondition: action.completionCondition,
+			expectation: action.expectation,
+			expectedEvidenceRounds: Math.min(rounds, DEFAULT_FRAME_LEASE_POLICY.maxEvidenceRounds),
+			budgetReason: action.budgetReason?.trim() || "Pre-Frame explore estimate.",
+			contractId: "explore",
+			actionStartEntryId: action.startEntryId,
+		};
 	}
 
 	/**
@@ -2056,7 +2078,10 @@ export class AgentSession {
 						"explore must add new information: this episode repeats a prior exploration or re-predicts an already-established fact. Propose a Frame, decompose, or ask instead of re-exploring.",
 					);
 				}
-				this._appendExploreStart(definition, expectation, sourceEventId, state.anchor);
+				this._appendExploreStart(definition, expectation, sourceEventId, state.anchor, {
+					expectedEvidenceRounds: decision.expectedEvidenceRounds,
+					budgetReason: decision.budgetReason,
+				});
 				this._operationalActionId = restoreEpistemicState(this.sessionManager.getBranch()).action?.id;
 				this._operationalRepairAttempts = 0;
 				this._latestOperationalError = undefined;
@@ -2123,6 +2148,10 @@ export class AgentSession {
 					const budgetDescription = actionBudget
 						? `${actionBudget.expectedEvidenceRounds}-round serial evidence budget`
 						: `${this._actionResponseLimit}-response legacy execution budget`;
+					this._materializeTerminalObservation(state, state.action, {
+						sign: "refuted",
+						detail: `the frozen completion condition was not established before the ${budgetDescription} was exhausted`,
+					});
 					this._appendActionTransition(
 						state.action,
 						"unresolvable",

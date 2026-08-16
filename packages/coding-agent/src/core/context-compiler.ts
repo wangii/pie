@@ -344,7 +344,7 @@ function buildExecutionEvidenceMessage(
 			const observed = contentText(message.content, "\n").trim();
 			const bounded =
 				observed.length > BROAD_EVIDENCE_MAX_RESULT_CHARS
-					? `${observed.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…[truncated ${observed.length - BROAD_EVIDENCE_MAX_RESULT_CHARS} characters]`
+					? `${observed.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…[excerpted; the tool returned ${observed.length} characters]`
 					: observed;
 			lines.push(bounded ? `  → ${bounded}` : "  → (no text result)");
 			entries++;
@@ -355,9 +355,57 @@ function buildExecutionEvidenceMessage(
 	return {
 		role: "custom",
 		customType: EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
-		content: `[EXECUTION EVIDENCE]\nWhat the execution role probed and observed in the current Action:\n${lines.join("\n")}${omitted}`,
+		content: `[EXECUTION EVIDENCE]\nWhat the execution role probed and observed in the current Action (long results are excerpted here, not truncated by the tool):\n${lines.join("\n")}${omitted}`,
 		display: false,
 		details: { actionId: action?.id, startEntryId },
+		timestamp: Date.now(),
+	};
+}
+
+/**
+ * The execution role is scoped to its current Action and its context projection
+ * drops every event before the Action's start entry (`outside_action_episode`), so
+ * a fresh Action begins with no memory of the files earlier Actions already located.
+ * Summarize those prior probes — tool calls plus bounded results — so the execution
+ * role reads the already-named paths directly instead of re-running `find`/`ls`/`wc`
+ * discovery and exhausting its evidence budget on reconnaissance.
+ */
+function buildPriorExecutionEvidenceMessage(
+	events: readonly SessionEntry[],
+	action: Action | undefined,
+): AgentMessage | undefined {
+	if (!action) return undefined;
+	const currentStartIndex = events.findIndex((event) => event.id === action.startEntryId);
+	if (currentStartIndex <= 0) return undefined;
+
+	const lines: string[] = [];
+	for (let index = 0; index < currentStartIndex; index++) {
+		const event = events[index]!;
+		if (event.type !== "message") continue;
+		const message = event.message;
+		if (message.role === "assistant") {
+			for (const part of message.content) {
+				if (part.type !== "toolCall") continue;
+				lines.push(`- ${part.name} ${summarizeToolArguments(part.arguments)}`);
+			}
+		} else if (message.role === "toolResult") {
+			const observed = contentText(message.content, "\n").trim();
+			const bounded =
+				observed.length > BROAD_EVIDENCE_MAX_RESULT_CHARS
+					? `${observed.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…[excerpted; the tool returned ${observed.length} characters]`
+					: observed;
+			lines.push(bounded ? `  → ${bounded}` : "  → (no text result)");
+		}
+	}
+	if (lines.length === 0) return undefined;
+	const retained = lines.slice(-BROAD_EVIDENCE_MAX_ENTRIES);
+	const omitted = lines.length > retained.length ? "\n…[earlier execution probes omitted]" : "";
+	return {
+		role: "custom",
+		customType: EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
+		content: `[PRIOR EXECUTION EVIDENCE]\nWhat earlier Actions already probed and located; read the named paths directly and do not re-run find/ls/wc discovery:\n${retained.join("\n")}${omitted}`,
+		display: false,
+		details: { actionId: action?.id, priorToEntryId: action?.startEntryId },
 		timestamp: Date.now(),
 	};
 }
@@ -757,7 +805,11 @@ async function compileProjection(
 	const frameMessages = frame ? [frameMessage(frame)] : [];
 	const actionMessages = action ? [actionMessage(action)] : [];
 	const executionEvidence =
-		projectionRole === "epistemic" ? buildExecutionEvidenceMessage(input.rawEvents, action) : undefined;
+		projectionRole === "epistemic"
+			? buildExecutionEvidenceMessage(input.rawEvents, action)
+			: projectionRole === "execution"
+				? buildPriorExecutionEvidenceMessage(input.rawEvents, action)
+				: undefined;
 	const executionEvidenceMessages = executionEvidence ? [executionEvidence] : [];
 	const requestInstructionMessages = input.requestInstruction ? [input.requestInstruction] : [];
 	const anchorTokens = estimateMessagesTokens(anchorMessages);
