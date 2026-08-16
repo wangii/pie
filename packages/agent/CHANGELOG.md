@@ -7,6 +7,8 @@
 - Added an `onModelContext` diagnostic hook for observing the exact context passed to each model request.
 - Added an application-selectable `AgentLoopRunner` boundary so applications can own turn progression, including explicit assistant-tail continuation, while reusing provider and tool execution services.
 
+## [0.84.2] - 2026-08-14
+
 ### Fixed
 
 - Fixed `streamProxy()` dropping finalized tool-call metadata such as OpenAI Responses namespaces ([#7709](https://github.com/earendil-works/pi/issues/7709)).
