@@ -1014,7 +1014,7 @@ Materialize only when the episode produced at least one finalized result to cite
 
 ### 10.3 Validate the prediction error names a concrete referent
 
-Add `validatePredictionError(sign, detail, expectation)`, in the same style as `validateBudgetReason`: the `detail` must be non-empty and must not be a bare confirmation token (`confirmed`/`found it` carry no named conclusion), while any substantive sentence naming a path, symbol, line, or count passes. Cross-check `sign` against the transition: `escalate` requires `refuted`, `complete` allows `confirmed`/`refined`, `unresolvable` allows `refuted`/`refined`. (The bare-confirmation denylist is deliberately light; tighten with the deterministic suite if the controller starts emitting content-free confirmations.)
+Add `validatePredictionError(sign, detail, expectation)`, in the same style as `validateBudgetReason`: the `detail` must be non-empty and must not be a bare confirmation token (`confirmed`/`found it` carry no named conclusion), while any substantive sentence naming a path, symbol, line, or count passes. Cross-check `sign` against the transition: `escalate` requires `refuted`, `complete` allows `confirmed`/`refined`, `unresolvable` allows `refuted`/`refined`. The `refined` sign is narrowed to "the expectation's claim held and reality added detail": a `refined` detail that negates the expectation's predicate ("contains no X", "does not", "rather than", "instead") is rejected and must be `refuted` — softening a false predicate into "progress" is exactly the failure that lets a wrong Frame survive.
 
 ### 10.4 Deterministic coverage
 

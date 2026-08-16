@@ -449,4 +449,49 @@ describe("Phase 10 execution feedback observation", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("rejects a refined prediction error that negates its expectation's claim", async () => {
+		const harness = await createHarness(options());
+		try {
+			harness.setResponses([
+				control(frame),
+				control(authorizeAction),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "loader-only" }, { id: "call-rej-r" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("The probe result is finalized."),
+				// A refined sign must still claim the expectation held; negating the predicate is a refutation.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "refined",
+						detail: "the module contains no literal prompt text; it is a loader",
+					},
+				}),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "refined",
+						detail: "the module holds the boundary and adds the exact export names",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("inspect the boundary");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes(
+						"A refined prediction error must still claim its expectation held",
+					),
+				),
+			).toBe(true);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

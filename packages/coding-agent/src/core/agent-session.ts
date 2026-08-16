@@ -559,6 +559,15 @@ const DEFAULT_MAX_FRAME_ADVANCES = 3;
 const VAGUE_PREDICTION_ERROR_PATTERN =
 	/^(?:confirmed|correct|verified|works|done|ok|okay|yes|no|true|found|found it|it works|as expected|successful(?:ly)?|completed?|matched|passed|failed)$/iu;
 
+/**
+ * A `refined` prediction error must still claim its expectation held. Negating the
+ * expectation's predicate ("contains no X", "does not", "rather than", "instead")
+ * is a refutation, not a refinement, even when the episode produced a useful
+ * correction. This narrows `refined` to "the claim held and reality added detail".
+ */
+const REFINED_REFUTATION_MARKER_PATTERN =
+	/(?:contains? no |contained no |has? no |had no |does not contain|did not contain|doesn't contain|rather than|instead of|is actually|are actually|turned out to be)/iu;
+
 /** Render a structured prediction error as `sign: detail` for statements and transitions. */
 function renderPredictionError(predictionError: PredictionError): string {
 	return `${predictionError.sign}: ${predictionError.detail.trim()}`;
@@ -1280,7 +1289,6 @@ export class AgentSession {
 			(activeActionBudget
 				? consumedEvidenceRounds >= activeActionBudget.expectedEvidenceRounds
 				: state.action.completedModelResponses >= this._actionResponseLimit);
-		const policy = DEFAULT_FRAME_LEASE_POLICY;
 		const availableActionContracts = !state.action
 			? this._leaseBudgetForFrame(state.frame)?.actions.filter((candidate) => !candidate.actionStartEntryId)
 			: undefined;
@@ -1325,21 +1333,17 @@ export class AgentSession {
 			`The current state permits only: ${allowed}.` +
 			availableActionContractsPrompt +
 			consumedActionContractsPrompt +
-			` For create_frame, enumerate only the first wave of independent Actions (1-${policy.maxActions}): the ones whose completion conditions are knowable and executable now, before any prior observation. Defer any Action whose completion condition depends on a result you have not yet observed, and name in the expectation which single observation gates the next wave. ` +
-			"For advance_frame, add only the next wave of independent Actions now made knowable by the prior wave's observation; never re-enumerate an already-consumed Action. revise_frame and replace_frame change the proposition and also carry actions. None of these supply horizon. " +
-			`A Frame may be advanced at most ${this._maxFrameAdvances} times before it must be falsified, replaced, or finalized; if a proposition needs more waves than that, it is probably wrong and should be falsified. ` +
-			`Each provisional Action has intent, completionCondition, expectation, expectedEvidenceRounds (integer 1-${policy.maxEvidenceRounds}), and budgetReason. Its expectation names the single observable the probe predicts it will find, distinct from intent (what to do) and completion condition (what proves done). ` +
-			"One evidence round is one model response that emits one or more independent evidence-producing tool calls; parallel read-only calls in that response count once. A later round is valid only when its probe depends on a result unavailable before the preceding round. " +
-			"Complexity, uncertainty, file count, or tool-call count do not justify extra rounds. Unknown source locations require a discovery-only Action before source reading. " +
-			`The harness derives horizon within ${this._frameHorizonRange.min}-${this._frameHorizonRange.max}: initial control ${policy.initialControlAllowance} + per Action authorization ${policy.actionAuthorizationCost} + evidence rounds + terminal adjudication ${policy.actionTerminalAdjudicationCost} + final Frame adjudication ${policy.finalFrameAdjudicationCost}. ` +
-			"When an accepted evidence-round estimate is exhausted, continue_action is forbidden and control must return without automatic renewal. " +
+			" For create_frame, enumerate only the first wave of independent Actions: the ones whose completion conditions are knowable and executable now, before any prior observation. Defer any Action whose completion condition depends on a result you have not yet observed, and name in the expectation which single observation gates the next wave. " +
+			"For advance_frame, add only the next wave of independent Actions now made knowable by the prior wave's observation; never re-enumerate an already-consumed Action. revise_frame and replace_frame change the proposition and also carry actions. If a Frame keeps needing new waves, it is probably wrong; falsify or replace it rather than advancing indefinitely. " +
+			"Each provisional Action has intent, completionCondition, expectation, expectedEvidenceRounds, and budgetReason. Its expectation names the single observable the probe predicts it will find, distinct from intent (what to do) and completion condition (what proves done). Each evidence round after the first must depend on a result the preceding round produced; unknown source locations require a discovery-only Action before source reading. " +
+			"The harness derives and enforces the Frame horizon, advance limits, and evidence-round budgets mechanically; do not reason about how many responses remain or whether a wave fits — decide only the epistemically right next step, and the harness will reject any out-of-bounds decision with the reason. " +
 			'Schemas: {"kind":"create_frame","statement":string,"expectation":string,"actions":[{"intent":string,"completionCondition":string,"expectation":string,"expectedEvidenceRounds":integer,"budgetReason":string}]}; ' +
 			"explore requires expectation, intent, completionCondition, expectedEvidenceRounds (integer), and budgetReason (one bounded comprehension episode before any Frame); ask requires question; decompose requires subgoals (array of non-empty strings) and reason; " +
 			"revise_frame and replace_frame use the same actions array and also require reason; advance_frame carries only actions and reason (it keeps the current Frame's statement and expectation unchanged, so the proposition is not re-asserted); falsify_frame, kill_frame, continue_action, " +
 			"authorize_final, and report_inability require reason; " +
 			"revise_anchor requires statement and reason; authorize_action requires only actionContractId from one listed unused provisional contract; " +
 			"complete_action, unresolvable_action, and escalate_action require predictionError {sign, detail}; escalate_action also requires challenge (anchor or frame). " +
-			"The predictionError sign is confirmed (the expectation held exactly), refined (held and reality added precision), or refuted (the world contradicted or could not satisfy it); escalate_action must be refuted, complete_action must be confirmed or refined. The detail must name the concrete referent the episode established — a file path, symbol, line number, or count — because the raw tool output stays at the execution layer and only this named conclusion crosses into epistemic context; a bare confirmation carries no evidence. A Frame must assert one provisional causal or " +
+			'The predictionError sign is judged on the expectation\'s exact observable claim, not on whether the probe was informative. confirmed means the claim was met exactly. refined means the claim WAS met and the episode added a precise detail (names, counts, mechanism) that sharpens it. refuted means the claim was NOT met — reality contradicted it or it was unsatisfiable — even when the episode still produced a useful correction, which belongs in detail. If the detail negates the expectation\'s claim ("contains no X", "does not", "rather than", "instead"), the sign is refuted, not refined. escalate_action must be refuted; complete_action must be confirmed or refined. The detail must name the concrete referent the episode established — a file path, symbol, line number, or count — because the raw tool output stays at the execution layer and only this named conclusion crosses into epistemic context; a bare confirmation carries no evidence. A Frame must assert one provisional causal or ' +
 			"behavioral relation that authorizes investigation; it must not restate the request, begin with a task verb, or include " +
 			"the requested deliverable. Its expectation names the exact observable world result you predict confirms that relation, " +
 			"not an inability to finish the investigation; if the check does not produce that result, the Frame is falsified. A Frame must not assert an unbounded completeness claim (for example that " +
@@ -3348,6 +3352,11 @@ export class AgentSession {
 		if (sign === "confirmed" && VAGUE_PREDICTION_ERROR_PATTERN.test(detail)) {
 			throw new Error(
 				"A confirmed prediction error must name the concrete conclusion (path, symbol, line, or count); a bare confirmation is not evidence.",
+			);
+		}
+		if (sign === "refined" && REFINED_REFUTATION_MARKER_PATTERN.test(detail)) {
+			throw new Error(
+				"A refined prediction error must still claim its expectation held; negating the predicate means refuted, with the correction in detail.",
 			);
 		}
 	}
