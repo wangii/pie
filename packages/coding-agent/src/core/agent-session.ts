@@ -1331,10 +1331,13 @@ export class AgentSession {
 				responseBudget +
 				" When a target file or region is already named in the CURRENT ACTION or in prior execution evidence, read it " +
 				"directly: do not spend responses re-locating files with ls/find/wc/grep discovery. " +
-				"Batch independent read-only tool calls in one response when their execution contracts permit it. Do not spend a " +
-				"response only narrating progress: either gather evidence needed by the completion condition or state the established result. " +
-				"As soon as the exact completion condition is established, stop this generation immediately: do not call another " +
-				"tool, do not begin the next task step, and do not produce the user's final answer. A provider stop ends only this " +
+				"Batch independent read-only tool calls in one response when their execution contracts permit it. " +
+				"End every generation with a single prose sentence stating the established result so far: what you verified against " +
+				"the completion condition, and whether it is now met or what remains. The controller reads only this prose, not your " +
+				"raw tool output, so never end a generation with tool calls alone. " +
+				"As soon as the exact completion condition is established, stop this generation immediately: state what you observed " +
+				"and stop — do not call another tool, do not begin the next task step, and do not produce the user's final answer. " +
+				"A provider stop ends only this " +
 				"generation; it does not complete the Action or authorize a final answer. Return exactly UNRESOLVABLE only when " +
 				"the frozen completion condition cannot be met under current constraints. If it is unmeetable because it demands an " +
 				"unbounded enumeration (every/all occurrences or a complete catalog) rather than because the world contradicts it, do not " +

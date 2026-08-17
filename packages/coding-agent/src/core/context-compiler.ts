@@ -303,15 +303,18 @@ function isControlDecisionMessage(event: SessionEntry): boolean {
 
 /**
  * The broad (epistemic) projection lets the controller adjudicate the active or
- * last-terminal Action. Projecting the execution role's raw tool-call/tool-result
- * traffic as structured messages shows the controller a "doer" transcript it then
- * imitates — emitting <invoke> text instead of a JSON decision — because the
- * concrete call/result pattern outweighs any "you have no tools" instruction.
- * Replace that transcript with one compact, derived evidence message: the probes
- * the execution role issued and what each observed, as plain text.
+ * last-terminal Action. Its terminal unit is expectation + predictionError, so the
+ * execution evidence it receives must be the execution role's own distilled
+ * conclusion — the prose "established result" it narrates after gathering — not the
+ * raw tool-call/tool-result transcript. Replaying raw probe traffic (ls/find/wc
+ * discovery and file dumps) drowns the controller in execution detail it cannot
+ * adjudicate against; raw evidence is the execution role's private working memory.
  */
 const BROAD_EVIDENCE_MAX_RESULT_CHARS = 400;
 const BROAD_EVIDENCE_MAX_ENTRIES = 24;
+
+/** Tool-call/shell syntax emitted as literal text; mirrors the control-loop detector. */
+const TOOL_CALL_SYNTAX_PATTERN = /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b/iu;
 
 function summarizeToolArguments(arguments_: Record<string, unknown>): string {
 	const json = JSON.stringify(arguments_);
@@ -328,34 +331,28 @@ function buildExecutionEvidenceMessage(
 	if (actionStartIndex < 0) return undefined;
 
 	const lines: string[] = [];
+	const seen = new Set<string>();
 	let entries = 0;
 	for (let index = actionStartIndex + 1; index < events.length && entries < BROAD_EVIDENCE_MAX_ENTRIES; index++) {
 		const event = events[index]!;
-		if (event.type !== "message") continue;
-		const message = event.message;
-		if (message.role === "assistant") {
-			for (const part of message.content) {
-				if (part.type !== "toolCall") continue;
-				if (entries >= BROAD_EVIDENCE_MAX_ENTRIES) break;
-				lines.push(`- ${part.name} ${summarizeToolArguments(part.arguments)}`);
-				entries++;
-			}
-		} else if (message.role === "toolResult") {
-			const observed = contentText(message.content, "\n").trim();
-			const bounded =
-				observed.length > BROAD_EVIDENCE_MAX_RESULT_CHARS
-					? `${observed.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…[excerpted; the tool returned ${observed.length} characters]`
-					: observed;
-			lines.push(bounded ? `  → ${bounded}` : "  → (no text result)");
-			entries++;
-		}
+		if (event.type !== "message" || event.message.role !== "assistant") continue;
+		if (isControlDecisionMessage(event)) continue;
+		if (event.message.content.some((part) => part.type === "toolCall")) continue;
+		const prose = contentText(event.message.content, "\n").trim();
+		if (!prose || TOOL_CALL_SYNTAX_PATTERN.test(prose)) continue;
+		const normalized = prose.toLocaleLowerCase();
+		if (seen.has(normalized)) continue;
+		seen.add(normalized);
+		const bounded =
+			prose.length > BROAD_EVIDENCE_MAX_RESULT_CHARS ? `${prose.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…` : prose;
+		lines.push(`- ${bounded}`);
+		entries++;
 	}
 	if (lines.length === 0) return undefined;
-	const omitted = entries >= BROAD_EVIDENCE_MAX_ENTRIES ? "\n…[additional execution probes omitted]" : "";
 	return {
 		role: "custom",
 		customType: EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
-		content: `[EXECUTION EVIDENCE]\nWhat the execution role probed and observed in the current Action (long results are excerpted here, not truncated by the tool):\n${lines.join("\n")}${omitted}`,
+		content: `[EXECUTION EVIDENCE]\nThe execution role's established result in the current Action (its own distilled conclusion, not raw tool output):\n${lines.join("\n")}`,
 		display: false,
 		details: { actionId: action?.id, startEntryId },
 		timestamp: Date.now(),
@@ -445,9 +442,6 @@ function episodeBoundary(events: readonly SessionEntry[], action: Action | undef
 	}
 	return undefined;
 }
-
-/** Tool-call/shell syntax emitted as literal text; mirrors the control-loop detector. */
-const TOOL_CALL_SYNTAX_PATTERN = /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b/iu;
 
 function selectBroadRawEventIds(
 	events: readonly SessionEntry[],

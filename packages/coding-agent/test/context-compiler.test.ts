@@ -782,7 +782,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.manifest.projection.frameOutcomes).toBeUndefined();
 	});
 
-	it("summarizes finalized tool results from a terminal Action episode into execution evidence", async () => {
+	it("surfaces the execution role's distilled narration, not raw tool results, from a terminal Action episode", async () => {
 		const manager = SessionManager.inMemory();
 		const userId = manager.appendMessage(user("diagnose authorization", 1));
 		manager.appendAnchorRevision({
@@ -839,6 +839,10 @@ describe("PhaseZeroContextCompiler", () => {
 			isError: false,
 			timestamp: 7,
 		});
+		// The execution role's distilled conclusion — the only channel the controller reads.
+		manager.appendMessage(
+			assistant("The owning process is the worker runtime (pid 42); completion condition met.", 7),
+		);
 
 		const unresolvableControlId = manager.appendMessage(assistant('{"kind":"unresolvable_action"}', 8));
 		manager.appendActionTransition({
@@ -871,11 +875,12 @@ describe("PhaseZeroContextCompiler", () => {
 		});
 		const texts = result.messages.map(text);
 
-		expect(texts.join("\n")).toContain("first evidence");
-		expect(texts.join("\n")).toContain("second evidence");
+		expect(texts.join("\n")).toContain("worker runtime");
+		expect(texts.join("\n")).not.toContain("first evidence");
+		expect(texts.join("\n")).not.toContain("second evidence");
 	});
 
-	it("replaces raw tool-call/tool-result traffic with a bounded execution-evidence summary", async () => {
+	it("replaces raw tool-call/tool-result traffic with the execution role's distilled narration", async () => {
 		const manager = SessionManager.inMemory();
 		const userId = manager.appendMessage(user("diagnose authorization", 1));
 		manager.appendAnchorRevision({
@@ -919,6 +924,10 @@ describe("PhaseZeroContextCompiler", () => {
 			isError: false,
 			timestamp: 5,
 		});
+		// The execution role's distilled conclusion — the only channel the controller reads.
+		manager.appendMessage(
+			assistant("The owning process is the worker runtime (pid 42); completion condition met.", 5),
+		);
 
 		const unresolvableControlId = manager.appendMessage(assistant('{"kind":"unresolvable_action"}', 6));
 		manager.appendActionTransition({
@@ -948,14 +957,14 @@ describe("PhaseZeroContextCompiler", () => {
 			),
 		).toBe(false);
 
-		// A single derived evidence message carries a bounded probe summary instead.
+		// A single derived evidence message carries the execution role's distilled conclusion.
 		const evidence = result.messages.find(
 			(message) => message.role === "custom" && message.customType === EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
 		);
 		expect(evidence).toBeDefined();
 		const evidenceText = text(evidence!);
-		expect(evidenceText).toContain("read");
-		expect(evidenceText).toContain("[excerpted");
+		expect(evidenceText).toContain("worker runtime");
+		expect(evidenceText).not.toContain("read");
 		expect(evidenceText).not.toContain(huge);
 	});
 
