@@ -91,6 +91,8 @@ export interface HarnessOptions {
 	controlMaxTokens?: number;
 	/** Max times a Frame may be re-planned (advance/revise) before falsify/replace (see AgentSessionConfig). */
 	maxFrameAdvances?: number;
+	/** Max times an Anchor may be re-decomposed before explore/Frame (see AgentSessionConfig). */
+	maxAnchorDecompositions?: number;
 	/** Existing raw session used by restart and branch integration tests. */
 	sessionManager?: SessionManager;
 	/** Upper bound on epistemic control decisions per production request. */
@@ -261,6 +263,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		actionResponseLimit: options.actionResponseLimit,
 		controlMaxTokens: options.controlMaxTokens,
 		maxFrameAdvances: options.maxFrameAdvances,
+		maxAnchorDecompositions: options.maxAnchorDecompositions,
 	});
 
 	const events: AgentSessionEvent[] = [];

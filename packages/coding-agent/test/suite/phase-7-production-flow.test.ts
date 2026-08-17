@@ -613,7 +613,7 @@ describe("Phase 7 production control flow", () => {
 			);
 			expect(refutedObservation).toBeDefined();
 			expect(refutedObservation?.statement).toContain("refuted");
-			expect(harness.session.getLastAssistantText()).toContain("evidence-round budget");
+			expect(harness.session.getLastAssistantText()).toContain("could not complete this request");
 		} finally {
 			harness.cleanup();
 		}
@@ -744,10 +744,10 @@ describe("Phase 7 production control flow", () => {
 
 			await harness.session.prompt("repair malformed control");
 			expect(harness.session.state.errorMessage).toBeUndefined();
-			expect(harness.session.getLastAssistantText()).toBe("A bounded inability report.");
+			expect(harness.session.getLastAssistantText()).toContain("could not complete this request");
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_revision")).toHaveLength(0);
 			expect(harness.providerContexts[1]!.systemPrompt).toContain("previous decision was rejected");
-			expect(harness.providerContexts).toHaveLength(4);
+			expect(harness.providerContexts).toHaveLength(3);
 		} finally {
 			harness.cleanup();
 		}

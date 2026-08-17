@@ -228,9 +228,7 @@ describe("completion condition bounds", () => {
 
 			await harness.session.prompt("check the prompt entry sites in the loop");
 
-			expect(harness.session.getLastAssistantText()).toBe(
-				"The epistemic budget was exhausted; partial report follows.",
-			);
+			expect(harness.session.getLastAssistantText()).toContain("could not complete this request");
 			expect(harness.session.state.errorMessage).toBeUndefined();
 		} finally {
 			harness.cleanup();
@@ -260,7 +258,7 @@ describe("completion condition bounds", () => {
 
 			await harness.session.prompt("check the prompt entry sites in the loop");
 
-			expect(harness.session.getLastAssistantText()).toBe("budget 2 exhausted");
+			expect(harness.session.getLastAssistantText()).toContain("could not complete this request");
 			expect(harness.session.state.errorMessage).toBeUndefined();
 		} finally {
 			harness.cleanup();
@@ -379,9 +377,7 @@ describe("completion condition bounds", () => {
 
 			await harness.session.prompt("locate the prompt entry sites in the loop");
 
-			expect(harness.session.getLastAssistantText()).toBe(
-				"Control decisions kept failing; here is a bounded report.",
-			);
+			expect(harness.session.getLastAssistantText()).toContain("could not complete this request");
 			expect(harness.session.state.errorMessage).toBeUndefined();
 		} finally {
 			harness.cleanup();
@@ -698,6 +694,63 @@ describe("completion condition bounds", () => {
 		}
 	});
 
+	it("rejects a decompose that repeats the current subgoals", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "decompose",
+					subgoals: ["Identify the base system prompt", "Identify the per-role control prompts"],
+					reason: "split the inventory into checkable slices",
+				}),
+				// Re-decomposing into the same subgoals must be rejected, so the next
+				// response advances the loop instead of churning the Anchor.
+				control({
+					kind: "decompose",
+					subgoals: ["Identify the base system prompt", "Identify the per-role control prompts"],
+					reason: "retry the same split",
+				}),
+				control({ kind: "authorize_final", reason: "slices established" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("check all the prompts");
+
+			const anchors = harness.sessionManager.getBranch().filter((entry) => entry.type === "anchor_revision");
+			expect(anchors).toHaveLength(2);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("caps repeated re-decomposition", async () => {
+		const harness = await createHarness({ ...fullStackOptions(), maxAnchorDecompositions: 1 });
+		try {
+			harness.setResponses([
+				control({
+					kind: "decompose",
+					subgoals: ["Identify the base system prompt"],
+					reason: "first split",
+				}),
+				// Different subgoals to clear the near-duplicate guard, but the cap rejects it.
+				control({
+					kind: "decompose",
+					subgoals: ["Locate the system prompt template"],
+					reason: "second split",
+				}),
+				control({ kind: "authorize_final", reason: "slices established" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("check all the prompts");
+
+			const anchors = harness.sessionManager.getBranch().filter((entry) => entry.type === "anchor_revision");
+			expect(anchors).toHaveLength(2);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("materializes an explore's concrete tool result, not only its prediction", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
@@ -836,20 +889,67 @@ describe("completion condition bounds", () => {
 		}
 	});
 
-	it("strips tool-call markup from a final answer that emits it as text", async () => {
+	it("strips tool-call markup from a satisfied final answer that emits it as text", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
 			harness.setResponses([
-				control({ kind: "ask", question: "Should this be an exhaustive inventory or a representative analysis?" }),
+				control({
+					kind: "create_frame",
+					statement: "Prompt construction in the loop is produced only by externally injected messages",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
 				fauxAssistantMessage(
-					'Let me check the sources first.\n\n<invoke name="bash">\n<parameter name="command" string="true">rg -l prompt packages</parameter>\n</invoke>',
+					'The answer.\n\n<invoke name="bash">\n<parameter name="command" string="true">rg -l prompt packages</parameter>\n</invoke>',
 				),
 			]);
 
-			await harness.session.prompt("check the prompts");
+			await harness.session.prompt("locate the prompt entry sites in the loop");
 
 			// The fake <invoke> block is gone, the surrounding prose is kept.
-			expect(harness.session.getLastAssistantText()).toBe("Let me check the sources first.");
+			expect(harness.session.getLastAssistantText()).toBe("The answer.");
+			expect(harness.session.state.errorMessage).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("strips plural <tool_calls> markup from a satisfied final answer", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "create_frame",
+					statement: "Prompt construction in the loop is produced only by externally injected messages",
+					expectation: "The loop source shows a prompt template or assembly routine inside the class",
+					actions: [actionBudget(action)],
+				}),
+				control({ kind: "authorize_action", actionContractId: "A1" }),
+				fauxAssistantMessage("The loop source was read in full."),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "A single full read established where prompts enter in the loop source",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The requested diagnosis is established" }),
+				fauxAssistantMessage("The answer.\n\n<tool_calls>rg -l prompt packages</tool_calls>"),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites in the loop");
+
+			expect(harness.session.getLastAssistantText()).toBe("The answer.");
 			expect(harness.session.state.errorMessage).toBeUndefined();
 		} finally {
 			harness.cleanup();

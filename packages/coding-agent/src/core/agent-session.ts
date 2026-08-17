@@ -324,6 +324,13 @@ export interface AgentSessionConfig {
 	 * indefinitely instead of being falsified. Default: 3.
 	 */
 	maxFrameAdvances?: number;
+	/**
+	 * Maximum number of times a single Anchor may be re-decomposed (`decompose`)
+	 * before the controller must explore or commit a Frame. Bounds Anchor re-planning
+	 * so the controller cannot re-decompose indefinitely instead of executing.
+	 * Default: 4.
+	 */
+	maxAnchorDecompositions?: number;
 }
 
 export interface ExtensionBindings {
@@ -556,6 +563,15 @@ const DEFAULT_CONTROL_MAX_TOKENS = 8000;
 const DEFAULT_MAX_FRAME_ADVANCES = 3;
 
 /**
+ * Maximum number of times the Anchor may be re-decomposed (`decompose`) before the
+ * controller must either run a bounded exploration or commit a Frame. Decompose is
+ * a planning crutch: it rewrites the Anchor into numbered subgoals and always
+ * succeeds, so without a cap a controller can re-plan indefinitely instead of
+ * executing. Reset when a Frame is created from the decomposition.
+ */
+const DEFAULT_MAX_ANCHOR_DECOMPOSITIONS = 4;
+
+/**
  * The JSON field signature for each Pie control decision kind. The epistemic
  * prompt states the permitted kind names but not their shapes; without this the
  * control model guesses field names (it has reasoning disabled and no schema to
@@ -617,12 +633,15 @@ function renderTerminalObservationStatement(expectation: string, predictionError
 }
 
 /**
- * A tool-call block emitted as literal text — e.g. `<invoke name="bash">…</invoke>`
- * or `<tool_call>…</tool_call>` — including its nested parameters. Matched so the
- * final-answer sanitizer can strip it and recover the surrounding prose.
+ * Angle-bracket markup emitted as literal text by a no-tool role — a tool-call
+ * block (`<invoke>`/`<tool_call>`), a wrapper tag (`<frame_plan>`/`<thinking>`), or a
+ * hallucinated command tag (`<view_command>`). A whitelist is fragile because the
+ * model keeps inventing new tag names, so match any `<tag>…</tag>` block (via
+ * backreference), any self-closing `<tag/>`, and any stray `</tag>`. The final-answer
+ * sanitizer strips these to recover the surrounding prose.
  */
 const TOOL_CALL_BLOCK_PATTERN =
-	/<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b[\s\S]*?(?:<\s*\/\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\s*>|$)/giu;
+	/<([a-z_][a-z0-9_.:-]*)\b[^>]*>[\s\S]*?<\/\1\s*>|<[a-z_][a-z0-9_.:-]*\b[^>]*\/>|<\/[a-z_][a-z0-9_.:-]*\s*>/giu;
 
 // ============================================================================
 // AgentSession Class
@@ -711,6 +730,8 @@ export class AgentSession {
 	private readonly _controlMaxTokens: number;
 	private readonly _maxFrameAdvances: number;
 	private _frameAdvanceCount = 0;
+	private readonly _maxAnchorDecompositions: number;
+	private _anchorDecomposeCount = 0;
 	private _frameLeaseBudget: ActiveFrameLeaseBudget | undefined;
 	private _controlRepairAttempts = 0;
 	private readonly _maxControlRepairAttempts = 3;
@@ -808,6 +829,11 @@ export class AgentSession {
 			throw new Error("Max frame advances must be a non-negative integer.");
 		}
 		this._maxFrameAdvances = maxFrameAdvances;
+		const maxAnchorDecompositions = config.maxAnchorDecompositions ?? DEFAULT_MAX_ANCHOR_DECOMPOSITIONS;
+		if (!Number.isSafeInteger(maxAnchorDecompositions) || maxAnchorDecompositions < 0) {
+			throw new Error("Max anchor decompositions must be a non-negative integer.");
+		}
+		this._maxAnchorDecompositions = maxAnchorDecompositions;
 		const frameHorizonRange = config.frameHorizonRange ?? { min: 1, max: DEFAULT_MAX_FRAME_HORIZON };
 		if (
 			!Number.isSafeInteger(frameHorizonRange.min) ||
@@ -1387,8 +1413,8 @@ export class AgentSession {
 		return (
 			stateSnapshot +
 			"\n\nPIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
-			"do not call or simulate tools, and do not output requested answer tokens. You have no tools: never emit tool-call or shell syntax such as <invoke> or <bash_command> — reading and running happen in the execution role. To keep the active Action running, emit continue_action; to record that its completion condition was or was not met, emit complete_action or unresolvable_action carrying its predictionError. Return exactly one JSON object, with " +
-			"the discriminator property named exactly kind, and no prose or markdown. The first character must be { and the " +
+			"do not call or simulate tools, and do not output requested answer tokens. You have no tools: never emit tool-call or shell syntax such as <invoke>, <tool_call>, <tool_calls>, or <bash_command> — reading and running happen in the execution role. To keep the active Action running, emit continue_action; to record that its completion condition was or was not met, emit complete_action or unresolvable_action carrying its predictionError. Return exactly one JSON object, with " +
+			"the discriminator property named exactly kind, and no prose, no markdown, and no wrapping tags such as <frame_plan> or <thinking> before or after the object. The first character must be { and the " +
 			"last character must be }. " +
 			(this._lastControlError
 				? `\n\nREJECTED DECISION. The previous decision was rejected: ${this._lastControlError} Correct only what it names and return one JSON decision object.\n`
@@ -1562,14 +1588,15 @@ export class AgentSession {
 	}
 
 	/**
-	 * Detect tool-call syntax emitted as literal text (e.g. `<invoke name="...">` or
-	 * `<tool_call>`) rather than as a structured toolCall content part. Models in a
-	 * no-tool role (epistemic control, final answer) fall back to this when they
-	 * want to act but have no tools available; it is inert prose, not an executable
-	 * call.
+	 * Detect angle-bracket markup emitted as literal text — tool-call syntax
+	 * (`<invoke>`/`<tool_call>`) or a wrapper/hallucinated tag (`<frame_plan>`,
+	 * `<thinking>`, `<view_command>`). Models in a no-tool role (epistemic control,
+	 * final answer) emit these when they want to act but have no tools; they are inert
+	 * prose, not executable calls. Match any `<tag` or `</tag` opener so a novel tag
+	 * name cannot escape detection.
 	 */
 	private _emitsToolCallSyntax(text: string): boolean {
-		return /<\s*(?:antml:)?(?:invoke|tool_call|tool_use|function_call|bash_command|bash)\b/iu.test(text);
+		return /<\/?[a-z_][a-z0-9_.:-]*/iu.test(text);
 	}
 
 	/**
@@ -1945,6 +1972,7 @@ export class AgentSession {
 				prepared.budget.frameRevisionEntryId = created.revisionEntryId;
 				this._frameLeaseBudget = prepared.budget;
 				this._frameAdvanceCount = 0;
+				this._anchorDecomposeCount = 0;
 				return "epistemic";
 			}
 			case "revise_frame":
@@ -2022,6 +2050,20 @@ export class AgentSession {
 				}
 				const subgoals = decision.subgoals.map((subgoal) => subgoal.trim()).filter((subgoal) => subgoal.length > 0);
 				if (subgoals.length === 0) throw new Error("Decompose subgoals must be non-empty strings.");
+				// Re-planning guard: refuse to rewrite the Anchor into essentially the same
+				// subgoals it already carries, and bound total re-decomposition so the
+				// controller cannot keep narrowing via decompose instead of executing.
+				if (this._semanticCharacterContainment(subgoals.join("\n"), state.anchor.statement) >= 0.85) {
+					throw new Error(
+						"decompose must change the subgoal structure: this decomposition repeats the current Anchor's subgoals. Explore, create a Frame, or ask instead of re-decomposing.",
+					);
+				}
+				if (this._anchorDecomposeCount >= this._maxAnchorDecompositions) {
+					throw new Error(
+						`Anchor has already been decomposed ${this._anchorDecomposeCount} time(s) (limit ${this._maxAnchorDecompositions}); explore or create a Frame instead of decomposing again.`,
+					);
+				}
+				this._anchorDecomposeCount++;
 				this._emitAppendedEntry(
 					this.sessionManager.appendAnchorRevision({
 						anchorId: state.anchor.id,
@@ -2365,6 +2407,14 @@ export class AgentSession {
 				this._ambiguousMutation = undefined;
 				this._automaticActionRequest = false;
 				this._pendingFinalAuthorization = undefined;
+			},
+			finalAnswerText: () => {
+				const authorization = this._pendingFinalAuthorization;
+				if (authorization?.kind === "question") return authorization.reason;
+				if (authorization?.kind === "inability") {
+					return `The agent could not complete this request within its bounded control loop.\n\n${authorization.reason}`;
+				}
+				return undefined;
 			},
 			interruptRequest: (reason) => {
 				if (!this._automaticActionRequest) return;

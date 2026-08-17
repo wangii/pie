@@ -79,6 +79,13 @@ export interface PieProductionLoopLifecycle {
 		toolResults: readonly ToolResultMessage[],
 	): Promise<PieControlResult> | PieControlResult;
 	completeFinalAnswer(message: AssistantMessage): Promise<void> | void;
+	/**
+	 * Deterministic final-answer text, when the authorized outcome (a clarifying
+	 * question or a bounded inability report) needs no model generation. Returning a
+	 * string short-circuits the final-answer model call; return undefined to
+	 * free-generate the answer (an `authorize_final` with a satisfied Anchor).
+	 */
+	finalAnswerText?(): string | undefined;
 	interruptRequest(reason: string): Promise<void> | void;
 	exhaustControlBudget(reason: string): Promise<PieControlResult> | PieControlResult;
 }
@@ -201,6 +208,40 @@ export class PieProductionLoop implements AgentLoopRunner {
 				};
 			}
 			requestIndex++;
+			// A clarifying question or bounded inability report is deterministic: emit
+			// it directly instead of streaming a model response, so the tool-less
+			// final-answer role cannot free-generate tool-call markup instead of the
+			// authorized text.
+			if (this._requestRole === "finalAnswer") {
+				const deterministic = lifecycle.finalAnswerText?.();
+				if (deterministic !== undefined) {
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "text", text: deterministic }],
+						api: config.model.api,
+						provider: config.model.provider,
+						model: config.model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					newMessages.push(message);
+					await request.emit({ type: "message_start", message });
+					await request.emit({ type: "message_end", message });
+					await request.emit({ type: "turn_end", message, toolResults: [] });
+					await lifecycle.completeFinalAnswer(message);
+					this._state = "completed";
+					await request.emit({ type: "agent_end", messages: newMessages });
+					return newMessages;
+				}
+			}
 			this._state = "model_streaming";
 			const message = await streamAssistantResponse(
 				currentContext,

@@ -240,7 +240,7 @@ describe("Phase 6 production loop ownership", () => {
 			]);
 			await resumed.session.prompt("continue with a new bounded request");
 
-			expect(resumed.providerContexts).toHaveLength(3);
+			expect(resumed.providerContexts).toHaveLength(2);
 			expect(manager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
 				expect.objectContaining({ transition: "unresolvable", reason: expect.stringContaining("supersedes") }),
 			]);
@@ -562,7 +562,7 @@ describe("Phase 6 production loop ownership", () => {
 					reason: expect.stringContaining("Operational repair exhausted after 3/3"),
 				}),
 			]);
-			expect(harness.providerContexts).toHaveLength(7);
+			expect(harness.providerContexts).toHaveLength(6);
 			expect((harness.session.agent.loopRunner as PieProductionLoop).state).toBe("completed");
 			expect(harness.session.isIdle).toBe(true);
 		} finally {
