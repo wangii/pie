@@ -2071,7 +2071,10 @@ export class AgentSession {
 					this.sessionManager.appendAnchorRevision({
 						anchorId: state.anchor.id,
 						revision: state.anchor.revision + 1,
-						statement: subgoals.map((subgoal, index) => `${index + 1}. ${subgoal}`).join("\n"),
+						statement: subgoals
+							.map((subgoal) => subgoal.replace(/^\s*(?:\d+\s*[.)、:．]\s*)+/u, ""))
+							.map((subgoal, index) => `${index + 1}. ${subgoal}`)
+							.join("\n"),
 						previousRevisionId: state.anchor.revisionEntryId,
 						sourceEventId,
 						revisionReason: reason ?? `Decomposed into ${subgoals.length} checkable subgoals.`,
@@ -2092,7 +2095,7 @@ export class AgentSession {
 					completionCondition: decision.completionCondition.trim(),
 					expectation,
 				};
-				this._validateActionDefinition(definition);
+				this._validateControllerAction(definition, state);
 				// Information-gain gate: refuse an explore whose intent repeats a prior
 				// episode, or whose predicted fact is already established by a durable
 				// Anchor Observation from a completed explore.

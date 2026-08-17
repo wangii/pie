@@ -648,6 +648,55 @@ describe("completion condition bounds", () => {
 		}
 	});
 
+	it("rejects an explore whose completion condition is a universal enumeration", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "explore",
+					expectation: "Prompt assembly points form one closed, enumerable inventory",
+					intent: "Enumerate every prompt assembly point in the loop",
+					completionCondition: "enumerate every prompt assembly site and record each site's information source",
+					expectedEvidenceRounds: 4,
+					budgetReason: "several subsystems need discovery",
+				}),
+				// Rejected: the controller re-frames into one bounded observable.
+				control({
+					kind: "explore",
+					expectation: "system-prompt.ts is the base system prompt assembly site",
+					intent: "Read system-prompt.ts to locate the base system prompt assembly site",
+					completionCondition: "system-prompt.ts exports buildSystemPrompt",
+					expectedEvidenceRounds: 1,
+					budgetReason: "one file, one read",
+				}),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "buildSystemPrompt" }, { id: "call-1" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("buildSystemPrompt found in system-prompt.ts"),
+				control({
+					kind: "complete_action",
+					predictionError: { sign: "confirmed", detail: "system-prompt.ts exports buildSystemPrompt" },
+				}),
+				control({ kind: "authorize_final", reason: "Comprehension is sufficient" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("map the prompt assembly points");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes(
+						"Action completion condition must be confirmable by one bounded observable result",
+					),
+				),
+			).toBe(true);
+			// Only the bounded explore started an episode.
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_start")).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("asks a clarifying question before committing a Frame", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
@@ -689,6 +738,32 @@ describe("completion condition bounds", () => {
 			expect(anchors).toHaveLength(2);
 			expect(anchors[1].statement).toContain("1. Identify the base system prompt");
 			expect(anchors[1].statement).toContain("2. Identify the per-role control prompts");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("strips pre-existing numeric prefixes before re-numbering decompose subgoals", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control({
+					kind: "decompose",
+					subgoals: ["1. Identify the base system prompt", "2. Identify the per-role control prompts"],
+					reason: "split the inventory into checkable slices",
+				}),
+				control({ kind: "authorize_final", reason: "slices established" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("check all the prompts");
+
+			const anchors = harness.sessionManager.getBranch().filter((entry) => entry.type === "anchor_revision");
+			expect(anchors).toHaveLength(2);
+			expect(anchors[1].statement).toContain("1. Identify the base system prompt");
+			expect(anchors[1].statement).toContain("2. Identify the per-role control prompts");
+			expect(anchors[1].statement).not.toContain("1. 1.");
+			expect(anchors[1].statement).not.toContain("2. 2.");
 		} finally {
 			harness.cleanup();
 		}
