@@ -102,13 +102,19 @@ describe("validateBelief", () => {
 });
 
 describe("formatBeliefsForPrompt", () => {
-	test("renders only live beliefs, empty when none", () => {
-		expect(formatBeliefsForPrompt([])).toBe("");
+	test("bootstraps speculation when empty, then renders live beliefs", () => {
+		const empty = formatBeliefsForPrompt([]);
+		expect(empty).toContain("[CURRENT BELIEFS]");
+		expect(empty).toContain("no live beliefs");
+		expect(empty).toContain("declare_belief");
+		expect(empty).toContain("domain=product");
+		expect(empty).toContain("domain=code");
 
 		const set = new BeliefSet();
 		set.apply({ op: "propose", statement: "authorizationSource returns stale-replica", domain: "code" });
 		const text = formatBeliefsForPrompt(set.open());
 		expect(text).toContain("[CURRENT BELIEFS]");
 		expect(text).toContain("[code] authorizationSource returns stale-replica");
+		expect(text).not.toContain("no live beliefs");
 	});
 });

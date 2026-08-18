@@ -186,12 +186,23 @@ export function validateBelief(statement: string, domain: BeliefDomain): void {
 }
 
 /**
- * Render the live beliefs as a system-prompt block. Empty when there is nothing
- * the model currently holds — the block is additive context, like project context.
+ * Render the live beliefs as a system-prompt block. The block is always present
+ * so the model has a stable place to read and update its beliefs; when there is
+ * nothing yet it carries a bootstrap instruction that asks the model to speculate
+ * initial product + code hypotheses, and once beliefs exist they become the
+ * reference every later result is measured against.
  */
 export function formatBeliefsForPrompt(beliefs: readonly Belief[]): string {
 	if (beliefs.length === 0) {
-		return "";
+		return (
+			"\n\n[CURRENT BELIEFS]\n" +
+			"(no live beliefs)\n" +
+			"Bootstrap your investigation by speculating: from the user's question, call declare_belief " +
+			"(op=propose) to record your initial hypotheses. Product beliefs (domain=product) name the " +
+			"observable behavior you expect; code beliefs (domain=code) name the structure or behavior you " +
+			"suspect. Measure every later result against these beliefs — support, refute, or refine them as " +
+			"evidence arrives."
+		);
 	}
 	const lines = beliefs.map((b) => `- [${b.domain}] ${b.statement} (${b.status})`);
 	return `\n\n[CURRENT BELIEFS]\n${lines.join("\n")}`;
