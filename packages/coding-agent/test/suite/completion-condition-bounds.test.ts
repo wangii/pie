@@ -545,6 +545,56 @@ describe("completion condition bounds", () => {
 		}
 	});
 
+	it("rejects an explore missing required fields with an actionable message", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				// A control model guessing field names emits an explore with no schema fields;
+				// the rejection must name them instead of surfacing a TypeError.
+				control({ kind: "explore", query: "Where are the prompt definitions?" }),
+				// Once the rejection names the fields, the controller recovers.
+				control({
+					kind: "explore",
+					expectation: "Grep records the prompt-definition sites",
+					intent: "Grep packages/coding-agent/src for prompt-definition markers",
+					completionCondition: "One grep records file locations and per-file match counts for the prompt markers",
+					expectedEvidenceRounds: 1,
+					budgetReason: "A single grep over the package tree is one independent evidence round",
+				}),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "prompt-sites" }, { id: "call-1" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("grep recorded the prompt sites"),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The grep recorded the prompt sites in system-prompt.ts",
+					},
+					observation: {
+						statement: "The prompt-definition markers live in system-prompt.ts",
+						affects: "anchor",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "Comprehension is sufficient; the Anchor is satisfied" }),
+				fauxAssistantMessage("The prompt sites are in system-prompt.ts."),
+			]);
+
+			await harness.session.prompt("locate the prompt entry sites");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes(
+						"explore requires fields: expectation, intent, completionCondition",
+					),
+				),
+			).toBe(true);
+			expect(harness.session.getLastAssistantText()).toBe("The prompt sites are in system-prompt.ts.");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("explores comprehension before any Frame and rejects a duplicate target", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {

@@ -2162,6 +2162,21 @@ export class AgentSession {
 						"explore is a pre-Frame comprehension operator; under an active Frame use authorize_action instead.",
 					);
 				if (!state.anchor) throw new Error("No Anchor is active to explore under.");
+				// Name the missing fields instead of letting .trim() throw an unactionable
+				// TypeError when the control model guesses field names (reasoning is disabled
+				// and it has no schema to check against).
+				if (
+					typeof decision.expectation !== "string" ||
+					typeof decision.intent !== "string" ||
+					typeof decision.completionCondition !== "string"
+				) {
+					const missing = [
+						typeof decision.expectation !== "string" ? "expectation" : null,
+						typeof decision.intent !== "string" ? "intent" : null,
+						typeof decision.completionCondition !== "string" ? "completionCondition" : null,
+					].filter((field): field is string => field !== null);
+					throw new Error(`explore requires fields: ${missing.join(", ")}.`);
+				}
 				const expectation = decision.expectation.trim();
 				const definition = {
 					intent: decision.intent.trim(),
