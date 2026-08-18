@@ -53,7 +53,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { BeliefSet, type Belief, formatBeliefsForPrompt } from "./belief-set.ts";
+import { BeliefSet, type Belief, formatBeliefBootstrap, formatBeliefsForPrompt } from "./belief-set.ts";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -569,14 +569,20 @@ export class AgentSession {
 	}
 
 	/**
-	 * The live system prompt for the next turn: the base prompt plus the current
-	 * belief set. Beliefs change within a turn (the model calls `declare_belief`),
-	 * so this is appended at turn-preparation time rather than baked into
-	 * `_baseSystemPrompt`, which is only rebuilt on tool-set / resource changes.
+	 * The live system prompt for the next turn. When the belief set is empty, a
+	 * hard bootstrap directive is *prepended* so the model must speculate before
+	 * it reaches for any tool; once beliefs exist they are *appended* as a
+	 * reference block. Beliefs change within a turn (the model calls
+	 * `declare_belief`), so this is recomputed at turn-preparation time rather
+	 * than baked into `_baseSystemPrompt`.
 	 */
 	private _systemPromptWithBeliefs(): string {
 		const base = this._systemPromptOverride ?? this._baseSystemPrompt;
-		return base + formatBeliefsForPrompt(this._beliefSet.open());
+		const beliefs = this._beliefSet.open();
+		if (beliefs.length === 0) {
+			return formatBeliefBootstrap() + base;
+		}
+		return base + formatBeliefsForPrompt(beliefs);
 	}
 
 	/** The live belief set, read-only. Exposed for `/bs` and diagnostics. */
