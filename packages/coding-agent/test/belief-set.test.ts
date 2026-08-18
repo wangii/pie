@@ -4,6 +4,8 @@ import {
 	BeliefValidationError,
 	formatBeliefBootstrap,
 	formatBeliefsForPrompt,
+	formatReconcileDirective,
+	formatResolveDirective,
 	validateBelief,
 } from "../src/core/belief-set.ts";
 
@@ -132,54 +134,59 @@ describe("formatBeliefsForPrompt", () => {
 	});
 });
 
-describe("propose relatedness gate", () => {
-	test("empty set: a belief must relate to the root instruction", () => {
+describe("formatResolveDirective", () => {
+	test("lists only proposed beliefs and demands resolution", () => {
 		const set = new BeliefSet();
-		set.setRootInstruction("check the system prompt structure");
+		const proposed = set.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
+		const supported = set.apply({
+			op: "propose",
+			statement: "authorizationSource returns stale-replica",
+			domain: "code",
+		});
+		set.apply({ op: "support", beliefId: supported.id });
 
-		expect(() =>
-			set.apply({ op: "propose", statement: "system-prompt.ts assembles the system prompt", domain: "code" }),
-		).not.toThrow();
-
-		const other = new BeliefSet();
-		other.setRootInstruction("check the system prompt structure");
-		expect(() =>
-			other.apply({ op: "propose", statement: "the cache is warm", domain: "code" }),
-		).toThrow(BeliefValidationError);
+		const text = formatResolveDirective(set.open());
+		expect(text).toContain(proposed.id);
+		expect(text).toContain("the cache survives logout");
+		expect(text).toContain("proposed");
+		expect(text).not.toContain(supported.id);
 	});
 
-	test("empty set without a root instruction skips the relatedness check", () => {
+	test("is empty when no beliefs are proposed", () => {
 		const set = new BeliefSet();
-		expect(() => set.apply({ op: "propose", statement: "the cache is warm", domain: "code" })).not.toThrow();
+		const belief = set.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
+		set.apply({ op: "support", beliefId: belief.id });
+
+		expect(formatResolveDirective(set.open())).toBe("");
+	});
+});
+
+describe("formatReconcileDirective", () => {
+	test("lists open beliefs and demands reconciliation", () => {
+		const set = new BeliefSet();
+		const proposed = set.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
+		const supported = set.apply({
+			op: "propose",
+			statement: "authorizationSource returns stale-replica",
+			domain: "code",
+		});
+		set.apply({ op: "support", beliefId: supported.id });
+		const refuted = set.apply({ op: "propose", statement: "login is stateless", domain: "product" });
+		set.apply({ op: "refute", beliefId: refuted.id });
+
+		const text = formatReconcileDirective(set.beliefs);
+		expect(text).toContain(proposed.id);
+		expect(text).toContain(supported.id);
+		expect(text).toContain("the cache survives logout");
+		expect(text).toContain("your belief set is stale");
+		expect(text).not.toContain(refuted.id);
 	});
 
-	test("non-empty set: a belief must relate to at least one current belief", () => {
+	test("is empty when no beliefs are open", () => {
 		const set = new BeliefSet();
-		set.apply({ op: "propose", statement: "the system prompt is assembled by buildSystemPrompt", domain: "code" });
+		const belief = set.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
+		set.apply({ op: "refute", beliefId: belief.id });
 
-		expect(() =>
-			set.apply({ op: "propose", statement: "system-prompt.ts builds the prompt sections", domain: "code" }),
-		).not.toThrow();
-
-		expect(() =>
-			set.apply({ op: "propose", statement: "the cache is warm", domain: "code" }),
-		).toThrow(BeliefValidationError);
-	});
-
-	test("non-empty set: a belief must not contradict a current belief", () => {
-		const set = new BeliefSet();
-		set.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
-
-		// Consistent extension passes.
-		expect(() =>
-			set.apply({ op: "propose", statement: "the cache survives logout for 30s", domain: "product" }),
-		).not.toThrow();
-
-		// Explicit negation of a shared referent is a contradiction.
-		const other = new BeliefSet();
-		other.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
-		expect(() =>
-			other.apply({ op: "propose", statement: "the cache does not survive logout", domain: "product" }),
-		).toThrow(BeliefValidationError);
+		expect(formatReconcileDirective(set.beliefs)).toBe("");
 	});
 });

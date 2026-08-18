@@ -72,6 +72,8 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	/** Enable the `declare_belief` tool and its epistemic gates. Defaults to false in tests. */
+	enableBeliefSet?: boolean;
 }
 
 export interface Harness {
@@ -191,6 +193,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
+		enableBeliefSet: options.enableBeliefSet ?? false,
 	});
 
 	const events: AgentSessionEvent[] = [];

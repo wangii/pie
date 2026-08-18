@@ -48,7 +48,6 @@ export const declareBeliefSystemPromptContribution = {
 	guidelines: [
 		"Maintain a working set of beliefs about the task's product and code; call declare_belief to propose a new belief, or to support/refute/refine one after you see a result",
 		"A belief is a named relation about the product or code, not a command or a test-output prediction",
-		"A new belief must relate to the user's instruction (when you hold no beliefs yet) or to at least one current belief, and must not contradict any current belief",
 	],
 };
 

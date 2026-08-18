@@ -429,7 +429,10 @@ async function createHarnessWithResourceLoader(
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
-		enableBeliefSet: options.enableBeliefSet,
+		// The belief set (and its hard entry/exit gates) is opt-in per test. Production
+		// defaults it on, but the harness defaults it off so non-belief tests do not
+		// unexpectedly run through the epistemic gates.
+		enableBeliefSet: options.enableBeliefSet ?? false,
 		initialActiveToolNames: options.initialActiveToolNames,
 	});
 

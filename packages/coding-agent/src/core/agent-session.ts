@@ -53,7 +53,14 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { BeliefSet, type Belief, formatBeliefBootstrap, formatBeliefsForPrompt } from "./belief-set.ts";
+import {
+	type Belief,
+	BeliefSet,
+	formatBeliefBootstrap,
+	formatBeliefsForPrompt,
+	formatReconcileDirective,
+	formatResolveDirective,
+} from "./belief-set.ts";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -303,6 +310,14 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
+/**
+ * How many executed non-`declare_belief` tool results may accumulate before the
+ * middle gate blocks the next dispatch and forces a belief reconciliation. Two
+ * gives the model room for a locate-then-read pair without letting evidence pile
+ * up inert (the failure mode where beliefs are only retro-judged at the end).
+ */
+const BELIEF_RECONCILE_EVIDENCE_THRESHOLD = 2;
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -352,6 +367,12 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private readonly _beliefSet = new BeliefSet();
+	/**
+	 * Count of executed non-`declare_belief` tool results since the last belief
+	 * mutation. Drives the middle (R → B′) gate: when it crosses the threshold the
+	 * next dispatch is blocked until the model reconciles the belief set.
+	 */
+	private _unreconciledEvidenceCount = 0;
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
@@ -403,6 +424,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._installBeliefGates();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -537,6 +559,78 @@ export class AgentSession {
 				isError: hookResult?.isError ?? isError,
 				usage: hookResult?.usage,
 			};
+		};
+	}
+
+	/**
+	 * Install the epistemic loop invariants as hard harness gates.
+	 *
+	 * Start: while the belief set is empty, the only dispatch allowed is
+	 * `declare_belief` (speculate) — any other tool call is blocked, so an action
+	 * cannot run without an antecedent belief. The model can still ask by stopping.
+	 *
+	 * Middle: evidence must flow back to beliefs, not pile up inert. After a small
+	 * number of executed tool results with no belief update, the next dispatch is
+	 * blocked until the model reconciles (support/refute/refine/retract/propose).
+	 *
+	 * End: the turn cannot close while any belief is still `proposed`; the stop is
+	 * blocked and the model is steered to resolve its beliefs before it answers.
+	 */
+	private _installBeliefGates(): void {
+		const previousBeforeToolCall = this.agent.beforeToolCall;
+		const previousAfterToolCall = this.agent.afterToolCall;
+
+		// Track the R → B′ arrow: an executed non-belief result is evidence; a belief
+		// mutation is reconciliation. Blocked calls never reach this hook (the loop
+		// short-circuits them in `prepareToolCall`), so gate blocks are not counted.
+		this.agent.afterToolCall = async (context, signal) => {
+			if (this._enableBeliefSet) {
+				if (context.toolCall.name === "declare_belief") {
+					this._unreconciledEvidenceCount = 0;
+				} else if (!context.isError) {
+					this._unreconciledEvidenceCount += 1;
+				}
+			}
+			return previousAfterToolCall?.(context, signal);
+		};
+
+		this.agent.beforeToolCall = async (context, signal) => {
+			if (this._enableBeliefSet && context.toolCall.name !== "declare_belief") {
+				// Entry gate: no dispatch without a belief.
+				if (this._beliefSet.open().length === 0) {
+					return {
+						block: true,
+						reason:
+							"You hold no beliefs about this task yet. Call declare_belief (op=propose) to record at " +
+							"least one hypothesis about the product or code before using any other tool.",
+					};
+				}
+				// Middle gate: evidence must flow back to beliefs, not pile up inert.
+				if (this._unreconciledEvidenceCount >= BELIEF_RECONCILE_EVIDENCE_THRESHOLD) {
+					return {
+						block: true,
+						reason: formatReconcileDirective(this._beliefSet.beliefs),
+					};
+				}
+			}
+			return previousBeforeToolCall?.(context, signal);
+		};
+
+		// Exit gate: the belief set is the end of every action — resolve before you answer.
+		this.agent.shouldStopAfterTurn = (context) => {
+			if (!this._enableBeliefSet || context.message.stopReason !== "stop") {
+				return false;
+			}
+			const proposed = this._beliefSet.open().filter((b) => b.status === "proposed");
+			if (proposed.length === 0) {
+				return false;
+			}
+			this.agent.steer({
+				role: "user",
+				content: [{ type: "text", text: formatResolveDirective(proposed) }],
+				timestamp: Date.now(),
+			});
+			return false;
 		};
 	}
 
@@ -1254,10 +1348,6 @@ export class AgentSession {
 
 			// Build messages array (custom message if any, then user message)
 			messages = [];
-
-			// Re-root the belief set on this instruction: the first belief of the
-			// task must trace back to what the user just asked.
-			this._beliefSet.setRootInstruction(expandedText);
 
 			// Add user message
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];

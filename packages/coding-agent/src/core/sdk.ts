@@ -84,6 +84,12 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * Enable the `declare_belief` tool and its epistemic loop (including the hard
+	 * entry/exit gates: no dispatch without a belief, no answer while beliefs are
+	 * unresolved). Default: true.
+	 */
+	enableBeliefSet?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -390,6 +396,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		enableBeliefSet: options.enableBeliefSet,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

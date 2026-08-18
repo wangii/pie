@@ -431,6 +431,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
 			baseToolsOverride: { dummy: tool },
+			enableBeliefSet: false,
 		});
 
 		const snapshots: string[][] = [];
@@ -578,6 +579,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
 			baseToolsOverride: { dummy: tool },
+			enableBeliefSet: false,
 		});
 
 		const sessionWithRunner = session as unknown as {
