@@ -757,6 +757,7 @@ export class AgentSession {
 	private _frameAdvanceCount = 0;
 	private readonly _maxAnchorDecompositions: number;
 	private _anchorDecomposeCount = 0;
+	private _frameFalsifyCount = 0;
 	private _frameLeaseBudget: ActiveFrameLeaseBudget | undefined;
 	private _controlRepairAttempts = 0;
 	private readonly _maxControlRepairAttempts = 3;
@@ -1537,6 +1538,11 @@ export class AgentSession {
 			);
 			lines.push(`  Expectation: ${state.frame.expectation}`);
 		}
+		if (!state.frame && this._frameFalsifyCount >= 2) {
+			lines.push(
+				`Convergence note: ${this._frameFalsifyCount} Frames have been falsified under this Anchor revision. If the Anchor's referent keeps yielding no falsifiable target (for example a name that denotes an architectural layer rather than a concrete file), revise_anchor to re-anchor the task to the concrete objects the evidence did establish.`,
+			);
+		}
 		if (state.action) {
 			const budget = this._leaseBudgetForAction(state);
 			const consumed = this._consumedEvidenceRounds(state.action.startEntryId);
@@ -2110,6 +2116,7 @@ export class AgentSession {
 					reason!,
 				);
 				this._frameAdvanceCount = 0;
+				this._frameFalsifyCount++;
 				return "epistemic";
 			case "ask":
 				if (state.action || state.frame) throw new Error("Clarify the Anchor before committing a Frame or Action.");
@@ -2238,6 +2245,7 @@ export class AgentSession {
 						revisionReason: reason,
 					}),
 				);
+				this._frameFalsifyCount = 0;
 				return "epistemic";
 			case "authorize_action": {
 				if (state.action) throw new Error("An Action episode is already active.");

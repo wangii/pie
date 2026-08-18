@@ -295,6 +295,37 @@ describe("Phase 7 production control flow", () => {
 		}
 	});
 
+	it("signals revise_anchor after two falsified Frames under one Anchor", async () => {
+		const harness = await createHarness(fullStackOptions());
+		try {
+			harness.setResponses([
+				control(frame),
+				control({ kind: "falsify_frame", reason: "The first Frame premise was contradicted by the evidence" }),
+				control({
+					kind: "create_frame",
+					statement: "A single prompt file literally named epistemic or execution holds the prompt text",
+					expectation: "A read of the named file returns the prompt text",
+					horizon: 1,
+				}),
+				control({ kind: "falsify_frame", reason: "No file literally named epistemic or execution exists" }),
+				// The convergence note is visible before the next decision.
+				control({ kind: "authorize_final", reason: "The Anchor referent is empty; report the finding" }),
+				fauxAssistantMessage("Epistemic and execution name architectural layers, not prompt files."),
+			]);
+
+			await harness.session.prompt("analyze the epistemic and execution prompts");
+
+			expect(
+				harness.providerContexts.some((context) => (context.systemPrompt ?? "").includes("Convergence note")),
+			).toBe(true);
+			expect(harness.session.getLastAssistantText()).toBe(
+				"Epistemic and execution name architectural layers, not prompt files.",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("does not let an ordinary stop complete the active Action", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
