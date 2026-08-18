@@ -613,4 +613,95 @@ describe("Phase 10 execution feedback observation", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("rejects a search-failure Observation statement", async () => {
+		const harness = await createHarness(options());
+		try {
+			harness.setResponses([
+				control(frame),
+				control(authorizeAction),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "boundary-established" }, { id: "call-sf" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("The probe result is finalized."),
+				// A search-failure record narrates that the probe came up empty.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement:
+							"No file in the searched repository contains the boundary definition; the actual content could not be located from the evidence gathered.",
+						affects: "frame",
+					},
+				}),
+				// The controller recovers with a valid relation assertion.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration",
+						affects: "frame",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("inspect the boundary");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes("not a search-failure record"),
+				),
+			).toBe(true);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "observation")).toHaveLength(1);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("accepts a negated fact about a named referent", async () => {
+		const harness = await createHarness(options());
+		try {
+			harness.setResponses([
+				control(frame),
+				control(authorizeAction),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "boundary-established" }, { id: "call-nf" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("The probe result is finalized."),
+				// A negated fact about a named referent asserts a relation, not a search outcome.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement:
+							"prompt-templates.ts does not contain hard-coded prompt text; it loads templates from YAML files parsed via the 'yaml' package.",
+						affects: "frame",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("inspect the boundary");
+
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "observation")).toHaveLength(1);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

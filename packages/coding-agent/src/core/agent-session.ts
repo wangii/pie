@@ -640,6 +640,18 @@ const OBSERVATION_PROCESS_RECORD_PATTERN =
 /** An experiment record restates the probe instead of the fact it established. */
 const OBSERVATION_EXPERIMENT_RECORD_PATTERN = /(?:^|\n)\s*(?:expectation|prediction error)\s*:/iu;
 
+/**
+ * A search-failure record narrates that the episode's probes did not locate or
+ * identify something ("remain unidentified", "could not be located", "no file
+ * contains", "does not reveal"). It records what the search did not find, not a
+ * world relation between two project referents; Phase 11 keeps probe outcomes at
+ * the execution layer. A negated fact about a named referent ("prompt-templates.ts
+ * does not contain hard-coded prompt text") still passes: it asserts a relation,
+ * while these forms assert only that the search came up empty.
+ */
+const OBSERVATION_SEARCH_FAILURE_PATTERN =
+	/(?:remain(?:s|ed)? (?:unidentified|unresolved|unknown)|\b(?:unidentified|unlocatable)\b|(?:could not|unable to|failed to) (?:be )?(?:located|found|resolved|identified|determined)|(?:was|were|is|are) not (?:located|found|identified|resolved|determined)|(?:does|did|do) not reveal|\bno (?:file|path|evidence|result|match|output)s? .{0,80}\b(?:contains?|contained|reveals?|revealed)\b)/iu;
+
 /** Render a structured prediction error as `sign: detail` for statements and transitions. */
 function renderPredictionError(predictionError: PredictionError): string {
 	return `${predictionError.sign}: ${predictionError.detail.trim()}`;
@@ -1104,9 +1116,10 @@ export class AgentSession {
 	 */
 	/**
 	 * Phase 11: a material Observation is a fact, not a process or experiment
-	 * record. A bare confirmation, an experiment record ("Expectation: …"), and a
+	 * record. A bare confirmation, an experiment record ("Expectation: …"), a
 	 * process record ("we did not prove X", "the action completed", "budget
-	 * exhausted") all belong to the execution layer.
+	 * exhausted"), and a search-failure record ("could not be located", "no file
+	 * contains", "remain unidentified") all belong to the execution layer.
 	 */
 	private _validateObservationStatement(statement: string): void {
 		if (VAGUE_PREDICTION_ERROR_PATTERN.test(statement)) {
@@ -1122,6 +1135,11 @@ export class AgentSession {
 		if (OBSERVATION_PROCESS_RECORD_PATTERN.test(statement)) {
 			throw new Error(
 				"A material Observation statement must name a world relation between project referents, not a process record (we did not prove X, budget exhausted, action completed).",
+			);
+		}
+		if (OBSERVATION_SEARCH_FAILURE_PATTERN.test(statement)) {
+			throw new Error(
+				"A material Observation statement must name a world relation between project referents, not a search-failure record (could not be located, no file contains, remain unidentified).",
 			);
 		}
 	}
