@@ -115,6 +115,7 @@ import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { BeliefSetPanel } from "./components/belief-set-panel.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
@@ -512,6 +513,9 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
+	private beliefPanelContainer!: Container;
+	private beliefPanel!: BeliefSetPanel;
+	private beliefPanelVisible = true;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -578,6 +582,7 @@ export class InteractiveMode {
 		this.statusContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
+		this.beliefPanelContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -890,9 +895,13 @@ export class InteractiveMode {
 			scrollbar: this.settingsManager.getFullscreenScrollbar(),
 			scrollbarStyle: (text) => theme.bg("scrollbarThumb", text),
 		});
+		this.beliefPanel = new BeliefSetPanel(() => this.session.beliefs);
+		this.beliefPanelContainer.addChild(this.beliefPanel);
+
 		const dock = new TuiLayouts.VStack([
 			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
 			{ component: this.statusContainer, shrink: 1, minSize: 0 },
+			{ component: this.beliefPanelContainer, shrink: 1, minSize: 0 },
 			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 3 },
 			{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
@@ -906,6 +915,7 @@ export class InteractiveMode {
 			this.documentContainer,
 			this.pendingMessagesContainer,
 			this.statusContainer,
+			this.beliefPanelContainer,
 			this.widgetContainerAbove,
 			this.editorContainer,
 			this.widgetContainerBelow,
@@ -6120,29 +6130,10 @@ export class InteractiveMode {
 	}
 
 	private handleBeliefSetCommand(): void {
-		const beliefs = this.session.beliefs;
-		let info = `${theme.bold("Belief Set")}\n\n`;
-
-		if (beliefs.length === 0) {
-			info += theme.fg("dim", "No beliefs yet. The model records beliefs with declare_belief.");
-		} else {
-			const openCount = beliefs.filter((b) => b.status === "proposed" || b.status === "supported").length;
-			info += `${theme.fg("dim", `Open: ${openCount}  ·  Total: ${beliefs.length}`)}\n\n`;
-			for (const belief of beliefs) {
-				const statusLabel = {
-					proposed: theme.fg("muted", "proposed"),
-					supported: theme.fg("success", "supported"),
-					refuted: theme.fg("error", "refuted"),
-					superseded: theme.fg("dim", "superseded"),
-				}[belief.status];
-				info += `${statusLabel} ${theme.fg("accent", `[${belief.domain}]`)} ${belief.statement}\n`;
-				info += `  ${theme.fg("dim", belief.id)}\n`;
-			}
-		}
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.beliefPanelVisible = !this.beliefPanelVisible;
+		this.beliefPanel.setVisible(this.beliefPanelVisible);
 		this.ui.requestRender();
+		this.showStatus(this.beliefPanelVisible ? "Belief panel shown" : "Belief panel hidden");
 	}
 
 	private handleChangelogCommand(): void {
