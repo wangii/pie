@@ -17,22 +17,34 @@ function messageText(message: { content: unknown }): string {
 	return "";
 }
 
+/** Concatenate every text block across a captured LLM context's messages. */
+function contextText(ctx: { messages: Array<{ content: unknown }> }): string {
+	return ctx.messages.map((m) => messageText(m)).join("\n");
+}
+
+/** The tool names present in a captured LLM context. */
+function contextToolNames(ctx: { tools?: Array<{ name: string }> }): string[] {
+	return (ctx.tools ?? []).map((t) => t.name);
+}
+
 describe("declare_belief integration", () => {
-	test("declare_belief is active when enabled", async () => {
+	test("declare_belief and view_beliefs are active when enabled", async () => {
 		const harness = await createHarness({ enableBeliefSet: true });
 		try {
 			expect(harness.session.getActiveToolNames()).toContain("declare_belief");
 			expect(harness.session.getAllTools().map((t) => t.name)).toContain("declare_belief");
+			expect(harness.session.getAllTools().map((t) => t.name)).toContain("view_beliefs");
 			expect(harness.session.systemPrompt).toContain("Record or update what you currently believe");
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	test("enableBeliefSet: false disables declare_belief", async () => {
+	test("enableBeliefSet: false disables the belief tools", async () => {
 		const harness = await createHarness({ enableBeliefSet: false });
 		try {
 			expect(harness.session.getActiveToolNames()).not.toContain("declare_belief");
+			expect(harness.session.getActiveToolNames()).not.toContain("view_beliefs");
 			expect(harness.session.getAllTools().map((t) => t.name)).not.toContain("declare_belief");
 		} finally {
 			harness.cleanup();
@@ -51,56 +63,18 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("entry gate: blocks dispatch while the belief set is empty", async () => {
-		const harness = await createHarness({
-			enableBeliefSet: true,
-			responses: [{ toolCalls: [{ name: "bash", args: { command: "ls" } }], stopReason: "toolUse" }, "done"],
-		});
+	test("initial role is epistemic: only belief tools are projected", async () => {
+		const harness = await createHarness({ enableBeliefSet: true });
 		try {
-			await harness.session.prompt("hi");
-
-			const result = harness.session.messages.find((m) => m.role === "toolResult");
-			expect(result?.role === "toolResult" ? result.isError : false).toBe(true);
-			expect(result ? messageText(result) : "").toContain("You hold no beliefs");
+			// The model-facing tool list is the epistemic role's subset; the full active
+			// list (read/bash/…) is still available via `getActiveToolNames`.
+			expect(harness.session.agent.state.tools.map((t) => t.name)).toEqual(["declare_belief", "view_beliefs"]);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	test("exit gate: blocks the answer while beliefs are proposed", async () => {
-		const harness = await createHarness({
-			enableBeliefSet: true,
-			responses: [
-				{
-					toolCalls: [
-						{
-							name: "declare_belief",
-							args: { op: "propose", statement: "the cache survives logout", domain: "product" },
-						},
-					],
-					stopReason: "toolUse",
-				},
-				"premature answer",
-				{
-					toolCalls: [{ name: "declare_belief", args: { op: "support", beliefId: "belief-1" } }],
-					stopReason: "toolUse",
-				},
-				"final answer",
-			],
-		});
-		try {
-			await harness.session.prompt("hi");
-
-			// The premature stop was blocked and the model was steered to resolve the belief.
-			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.status).toBe("supported");
-			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
-			expect(assistantTexts).toContain("final answer");
-		} finally {
-			harness.cleanup();
-		}
-	});
-
-	test("middle gate: blocks dispatch after evidence piles up without reconciliation", async () => {
+	test("two-role flow: propose dispatches to execution, then adjudication settles the frame", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -116,42 +90,168 @@ describe("declare_belief integration", () => {
 			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
-				// Propose a belief (satisfies the entry gate).
+				// Epistemic: propose a frame.
 				{
 					toolCalls: [
 						{
 							name: "declare_belief",
-							args: { op: "propose", statement: "the cache survives logout", domain: "product" },
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the cached value",
+								evidenceRounds: 1,
+							},
 						},
 					],
 					stopReason: "toolUse",
 				},
-				// Evidence 1.
-				{ toolCalls: [{ name: "echo", args: { text: "a" } }], stopReason: "toolUse" },
-				// Evidence 2 — threshold crossed.
-				{ toolCalls: [{ name: "echo", args: { text: "b" } }], stopReason: "toolUse" },
-				// This dispatch is blocked by the middle gate.
-				{ toolCalls: [{ name: "echo", args: { text: "c" } }], stopReason: "toolUse" },
-				// Reconcile.
+				// Epistemic: stops without settling the fresh frame → dispatches to execution.
+				"I should verify this in code",
+				// Execution: probe.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled result.
+				"the value persisted",
+				// Epistemic: adjudicate with evidence.
 				{
-					toolCalls: [{ name: "declare_belief", args: { op: "support", beliefId: "belief-1" } }],
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the probe kept the value" },
+						},
+					],
 					stopReason: "toolUse",
 				},
+				// Epistemic: finalize.
+				"the cache survives logout for 30s",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("the cache survives logout for 30s");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("propose then support on the next epistemic turn without dispatching to execution", async () => {
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			responses: [
+				// Epistemic: propose a frame.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the cached value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Epistemic: support it directly with evidence already in hand — no execution episode.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "support",
+								beliefId: "belief-1",
+								evidence: "the cached value was observed to persist",
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Epistemic: finalize.
+				"the cache survives logout for 30s",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The frame was settled directly. Had the propose turn wrongly dispatched to the
+			// execution role, `declare_belief` would be absent there and the support call would
+			// fail, leaving `belief-1` merely proposed.
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("epistemic context masks raw execution tool results", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "RAW_SENSITIVE_OUTPUT" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the cached value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Epistemic: stops → dispatch.
+				"verify it",
+				// Execution: probe (raw output produced here).
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Epistemic: support.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Epistemic: finalize.
 				"done",
 			],
 		});
 		try {
 			await harness.session.prompt("hi");
 
-			const errorResults = harness.session.messages
-				.filter((m) => m.role === "toolResult")
-				.filter((m) => m.isError === true);
-			expect(errorResults.length).toBe(1);
-			expect(messageText(errorResults[0])).toContain("your belief set is stale");
+			const executionContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("echo"));
+			const nonExecutionContexts = harness.faux.contexts.filter((c) => !contextToolNames(c).includes("echo"));
 
-			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.status).toBe("supported");
-			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
-			expect(assistantTexts).toContain("done");
+			// The raw result reached the execution role ...
+			expect(executionContexts.length).toBeGreaterThan(0);
+			expect(executionContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
+			// ... but never the epistemic (or finalAnswer) role.
+			for (const c of nonExecutionContexts) {
+				expect(contextText(c)).not.toContain("RAW_SENSITIVE_OUTPUT");
+			}
 		} finally {
 			harness.cleanup();
 		}

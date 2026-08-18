@@ -53,14 +53,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import {
-	type Belief,
-	BeliefSet,
-	formatBeliefBootstrap,
-	formatBeliefsForPrompt,
-	formatReconcileDirective,
-	formatResolveDirective,
-} from "./belief-set.ts";
+import { type Belief, BeliefSet } from "./belief-set.ts";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -118,6 +111,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createDeclareBeliefToolDefinition } from "./tools/declare-belief.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { createViewBeliefsToolDefinition } from "./tools/view-beliefs.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
 // ============================================================================
@@ -316,7 +310,6 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
  * gives the model room for a locate-then-read pair without letting evidence pile
  * up inert (the failure mode where beliefs are only retro-judged at the end).
  */
-const BELIEF_RECONCILE_EVIDENCE_THRESHOLD = 2;
 
 // ============================================================================
 // AgentSession Class
@@ -367,12 +360,19 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private readonly _beliefSet = new BeliefSet();
-	/**
-	 * Count of executed non-`declare_belief` tool results since the last belief
-	 * mutation. Drives the middle (R → B′) gate: when it crosses the threshold the
-	 * next dispatch is blocked until the model reconciles the belief set.
-	 */
-	private _unreconciledEvidenceCount = 0;
+	/** The current production role: epistemic (belief ops only) vs execution (probe) vs finalAnswer. */
+	private _role: "epistemic" | "execution" | "finalAnswer" = "epistemic";
+	/** Remaining execution actions for the current frame's lease (derived from `evidenceRounds`, never fixed). */
+	private _frameHorizon = 0;
+	/** The last frame id dispatched to execution — distinguishes a fresh frame from an unsettled one. */
+	private _dispatchedFrameId: string | undefined;
+	/** The full active tool names, independent of the current role's projected subset. */
+	private _fullActiveToolNames: string[] = [];
+
+	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
+	private get _beliefSetUsable(): boolean {
+		return this._fullActiveToolNames.includes("declare_belief");
+	}
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
@@ -424,12 +424,13 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
-		this._installBeliefGates();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		// Apply the initial epistemic role surface (belief tools only).
+		this._applyRoleSurface();
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -563,77 +564,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Install the epistemic loop invariants as hard harness gates.
-	 *
-	 * Start: while the belief set is empty, the only dispatch allowed is
-	 * `declare_belief` (speculate) — any other tool call is blocked, so an action
-	 * cannot run without an antecedent belief. The model can still ask by stopping.
-	 *
-	 * Middle: evidence must flow back to beliefs, not pile up inert. After a small
-	 * number of executed tool results with no belief update, the next dispatch is
-	 * blocked until the model reconciles (support/refute/refine/retract/propose).
-	 *
-	 * End: the turn cannot close while any belief is still `proposed`; the stop is
-	 * blocked and the model is steered to resolve its beliefs before it answers.
+	 * Install the two-role (epistemic vs execution) loop. The role is advanced in
+	 * `prepareNextTurnWithContext`, which also projects the next role's surface
+	 * (tool subset + system prompt). Separation is structural: the epistemic role
+	 * has only `declare_belief`/`view_beliefs` in its tool list, so it cannot reach
+	 * `read`/`bash`; the execution role has no belief tools. No constraint is
+	 * preached in the prompt — it is enforced by what is simply absent.
 	 */
-	private _installBeliefGates(): void {
-		const previousBeforeToolCall = this.agent.beforeToolCall;
-		const previousAfterToolCall = this.agent.afterToolCall;
-
-		// Track the R → B′ arrow: an executed non-belief result is evidence; a belief
-		// mutation is reconciliation. Blocked calls never reach this hook (the loop
-		// short-circuits them in `prepareToolCall`), so gate blocks are not counted.
-		this.agent.afterToolCall = async (context, signal) => {
-			if (this._enableBeliefSet) {
-				if (context.toolCall.name === "declare_belief") {
-					this._unreconciledEvidenceCount = 0;
-				} else if (!context.isError) {
-					this._unreconciledEvidenceCount += 1;
-				}
-			}
-			return previousAfterToolCall?.(context, signal);
-		};
-
-		this.agent.beforeToolCall = async (context, signal) => {
-			if (this._enableBeliefSet && context.toolCall.name !== "declare_belief") {
-				// Entry gate: no dispatch without a belief.
-				if (this._beliefSet.open().length === 0) {
-					return {
-						block: true,
-						reason:
-							"You hold no beliefs about this task yet. Call declare_belief (op=propose) to record at " +
-							"least one hypothesis about the product or code before using any other tool.",
-					};
-				}
-				// Middle gate: evidence must flow back to beliefs, not pile up inert.
-				if (this._unreconciledEvidenceCount >= BELIEF_RECONCILE_EVIDENCE_THRESHOLD) {
-					return {
-						block: true,
-						reason: formatReconcileDirective(this._beliefSet.beliefs),
-					};
-				}
-			}
-			return previousBeforeToolCall?.(context, signal);
-		};
-
-		// Exit gate: the belief set is the end of every action — resolve before you answer.
-		this.agent.shouldStopAfterTurn = (context) => {
-			if (!this._enableBeliefSet || context.message.stopReason !== "stop") {
-				return false;
-			}
-			const proposed = this._beliefSet.open().filter((b) => b.status === "proposed");
-			if (proposed.length === 0) {
-				return false;
-			}
-			this.agent.steer({
-				role: "user",
-				content: [{ type: "text", text: formatResolveDirective(proposed) }],
-				timestamp: Date.now(),
-			});
-			return false;
-		};
-	}
-
 	private _installAgentNextTurnRefresh(): void {
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
@@ -643,18 +580,16 @@ export class AgentSession {
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
-			const systemPrompt = this._systemPromptWithBeliefs();
-			// Keep the agent's base state fresh so the first turn of the *next* run
-			// (a later `prompt`/`continue`) also sees the live belief block, not a
-			// stale copy captured at the last tool-set rebuild.
-			this.agent.state.systemPrompt = systemPrompt;
+
+			this._advanceRole(turn);
 
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					systemPrompt,
+					systemPrompt: this.agent.state.systemPrompt,
 					tools: this.agent.state.tools.slice(),
+					messages: this._projectContextMessages(),
 				},
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
@@ -663,20 +598,166 @@ export class AgentSession {
 	}
 
 	/**
-	 * The live system prompt for the next turn. When the belief set is empty, a
-	 * hard bootstrap directive is *prepended* so the model must speculate before
-	 * it reaches for any tool; once beliefs exist they are *appended* as a
-	 * reference block. Beliefs change within a turn (the model calls
-	 * `declare_belief`), so this is recomputed at turn-preparation time rather
-	 * than baked into `_baseSystemPrompt`.
+	 * The transcript for the next role's turn. The epistemic and finalAnswer roles must
+	 * not see raw execution tool results (source files, bash output) — that is operational
+	 * detail that would pollute the belief loop. This projects a filtered copy from the
+	 * authoritative `agent.state.messages` (never `turn.context.messages`, which may already
+	 * be a prior projection and would silently accumulate): belief-tool results and the
+	 * model's own distilled sentences survive; every other tool result and bash output is
+	 * redacted to a placeholder so tool-call pairing stays valid. The execution role needs
+	 * the raw results to probe, so it receives the full transcript.
 	 */
-	private _systemPromptWithBeliefs(): string {
-		const base = this._systemPromptOverride ?? this._baseSystemPrompt;
-		const beliefs = this._beliefSet.open();
-		if (beliefs.length === 0) {
-			return formatBeliefBootstrap() + base;
+	private _projectContextMessages(): AgentMessage[] {
+		if (!this._enableBeliefSet || !this._beliefSetUsable || this._role === "execution") {
+			return this.agent.state.messages.slice();
 		}
-		return base + formatBeliefsForPrompt(beliefs);
+		return this.agent.state.messages.map((message) => this._maskForEpistemic(message));
+	}
+
+	/** Redact operational detail from a single message for the epistemic/finalAnswer role. */
+	private _maskForEpistemic(message: AgentMessage): AgentMessage {
+		switch (message.role) {
+			case "toolResult":
+				if (message.toolName === "declare_belief" || message.toolName === "view_beliefs") {
+					return message;
+				}
+				return { ...message, content: [{ type: "text", text: "[operational detail omitted]" }] };
+			case "bashExecution":
+				return { ...message, output: "[output omitted]" };
+			default:
+				return message;
+		}
+	}
+
+	/** Advance the role from the just-completed turn and project the next role's surface. */
+	private _advanceRole(turn: PrepareNextTurnContext): void {
+		if (!this._enableBeliefSet || !this._beliefSetUsable) {
+			this._applyRoleSurface();
+			return;
+		}
+		const ranTools = turn.toolResults.length > 0;
+		switch (this._role) {
+			case "epistemic": {
+				const frame = this._beliefSet.frame();
+				if (frame && frame.id !== this._dispatchedFrameId) {
+					// A fresh frame. Do NOT dispatch on the turn that created it: the model may
+					// already hold evidence to support/refute it, and `declare_belief` stays
+					// available for it to do so. Dispatch only when the model then stops without
+					// settling it (no belief tools this turn) — that is the hand-off to execution.
+					if (!ranTools) {
+						this._dispatchedFrameId = frame.id;
+						this._role = "execution";
+						this._frameHorizon = Math.ceil(frame.evidenceRounds * 1.3);
+						// A turn with no tool calls would otherwise end the run; queue a message so
+						// the loop continues into the execution role.
+						this.agent.steer({
+							role: "user",
+							content: [{ type: "text", text: "Investigate the current belief and gather evidence for it." }],
+							timestamp: Date.now(),
+						});
+					}
+				} else if (frame && !ranTools) {
+					// A dispatched-but-unsettled frame, and the model stopped instead of
+					// settling it — nudge it in its own terms, not the harness machinery.
+					this.agent.steer({
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: `Your belief "${frame.statement}" is still open. Settle it — support, refute, or refine it from the evidence you gathered.`,
+							},
+						],
+						timestamp: Date.now(),
+					});
+				} else if (!frame && !ranTools) {
+					// Settled and stopped — the answer is final.
+					this._role = "finalAnswer";
+				}
+				break;
+			}
+			case "execution": {
+				this._frameHorizon -= turn.toolResults.length;
+				if (!ranTools || this._frameHorizon <= 0) {
+					this._role = "epistemic";
+					// Execution ended — nudge the epistemic role to reconcile, and keep
+					// the loop going (the distilled result is already in context).
+					this.agent.steer({
+						role: "user",
+						content: [{ type: "text", text: "Based on what you just found, update your beliefs." }],
+						timestamp: Date.now(),
+					});
+				}
+				break;
+			}
+			case "finalAnswer":
+				break;
+		}
+		this._applyRoleSurface();
+	}
+
+	/** The active tool names available to the current role. */
+	private _roleToolNames(): string[] {
+		switch (this._role) {
+			case "epistemic":
+				return ["declare_belief", "view_beliefs"];
+			case "finalAnswer":
+				return [];
+			case "execution":
+				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "view_beliefs");
+		}
+	}
+
+	/** The role system prompt: base prompt with only the role's tools described, plus a natural role instruction. */
+	private _roleSystemPrompt(): string {
+		const toolNames = this._roleToolNames();
+		const snippets: Record<string, string> = {};
+		const guidelines: string[] = [];
+		for (const name of toolNames) {
+			const snippet = this._toolPromptSnippets.get(name);
+			if (snippet) {
+				snippets[name] = snippet;
+			}
+			const toolGuidelines = this._toolPromptGuidelines.get(name);
+			if (toolGuidelines) {
+				guidelines.push(...toolGuidelines);
+			}
+		}
+		const base =
+			this._systemPromptOverride ??
+			buildSystemPrompt({
+				...this._baseSystemPromptOptions,
+				selectedTools: toolNames,
+				toolSnippets: snippets,
+				promptGuidelines: guidelines,
+			});
+		return base + this._roleInstruction();
+	}
+
+	private _roleInstruction(): string {
+		switch (this._role) {
+			case "epistemic":
+				return (
+					"\n\nInvestigate this task by forming and testing beliefs about the product and code. " +
+					"Record and update your beliefs with declare_belief, and read them with view_beliefs."
+				);
+			case "execution":
+				return "\n\nGather evidence for the current investigation, then report a concise result.";
+			case "finalAnswer":
+				return "";
+		}
+	}
+
+	/** Project the current role's tool subset and system prompt onto the agent state. */
+	private _applyRoleSurface(): void {
+		if (!this._enableBeliefSet || !this._beliefSetUsable) {
+			this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+			return;
+		}
+		const toolNames = this._roleToolNames();
+		this.agent.state.tools = toolNames
+			.map((name) => this._toolRegistry.get(name))
+			.filter((tool): tool is AgentTool => tool !== undefined);
+		this.agent.state.systemPrompt = this._roleSystemPrompt();
 	}
 
 	/** The live belief set, read-only. Exposed for `/bs` and diagnostics. */
@@ -1020,8 +1101,9 @@ export class AgentSession {
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
+	/** The full base system prompt (without the per-role projection). */
 	get systemPrompt(): string {
-		return this.agent.state.systemPrompt;
+		return this._systemPromptOverride ?? this._baseSystemPrompt;
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -1034,7 +1116,7 @@ export class AgentSession {
 	 * Returns the names of tools currently set on the agent.
 	 */
 	getActiveToolNames(): string[] {
-		return this.agent.state.tools.map((t) => t.name);
+		return this._fullActiveToolNames;
 	}
 
 	/**
@@ -1071,12 +1153,12 @@ export class AgentSession {
 			}
 		}
 		this.agent.state.tools = tools;
+		this._fullActiveToolNames = validToolNames;
 
-		// Rebuild base system prompt with new tool set, then attach the live belief
-		// block so the *first* turn of a run already carries the bootstrap (or the
-		// current beliefs) — `prepareNextTurn` only refreshes from turn two onward.
+		// Rebuild the base prompt with the new tool set, then project the current
+		// role's surface (tool subset + system prompt) onto the agent.
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.state.systemPrompt = this._systemPromptWithBeliefs();
+		this._applyRoleSurface();
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -1390,12 +1472,11 @@ export class AgentSession {
 			// Apply extension-modified system prompt, or reset to base
 			if (result?.systemPrompt !== undefined) {
 				this._systemPromptOverride = result.systemPrompt;
-				this.agent.state.systemPrompt = result.systemPrompt;
 			} else {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this._systemPromptOverride = undefined;
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
+			this._applyRoleSurface();
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -2484,7 +2565,7 @@ export class AgentSession {
 
 		this._resourceLoader.extendResources(extensionPaths);
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		this._applyRoleSurface();
 	}
 
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
@@ -2784,6 +2865,10 @@ export class AgentSession {
 				"declare_belief",
 				createDeclareBeliefToolDefinition(this._beliefSet) as ToolDefinition,
 			);
+			this._baseToolDefinitions.set(
+				"view_beliefs",
+				createViewBeliefsToolDefinition(this._beliefSet) as ToolDefinition,
+			);
 		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -2809,17 +2894,18 @@ export class AgentSession {
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
 			: this._enableBeliefSet
-				? ["read", "bash", "edit", "write", "declare_belief"]
+				? ["read", "bash", "edit", "write", "declare_belief", "view_beliefs"]
 				: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
-		// The belief set is on by default, so its tool must be active even when the
+		// The belief set is on by default, so its tools must be active even when the
 		// caller supplied its own `activeToolNames` (the CLI passes a settings default
-		// of `["read", "bash", "edit", "write"]` that would otherwise drop it). An
+		// of `["read", "bash", "edit", "write"]` that would otherwise drop them). An
 		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
 		// back out via `allowedToolNames`.
+		const beliefToolNames = ["declare_belief", "view_beliefs"];
 		const activeToolNames =
-			this._enableBeliefSet && !baseActiveToolNames.includes("declare_belief")
-				? [...baseActiveToolNames, "declare_belief"]
+			this._enableBeliefSet && baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
+				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]
 				: baseActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames,

@@ -70,6 +70,7 @@ describe("AgentSession dynamic tool registration", () => {
 			settingsManager,
 			sessionManager,
 			resourceLoader,
+			enableBeliefSet: false,
 		});
 
 		const bashTool = session.agent.state.tools.find((tool) => tool.name === "bash")!;

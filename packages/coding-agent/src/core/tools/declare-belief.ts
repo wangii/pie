@@ -1,14 +1,12 @@
 import { type Static, Type } from "typebox";
-import type { BeliefDelta, BeliefSet } from "../belief-set.ts";
+import { type BeliefDelta, type BeliefSet, statusOf } from "../belief-set.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 /**
- * The `declare_belief` tool. This is the single-loop counterpart to Pie's no-tool
- * epistemic controller: instead of a separate role emitting a control JSON menu,
- * the model records and reclassifies its beliefs by calling this tool interleaved
- * with `read`/`bash`/`grep`. The harness validates the delta and mutates the
- * `BeliefSet`; dispatch (running real tools) and asking (ending the turn with a
- * question) need no mechanism — the single loop already provides them.
+ * The `declare_belief` tool — the epistemic role's mutation surface. It records and
+ * reclassifies beliefs; the harness validates the delta and applies it to the immutable
+ * `BeliefSet`. `read`/`bash` are not part of this role's surface (they live in the
+ * execution role), so the epistemic layer stays cleanly separated from execution.
  */
 
 const declareBeliefSchema = Type.Object({
@@ -34,9 +32,26 @@ const declareBeliefSchema = Type.Object({
 				"Is this belief about the product's observable behavior, or the code's behavior/structure? Required for propose.",
 		}),
 	),
+	expectation: Type.Optional(
+		Type.String({
+			description:
+				"The falsifiable prediction: what observable result would confirm or refute this belief. Required for propose and refine.",
+		}),
+	),
+	evidenceRounds: Type.Optional(
+		Type.Number({
+			description: "How many tool results this test needs (1-5). Defaults to 1. Required for propose and refine.",
+		}),
+	),
 	beliefId: Type.Optional(
 		Type.String({
 			description: "The id of the belief to support/refute/refine/retract. Required for those ops.",
+		}),
+	),
+	evidence: Type.Optional(
+		Type.String({
+			description:
+				"The observed result and how it met or diverged from the belief's expectation. Required for support and refute.",
 		}),
 	),
 });
@@ -46,8 +61,7 @@ export type DeclareBeliefInput = Static<typeof declareBeliefSchema>;
 export const declareBeliefSystemPromptContribution = {
 	snippet: "Record or update what you currently believe about the product or code",
 	guidelines: [
-		"Maintain a working set of beliefs about the task's product and code; call declare_belief to propose a new belief, or to support/refute/refine one after you see a result",
-		"A belief is a named relation about the product or code, not a command or a test-output prediction",
+		"A belief names a relation and its falsifiable expectation; support or refute it with the evidence you observed",
 	],
 };
 
@@ -60,13 +74,32 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 			if (input.domain !== "product" && input.domain !== "code") {
 				throw new Error("propose requires `domain` of 'product' or 'code'.");
 			}
-			return { op: "propose", statement: input.statement, domain: input.domain };
+			if (!input.expectation?.trim()) {
+				throw new Error(
+					"propose requires a non-empty `expectation` (the observable result that would confirm or refute it).",
+				);
+			}
+			return {
+				op: "propose",
+				statement: input.statement,
+				domain: input.domain,
+				expectation: input.expectation,
+				evidenceRounds: input.evidenceRounds ?? 1,
+			};
 		case "support":
 			if (!input.beliefId) throw new Error("support requires a `beliefId`.");
-			return { op: "support", beliefId: input.beliefId };
+			if (!input.evidence?.trim()) {
+				throw new Error("support requires `evidence` (the observed result and how it met the expectation).");
+			}
+			return { op: "support", beliefId: input.beliefId, evidence: input.evidence };
 		case "refute":
 			if (!input.beliefId) throw new Error("refute requires a `beliefId`.");
-			return { op: "refute", beliefId: input.beliefId };
+			if (!input.evidence?.trim()) {
+				throw new Error(
+					"refute requires `evidence` (the observed result and how it diverged from the expectation).",
+				);
+			}
+			return { op: "refute", beliefId: input.beliefId, evidence: input.evidence };
 		case "retract":
 			if (!input.beliefId) throw new Error("retract requires a `beliefId`.");
 			return { op: "retract", beliefId: input.beliefId };
@@ -77,7 +110,16 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 			if (!input.statement?.trim()) {
 				throw new Error("refine requires a non-empty `statement`.");
 			}
-			return { op: "refine", beliefId: input.beliefId, statement: input.statement };
+			if (!input.expectation?.trim()) {
+				throw new Error("refine requires a non-empty `expectation` (the corrected prediction).");
+			}
+			return {
+				op: "refine",
+				beliefId: input.beliefId,
+				statement: input.statement,
+				expectation: input.expectation,
+				evidenceRounds: input.evidenceRounds ?? 1,
+			};
 	}
 }
 
@@ -89,8 +131,8 @@ export function createDeclareBeliefToolDefinition(
 		label: "declare belief",
 		description:
 			"Record or update your current beliefs about the product or code. A belief names a relation between two referents " +
-			"(e.g. 'authorizationSource(1003,1001) returns stale-replica'). Ops: propose (add a belief), support/refute " +
-			"(reclassify an existing belief after a result), refine (replace a belief with a corrected version), retract (withdraw).",
+			"plus a falsifiable expectation. Ops: propose (add a belief — only while no belief is open), support/refute " +
+			"(settle the open belief with evidence), refine (replace a belief with a corrected version), retract (withdraw).",
 		promptSnippet: declareBeliefSystemPromptContribution.snippet,
 		promptGuidelines: declareBeliefSystemPromptContribution.guidelines,
 		parameters: declareBeliefSchema,
@@ -102,7 +144,7 @@ export function createDeclareBeliefToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Applied ${input.op}: ${belief.id} ${belief.statement} [${belief.domain}] (${belief.status}).`,
+							text: `Applied ${input.op}: ${belief.id} ${belief.statement} [${belief.domain}] (${statusOf(belief)}).`,
 						},
 					],
 					details: undefined,

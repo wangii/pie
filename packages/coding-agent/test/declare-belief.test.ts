@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { BeliefSet } from "../src/core/belief-set.ts";
 import { createDeclareBeliefToolDefinition } from "../src/core/tools/declare-belief.ts";
+import { createViewBeliefsToolDefinition } from "../src/core/tools/view-beliefs.ts";
 
 describe("declare_belief tool", () => {
 	test("propose applies a valid belief", async () => {
@@ -8,7 +9,13 @@ describe("declare_belief tool", () => {
 		const tool = createDeclareBeliefToolDefinition(set);
 		const result = await tool.execute(
 			"tc-1",
-			{ op: "propose", statement: "authorizationSource(1003,1001) returns stale-replica", domain: "code" },
+			{
+				op: "propose",
+				statement: "authorizationSource(1003,1001) returns stale-replica",
+				domain: "code",
+				expectation: "reading it shows a stale replica",
+				evidenceRounds: 2,
+			},
 			undefined,
 			undefined,
 			undefined as never,
@@ -24,7 +31,7 @@ describe("declare_belief tool", () => {
 		const tool = createDeclareBeliefToolDefinition(set);
 		const result = await tool.execute(
 			"tc-1",
-			{ op: "propose", statement: "npm test prints PASS", domain: "code" },
+			{ op: "propose", statement: "", domain: "code", expectation: "x", evidenceRounds: 1 },
 			undefined,
 			undefined,
 			undefined as never,
@@ -34,9 +41,64 @@ describe("declare_belief tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
 	});
 
-	test("support reclassifies by beliefId", async () => {
+	test("support reclassifies by beliefId with evidence", async () => {
 		const set = new BeliefSet();
-		const belief = set.apply({ op: "propose", statement: "the cache is warm", domain: "code" });
+		const belief = set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{ op: "support", beliefId: belief.id, evidence: "reads hit the cache" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect(set.get(belief.id)?.supportedBy).toHaveLength(1);
+		expect((result.content[0] as { text: string }).text).toContain("Applied support");
+	});
+
+	test("propose while a frame is open is rejected", async () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{
+				op: "propose",
+				statement: "login is stateless",
+				domain: "product",
+				expectation: "no session reuse",
+				evidenceRounds: 1,
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+	});
+
+	test("support without evidence is rejected", async () => {
+		const set = new BeliefSet();
+		const belief = set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
 		const tool = createDeclareBeliefToolDefinition(set);
 		const result = await tool.execute(
 			"tc-1",
@@ -46,8 +108,8 @@ describe("declare_belief tool", () => {
 			undefined as never,
 		);
 
-		expect(set.get(belief.id)?.status).toBe("supported");
-		expect((result.content[0] as { text: string }).text).toContain("Applied support");
+		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+		expect((result.content[0] as { text: string }).text).toContain("evidence");
 	});
 
 	test("an op missing its required field is rejected", async () => {
@@ -57,5 +119,22 @@ describe("declare_belief tool", () => {
 
 		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
 		expect((result.content[0] as { text: string }).text).toContain("beliefId");
+	});
+});
+
+describe("view_beliefs tool", () => {
+	test("renders the current belief set as text", async () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		const tool = createViewBeliefsToolDefinition(set);
+		const result = await tool.execute("tc-1", {}, undefined, undefined, undefined as never);
+
+		expect((result.content[0] as { text: string }).text).toContain("the cache is warm");
 	});
 });

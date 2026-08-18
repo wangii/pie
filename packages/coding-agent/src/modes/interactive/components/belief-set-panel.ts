@@ -1,5 +1,5 @@
-import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import type { Belief } from "../../../core/belief-set.ts";
+import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Belief, statusOf } from "../../../core/belief-set.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -25,16 +25,29 @@ export class BeliefSetPanel implements Component {
 		if (beliefs.length === 0) return [];
 
 		const lines: string[] = [];
-		const openCount = beliefs.filter((b) => b.status === "proposed" || b.status === "supported").length;
+		const openCount = beliefs.filter((b) => {
+			const status = statusOf(b);
+			return status === "proposed" || status === "supported";
+		}).length;
 		lines.push(theme.bold(`Beliefs (${openCount} open / ${beliefs.length} total)`));
 		for (const belief of beliefs) {
+			const status = statusOf(belief);
 			const statusLabel = {
 				proposed: theme.fg("muted", "proposed"),
 				supported: theme.fg("success", "supported"),
 				refuted: theme.fg("error", "refuted"),
 				superseded: theme.fg("dim", "superseded"),
-			}[belief.status];
-			lines.push(truncateToWidth(`${statusLabel} ${theme.fg("accent", `[${belief.domain}]`)} ${belief.statement}`, width));
+			}[status];
+			const frameMarker = status === "proposed" ? ` ${theme.fg("accent", "[frame]")}` : "";
+			lines.push(
+				truncateToWidth(
+					`${statusLabel}${frameMarker} ${theme.fg("accent", `[${belief.domain}]`)} ${belief.statement}`,
+					width,
+				),
+			);
+			if (belief.expectation) {
+				lines.push(truncateToWidth(`  ↳ ${theme.fg("dim", belief.expectation)}`, width));
+			}
 		}
 		return lines;
 	}
