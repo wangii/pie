@@ -53,6 +53,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { BeliefSet, formatBeliefsForPrompt } from "./belief-set.ts";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -107,6 +108,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { createDeclareBeliefToolDefinition } from "./tools/declare-belief.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
@@ -226,6 +228,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** When true, register the `declare_belief` tool and maintain the live belief set. Default true. */
+	enableBeliefSet?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -347,12 +351,14 @@ export class AgentSession {
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	private readonly _beliefSet = new BeliefSet();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private readonly _enableBeliefSet: boolean;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -389,6 +395,7 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._enableBeliefSet = config.enableBeliefSet ?? true;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -547,13 +554,24 @@ export class AgentSession {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
+					systemPrompt: this._systemPromptWithBeliefs(),
 					tools: this.agent.state.tools.slice(),
 				},
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
 		};
+	}
+
+	/**
+	 * The live system prompt for the next turn: the base prompt plus the current
+	 * belief set. Beliefs change within a turn (the model calls `declare_belief`),
+	 * so this is appended at turn-preparation time rather than baked into
+	 * `_baseSystemPrompt`, which is only rebuilt on tool-set / resource changes.
+	 */
+	private _systemPromptWithBeliefs(): string {
+		const base = this._systemPromptOverride ?? this._baseSystemPrompt;
+		return base + formatBeliefsForPrompt(this._beliefSet.open());
 	}
 
 	// =========================================================================
@@ -2649,6 +2667,12 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		if (this._enableBeliefSet) {
+			this._baseToolDefinitions.set(
+				"declare_belief",
+				createDeclareBeliefToolDefinition(this._beliefSet) as ToolDefinition,
+			);
+		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2672,7 +2696,9 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: this._enableBeliefSet
+				? ["read", "bash", "edit", "write", "declare_belief"]
+				: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

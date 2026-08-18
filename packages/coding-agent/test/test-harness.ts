@@ -339,6 +339,8 @@ export interface HarnessOptions {
 	tools?: AgentTool[];
 	/** Base tools override (replaces built-in read/bash/edit/write). */
 	baseToolsOverride?: Record<string, AgentTool>;
+	/** Enable the `declare_belief` tool and live belief set. */
+	enableBeliefSet?: boolean;
 	/** Optional resource loader override. */
 	resourceLoader?: ResourceLoader;
 	/** Inline extensions to load into the session resource loader. */
@@ -425,6 +427,7 @@ async function createHarnessWithResourceLoader(
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
+		enableBeliefSet: options.enableBeliefSet,
 	});
 
 	const events: AgentSessionEvent[] = [];
