@@ -71,6 +71,33 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- view_beliefs:");
 		});
 
+		test("execution role uses a probe preamble and omits the pi-docs block and coding identity", () => {
+			const prompt = buildSystemPrompt({
+				role: "execution",
+				selectedTools: ["read", "bash", "view_beliefs"],
+				toolSnippets: {
+					read: "Read file contents",
+					bash: "Execute bash commands",
+					view_beliefs: "View your current beliefs",
+				},
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			// A probe identity, not the file/command-agent identity.
+			expect(prompt).toContain("You are a scientific mind running an experiment");
+			expect(prompt).not.toContain("expert coding assistant");
+			// No pi-docs block or coding-only guideline to distract the probe.
+			expect(prompt).not.toContain("Pi documentation");
+			expect(prompt).not.toContain("In addition to the tools above");
+			expect(prompt).not.toContain("Show file paths clearly");
+			// …but its probe tools (and the read-only belief view) are still enumerated.
+			expect(prompt).toContain("- read:");
+			expect(prompt).toContain("- bash:");
+			expect(prompt).toContain("- view_beliefs:");
+		});
+
 		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],

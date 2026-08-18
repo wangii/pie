@@ -370,6 +370,14 @@ export class AgentSession {
 	private _leaseReportNudged = false;
 	/** The full active tool names, independent of the current role's projected subset. */
 	private _fullActiveToolNames: string[] = [];
+	/**
+	 * Index into `agent.state.messages` below which operational detail (raw tool results and
+	 * bash output) has already been shown to the epistemic role. The epistemic role sees each
+	 * execution round's raw evidence exactly once — the turn after execution produces it — then
+	 * that detail is masked so the loop is stimulated by fresh evidence without its context
+	 * accumulating stale raw output. Advances when the epistemic role dispatches (moves on).
+	 */
+	private _evidenceWatermark = 0;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -604,20 +612,39 @@ export class AgentSession {
 	 * `agent.state.messages` (never `turn.context.messages`, which may already be a prior
 	 * projection and would silently accumulate).
 	 *
-	 * The epistemic and execution roles both receive the full transcript: the epistemic role
-	 * must *see* the execution evidence to update or propose beliefs (a filter that omitted it
-	 * would starve the loop), and the execution role needs the raw results to probe. Only the
-	 * finalAnswer role discards that operational detail — its job is to synthesize the answer
-	 * from the settled beliefs, so raw tool results and bash output are redacted there.
+	 * Each role sees a different projection:
+	 * - epistemic: the belief bookkeeping (declare_belief / view_beliefs results) is always
+	 *   visible — it is the operated-on object — while raw operational detail is shown exactly
+	 *   once (see `_evidenceWatermark`) to stimulate updates, then masked.
+	 * - execution: the belief *mutation* echo (declare_belief) is masked so the probe role is
+	 *   not tempted to propose/update beliefs, but the read-only `view_beliefs` stays visible so
+	 *   it can recall the hypothesis it is testing; raw operational detail stays.
+	 * - finalAnswer: raw operational detail is discarded; the settled beliefs remain.
 	 */
 	private _projectContextMessages(): AgentMessage[] {
-		if (!this._enableBeliefSet || !this._beliefSetUsable || this._role !== "finalAnswer") {
+		if (!this._enableBeliefSet || !this._beliefSetUsable) {
 			return this.agent.state.messages.slice();
 		}
-		return this.agent.state.messages.map((message) => this._maskOperationalDetail(message));
+		return this.agent.state.messages.map((message, index) => this._projectMessage(message, index));
 	}
 
-	/** Redact operational detail from a single message for the finalAnswer role. */
+	/** Project one message for the current role. */
+	private _projectMessage(message: AgentMessage, index: number): AgentMessage {
+		switch (this._role) {
+			case "epistemic":
+				return index < this._evidenceWatermark ? this._maskOperationalDetail(message) : message;
+			case "execution":
+				return this._maskBeliefBookkeeping(message);
+			case "finalAnswer":
+				return this._maskOperationalDetail(message);
+		}
+	}
+
+	/**
+	 * Redact raw operational detail (non-belief tool results and bash output) from one message,
+	 * preserving the belief bookkeeping. Used by the epistemic role below its watermark and by
+	 * the finalAnswer role everywhere.
+	 */
 	private _maskOperationalDetail(message: AgentMessage): AgentMessage {
 		switch (message.role) {
 			case "toolResult":
@@ -630,6 +657,21 @@ export class AgentSession {
 			default:
 				return message;
 		}
+	}
+
+	/**
+	 * Redact the belief *mutation* echo (declare_belief results) from one message, for the
+	 * execution role. The execution role probes and reports; belief updates happen in the
+	 * epistemic role, so exposing the "Applied propose/support/refute" echoes here only invites
+	 * the probe role to step out of its lane instead of reporting a plain observation. The
+	 * read-only `view_beliefs` result is left intact — the execution role needs it to recall the
+	 * hypothesis it is testing.
+	 */
+	private _maskBeliefBookkeeping(message: AgentMessage): AgentMessage {
+		if (message.role === "toolResult" && message.toolName === "declare_belief") {
+			return { ...message, content: [{ type: "text", text: "[belief update omitted]" }] };
+		}
+		return message;
 	}
 
 	/** Advance the role from the just-completed turn and project the next role's surface. */
@@ -649,6 +691,9 @@ export class AgentSession {
 					// must not linger to "explore" on its own — no probe tools exist there.
 					this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
 					this._role = "execution";
+					// The epistemic role has consumed the evidence it just saw; mask it going
+					// forward so the next epistemic turn sees only the fresh round.
+					this._evidenceWatermark = this.agent.state.messages.length;
 					const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
 					this._frameHorizon = Math.ceil(totalRounds * 1.3);
 					this._leaseReportNudged = false;
@@ -677,9 +722,15 @@ export class AgentSession {
 						],
 						timestamp: Date.now(),
 					});
-				} else if (proposed.length === 0 && !ranTools) {
-					// Settled and stopped — the answer is final.
-					this._role = "finalAnswer";
+				} else if (proposed.length === 0) {
+					// No open hypotheses remain. Conclude — but not while the epistemic role is
+					// still bootstrapping: its first action is usually `view_beliefs` on an empty
+					// set (ranTools with no belief ever proposed), which must not be mistaken for a
+					// conclusion or the role would lose its belief tools before proposing anything.
+					const bootstrapping = ranTools && this._beliefSet.beliefs.length === 0;
+					if (!bootstrapping) {
+						this._role = "finalAnswer";
+					}
 				}
 				break;
 			}
@@ -730,7 +781,10 @@ export class AgentSession {
 			case "finalAnswer":
 				return [];
 			case "execution":
-				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "view_beliefs");
+				// The probe role gets `view_beliefs` read-only — it must be able to recall the
+				// hypothesis it is testing (statement + expectation) without drifting, but it
+				// must not mutate the belief set, so `declare_belief` stays absent.
+				return this._fullActiveToolNames.filter((name) => name !== "declare_belief");
 		}
 	}
 
@@ -753,7 +807,7 @@ export class AgentSession {
 			this._systemPromptOverride ??
 			buildSystemPrompt({
 				...this._baseSystemPromptOptions,
-				role: this._role === "execution" ? "coding" : this._role,
+				role: this._role,
 				selectedTools: toolNames,
 				toolSnippets: snippets,
 				promptGuidelines: guidelines,
@@ -775,8 +829,9 @@ export class AgentSession {
 				);
 			case "execution":
 				return (
-					"\n\nYou are a scientific mind running the experiment: probe the open hypothesis's prediction " +
-					"in the code or product, then report one concise observation of what you actually saw."
+					"\n\nRead the hypothesis you are probing with view_beliefs if you need its exact expectation, then " +
+					"probe the code or product to test it and report one concise sentence stating what you actually " +
+					"observed. Report as plain text — proposing or updating beliefs is a separate step you do not perform."
 				);
 			case "finalAnswer":
 				return (
