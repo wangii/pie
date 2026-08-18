@@ -549,12 +549,17 @@ export class AgentSession {
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
+			const systemPrompt = this._systemPromptWithBeliefs();
+			// Keep the agent's base state fresh so the first turn of the *next* run
+			// (a later `prompt`/`continue`) also sees the live belief block, not a
+			// stale copy captured at the last tool-set rebuild.
+			this.agent.state.systemPrompt = systemPrompt;
 
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					systemPrompt: this._systemPromptWithBeliefs(),
+					systemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
 				model: this.agent.state.model,
@@ -967,9 +972,11 @@ export class AgentSession {
 		}
 		this.agent.state.tools = tools;
 
-		// Rebuild base system prompt with new tool set
+		// Rebuild base system prompt with new tool set, then attach the live belief
+		// block so the *first* turn of a run already carries the bootstrap (or the
+		// current beliefs) — `prepareNextTurn` only refreshes from turn two onward.
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+		this.agent.state.systemPrompt = this._systemPromptWithBeliefs();
 	}
 
 	/** Whether compaction or branch summarization is currently running */
