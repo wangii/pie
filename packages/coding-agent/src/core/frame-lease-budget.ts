@@ -38,6 +38,16 @@ export interface FrameLeaseCalculation {
 const DEFERRED_TARGET_PATTERN =
 	/(?:from the (?:prior|previous|same) (?:grep|search|result|observation)|(?:highest|next[- ]?highest|top) (?:total )?(?:count|match)|the (?:source )?file (?:with|from|identified|returned|recorded|named)|the (?:location|path|file) (?:returned|identified|recorded|named) by)/iu;
 
+/**
+ * Signals in a budgetReason that a later evidence round reads or traces something
+ * an earlier round returned. The model phrases this many ways ("trace the modules it
+ * imports", "a follow-up read of the file it references", "then read the returned
+ * path"), so the word list is intentionally broad. Plural and stem forms (`paths`,
+ * `imports`, `referenced`) must match — a bare `\b…\b` boundary would miss them.
+ */
+const SERIAL_DEPENDENCY_PATTERN =
+	/\b(?:depend(?:s|ent|encies?)?|after|before|return(?:s|ed)?|results?|outputs?|paths?|locations?|preceding|previous|first|then|unavailable|trac(?:es|ed|ing)?|referenc(?:es|ed|ing)?|import(?:s|ed|ing)?|upstream|follow(?:s|ed|ing)?(?:-up)?|deriv(?:e|es|ed|ing)?|call\s*sites?|resolv(?:e|es|ed|ing)?)\b|依赖|基于|之后|返回|结果|输出|路径|位置|前一|先|追溯|引用|导入|上游|后续|派生|调用点/iu;
+
 export const DEFAULT_FRAME_LEASE_POLICY: FrameLeasePolicy = {
 	maxActions: 3,
 	maxEvidenceRounds: 5,
@@ -62,13 +72,10 @@ function validateBudgetReason(candidate: ProvisionalActionContract): void {
 			"Action evidence rounds must be justified by serial result dependency, not complexity or tool count.",
 		);
 	}
-	if (
-		candidate.expectedEvidenceRounds > 1 &&
-		!/\b(?:depend(?:s|ent)?|after|before|returned|result|output|path|location|preceding|previous|first|then|unavailable)\b|依赖|基于|之后|返回|结果|输出|路径|位置|前一|先/u.test(
-			reason,
-		)
-	) {
-		throw new Error("Each evidence round after the first requires an inspectable serial dependency.");
+	if (candidate.expectedEvidenceRounds > 1 && !SERIAL_DEPENDENCY_PATTERN.test(reason)) {
+		throw new Error(
+			'Each evidence round after the first requires an inspectable serial dependency: name what the later round reads or traces that the earlier round returned (e.g. "read the file, then trace the modules it imports").',
+		);
 	}
 	// A single-round Action has no room for a serial "discover the target, then read
 	// it" sequence. If the contract derives its target from a prior result (by rank,

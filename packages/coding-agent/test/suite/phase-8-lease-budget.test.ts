@@ -91,6 +91,45 @@ describe("Phase 8 model-response lease derivation", () => {
 		});
 	});
 
+	it("accepts serial-dependency reasons phrased as trace/reference/import and rejects complexity", () => {
+		const base = { intent: "map", completionCondition: "mapped", expectation: "mapped" };
+		// Serial dependencies phrased without the narrow keyword set are accepted.
+		expect(() =>
+			deriveFrameLease([
+				{ ...base, expectedEvidenceRounds: 2, budgetReason: "read the file, then trace the modules it imports" },
+			]),
+		).not.toThrow();
+		expect(() =>
+			deriveFrameLease([
+				{
+					...base,
+					expectedEvidenceRounds: 2,
+					budgetReason:
+						"one round to read the file, one to trace any imported source modules referenced by the assembly code",
+				},
+			]),
+		).not.toThrow();
+		expect(() =>
+			deriveFrameLease([
+				{
+					...base,
+					expectedEvidenceRounds: 2,
+					budgetReason: "reading the compiler's imports and call sites, then its upstream inputs",
+				},
+			]),
+		).not.toThrow();
+		// A complexity justification is still rejected.
+		expect(() =>
+			deriveFrameLease([
+				{
+					...base,
+					expectedEvidenceRounds: 2,
+					budgetReason: "the file is large and complex, so it needs multiple rounds",
+				},
+			]),
+		).toThrow(/complexity|serial result dependency/);
+	});
+
 	it("rejects a direct horizon and unsupported round estimates without silent clamping", async () => {
 		const harness = await createHarness(fullStackOptions());
 		try {
