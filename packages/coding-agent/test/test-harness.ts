@@ -341,6 +341,8 @@ export interface HarnessOptions {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Enable the `declare_belief` tool and live belief set. */
 	enableBeliefSet?: boolean;
+	/** Initial active tool names (mirrors the CLI's `initialActiveToolNames`). */
+	initialActiveToolNames?: string[];
 	/** Optional resource loader override. */
 	resourceLoader?: ResourceLoader;
 	/** Inline extensions to load into the session resource loader. */
@@ -428,6 +430,7 @@ async function createHarnessWithResourceLoader(
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
 		enableBeliefSet: options.enableBeliefSet,
+		initialActiveToolNames: options.initialActiveToolNames,
 	});
 
 	const events: AgentSessionEvent[] = [];

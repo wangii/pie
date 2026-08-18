@@ -2718,8 +2718,17 @@ export class AgentSession {
 				? ["read", "bash", "edit", "write", "declare_belief"]
 				: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		// The belief set is on by default, so its tool must be active even when the
+		// caller supplied its own `activeToolNames` (the CLI passes a settings default
+		// of `["read", "bash", "edit", "write"]` that would otherwise drop it). An
+		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
+		// back out via `allowedToolNames`.
+		const activeToolNames =
+			this._enableBeliefSet && !baseActiveToolNames.includes("declare_belief")
+				? [...baseActiveToolNames, "declare_belief"]
+				: baseActiveToolNames;
 		this._refreshToolRegistry({
-			activeToolNames: baseActiveToolNames,
+			activeToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
 	}

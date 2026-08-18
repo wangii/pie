@@ -22,4 +22,16 @@ describe("declare_belief integration", () => {
 			harness.cleanup();
 		}
 	});
+
+	test("declare_belief stays active when the CLI supplies a tool list without it", async () => {
+		// The CLI passes `initialActiveToolNames = ["read", "bash", "edit", "write"]`
+		// (its settings default); declare_belief must be added back in because the
+		// belief set is on by default.
+		const harness = await createHarness({ initialActiveToolNames: ["read", "bash", "edit", "write"] });
+		try {
+			expect(harness.session.getActiveToolNames()).toContain("declare_belief");
+		} finally {
+			harness.cleanup();
+		}
+	});
 });
