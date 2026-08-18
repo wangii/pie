@@ -75,6 +75,10 @@ describe("Phase 10 execution feedback observation", () => {
 						sign: "refuted",
 						detail: "The boundary is runtime config, so the frozen condition cannot be met here",
 					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration",
+						affects: "anchor_and_frame",
+					},
 				}),
 				control({ kind: "report_inability", reason: "A corrected Frame must be authorized separately" }),
 				fauxAssistantMessage("reconsider under a corrected commitment"),
@@ -85,9 +89,7 @@ describe("Phase 10 execution feedback observation", () => {
 			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
 			expect(observations).toHaveLength(1);
 			expect(observations[0]).toMatchObject({
-				statement:
-					"Expectation: The inspect result shows the implementation boundary is runtime configuration\n" +
-					"Prediction error: refuted: The boundary is runtime config, so the frozen condition cannot be met here",
+				statement: "The implementation boundary is runtime configuration",
 				frameId: expect.any(String),
 				frameRevisionEntryId: expect.any(String),
 				anchorId: expect.any(String),
@@ -123,6 +125,10 @@ describe("Phase 10 execution feedback observation", () => {
 						sign: "refuted",
 						detail: "The exact result contradicts the Frame relation",
 					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration, not a static boundary",
+						affects: "frame",
+					},
 				}),
 				control({ kind: "falsify_frame", reason: "The expectation is established by the escalated result" }),
 				control({ kind: "report_inability", reason: "A corrected Frame must be authorized separately" }),
@@ -134,9 +140,7 @@ describe("Phase 10 execution feedback observation", () => {
 			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
 			expect(observations).toHaveLength(1);
 			expect(observations[0]).toMatchObject({
-				statement:
-					"Expectation: The inspect result shows the implementation boundary is runtime configuration\n" +
-					"Prediction error: refuted: The exact result contradicts the Frame relation",
+				statement: "The implementation boundary is runtime configuration, not a static boundary",
 				frameId: expect.any(String),
 			});
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_transition")).toEqual([
@@ -192,6 +196,10 @@ describe("Phase 10 execution feedback observation", () => {
 						sign: "confirmed",
 						detail: "The implementation boundary is established in the runtime configuration",
 					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration",
+						affects: "frame",
+					},
 				}),
 				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
 				fauxAssistantMessage("done"),
@@ -202,9 +210,7 @@ describe("Phase 10 execution feedback observation", () => {
 			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
 			expect(observations).toHaveLength(1);
 			expect(observations[0]).toMatchObject({
-				statement:
-					"Expectation: The inspect result shows the implementation boundary is runtime configuration\n" +
-					"Prediction error: confirmed: The implementation boundary is established in the runtime configuration",
+				statement: "The implementation boundary is runtime configuration",
 				frameId: expect.any(String),
 				frameRevisionEntryId: expect.any(String),
 			});
@@ -240,6 +246,10 @@ describe("Phase 10 execution feedback observation", () => {
 					predictionError: {
 						sign: "refuted",
 						detail: "The boundary is runtime config, so the frozen condition cannot be met here",
+					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration",
+						affects: "anchor_and_frame",
 					},
 				}),
 				control({ kind: "kill_frame", reason: "The Frame premise is contradicted by the observed result" }),
@@ -279,9 +289,7 @@ describe("Phase 10 execution feedback observation", () => {
 			const projectingContext = harness.providerContexts.find((context) =>
 				context.messages
 					.map(getMessageText)
-					.some((text) =>
-						text.includes("The boundary is runtime config, so the frozen condition cannot be met here"),
-					),
+					.some((text) => text.includes("The implementation boundary is runtime configuration")),
 			);
 			expect(projectingContext).toBeDefined();
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "frame_transition")).toEqual([
@@ -367,7 +375,7 @@ describe("Phase 10 execution feedback observation", () => {
 		}
 	});
 
-	it("rejects a complete_action whose prediction error is refuted", async () => {
+	it("accepts a completed Action whose refuted result disproves the Frame premise", async () => {
 		const harness = await createHarness(options());
 		try {
 			harness.setResponses([
@@ -377,19 +385,18 @@ describe("Phase 10 execution feedback observation", () => {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("The probe result is finalized."),
-				// complete_action may only carry a confirmed or refined prediction error.
+				// Phase 11: execution outcome and epistemic effect are orthogonal. A
+				// completed episode whose result disproves the Frame premise carries a
+				// refuted prediction error and an explicit material Observation.
 				control({
 					kind: "complete_action",
 					predictionError: {
 						sign: "refuted",
 						detail: "The result contradicts the frozen expectation in source",
 					},
-				}),
-				control({
-					kind: "complete_action",
-					predictionError: {
-						sign: "confirmed",
-						detail: "The probe result establishes the boundary in source",
+					observation: {
+						statement: "The implementation boundary is statically defined in source, not runtime configuration",
+						affects: "anchor_and_frame",
 					},
 				}),
 				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
@@ -398,11 +405,17 @@ describe("Phase 10 execution feedback observation", () => {
 
 			await harness.session.prompt("inspect the boundary");
 
-			expect(
-				harness.providerContexts.some((context) =>
-					(context.systemPrompt ?? "").includes("complete_action prediction error cannot be refuted"),
-				),
-			).toBe(true);
+			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
+			expect(observations).toHaveLength(1);
+			expect(observations[0]).toMatchObject({
+				statement: "The implementation boundary is statically defined in source, not runtime configuration",
+				predictionErrorSign: "refuted",
+				anchorId: expect.any(String),
+				frameId: expect.any(String),
+			});
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "action_transition")).toEqual([
+				expect.objectContaining({ transition: "completed" }),
+			]);
 			expect(harness.session.state.errorMessage).toBeUndefined();
 			expect(harness.session.getLastAssistantText()).toBe("done");
 		} finally {
@@ -488,6 +501,112 @@ describe("Phase 10 execution feedback observation", () => {
 					),
 				),
 			).toBe(true);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects a process-record Observation statement", async () => {
+		const harness = await createHarness(options());
+		try {
+			harness.setResponses([
+				control(frame),
+				control(authorizeAction),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "boundary-established" }, { id: "call-pr" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("The probe result is finalized."),
+				// A process record narrates what the episode did, not a world relation.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement: "we did not prove the boundary within budget",
+						affects: "frame",
+					},
+				}),
+				// The controller recovers with a valid relation assertion.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration",
+						affects: "frame",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("inspect the boundary");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes("must name a world relation between project referents"),
+				),
+			).toBe(true);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "observation")).toHaveLength(1);
+			expect(harness.session.state.errorMessage).toBeUndefined();
+			expect(harness.session.getLastAssistantText()).toBe("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects an experiment-record Observation statement", async () => {
+		const harness = await createHarness(options());
+		try {
+			harness.setResponses([
+				control(frame),
+				control(authorizeAction),
+				fauxAssistantMessage(fauxToolCall("inspect", { value: "boundary-established" }, { id: "call-er" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("The probe result is finalized."),
+				// An experiment record restates the probe instead of the fact it established.
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement:
+							"Expectation: the boundary is runtime config\nPrediction error: confirmed: the boundary is runtime config",
+						affects: "frame",
+					},
+				}),
+				control({
+					kind: "complete_action",
+					predictionError: {
+						sign: "confirmed",
+						detail: "The boundary is established in source",
+					},
+					observation: {
+						statement: "The implementation boundary is runtime configuration",
+						affects: "frame",
+					},
+				}),
+				control({ kind: "authorize_final", reason: "The Anchor is satisfied" }),
+				fauxAssistantMessage("done"),
+			]);
+
+			await harness.session.prompt("inspect the boundary");
+
+			expect(
+				harness.providerContexts.some((context) =>
+					(context.systemPrompt ?? "").includes("must be the fact itself, not an experiment record"),
+				),
+			).toBe(true);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "observation")).toHaveLength(1);
 			expect(harness.session.state.errorMessage).toBeUndefined();
 			expect(harness.session.getLastAssistantText()).toBe("done");
 		} finally {

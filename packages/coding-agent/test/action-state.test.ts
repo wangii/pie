@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { describe, expect, it } from "vitest";
-import { restoreEpistemicState } from "../src/core/epistemic-state.ts";
+import { restoreEpistemicState, restoreExecutionView } from "../src/core/epistemic-state.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
 function initializeFrame(manager: SessionManager): { sourceEventId: string; frameRevisionEntryId: string } {
@@ -44,14 +44,16 @@ describe("Action episode persistence", () => {
 			manager.appendMessage(fauxAssistantMessage("inspect cache"));
 
 			const reopened = SessionManager.open(manager.getSessionFile()!);
-			expect(restoreEpistemicState(reopened.getBranch()).action).toMatchObject({
+			const branch = reopened.getBranch();
+			expect(restoreEpistemicState(branch).action).toMatchObject({
 				id: "action-1",
 				intent: "determine whether the worker cache survives logout",
 				completionCondition: "a cache lifetime is identified or cache survival is ruled out",
 				startEntryId,
 				frameRevisionEntryId,
-				completedModelResponses: 1,
 			});
+			// Execution counters live on the separate ExecutionView (Phase 11).
+			expect(restoreExecutionView(branch).action).toMatchObject({ completedModelResponses: 1 });
 			expect(reopened.getEntries().filter((entry) => entry.type === "action_start")).toHaveLength(1);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });

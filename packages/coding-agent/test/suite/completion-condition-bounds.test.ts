@@ -569,6 +569,10 @@ describe("completion condition bounds", () => {
 						sign: "confirmed",
 						detail: "The grep recorded the prompt sites in system-prompt.ts and agent-session.ts",
 					},
+					observation: {
+						statement: "The prompt-definition markers live in system-prompt.ts and agent-session.ts",
+						affects: "anchor",
+					},
 				}),
 				explore("Grep packages/coding-agent/src for prompt-definition markers"),
 				control({ kind: "authorize_final", reason: "Comprehension is sufficient; the Anchor is satisfied" }),
@@ -585,7 +589,7 @@ describe("completion condition bounds", () => {
 			const observations = branch.filter((entry) => entry.type === "observation");
 			expect(observations).toHaveLength(1);
 			expect(observations[0]).toMatchObject({
-				statement: expect.stringContaining("prompt-construction surface"),
+				statement: "The prompt-definition markers live in system-prompt.ts and agent-session.ts",
 			});
 			expect(observations[0].anchorRevisionEntryId).toBeDefined();
 			expect(observations[0].frameRevisionEntryId).toBeUndefined();
@@ -626,6 +630,10 @@ describe("completion condition bounds", () => {
 					predictionError: {
 						sign: "confirmed",
 						detail: "The prompt sites were recorded in system-prompt.ts and agent-session.ts",
+					},
+					observation: {
+						statement: "Prompt literals live in system-prompt.ts and agent-session.ts",
+						affects: "anchor",
 					},
 				}),
 				// Different intent, but the expectation repeats the already-established fact.
@@ -848,6 +856,10 @@ describe("completion condition bounds", () => {
 						sign: "confirmed",
 						detail: "The grep recorded the prompt sites in system-prompt.ts and agent-session.ts",
 					},
+					observation: {
+						statement: "The prompt-definition markers live in system-prompt.ts and agent-session.ts",
+						affects: "anchor",
+					},
 				}),
 				control({ kind: "authorize_final", reason: "Comprehension is sufficient" }),
 				fauxAssistantMessage("done"),
@@ -857,12 +869,11 @@ describe("completion condition bounds", () => {
 
 			const observations = harness.sessionManager.getBranch().filter((entry) => entry.type === "observation");
 			expect(observations).toHaveLength(1);
-			// The frozen expectation is restated at the head of the canonical statement…
-			expect(observations[0].statement).toContain(
-				"Expectation: The prompt-construction surface lives in a few identifiable files",
+			// Phase 11: the statement is the controller's direct relation assertion;
+			// expectation and predictionErrorSign remain provenance metadata.
+			expect(observations[0].statement).toBe(
+				"The prompt-definition markers live in system-prompt.ts and agent-session.ts",
 			);
-			// …and the confirmed prediction error names the concrete established result.
-			expect(observations[0].statement).toContain("Prediction error: confirmed: The grep recorded the prompt sites");
 			// The raw tool output is never inlined into the statement; it is referenced
 			// only through the exact provenance pointer.
 			expect(observations[0].statement).not.toContain("observed:agent-session.ts:39");

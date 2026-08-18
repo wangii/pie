@@ -33,9 +33,6 @@ export interface Frame {
 	sourceEventId: string;
 	timestamp: string;
 	revisionReason?: string;
-	/** Derived from raw events after revisionEntryId; it is not persisted as canonical state. */
-	completedModelResponses: number;
-	lastResponseEventId?: string;
 }
 
 export type FrameTerminalTransition = FrameTransitionEntry["transition"];
@@ -49,14 +46,8 @@ export interface Action {
 	expectation: string;
 	frameRevisionEntryId?: string;
 	anchorRevisionEntryId?: string;
-	/** Controller-estimated serial evidence rounds for a pre-Frame `explore`; absent on Frame-leased Actions. */
-	expectedEvidenceRounds?: number;
-	budgetReason?: string;
 	sourceEventId: string;
 	timestamp: string;
-	/** Derived from raw events after startEntryId; it is not persisted as canonical state. */
-	completedModelResponses: number;
-	lastResponseEventId?: string;
 }
 
 export type ActionTerminalTransition = ActionTransitionEntry["transition"];
@@ -88,6 +79,30 @@ export interface EpistemicState {
 	observations?: readonly Observation[];
 }
 
+/**
+ * Execution-side state derived from the same raw branch, separate from
+ * `EpistemicState` (Phase 11): response counters, evidence-round estimates, and
+ * lease consumption belong to the execution layer, not to epistemic knowledge.
+ * It is not persisted; it is recomputed from raw events on each restore.
+ */
+export interface ExecutionView {
+	/** Completed model responses under the current admissible Frame revision. */
+	frame?: {
+		revisionEntryId: string;
+		completedModelResponses: number;
+		lastResponseEventId?: string;
+	};
+	/** Execution state of the active Action episode. */
+	action?: {
+		actionId: string;
+		startEntryId: string;
+		expectedEvidenceRounds?: number;
+		budgetReason?: string;
+		completedModelResponses: number;
+		lastResponseEventId?: string;
+	};
+}
+
 function anchorFromEntry(entry: AnchorRevisionEntry): Anchor {
 	return {
 		id: entry.anchorId,
@@ -113,7 +128,6 @@ function frameFromEntry(entry: FrameRevisionEntry): Frame {
 		sourceEventId: entry.sourceEventId,
 		timestamp: entry.timestamp,
 		revisionReason: entry.revisionReason,
-		completedModelResponses: 0,
 	};
 }
 
@@ -126,11 +140,8 @@ function actionFromEntry(entry: ActionStartEntry): Action {
 		expectation: entry.expectation,
 		frameRevisionEntryId: entry.frameRevisionEntryId,
 		anchorRevisionEntryId: entry.anchorRevisionEntryId,
-		expectedEvidenceRounds: entry.expectedEvidenceRounds,
-		budgetReason: entry.budgetReason,
 		sourceEventId: entry.sourceEventId,
 		timestamp: entry.timestamp,
-		completedModelResponses: 0,
 	};
 }
 
@@ -191,6 +202,7 @@ function validateActionStart(
 	anchor: Anchor | undefined,
 	action: Action | undefined,
 	seenActionIds: Set<string>,
+	frameCompletedResponses: number,
 ): Action {
 	if (!entry.expectation?.trim()) {
 		throw new Error(`Action start ${entry.id} requires a non-empty frozen expectation.`);
@@ -201,11 +213,7 @@ function validateActionStart(
 		throw new Error(`Action start ${entry.id} must bind to exactly one of a current Frame version or the Anchor.`);
 	}
 	if (bindsToFrame) {
-		if (
-			!frame ||
-			entry.frameRevisionEntryId !== frame.revisionEntryId ||
-			frame.completedModelResponses >= frame.horizon
-		) {
+		if (!frame || entry.frameRevisionEntryId !== frame.revisionEntryId || frameCompletedResponses >= frame.horizon) {
 			throw new Error(`Action start ${entry.id} does not bind to a current admissible Frame version.`);
 		}
 	} else if (!anchor || entry.anchorRevisionEntryId !== anchor.revisionEntryId) {
@@ -239,6 +247,7 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 	const precedingEventIds = new Set<string>();
 	const eventPositions = new Map(entries.map((entry, index) => [entry.id, index] as const));
 	let expectedReplacementFrameId: string | undefined;
+	let frameCompletedResponses = 0;
 
 	for (const entry of entries) {
 		if (entry.type === "anchor_revision") {
@@ -273,6 +282,7 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 				);
 			}
 			frame = validateFrameRevision(entry, frame, seenFrameIds);
+			frameCompletedResponses = 0;
 			expectedReplacementFrameId = undefined;
 		} else if (entry.type === "frame_transition") {
 			if (action) throw new Error(`Frame transition ${entry.id} cannot terminate a Frame during an Action.`);
@@ -284,13 +294,14 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 			validateFrameTransition(entry, frame);
 			expectedReplacementFrameId = entry.replacementFrameId;
 			frame = undefined;
+			frameCompletedResponses = 0;
 		} else if (entry.type === "action_start") {
 			if (!precedingEventIds.has(entry.sourceEventId)) {
 				throw new Error(
 					`Action start ${entry.id} references source event ${entry.sourceEventId}, which is not earlier on the active branch.`,
 				);
 			}
-			action = validateActionStart(entry, frame, anchor, action, seenActionIds);
+			action = validateActionStart(entry, frame, anchor, action, seenActionIds, frameCompletedResponses);
 		} else if (entry.type === "action_transition") {
 			if (
 				!precedingEventIds.has(entry.sourceEventId) ||
@@ -344,14 +355,7 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 			seenObservationIds.add(entry.observationId);
 			observations.push(observationFromEntry(entry));
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			if (frame) {
-				frame.completedModelResponses++;
-				frame.lastResponseEventId = entry.id;
-			}
-			if (action) {
-				action.completedModelResponses++;
-				action.lastResponseEventId = entry.id;
-			}
+			frameCompletedResponses++;
 		}
 		precedingEventIds.add(entry.id);
 	}
@@ -361,5 +365,89 @@ export function restoreEpistemicState(entries: readonly SessionEntry[]): Epistem
 		...(frame ? { frame } : {}),
 		...(action ? { action } : {}),
 		...(observations.length > 0 ? { observations } : {}),
+	};
+}
+
+/**
+ * Reconstruct execution-side counters from the active raw branch. This is the
+ * Phase 11 counterpart to `restoreEpistemicState`: it owns response counters,
+ * evidence-round estimates, and lease consumption, which do not belong on the
+ * epistemic surface. It performs no validation — pair it with
+ * `restoreEpistemicState`, which validates the same branch.
+ */
+export function restoreExecutionView(entries: readonly SessionEntry[]): ExecutionView {
+	let frameRevisionEntryId: string | undefined;
+	let frameCompletedResponses = 0;
+	let frameLastResponseEventId: string | undefined;
+	let action:
+		| {
+				actionId: string;
+				startEntryId: string;
+				expectedEvidenceRounds?: number;
+				budgetReason?: string;
+				completedResponses: number;
+				lastResponseEventId?: string;
+		  }
+		| undefined;
+
+	for (const entry of entries) {
+		if (entry.type === "frame_revision") {
+			frameRevisionEntryId = entry.id;
+			frameCompletedResponses = 0;
+			frameLastResponseEventId = undefined;
+		} else if (entry.type === "frame_transition") {
+			frameRevisionEntryId = undefined;
+			frameCompletedResponses = 0;
+			frameLastResponseEventId = undefined;
+		} else if (entry.type === "action_start") {
+			action = {
+				actionId: entry.actionId,
+				startEntryId: entry.id,
+				...(entry.expectedEvidenceRounds !== undefined
+					? { expectedEvidenceRounds: entry.expectedEvidenceRounds }
+					: {}),
+				...(entry.budgetReason !== undefined ? { budgetReason: entry.budgetReason } : {}),
+				completedResponses: 0,
+			};
+		} else if (entry.type === "action_transition") {
+			action = undefined;
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			if (frameRevisionEntryId !== undefined) {
+				frameCompletedResponses++;
+				frameLastResponseEventId = entry.id;
+			}
+			if (action) {
+				action.completedResponses++;
+				action.lastResponseEventId = entry.id;
+			}
+		}
+	}
+
+	return {
+		...(frameRevisionEntryId !== undefined
+			? {
+					frame: {
+						revisionEntryId: frameRevisionEntryId,
+						completedModelResponses: frameCompletedResponses,
+						...(frameLastResponseEventId !== undefined ? { lastResponseEventId: frameLastResponseEventId } : {}),
+					},
+				}
+			: {}),
+		...(action
+			? {
+					action: {
+						actionId: action.actionId,
+						startEntryId: action.startEntryId,
+						...(action.expectedEvidenceRounds !== undefined
+							? { expectedEvidenceRounds: action.expectedEvidenceRounds }
+							: {}),
+						...(action.budgetReason !== undefined ? { budgetReason: action.budgetReason } : {}),
+						completedModelResponses: action.completedResponses,
+						...(action.lastResponseEventId !== undefined
+							? { lastResponseEventId: action.lastResponseEventId }
+							: {}),
+					},
+				}
+			: {}),
 	};
 }

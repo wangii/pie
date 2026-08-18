@@ -1,7 +1,14 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { type Api, contentText, type Model } from "@earendil-works/pi-ai";
 import { estimateTokens } from "./compaction/index.ts";
-import type { Action, Anchor, EpistemicState, Frame, Observation } from "./epistemic-state.ts";
+import {
+	type Action,
+	type Anchor,
+	type EpistemicState,
+	type Frame,
+	type Observation,
+	restoreExecutionView,
+} from "./epistemic-state.ts";
 import type { SessionEntry } from "./session-manager.ts";
 import { sessionEntryToContextMessages } from "./session-manager.ts";
 
@@ -303,12 +310,11 @@ function isControlDecisionMessage(event: SessionEntry): boolean {
 
 /**
  * The broad (epistemic) projection lets the controller adjudicate the active or
- * last-terminal Action. Its terminal unit is expectation + predictionError, so the
- * execution evidence it receives must be the execution role's own distilled
- * conclusion — the prose "established result" it narrates after gathering — not the
- * raw tool-call/tool-result transcript. Replaying raw probe traffic (ls/find/wc
- * discovery and file dumps) drowns the controller in execution detail it cannot
- * adjudicate against; raw evidence is the execution role's private working memory.
+ * last-terminal Action. Phase 11 hands it structured finalized results — exact
+ * result identity, tool name, status, and bounded deterministic content — plus the
+ * execution role's prose conclusion explicitly labeled as a model assertion, never
+ * as ground truth. Results already materialized as durable Observations are
+ * omitted so one evidence item projects through one channel.
  */
 const BROAD_EVIDENCE_MAX_RESULT_CHARS = 400;
 const BROAD_EVIDENCE_MAX_ENTRIES = 24;
@@ -321,9 +327,17 @@ function summarizeToolArguments(arguments_: Record<string, unknown>): string {
 	return json.length > 140 ? `${json.slice(0, 140)}…` : json;
 }
 
+/** Bounded deterministic result content; truncation is marked, never summarized. */
+function boundedResult(text: string): string {
+	return text.length > BROAD_EVIDENCE_MAX_RESULT_CHARS
+		? `${text.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…[truncated; ${text.length} chars]`
+		: text;
+}
+
 function buildExecutionEvidenceMessage(
 	events: readonly SessionEntry[],
 	action: Action | undefined,
+	materializedSourceEventIds: ReadonlySet<string>,
 ): AgentMessage | undefined {
 	const startEntryId = episodeBoundary(events, action);
 	if (!startEntryId) return undefined;
@@ -335,24 +349,42 @@ function buildExecutionEvidenceMessage(
 	let entries = 0;
 	for (let index = actionStartIndex + 1; index < events.length && entries < BROAD_EVIDENCE_MAX_ENTRIES; index++) {
 		const event = events[index]!;
-		if (event.type !== "message" || event.message.role !== "assistant") continue;
-		if (isControlDecisionMessage(event)) continue;
-		if (event.message.content.some((part) => part.type === "toolCall")) continue;
-		const prose = contentText(event.message.content, "\n").trim();
-		if (!prose || TOOL_CALL_SYNTAX_PATTERN.test(prose)) continue;
-		const normalized = prose.toLocaleLowerCase();
-		if (seen.has(normalized)) continue;
-		seen.add(normalized);
-		const bounded =
-			prose.length > BROAD_EVIDENCE_MAX_RESULT_CHARS ? `${prose.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…` : prose;
-		lines.push(`- ${bounded}`);
-		entries++;
+		if (event.type !== "message") continue;
+		const message = event.message;
+		if (message.role === "toolResult") {
+			if (materializedSourceEventIds.has(event.id)) continue;
+			const observed = boundedResult(contentText(message.content, "\n").trim());
+			lines.push(
+				`- result ${event.id} ${message.toolName} [${message.isError ? "error" : "ok"}]: ${observed || "(no text)"}`,
+			);
+			entries++;
+		} else if (message.role === "bashExecution") {
+			if (materializedSourceEventIds.has(event.id)) continue;
+			const observed = boundedResult(message.output.trim());
+			const status = message.exitCode === 0 ? "exit 0" : `exit ${message.exitCode ?? "?"}`;
+			lines.push(`- result ${event.id} bash [${status}]: ${observed || "(no text)"}`);
+			entries++;
+		} else if (message.role === "assistant") {
+			if (isControlDecisionMessage(event)) continue;
+			if (message.content.some((part) => part.type === "toolCall")) continue;
+			const prose = contentText(message.content, "\n").trim();
+			if (!prose || TOOL_CALL_SYNTAX_PATTERN.test(prose)) continue;
+			const normalized = prose.toLocaleLowerCase();
+			if (seen.has(normalized)) continue;
+			seen.add(normalized);
+			const bounded =
+				prose.length > BROAD_EVIDENCE_MAX_RESULT_CHARS
+					? `${prose.slice(0, BROAD_EVIDENCE_MAX_RESULT_CHARS)}…`
+					: prose;
+			lines.push(`- [model assertion] ${bounded}`);
+			entries++;
+		}
 	}
 	if (lines.length === 0) return undefined;
 	return {
 		role: "custom",
 		customType: EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
-		content: `[EXECUTION EVIDENCE]\nThe execution role's established result in the current Action (its own distilled conclusion, not raw tool output):\n${lines.join("\n")}`,
+		content: `[EXECUTION EVIDENCE]\nFinalized results (bounded deterministic content) and the execution role's conclusions (model assertions, not ground truth):\n${lines.join("\n")}`,
 		display: false,
 		details: { actionId: action?.id, startEntryId },
 		timestamp: Date.now(),
@@ -540,14 +572,14 @@ function anchorMessage(anchor: Anchor): AgentMessage {
 	};
 }
 
-function frameMessage(frame: Frame): AgentMessage {
-	const remainingModelResponses = Math.max(0, frame.horizon - frame.completedModelResponses);
+function frameMessage(frame: Frame, completedModelResponses: number): AgentMessage {
+	const remainingModelResponses = Math.max(0, frame.horizon - completedModelResponses);
 	return {
 		role: "custom",
 		customType: FRAME_CONTEXT_MESSAGE_TYPE,
 		content:
 			`[CURRENT FRAME]\nCommitment: ${frame.statement}\nExpectation: ${frame.expectation}\n` +
-			`Response lease: ${frame.completedModelResponses}/${frame.horizon} completed; ${remainingModelResponses} model responses remain`,
+			`Response lease: ${completedModelResponses}/${frame.horizon} completed; ${remainingModelResponses} model responses remain`,
 		display: false,
 		details: {
 			frameId: frame.id,
@@ -555,13 +587,13 @@ function frameMessage(frame: Frame): AgentMessage {
 			revisionEntryId: frame.revisionEntryId,
 			sourceEventId: frame.sourceEventId,
 			horizon: frame.horizon,
-			completedModelResponses: frame.completedModelResponses,
+			completedModelResponses,
 		},
 		timestamp: new Date(frame.timestamp).getTime(),
 	};
 }
 
-function actionMessage(action: Action): AgentMessage {
+function actionMessage(action: Action, completedModelResponses: number): AgentMessage {
 	return {
 		role: "custom",
 		customType: ACTION_CONTEXT_MESSAGE_TYPE,
@@ -575,7 +607,7 @@ function actionMessage(action: Action): AgentMessage {
 			startEntryId: action.startEntryId,
 			frameRevisionEntryId: action.frameRevisionEntryId,
 			sourceEventId: action.sourceEventId,
-			completedModelResponses: action.completedModelResponses,
+			completedModelResponses,
 		},
 		timestamp: new Date(action.timestamp).getTime(),
 	};
@@ -612,6 +644,7 @@ function actionOutcomeMessage(
 function projectActionOutcomes(
 	events: readonly SessionEntry[],
 	currentFrame: Frame | undefined,
+	materializedSourceEventIds: ReadonlySet<string>,
 ): ProjectedActionOutcome[] {
 	const starts = new Map<string, Extract<SessionEntry, { type: "action_start" }>>();
 	const frames = new Map<string, Extract<SessionEntry, { type: "frame_revision" }>>();
@@ -624,6 +657,10 @@ function projectActionOutcomes(
 		} else if (event.type === "action_transition") {
 			const start = starts.get(event.startEntryId);
 			if (!start) continue;
+			// Phase 11 de-duplication: if the episode's results were already
+			// materialized as durable Observations, the outcome re-projects the same
+			// evidence; project it only through the Observation channel.
+			if (episodeHasMaterializedResult(events, start.id, event.id, materializedSourceEventIds)) continue;
 			const message = actionOutcomeMessage(start, event, frames.get(start.frameRevisionEntryId ?? ""));
 			outcomes.push({
 				actionId: start.actionId,
@@ -639,6 +676,24 @@ function projectActionOutcomes(
 		}
 	}
 	return outcomes;
+}
+
+/** Whether any result inside the episode was already materialized as a durable Observation. */
+function episodeHasMaterializedResult(
+	events: readonly SessionEntry[],
+	startEntryId: string,
+	transitionEntryId: string,
+	materializedSourceEventIds: ReadonlySet<string>,
+): boolean {
+	if (materializedSourceEventIds.size === 0) return false;
+	const startIndex = events.findIndex((event) => event.id === startEntryId);
+	const transitionIndex = events.findIndex((event) => event.id === transitionEntryId);
+	if (startIndex < 0 || transitionIndex < 0) return false;
+	for (let index = startIndex + 1; index < transitionIndex; index++) {
+		const event = events[index];
+		if (event && materializedSourceEventIds.has(event.id)) return true;
+	}
+	return false;
 }
 
 function frameOutcomeMessage(
@@ -796,11 +851,21 @@ async function compileProjection(
 	const anchorMessages = anchor ? [anchorMessage(anchor)] : [];
 	const groundingMessages =
 		input.grounding && projectionRole === "epistemic" && anchor && !frame ? [input.grounding] : [];
-	const frameMessages = frame ? [frameMessage(frame)] : [];
-	const actionMessages = action ? [actionMessage(action)] : [];
+	const executionView = restoreExecutionView(input.rawEvents);
+	const frameResponses = executionView.frame?.completedModelResponses ?? 0;
+	const actionResponses = executionView.action?.completedModelResponses ?? 0;
+	const frameMessages = frame ? [frameMessage(frame, frameResponses)] : [];
+	const actionMessages = action ? [actionMessage(action, actionResponses)] : [];
+	// Results already materialized as durable Observations project through the
+	// [OBSERVATION] channel only; the execution-evidence and action-outcome
+	// channels skip them so one evidence item has one projection channel.
+	const materializedSourceEventIds = new Set<string>();
+	for (const observation of observations) {
+		for (const sourceEventId of observation.sourceEventIds) materializedSourceEventIds.add(sourceEventId);
+	}
 	const executionEvidence =
 		projectionRole === "epistemic"
-			? buildExecutionEvidenceMessage(input.rawEvents, action)
+			? buildExecutionEvidenceMessage(input.rawEvents, action, materializedSourceEventIds)
 			: projectionRole === "execution"
 				? buildPriorExecutionEvidenceMessage(input.rawEvents, action)
 				: undefined;
@@ -827,7 +892,9 @@ async function compileProjection(
 		throw new ContextBudgetError(availableInputTokens, requiredTokens + requiredStateTokens + newestWindow.tokens);
 	}
 
-	const projectedActionOutcomes = broadProjection ? projectActionOutcomes(input.rawEvents, frame) : [];
+	const projectedActionOutcomes = broadProjection
+		? projectActionOutcomes(input.rawEvents, frame, materializedSourceEventIds)
+		: [];
 	const projectedFrameOutcomes = broadProjection ? projectFrameOutcomes(input.rawEvents) : [];
 	const projectedObservations: ProjectedObservation[] = observations.map((observation, order) => {
 		const anchorRelevant = anchor !== undefined && observation.anchorRevisionEntryId === anchor.revisionEntryId;
@@ -1027,8 +1094,8 @@ async function compileProjection(
 							revisionEntryId: frame.revisionEntryId,
 							sourceEventId: frame.sourceEventId,
 							horizon: frame.horizon,
-							completedModelResponses: frame.completedModelResponses,
-							remainingModelResponses: Math.max(0, frame.horizon - frame.completedModelResponses),
+							completedModelResponses: frameResponses,
+							remainingModelResponses: Math.max(0, frame.horizon - frameResponses),
 							tokens: frameTokens,
 						}
 					: undefined,
@@ -1038,7 +1105,7 @@ async function compileProjection(
 							startEntryId: action.startEntryId,
 							frameRevisionEntryId: action.frameRevisionEntryId,
 							sourceEventId: action.sourceEventId,
-							completedModelResponses: action.completedModelResponses,
+							completedModelResponses: actionResponses,
 							tokens: actionTokens,
 						}
 					: undefined,

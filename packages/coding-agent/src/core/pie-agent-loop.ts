@@ -24,6 +24,19 @@ export type PieProductionLoopState =
 /** A provider request has exactly one control role in the production loop. */
 export type PieProductionRequestRole = "epistemic" | "execution" | "finalAnswer";
 
+/**
+ * Controller-authored epistemic effect carried by a terminal Action decision.
+ * The terminal transition records what the episode did; this field records, when
+ * present, what the world result now licenses us to believe. Absent means the
+ * transition carries no durable Observation (Phase 11: execution outcome and
+ * epistemic effect are orthogonal).
+ */
+export interface PieObservationDecision {
+	/** Direct world relation assertion, not an experiment record. */
+	statement: string;
+	affects: "anchor" | "frame" | "anchor_and_frame";
+}
+
 export type PieControlDecision =
 	| { kind: "create_frame"; statement: string; expectation: string; actions: ProvisionalActionContract[] }
 	| {
@@ -59,8 +72,17 @@ export type PieControlDecision =
 	| { kind: "revise_anchor"; statement: string; reason: string }
 	| { kind: "authorize_action"; actionContractId: string }
 	| { kind: "continue_action"; reason: string }
-	| { kind: "complete_action" | "unresolvable_action"; predictionError: PredictionError }
-	| { kind: "escalate_action"; challenge: "anchor" | "frame"; predictionError: PredictionError }
+	| {
+			kind: "complete_action" | "unresolvable_action";
+			predictionError: PredictionError;
+			observation?: PieObservationDecision;
+	  }
+	| {
+			kind: "escalate_action";
+			challenge: "anchor" | "frame";
+			predictionError: PredictionError;
+			observation?: PieObservationDecision;
+	  }
 	| { kind: "authorize_final"; reason: string }
 	| { kind: "report_inability"; reason: string };
 

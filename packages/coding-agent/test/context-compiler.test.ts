@@ -264,7 +264,6 @@ describe("PhaseZeroContextCompiler", () => {
 					previousRevisionId: "fr1",
 					sourceEventId: "u1",
 					timestamp: new Date(1).toISOString(),
-					completedModelResponses: 1,
 				},
 			},
 			runtimeMessages: [event.message],
@@ -277,14 +276,14 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.messages.map(text)).toEqual([
 			"[ANCHOR]\nrestore authorization correctness",
 			"[CURRENT FRAME]\nCommitment: worker-local state survives logout\n" +
-				"Expectation: a worker restart preserves the authorization\nResponse lease: 1/3 completed; 2 model responses remain",
+				"Expectation: a worker restart preserves the authorization\nResponse lease: 0/3 completed; 3 model responses remain",
 			"inspect the failure",
 		]);
 		expect(result.manifest.epistemicState.frame).toMatchObject({
 			id: "frame-1",
 			version: 2,
-			completedModelResponses: 1,
-			remainingModelResponses: 2,
+			completedModelResponses: 0,
+			remainingModelResponses: 3,
 		});
 	});
 
@@ -312,7 +311,6 @@ describe("PhaseZeroContextCompiler", () => {
 					previousRevisionId: null,
 					sourceEventId: "u1",
 					timestamp: new Date(1).toISOString(),
-					completedModelResponses: 0,
 				},
 				observations: [
 					{
@@ -397,7 +395,6 @@ describe("PhaseZeroContextCompiler", () => {
 					previousRevisionId: null,
 					sourceEventId: "u1",
 					timestamp: new Date(1).toISOString(),
-					completedModelResponses: 0,
 				},
 				observations: [
 					{
@@ -632,7 +629,6 @@ describe("PhaseZeroContextCompiler", () => {
 					previousRevisionId: null,
 					sourceEventId: "u1",
 					timestamp: new Date(1).toISOString(),
-					completedModelResponses: 1,
 				},
 				action: {
 					id: "action-1",
@@ -643,7 +639,6 @@ describe("PhaseZeroContextCompiler", () => {
 					frameRevisionEntryId: "fr1",
 					sourceEventId: "u2",
 					timestamp: new Date(3).toISOString(),
-					completedModelResponses: 0,
 				},
 			},
 			runtimeMessages: events.map((event) => (event as SessionMessageEntry).message),
@@ -782,7 +777,7 @@ describe("PhaseZeroContextCompiler", () => {
 		expect(result.manifest.projection.frameOutcomes).toBeUndefined();
 	});
 
-	it("surfaces the execution role's distilled narration, not raw tool results, from a terminal Action episode", async () => {
+	it("surfaces structured finalized results and labels the execution conclusion as a model assertion", async () => {
 		const manager = SessionManager.inMemory();
 		const userId = manager.appendMessage(user("diagnose authorization", 1));
 		manager.appendAnchorRevision({
@@ -876,11 +871,12 @@ describe("PhaseZeroContextCompiler", () => {
 		const texts = result.messages.map(text);
 
 		expect(texts.join("\n")).toContain("worker runtime");
-		expect(texts.join("\n")).not.toContain("first evidence");
-		expect(texts.join("\n")).not.toContain("second evidence");
+		expect(texts.join("\n")).toContain("[model assertion]");
+		expect(texts.join("\n")).toContain("first evidence");
+		expect(texts.join("\n")).toContain("second evidence");
 	});
 
-	it("replaces raw tool-call/tool-result traffic with the execution role's distilled narration", async () => {
+	it("projects bounded finalized results with truncation marks instead of full tool output", async () => {
 		const manager = SessionManager.inMemory();
 		const userId = manager.appendMessage(user("diagnose authorization", 1));
 		manager.appendAnchorRevision({
@@ -957,14 +953,18 @@ describe("PhaseZeroContextCompiler", () => {
 			),
 		).toBe(false);
 
-		// A single derived evidence message carries the execution role's distilled conclusion.
+		// A single derived evidence message carries structured finalized results
+		// (bounded, truncation-marked) plus the execution role's conclusion labeled
+		// as a model assertion.
 		const evidence = result.messages.find(
 			(message) => message.role === "custom" && message.customType === EXECUTION_EVIDENCE_CONTEXT_MESSAGE_TYPE,
 		);
 		expect(evidence).toBeDefined();
 		const evidenceText = text(evidence!);
 		expect(evidenceText).toContain("worker runtime");
-		expect(evidenceText).not.toContain("read");
+		expect(evidenceText).toContain("read");
+		expect(evidenceText).toContain("[model assertion]");
+		expect(evidenceText).toContain("[truncated; 3000 chars]");
 		expect(evidenceText).not.toContain(huge);
 	});
 

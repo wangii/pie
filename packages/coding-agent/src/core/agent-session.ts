@@ -82,10 +82,12 @@ import {
 	type Action,
 	type ActionTerminalTransition,
 	type Anchor,
+	type ExecutionView,
 	type Frame,
 	type FrameTerminalTransition,
 	type Observation,
 	restoreEpistemicState,
+	restoreExecutionView,
 } from "./epistemic-state.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -128,6 +130,7 @@ import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import {
 	type PieControlDecision,
+	type PieObservationDecision,
 	PieProductionLoop,
 	type PieProductionLoopState,
 	type PieProductionRequestRole,
@@ -450,11 +453,12 @@ export interface EpistemicDiagnostics {
 	};
 	state: {
 		anchor?: Pick<Anchor, "id" | "revision" | "statement" | "revisionEntryId">;
-		frame?: Pick<
-			Frame,
-			"id" | "version" | "statement" | "expectation" | "revisionEntryId" | "horizon" | "completedModelResponses"
-		>;
-		action?: Pick<Action, "id" | "intent" | "completionCondition" | "startEntryId" | "completedModelResponses">;
+		frame?: Pick<Frame, "id" | "version" | "statement" | "expectation" | "revisionEntryId" | "horizon"> & {
+			completedModelResponses: number;
+		};
+		action?: Pick<Action, "id" | "intent" | "completionCondition" | "startEntryId"> & {
+			completedModelResponses: number;
+		};
 		lastAction?: {
 			id: string;
 			startEntryId: string;
@@ -595,10 +599,12 @@ const PIE_CONTROL_KIND_FIELDS: Readonly<Record<string, string>> = {
 	revise_anchor: "statement, reason",
 	authorize_action: "actionContractId",
 	continue_action: "reason",
-	complete_action: 'predictionError: { sign: "confirmed" | "refined" | "refuted", detail }',
-	unresolvable_action: 'predictionError: { sign: "confirmed" | "refined" | "refuted", detail }',
+	complete_action:
+		'predictionError: { sign: "confirmed" | "refined" | "refuted", detail }, observation?: { statement, affects: "anchor" | "frame" | "anchor_and_frame" }',
+	unresolvable_action:
+		'predictionError: { sign: "confirmed" | "refined" | "refuted", detail }, observation?: { statement, affects: "anchor" | "frame" | "anchor_and_frame" }',
 	escalate_action:
-		'challenge: "anchor" | "frame", predictionError: { sign: "confirmed" | "refined" | "refuted", detail }',
+		'challenge: "anchor" | "frame", predictionError: { sign: "confirmed" | "refined" | "refuted", detail }, observation?: { statement, affects: "anchor" | "frame" | "anchor_and_frame" }',
 	authorize_final: "reason",
 	report_inability: "reason",
 };
@@ -622,14 +628,21 @@ const VAGUE_PREDICTION_ERROR_PATTERN =
 const REFINED_REFUTATION_MARKER_PATTERN =
 	/(?:contains? no |contained no |has? no |had no |does not contain|did not contain|doesn't contain|rather than|instead of|is actually|are actually|turned out to be)/iu;
 
+/**
+ * A process record narrates what the episode did or failed to do ("we did not
+ * prove X within budget", "the action completed", "budget exhausted"), rather
+ * than naming a world relation between two project referents. Phase 11 keeps
+ * these at the execution layer; a durable Observation must be the fact itself.
+ */
+const OBSERVATION_PROCESS_RECORD_PATTERN =
+	/(?:^|\b)(?:we|the (?:agent|action|episode|probe|search|investigation))\b.{0,80}\b(?:did not|could not|unable to|failed to|not (?:established|proven|found)|no (?:result|evidence|match|output)|completed|finished|timed out|cancelled)\b|(?:budget|horizon|lease|rounds?) (?:were |was )?exhausted/iu;
+
+/** An experiment record restates the probe instead of the fact it established. */
+const OBSERVATION_EXPERIMENT_RECORD_PATTERN = /(?:^|\n)\s*(?:expectation|prediction error)\s*:/iu;
+
 /** Render a structured prediction error as `sign: detail` for statements and transitions. */
 function renderPredictionError(predictionError: PredictionError): string {
 	return `${predictionError.sign}: ${predictionError.detail.trim()}`;
-}
-
-/** The canonical two-part Observation statement: frozen expectation plus prediction error. */
-function renderTerminalObservationStatement(expectation: string, predictionError: PredictionError): string {
-	return `Expectation: ${expectation}\nPrediction error: ${renderPredictionError(predictionError)}`;
 }
 
 /**
@@ -1072,43 +1085,65 @@ export class AgentSession {
 	}
 
 	/**
-	 * Materialize the terminal outcome of a controller-authored Action as a durable
-	 * Observation whose statement is the epistemic record `expectation + prediction
-	 * error`. Every terminal transition — completed, unresolvable, and escalated —
-	 * is evidence: a completed Action confirms its frozen expectation (prediction
-	 * error ≈ 0, with any residual refinement), not "no information".
+	 * Materialize a controller-authored epistemic effect as a durable Observation.
+	 * A terminal Action transition is not itself evidence (Phase 11): execution
+	 * outcome and epistemic effect are orthogonal, so the transition records what
+	 * the episode did, while this method records — only when the controller
+	 * supplied an explicit `observation` — what the world result now licenses us
+	 * to believe.
 	 *
-	 * Raw result text never enters the statement: `sourceEventIds` is a downward
-	 * pointer to the episode's finalized execution results, which stay at the
-	 * execution layer. The only thing that crosses into the epistemic layer is the
-	 * named conclusion carried by the prediction-error detail.
+	 * The statement is the controller's direct world relation assertion. Raw result
+	 * text never enters it: `sourceEventIds` is a downward pointer to the episode's
+	 * finalized execution results. `expectation` and `predictionErrorSign` are kept
+	 * as provenance metadata on the entry.
 	 *
 	 * Harness-generated terminal transitions (lease expiry, round exhaustion) never
 	 * reach this path; they are bounded-return mechanics, not controller feedback.
 	 * An episode with no finalized execution result has no provenance to cite, so
 	 * nothing is materialized.
 	 */
+	/**
+	 * Phase 11: a material Observation is a fact, not a process or experiment
+	 * record. A bare confirmation, an experiment record ("Expectation: …"), and a
+	 * process record ("we did not prove X", "the action completed", "budget
+	 * exhausted") all belong to the execution layer.
+	 */
+	private _validateObservationStatement(statement: string): void {
+		if (VAGUE_PREDICTION_ERROR_PATTERN.test(statement)) {
+			throw new Error(
+				"A material Observation statement must name a concrete world relation, not a bare confirmation.",
+			);
+		}
+		if (OBSERVATION_EXPERIMENT_RECORD_PATTERN.test(statement)) {
+			throw new Error(
+				"A material Observation statement must be the fact itself, not an experiment record (Expectation/Prediction error).",
+			);
+		}
+		if (OBSERVATION_PROCESS_RECORD_PATTERN.test(statement)) {
+			throw new Error(
+				"A material Observation statement must name a world relation between project referents, not a process record (we did not prove X, budget exhausted, action completed).",
+			);
+		}
+	}
+
 	private _materializeTerminalObservation(
 		state: ReturnType<typeof restoreEpistemicState>,
 		action: Action,
 		predictionError: PredictionError,
+		observation: PieObservationDecision | undefined,
 	): void {
 		if (!this._observationEnabled) return;
-		const expectation = action.expectation?.trim();
-		if (!expectation) return;
+		if (!observation) return;
+		const statement = observation.statement?.trim();
+		if (!statement) throw new Error("A material Observation requires a non-empty statement.");
+		this._validateObservationStatement(statement);
 		const sourceEventIds = this._toolResultEventIdsForAction(action.startEntryId);
 		if (sourceEventIds.length === 0) return;
-		const affects =
-			action.anchorRevisionEntryId !== undefined
-				? "anchor"
-				: predictionError.sign === "refuted"
-					? "anchor_and_frame"
-					: "frame";
 		this._appendObservation(
 			{
-				statement: renderTerminalObservationStatement(expectation, predictionError),
-				affects,
-				expectation,
+				statement,
+				affects: observation.affects,
+				expectation: action.expectation?.trim() || undefined,
 				predictionErrorSign: predictionError.sign,
 				sourceEventIds,
 			},
@@ -1217,6 +1252,7 @@ export class AgentSession {
 				epistemicState = restoreEpistemicState(rawEvents);
 			}
 			const frame = epistemicState.frame;
+			const frameExecution = this._executionView().frame;
 			const latestEntry = rawEvents.at(-1);
 			const explicitActionAdjudicationPending = latestEntry?.type === "action_transition";
 			if (
@@ -1224,14 +1260,15 @@ export class AgentSession {
 				!requestedFrameDirective &&
 				!explicitActionAdjudicationPending &&
 				frame &&
-				frame.completedModelResponses >= frame.horizon &&
-				frame.lastResponseEventId
+				frameExecution?.revisionEntryId === frame.revisionEntryId &&
+				frameExecution.completedModelResponses >= frame.horizon &&
+				frameExecution.lastResponseEventId
 			) {
 				if (epistemicState.action) {
 					this._appendActionTransition(
 						epistemicState.action,
 						"unresolvable",
-						frame.lastResponseEventId,
+						frameExecution.lastResponseEventId,
 						`The containing Frame reached its ${frame.horizon}-response horizon before the completion condition was met.`,
 					);
 					rawEvents = this.sessionManager.getBranch();
@@ -1240,7 +1277,7 @@ export class AgentSession {
 				this._appendFrameTransition(
 					frame,
 					"expired",
-					frame.lastResponseEventId,
+					frameExecution.lastResponseEventId,
 					`Frame version ${frame.version} reached its ${frame.horizon}-response horizon.`,
 				);
 				rawEvents = this.sessionManager.getBranch();
@@ -1364,7 +1401,7 @@ export class AgentSession {
 			state.action !== undefined &&
 			(activeActionBudget
 				? consumedEvidenceRounds >= activeActionBudget.expectedEvidenceRounds
-				: state.action.completedModelResponses >= this._actionResponseLimit);
+				: (this._executionView().action?.completedModelResponses ?? 0) >= this._actionResponseLimit);
 		const availableActionContracts = !state.action
 			? this._leaseBudgetForFrame(state.frame)?.actions.filter((candidate) => !candidate.actionStartEntryId)
 			: undefined;
@@ -1416,7 +1453,7 @@ export class AgentSession {
 		return (
 			stateSnapshot +
 			"\n\nPIE CONTROL REQUEST. This request is not a user-answer or tool-execution turn. Do not execute the user task, " +
-			"do not call or simulate tools, and do not output requested answer tokens. You have no tools: never emit tool-call or shell syntax such as <invoke>, <tool_call>, <tool_calls>, or <bash_command> — reading and running happen in the execution role. To keep the active Action running, emit continue_action; to record that its completion condition was or was not met, emit complete_action or unresolvable_action carrying its predictionError. Return exactly one JSON object, with " +
+			"do not call or simulate tools, and do not output requested answer tokens. You have no tools: never emit tool-call or shell syntax such as <invoke>, <tool_call>, <tool_calls>, or <bash_command> — reading and running happen in the execution role. To keep the active Action running, emit continue_action; to end it, emit complete_action or unresolvable_action carrying its predictionError. A terminal transition alone leaves no durable evidence: materialize a durable Observation only by attaching an explicit observation field whose statement is a direct world relation assertion. Return exactly one JSON object, with " +
 			"the discriminator property named exactly kind, and no prose, no markdown, and no wrapping tags such as <frame_plan> or <thinking> before or after the object. The first character must be { and the " +
 			"last character must be }. " +
 			(this._lastControlError
@@ -1425,9 +1462,10 @@ export class AgentSession {
 			`The current state permits only: ${allowed}. Emit only these fields:\n${allowedSchema}\n` +
 			availableActionContractsPrompt +
 			consumedActionContractsPrompt +
+			"expectedEvidenceRounds is the number of serial model responses this episode may spend: a single read, grep, or observation is 1 round; use more than 1 only when a later probe reads or traces a path or result an earlier probe returned, and name that serial dependency in budgetReason (never complexity or file count). " +
 			"Decide the epistemically right next step. Anchor names the task-success semantics; a Frame asserts one provisional world relation and freezes Actions whose expectations are checked against execution results. " +
 			"A Frame may be advanced (advance_frame: add the next wave of Actions, proposition unchanged), revised or replaced (revise_frame, replace_frame: change the proposition), or falsified or killed (falsify_frame, kill_frame) when its premise is contradicted. " +
-			"A terminal Action outcome is the expectation plus its prediction error: confirmed means the expectation held exactly, refined means it held and reality added a named detail, refuted means reality contradicted or could not satisfy it; escalate_action challenges the Frame or Anchor on a refuted result, unresolvable_action records an episode that could not complete under its constraints. " +
+			"Ending an Action and its epistemic effect are separate: the transition records what the episode did, and only an attached observation records a durable world relation. predictionError sign: confirmed means the expectation held exactly, refined means it held and reality added a named detail, refuted means reality contradicted or could not satisfy it; complete_action may carry refuted when the episode finished but its result disproves the Frame premise. escalate_action challenges the Frame or Anchor on a refuted result, unresolvable_action records an episode that could not complete under its constraints. " +
 			"When an outcome refutes the Frame's expectation or premise, falsify the Frame instead of continuing to authorize Actions that presuppose the refuted premise. " +
 			"Ground a Frame in an observed structure before asserting it: run the bounded discovery first, then assert the Frame from what you found. " +
 			"The harness validates Frame validity, Action scoping, the horizon and evidence-round budgets, and the JSON structure mechanically; read a rejection reason and correct only what it names instead of pre-checking those constraints. "
@@ -1474,9 +1512,10 @@ export class AgentSession {
 			lines.push(`Anchor (revision ${state.anchor.revision}): ${state.anchor.statement}`);
 		}
 		if (state.frame) {
-			const remaining = Math.max(0, state.frame.horizon - state.frame.completedModelResponses);
+			const frameResponses = this._executionView().frame?.completedModelResponses ?? 0;
+			const remaining = Math.max(0, state.frame.horizon - frameResponses);
 			lines.push(
-				`Frame v${state.frame.version} (${state.frame.completedModelResponses}/${state.frame.horizon} responses used, ${remaining} remain): ${state.frame.statement}`,
+				`Frame v${state.frame.version} (${frameResponses}/${state.frame.horizon} responses used, ${remaining} remain): ${state.frame.statement}`,
 			);
 			lines.push(`  Expectation: ${state.frame.expectation}`);
 		}
@@ -1813,6 +1852,11 @@ export class AgentSession {
 		}
 	}
 
+	/** Recompute execution-side counters for the active branch (Phase 11). */
+	private _executionView(): ExecutionView {
+		return restoreExecutionView(this.sessionManager.getBranch());
+	}
+
 	private _consumedEvidenceRounds(actionStartEntryId: string): number {
 		const branch = this.sessionManager.getBranch();
 		const startIndex = branch.findIndex((entry) => entry.id === actionStartEntryId);
@@ -1849,17 +1893,20 @@ export class AgentSession {
 		);
 		if (frameBudget) return frameBudget;
 		// Pre-Frame `explore` Actions carry their controller-estimated evidence rounds
-		// directly on the Action; synthesize a lease-shaped budget so they are enforced
-		// (and surfaced as a countdown) the same way Frame-leased Actions are, instead of
-		// silently falling back to the flat legacy response cap.
-		const rounds = action.expectedEvidenceRounds;
-		if (typeof rounds !== "number" || !Number.isSafeInteger(rounds) || rounds < 1) return undefined;
+		// on the persisted ActionStart entry; read them from the execution view so they
+		// never live on the epistemic surface. Synthesize a lease-shaped budget so
+		// explore is enforced (and surfaced as a countdown) the same way Frame-leased
+		// Actions are, instead of silently falling back to the flat legacy response cap.
+		const actionExecution = this._executionView().action;
+		const rounds = actionExecution?.expectedEvidenceRounds;
+		if (!actionExecution || typeof rounds !== "number" || !Number.isSafeInteger(rounds) || rounds < 1)
+			return undefined;
 		return {
 			intent: action.intent,
 			completionCondition: action.completionCondition,
 			expectation: action.expectation,
 			expectedEvidenceRounds: Math.min(rounds, DEFAULT_FRAME_LEASE_POLICY.maxEvidenceRounds),
-			budgetReason: action.budgetReason?.trim() || "Pre-Frame explore estimate.",
+			budgetReason: actionExecution.budgetReason?.trim() || "Pre-Frame explore estimate.",
 			contractId: "explore",
 			actionStartEntryId: action.startEntryId,
 		};
@@ -1943,7 +1990,15 @@ export class AgentSession {
 	private _expireProductionFrame(sourceEventId: string): boolean {
 		let state = restoreEpistemicState(this.sessionManager.getBranch());
 		const frame = state.frame;
-		if (!frame || frame.completedModelResponses < frame.horizon) return false;
+		const frameExecution = this._executionView().frame;
+		if (
+			!frame ||
+			!frameExecution ||
+			frameExecution.revisionEntryId !== frame.revisionEntryId ||
+			frameExecution.completedModelResponses < frame.horizon
+		) {
+			return false;
+		}
 		if (state.action) {
 			this._appendActionTransition(
 				state.action,
@@ -2187,19 +2242,20 @@ export class AgentSession {
 				if (!state.action) throw new Error("No Action is active to continue.");
 				const actionBudget = this._leaseBudgetForAction(state);
 				const consumedRounds = this._consumedEvidenceRounds(state.action.startEntryId);
+				const actionResponses = this._executionView().action?.completedModelResponses ?? 0;
 				const exhausted = actionBudget
 					? consumedRounds >= actionBudget.expectedEvidenceRounds ||
-						state.action.completedModelResponses >=
+						actionResponses >=
 							actionBudget.expectedEvidenceRounds + DEFAULT_FRAME_LEASE_POLICY.actionTerminalAdjudicationCost
-					: state.action.completedModelResponses >= this._actionResponseLimit;
+					: actionResponses >= this._actionResponseLimit;
 				if (exhausted) {
 					const budgetDescription = actionBudget
 						? `${actionBudget.expectedEvidenceRounds}-round serial evidence budget`
 						: `${this._actionResponseLimit}-response legacy execution budget`;
-					this._materializeTerminalObservation(state, state.action, {
-						sign: "refuted",
-						detail: `the frozen completion condition was not established before the ${budgetDescription} was exhausted`,
-					});
+					// Budget exhaustion is an execution fact ("not established within
+					// budget"), not a world fact ("disproven"). It must not materialize an
+					// Observation; the controller adjudicates the episode's evidence itself
+					// from the projected ACTION/FRAME outcomes.
 					this._appendActionTransition(
 						state.action,
 						"unresolvable",
@@ -2213,7 +2269,7 @@ export class AgentSession {
 			case "unresolvable_action":
 				if (!state.action) throw new Error("Cannot unresolvable_action because no Action is active.");
 				this._validatePredictionError(decision.predictionError, "unresolvable");
-				this._materializeTerminalObservation(state, state.action, decision.predictionError);
+				this._materializeTerminalObservation(state, state.action, decision.predictionError, decision.observation);
 				this._appendActionTransition(
 					state.action,
 					"unresolvable",
@@ -2224,7 +2280,7 @@ export class AgentSession {
 			case "escalate_action":
 				if (!state.action) throw new Error("Cannot escalate_action because no Action is active.");
 				this._validatePredictionError(decision.predictionError, "escalated");
-				this._materializeTerminalObservation(state, state.action, decision.predictionError);
+				this._materializeTerminalObservation(state, state.action, decision.predictionError, decision.observation);
 				this._appendActionTransition(
 					state.action,
 					"escalated",
@@ -2236,7 +2292,7 @@ export class AgentSession {
 			case "complete_action":
 				if (!state.action) throw new Error("Cannot complete_action because no Action is active.");
 				this._validatePredictionError(decision.predictionError, "completed");
-				this._materializeTerminalObservation(state, state.action, decision.predictionError);
+				this._materializeTerminalObservation(state, state.action, decision.predictionError, decision.observation);
 				this._appendActionTransition(
 					state.action,
 					"completed",
@@ -2331,7 +2387,8 @@ export class AgentSession {
 					const decision = this._parseControlDecision(message);
 					const state = restoreEpistemicState(this.sessionManager.getBranch());
 					const frameLeaseExhausted =
-						state.frame !== undefined && state.frame.completedModelResponses >= state.frame.horizon;
+						state.frame !== undefined &&
+						(this._executionView().frame?.completedModelResponses ?? 0) >= state.frame.horizon;
 					const explicitActionDecision =
 						state.action !== undefined &&
 						(decision.kind === "complete_action" ||
@@ -2387,16 +2444,17 @@ export class AgentSession {
 				if (this._expireProductionFrame(sourceEventId)) return { nextRole: "epistemic" };
 				const state = restoreEpistemicState(this.sessionManager.getBranch());
 				if (!state.action) return { nextRole: "epistemic" };
+				const actionResponses = this._executionView().action?.completedModelResponses ?? 0;
 				const actionBudget = this._leaseBudgetForAction(state);
 				if (actionBudget) {
 					if (
 						this._consumedEvidenceRounds(state.action.startEntryId) >= actionBudget.expectedEvidenceRounds ||
-						state.action.completedModelResponses >=
+						actionResponses >=
 							actionBudget.expectedEvidenceRounds + DEFAULT_FRAME_LEASE_POLICY.actionTerminalAdjudicationCost - 1
 					) {
 						return { nextRole: "epistemic" };
 					}
-				} else if (state.action.completedModelResponses >= this._actionResponseLimit - 1) {
+				} else if (actionResponses >= this._actionResponseLimit - 1) {
 					return { nextRole: "epistemic" };
 				}
 				if (toolResults.length > 0) return { nextRole: "execution" };
@@ -3202,7 +3260,7 @@ export class AgentSession {
 							expectation: state.frame.expectation,
 							revisionEntryId: state.frame.revisionEntryId,
 							horizon: state.frame.horizon,
-							completedModelResponses: state.frame.completedModelResponses,
+							completedModelResponses: this._executionView().frame?.completedModelResponses ?? 0,
 						}
 					: undefined,
 				action: state.action
@@ -3211,7 +3269,7 @@ export class AgentSession {
 							intent: state.action.intent,
 							completionCondition: state.action.completionCondition,
 							startEntryId: state.action.startEntryId,
-							completedModelResponses: state.action.completedModelResponses,
+							completedModelResponses: this._executionView().action?.completedModelResponses ?? 0,
 						}
 					: undefined,
 				lastAction,
@@ -3460,9 +3518,6 @@ export class AgentSession {
 			throw new Error(
 				"escalate_action prediction error must be refuted: the finalized results contradict the Frame or Anchor.",
 			);
-		}
-		if (transition === "completed" && sign === "refuted") {
-			throw new Error("complete_action prediction error cannot be refuted; use confirmed or refined.");
 		}
 		if (sign === "confirmed" && VAGUE_PREDICTION_ERROR_PATTERN.test(detail)) {
 			throw new Error(
@@ -3839,7 +3894,7 @@ export class AgentSession {
 						options.frame?.type === "replace" ||
 						(!options.frame &&
 							currentEpistemicState.frame !== undefined &&
-							currentEpistemicState.frame.completedModelResponses < currentEpistemicState.frame.horizon);
+							(this._executionView().frame?.completedModelResponses ?? 0) < currentEpistemicState.frame.horizon);
 					if (!frameWillRemain) throw new Error("Create or revise an admissible Frame before starting an Action.");
 				} else {
 					if (!currentEpistemicState.action) {

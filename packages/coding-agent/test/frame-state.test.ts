@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { describe, expect, it } from "vitest";
-import { restoreEpistemicState } from "../src/core/epistemic-state.ts";
+import { restoreEpistemicState, restoreExecutionView } from "../src/core/epistemic-state.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
 function initializeAnchor(manager: SessionManager): string {
@@ -45,15 +45,17 @@ describe("Frame persistence", () => {
 		});
 		manager.appendMessage(fauxAssistantMessage("restart worker"));
 
-		expect(restoreEpistemicState(manager.getBranch()).frame).toMatchObject({
+		const branch = manager.getBranch();
+		expect(restoreEpistemicState(branch).frame).toMatchObject({
 			id: "frame-1",
 			version: 2,
 			statement: "the worker cache is stale",
 			expectation: "a worker restart preserves the value",
 			horizon: 2,
-			completedModelResponses: 1,
 			revisionReason: "scope narrowed",
 		});
+		// Execution counters live on the separate ExecutionView (Phase 11).
+		expect(restoreExecutionView(branch).frame).toMatchObject({ completedModelResponses: 1 });
 	});
 
 	it("persists replacement as termination of one identity followed by another", () => {

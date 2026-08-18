@@ -1,6 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { describe, expect, it } from "vitest";
-import { restoreEpistemicState } from "../../src/core/epistemic-state.ts";
+import { restoreEpistemicState, restoreExecutionView } from "../../src/core/epistemic-state.ts";
 import { createHarness, getMessageText } from "./harness.ts";
 
 const initialFrame = {
@@ -27,7 +27,10 @@ describe("Phase 2 Frame provider boundary", () => {
 					"Response lease: 0/3 completed; 3 model responses remain",
 				"diagnose logout authorization",
 			]);
-			expect(harness.session.frame).toMatchObject({ version: 1, completedModelResponses: 1 });
+			expect(harness.session.frame).toMatchObject({ version: 1 });
+			expect(restoreExecutionView(harness.sessionManager.getBranch()).frame).toMatchObject({
+				completedModelResponses: 1,
+			});
 			expect(harness.session.latestContextManifest).toMatchObject({
 				compilerVersion: "pie-phase-2-frame/v1",
 				epistemicState: { frame: { version: 1, remainingModelResponses: 3 } },

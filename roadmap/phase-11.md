@@ -157,6 +157,23 @@ Add faux-provider tests proving:
 
 Compare Phase 11 against Phase 10 on the two Phase 10 failure shapes (false Frame premise; over-scoped Action). Measure false materializations (routine errors/budget exhaustion promoted), omitted real evidence, successor-Frame first-Action divergence from failed-episode evidence, recovery without re-discovery, and token/latency overhead from removing the duplicate projection channels. Use `deepseek/deepseek-v4-flash`; the faux-provider deterministic suite is the gate prerequisite.
 
+### Implementation checkpoint — 2026-08-18
+
+**Status: IN PROGRESS. All implementation sections (11.2–11.7) are done and covered; the remaining work is the Phase 11 evaluation (11.10) against Phase 10.**
+
+Implemented:
+
+- Budget/evidence-round exhaustion no longer materializes a `refuted` Observation (`agent-session.ts` `continue_action` exhaustion path); it appends only the `unresolvable` transition. The controller adjudicates the episode's evidence from projected ACTION/FRAME outcomes instead.
+- Terminal decisions are decoupled: `complete_action` / `unresolvable_action` / `escalate_action` carry an optional controller-authored `observation` (`{ statement, affects }`, `pie-agent-loop.ts` `PieObservationDecision`). A terminal transition without it leaves no durable Observation.
+- `complete_action` may now carry a `refuted` prediction error, so `completed + refuted` (episode finished, result disproves the Frame premise) is representable.
+- Observation statements are controller-provided direct relation assertions; `_validateObservationStatement` rejects a bare confirmation token, an experiment record (`Expectation:`/`Prediction error:`), and a process record (`we did not prove X`, `budget exhausted`, `the action completed`), so only a named world relation crosses into the epistemic layer. `expectation` and `predictionErrorSign` remain provenance metadata on the entry.
+- `Frame`/`Action` no longer carry `completedModelResponses`, `lastResponseEventId`, `expectedEvidenceRounds`, or `budgetReason`; `restoreEpistemicState` no longer mutates live objects with response counters. A separate `restoreExecutionView` derives those execution-side counters from the same raw branch, and all lease/diagnostics/compiler consumers read from it (`epistemic-state.ts`, `agent-session.ts` `_executionView`, `context-compiler.ts`).
+- The epistemic handoff is structural: `buildExecutionEvidenceMessage` now projects exact finalized result identity, tool name, status, and bounded deterministic content (truncation-marked), and labels the execution role's prose conclusion as a `[model assertion]`, never ground truth (`context-compiler.ts`).
+- One evidence item, one projection channel: results already materialized as durable Observations are omitted from both `[EXECUTION EVIDENCE]` and `[ACTION OUTCOME]` via the shared `materializedSourceEventIds` set, so the Observation channel is the single projection for materialized evidence.
+- Phase 7/10, completion-condition-bounds, frame/action/observation state, context-compiler, and the terminal-decision boundary suites updated and passing (366/374; the 8 remaining failures are pre-existing compaction/retry/runtime/2860/3592 breakage from other in-flight work, unrelated to Phase 11); `tsgo --noEmit` passes.
+
+Remaining before the gate: the Phase 11 evaluation (11.10) against Phase 10 on false materializations, omitted real evidence, recovery without re-discovery, and token/latency overhead.
+
 ### Phase 11 gate
 
 Phase 11 passes only when:
