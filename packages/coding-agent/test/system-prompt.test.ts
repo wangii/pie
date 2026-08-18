@@ -46,6 +46,31 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- write:");
 		});
 
+		test("epistemic role omits the coding-agent preamble, pi docs, and file-path guideline", () => {
+			const prompt = buildSystemPrompt({
+				role: "epistemic",
+				selectedTools: ["declare_belief", "view_beliefs"],
+				toolSnippets: {
+					declare_belief: "Record or update what you currently believe",
+					view_beliefs: "View your current beliefs",
+				},
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("You are a scientific mind investigating a task by forming and testing hypotheses");
+			expect(prompt).not.toContain("reading files");
+			expect(prompt).not.toContain("executing commands");
+			expect(prompt).not.toContain("expert coding assistant");
+			expect(prompt).not.toContain("In addition to the tools above");
+			expect(prompt).not.toContain("Pi documentation");
+			expect(prompt).not.toContain("Show file paths clearly");
+			// The belief tools are still enumerated.
+			expect(prompt).toContain("- declare_belief:");
+			expect(prompt).toContain("- view_beliefs:");
+		});
+
 		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],

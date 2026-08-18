@@ -25,7 +25,7 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 		expect(statusOf(belief)).toBe("proposed");
 		expect(belief.expectation).toContain("stale replica");
 		expect(belief.evidenceRounds).toBe(2);
-		expect(set.frame()?.id).toBe("belief-1");
+		expect(set.proposed().map((b) => b.id)).toEqual(["belief-1"]);
 		expect(set.open()).toHaveLength(1);
 	});
 
@@ -41,7 +41,7 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 
 		const settled = set.apply({ op: "support", beliefId: belief.id, evidence: "the probe kept the value for 30s" });
 		expect(statusOf(settled)).toBe("supported");
-		expect(set.frame()).toBeUndefined();
+		expect(set.proposed()).toHaveLength(0);
 		expect(set.open()).toHaveLength(1);
 	});
 
@@ -57,11 +57,31 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 
 		set.apply({ op: "refute", beliefId: belief.id, evidence: "the value cleared on logout" });
 		expect(statusOf(set.get(belief.id)!)).toBe("refuted");
-		expect(set.frame()).toBeUndefined();
+		expect(set.proposed()).toHaveLength(0);
 		expect(set.open()).toHaveLength(0);
 	});
 
-	test("single-frame invariant: propose while a frame is open throws", () => {
+	test("multiple open beliefs are allowed (no single-frame invariant)", () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit cache",
+			evidenceRounds: 1,
+		});
+		set.apply({
+			op: "propose",
+			statement: "login is stateless",
+			domain: "product",
+			expectation: "no session reuse",
+			evidenceRounds: 1,
+		});
+
+		expect(set.proposed().map((b) => b.statement)).toEqual(["the cache is warm", "login is stateless"]);
+	});
+
+	test("each proposal in a batch is still validated individually", () => {
 		const set = new BeliefSet();
 		set.apply({
 			op: "propose",
@@ -71,12 +91,13 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 			evidenceRounds: 1,
 		});
 
+		// A second proposal with an empty statement is rejected even though one is already open.
 		expect(() =>
 			set.apply({
 				op: "propose",
-				statement: "login is stateless",
-				domain: "product",
-				expectation: "no session reuse",
+				statement: "  ",
+				domain: "code",
+				expectation: "x",
 				evidenceRounds: 1,
 			}),
 		).toThrow(BeliefValidationError);
@@ -145,7 +166,7 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 
 		set.apply({ op: "retract", beliefId: belief.id });
 		expect(statusOf(set.get(belief.id)!)).toBe("superseded");
-		expect(set.frame()).toBeUndefined();
+		expect(set.proposed()).toHaveLength(0);
 	});
 
 	test("illegal transitions and unknown ids throw", () => {

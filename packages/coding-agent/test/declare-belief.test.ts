@@ -63,7 +63,7 @@ describe("declare_belief tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain("Applied support");
 	});
 
-	test("propose while a frame is open is rejected", async () => {
+	test("proposing a second belief while one is open is allowed", async () => {
 		const set = new BeliefSet();
 		set.apply({
 			op: "propose",
@@ -87,7 +87,8 @@ describe("declare_belief tool", () => {
 			undefined as never,
 		);
 
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
+		expect(set.proposed()).toHaveLength(2);
 	});
 
 	test("support without evidence is rejected", async () => {

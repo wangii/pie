@@ -39,6 +39,7 @@ export {
 	type BeforeAgentStartEvent,
 	type BeforeAgentStartEventResult,
 	type BuildSystemPromptOptions,
+	type SystemPromptRole,
 	type ContextEvent,
 	defineTool,
 	discoverAndLoadExtensions,

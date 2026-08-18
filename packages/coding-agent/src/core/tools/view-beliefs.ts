@@ -18,7 +18,7 @@ export function createViewBeliefsToolDefinition(
 	return {
 		name: "view_beliefs",
 		label: "view beliefs",
-		description: "Show your current beliefs: the open frame (if any) and the settled beliefs.",
+		description: "Show your current beliefs: the open hypotheses (if any) and the settled beliefs.",
 		promptSnippet: "View your current beliefs",
 		promptGuidelines: [],
 		parameters: viewBeliefsSchema,

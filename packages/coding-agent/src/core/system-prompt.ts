@@ -5,6 +5,15 @@
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
+/**
+ * The operating role the prompt is assembled for. The default `"coding"` role renders
+ * the file/command-agent preamble plus the pi-docs index and file-path guideline. The
+ * belief-loop roles (`"epistemic"`, `"finalAnswer"`) render a narrower preamble and omit
+ * everything that advertises `read`/`bash`/`edit`/`write` — those tools are absent from
+ * those roles by construction, so advertising them would only mislead the model.
+ */
+export type SystemPromptRole = "coding" | "epistemic" | "finalAnswer";
+
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
@@ -22,6 +31,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/** Operating role for this prompt. Defaults to `"coding"`. */
+	role?: SystemPromptRole;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -35,6 +46,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		cwd,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
+		role = "coding",
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 
@@ -114,20 +126,36 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Always include these
 	addGuideline("Be concise in your responses");
-	addGuideline("Show file paths clearly when working with files");
+	if (role === "coding") {
+		addGuideline("Show file paths clearly when working with files");
+	}
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+	const preamble =
+		role === "epistemic"
+			? "You are a scientific mind investigating a task by forming and testing hypotheses about the product and code."
+			: role === "finalAnswer"
+				? "You are a scientific mind concluding an investigation and answering the user's task."
+				: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
+
+	let prompt = `${preamble}
 
 Available tools:
 ${toolsList}
+`;
 
-In addition to the tools above, you may have access to other custom tools depending on the project.
+	if (role === "coding") {
+		prompt += "\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n";
+	}
 
+	prompt += `
 Guidelines:
 ${guidelines}
+`;
 
+	if (role === "coding") {
+		prompt += `
 Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${readmePath}
 - Additional docs: ${docsPath}
@@ -136,6 +164,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
 - When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
 - Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
+	}
 
 	if (appendSection) {
 		prompt += appendSection;

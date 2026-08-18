@@ -74,6 +74,29 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("epistemic prompt describes the belief-action cycle and never advertises file/command tools", async () => {
+		const harness = await createHarness({ enableBeliefSet: true });
+		try {
+			const prompt = harness.session.agent.state.systemPrompt;
+			// The epistemic role has no read/bash/edit/write, so the prompt must not
+			// claim them (the coding-agent preamble did, which drove the model to call
+			// `bash` and get "Tool bash not found").
+			expect(prompt).not.toContain("reading files");
+			expect(prompt).not.toContain("executing commands");
+			expect(prompt).not.toContain("expert coding assistant");
+			expect(prompt).not.toContain("In addition to the tools above");
+			expect(prompt).not.toContain("Pi documentation");
+			// It frames the role as a scientific mind following the hypothesis → experiment
+			// → update protocol, rather than "start working" blindly.
+			expect(prompt).toContain("scientific mind");
+			expect(prompt).toContain("hypothesis → experiment → update protocol");
+			expect(prompt).toContain("falsifiable expectation");
+			expect(prompt).toContain("Settle each hypothesis before proposing the next");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("two-role flow: propose dispatches to execution, then adjudication settles the frame", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
@@ -106,9 +129,7 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: stops without settling the fresh frame → dispatches to execution.
-				"I should verify this in code",
-				// Execution: probe.
+				// Propose auto-dispatches to the execution (action) step.
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled result.
 				"the value persisted",
@@ -137,9 +158,21 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("propose then support on the next epistemic turn without dispatching to execution", async () => {
+	test("proposing a frame auto-dispatches to the execution role on the next turn", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
 		const harness = await createHarness({
 			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose a frame.
 				{
@@ -157,37 +190,42 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: support it directly with evidence already in hand — no execution episode.
+				// The very next turn is already the execution (action) step — probe tools
+				// present, `declare_belief` absent. The epistemic role does not get another
+				// turn to "explore" on its own.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled result.
+				"the value persisted",
+				// Epistemic: settle with evidence.
 				{
 					toolCalls: [
 						{
 							name: "declare_belief",
-							args: {
-								op: "support",
-								beliefId: "belief-1",
-								evidence: "the cached value was observed to persist",
-							},
+							args: { op: "support", beliefId: "belief-1", evidence: "the probe kept the value" },
 						},
 					],
 					stopReason: "toolUse",
 				},
 				// Epistemic: finalize.
-				"the cache survives logout for 30s",
+				"done",
 			],
 		});
 		try {
 			await harness.session.prompt("hi");
 
-			// The frame was settled directly. Had the propose turn wrongly dispatched to the
-			// execution role, `declare_belief` would be absent there and the support call would
-			// fail, leaving `belief-1` merely proposed.
+			// The turn immediately after propose is execution: echo present, declare_belief not.
+			const executionContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("echo"));
+			expect(executionContexts.length).toBeGreaterThan(0);
+			for (const c of executionContexts) {
+				expect(contextToolNames(c)).not.toContain("declare_belief");
+			}
 			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	test("epistemic context masks raw execution tool results", async () => {
+	test("epistemic role sees raw execution evidence so it can update beliefs", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -219,13 +257,11 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: stops → dispatch.
-				"verify it",
-				// Execution: probe (raw output produced here).
+				// Propose auto-dispatches to execution; probe produces raw output here.
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled sentence.
 				"the value persisted",
-				// Epistemic: support.
+				// Epistemic: support — this turn must see the raw evidence to settle the belief.
 				{
 					toolCalls: [
 						{
@@ -242,16 +278,87 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			const executionContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("echo"));
-			const nonExecutionContexts = harness.faux.contexts.filter((c) => !contextToolNames(c).includes("echo"));
+			// The raw execution result is NOT omitted from the epistemic role: it sees it
+			// (alongside the distilled sentence) so it can update or propose beliefs.
+			const epistemicContexts = harness.faux.contexts.filter((c) =>
+				contextToolNames(c).includes("declare_belief"),
+			);
+			expect(epistemicContexts.length).toBeGreaterThan(0);
+			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
 
-			// The raw result reached the execution role ...
-			expect(executionContexts.length).toBeGreaterThan(0);
-			expect(executionContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
-			// ... but never the epistemic (or finalAnswer) role.
-			for (const c of nonExecutionContexts) {
-				expect(contextText(c)).not.toContain("RAW_SENSITIVE_OUTPUT");
-			}
+	test("proposes and settles multiple beliefs in one batch", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose TWO beliefs in one turn.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: probe.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Epistemic: support both beliefs in one turn.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Epistemic: finalize.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+			expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
 		} finally {
 			harness.cleanup();
 		}

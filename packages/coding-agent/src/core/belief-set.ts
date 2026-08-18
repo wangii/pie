@@ -2,9 +2,11 @@
  * The belief set: the epistemic loop's object — immutable and append-only.
  *
  * A belief is a named relational assertion about product or code, carrying a
- * falsifiable `expectation` and a structured `evidenceRounds` estimate. At most one
- * belief is `proposed` (unadjudicated) at a time: that belief is the *frame*, the
- * single thing the next execution episode must probe.
+ * falsifiable `expectation` and a structured `evidenceRounds` estimate. Any number
+ * of beliefs may be `proposed` (unadjudicated) at once: those open beliefs are the
+ * *frame* — the set of hypotheses the next execution episode probes. Each is
+ * validated independently, so a batch of proposals is legal as long as every one
+ * passes its own structural rules.
  *
  * Records are immutable: `support`/`refute` append evidence, `refine`/`retract` mark
  * the prior record superseded and (for `refine`) add a new record. `status` is a
@@ -12,8 +14,8 @@
  * mutated. Tool results never enter this object; they live in the execution context.
  *
  * Validation is structural only (non-empty, enum membership, identity existence,
- * single-frame invariant, evidence-present, bounded integer) — no regex heuristics,
- * which leak across languages.
+ * evidence-present, bounded integer) — no regex heuristics, which leak across
+ * languages.
  */
 
 export type BeliefDomain = "product" | "code";
@@ -116,9 +118,9 @@ export class BeliefSet {
 		return this._beliefs;
 	}
 
-	/** The single unadjudicated belief driving action, if any. */
-	frame(): Belief | undefined {
-		return this._beliefs.find((b) => statusOf(b) === "proposed");
+	/** The unadjudicated beliefs driving action — the open frame (may be empty or hold several). */
+	proposed(): Belief[] {
+		return this._beliefs.filter((b) => statusOf(b) === "proposed");
 	}
 
 	/** Beliefs still actionable: proposed or supported, not superseded. */
@@ -136,13 +138,7 @@ export class BeliefSet {
 	apply(delta: BeliefDelta): Belief {
 		switch (delta.op) {
 			case "propose": {
-				// Single-frame invariant: a new belief may be proposed only after the
-				// prior frame is settled (no daydreaming).
-				if (this.frame()) {
-					throw new BeliefValidationError(
-						"A belief is already open; settle it (support/refute/refine) before proposing a new one.",
-					);
-				}
+				// Any number of hypotheses may be open at once; each is validated on its own.
 				validateBelief(delta.statement, delta.domain);
 				validateExpectation(delta.expectation);
 				validateEvidenceRounds(delta.evidenceRounds);
@@ -247,8 +243,8 @@ export function formatBeliefsForView(beliefs: readonly Belief[]): string {
 		return "No beliefs yet.";
 	}
 	const lines: string[] = [];
-	const frame = beliefs.find((b) => statusOf(b) === "proposed");
-	if (frame) {
+	const frames = beliefs.filter((b) => statusOf(b) === "proposed");
+	for (const frame of frames) {
 		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
 		lines.push(`  expectation: ${frame.expectation}`);
 		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);

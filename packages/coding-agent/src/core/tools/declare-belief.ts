@@ -131,8 +131,8 @@ export function createDeclareBeliefToolDefinition(
 		label: "declare belief",
 		description:
 			"Record or update your current beliefs about the product or code. A belief names a relation between two referents " +
-			"plus a falsifiable expectation. Ops: propose (add a belief — only while no belief is open), support/refute " +
-			"(settle the open belief with evidence), refine (replace a belief with a corrected version), retract (withdraw).",
+			"plus a falsifiable expectation. Ops: propose (add a belief — several may be open at once), support/refute " +
+			"(settle a proposed belief with evidence), refine (replace a belief with a corrected version), retract (withdraw).",
 		promptSnippet: declareBeliefSystemPromptContribution.snippet,
 		promptGuidelines: declareBeliefSystemPromptContribution.guidelines,
 		parameters: declareBeliefSchema,

@@ -364,8 +364,10 @@ export class AgentSession {
 	private _role: "epistemic" | "execution" | "finalAnswer" = "epistemic";
 	/** Remaining execution actions for the current frame's lease (derived from `evidenceRounds`, never fixed). */
 	private _frameHorizon = 0;
-	/** The last frame id dispatched to execution — distinguishes a fresh frame from an unsettled one. */
-	private _dispatchedFrameId: string | undefined;
+	/** The belief ids already dispatched to execution — distinguishes fresh hypotheses from dispatched-but-unsettled ones. */
+	private _dispatchedFrameIds: Set<string> = new Set();
+	/** True once the execution lease has been exhausted and the role has been nudged to report its observation. */
+	private _leaseReportNudged = false;
 	/** The full active tool names, independent of the current role's projected subset. */
 	private _fullActiveToolNames: string[] = [];
 
@@ -598,24 +600,25 @@ export class AgentSession {
 	}
 
 	/**
-	 * The transcript for the next role's turn. The epistemic and finalAnswer roles must
-	 * not see raw execution tool results (source files, bash output) — that is operational
-	 * detail that would pollute the belief loop. This projects a filtered copy from the
-	 * authoritative `agent.state.messages` (never `turn.context.messages`, which may already
-	 * be a prior projection and would silently accumulate): belief-tool results and the
-	 * model's own distilled sentences survive; every other tool result and bash output is
-	 * redacted to a placeholder so tool-call pairing stays valid. The execution role needs
-	 * the raw results to probe, so it receives the full transcript.
+	 * The transcript for the next role's turn, projected from the authoritative
+	 * `agent.state.messages` (never `turn.context.messages`, which may already be a prior
+	 * projection and would silently accumulate).
+	 *
+	 * The epistemic and execution roles both receive the full transcript: the epistemic role
+	 * must *see* the execution evidence to update or propose beliefs (a filter that omitted it
+	 * would starve the loop), and the execution role needs the raw results to probe. Only the
+	 * finalAnswer role discards that operational detail — its job is to synthesize the answer
+	 * from the settled beliefs, so raw tool results and bash output are redacted there.
 	 */
 	private _projectContextMessages(): AgentMessage[] {
-		if (!this._enableBeliefSet || !this._beliefSetUsable || this._role === "execution") {
+		if (!this._enableBeliefSet || !this._beliefSetUsable || this._role !== "finalAnswer") {
 			return this.agent.state.messages.slice();
 		}
-		return this.agent.state.messages.map((message) => this._maskForEpistemic(message));
+		return this.agent.state.messages.map((message) => this._maskOperationalDetail(message));
 	}
 
-	/** Redact operational detail from a single message for the epistemic/finalAnswer role. */
-	private _maskForEpistemic(message: AgentMessage): AgentMessage {
+	/** Redact operational detail from a single message for the finalAnswer role. */
+	private _maskOperationalDetail(message: AgentMessage): AgentMessage {
 		switch (message.role) {
 			case "toolResult":
 				if (message.toolName === "declare_belief" || message.toolName === "view_beliefs") {
@@ -638,38 +641,43 @@ export class AgentSession {
 		const ranTools = turn.toolResults.length > 0;
 		switch (this._role) {
 			case "epistemic": {
-				const frame = this._beliefSet.frame();
-				if (frame && frame.id !== this._dispatchedFrameId) {
-					// A fresh frame. Do NOT dispatch on the turn that created it: the model may
-					// already hold evidence to support/refute it, and `declare_belief` stays
-					// available for it to do so. Dispatch only when the model then stops without
-					// settling it (no belief tools this turn) — that is the hand-off to execution.
-					if (!ranTools) {
-						this._dispatchedFrameId = frame.id;
-						this._role = "execution";
-						this._frameHorizon = Math.ceil(frame.evidenceRounds * 1.3);
-						// A turn with no tool calls would otherwise end the run; queue a message so
-						// the loop continues into the execution role.
-						this.agent.steer({
-							role: "user",
-							content: [{ type: "text", text: "Investigate the current belief and gather evidence for it." }],
-							timestamp: Date.now(),
-						});
-					}
-				} else if (frame && !ranTools) {
-					// A dispatched-but-unsettled frame, and the model stopped instead of
-					// settling it — nudge it in its own terms, not the harness machinery.
+				const proposed = this._beliefSet.proposed();
+				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
+				if (undispatched.length > 0) {
+					// Fresh hypotheses. Dispatching to the experiment step is automatic:
+					// proposing is the signal to run the experiments, so the epistemic role
+					// must not linger to "explore" on its own — no probe tools exist there.
+					this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
+					this._role = "execution";
+					const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
+					this._frameHorizon = Math.ceil(totalRounds * 1.3);
+					this._leaseReportNudged = false;
+					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					this.agent.steer({
 						role: "user",
 						content: [
 							{
 								type: "text",
-								text: `Your belief "${frame.statement}" is still open. Settle it — support, refute, or refine it from the evidence you gathered.`,
+								text: `Run the experiments for the hypotheses ${statements} and report your observations.`,
 							},
 						],
 						timestamp: Date.now(),
 					});
-				} else if (!frame && !ranTools) {
+				} else if (proposed.length > 0 && !ranTools) {
+					// Dispatched-but-unsettled hypotheses, and the model stopped instead of
+					// updating them — nudge it in its own terms, not the harness machinery.
+					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
+					this.agent.steer({
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: `Some hypotheses are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
+							},
+						],
+						timestamp: Date.now(),
+					});
+				} else if (proposed.length === 0 && !ranTools) {
 					// Settled and stopped — the answer is final.
 					this._role = "finalAnswer";
 				}
@@ -677,13 +685,32 @@ export class AgentSession {
 			}
 			case "execution": {
 				this._frameHorizon -= turn.toolResults.length;
-				if (!ranTools || this._frameHorizon <= 0) {
+				if (!ranTools) {
+					// The experiment's observation is in — return to epistemic to update.
 					this._role = "epistemic";
-					// Execution ended — nudge the epistemic role to reconcile, and keep
-					// the loop going (the distilled result is already in context).
 					this.agent.steer({
 						role: "user",
-						content: [{ type: "text", text: "Based on what you just found, update your beliefs." }],
+						content: [{ type: "text", text: "Based on the observation, update your hypothesis." }],
+						timestamp: Date.now(),
+					});
+				} else if (this._frameHorizon <= 0 && !this._leaseReportNudged) {
+					// Lease exhausted while still probing. Do not yank it back mid-experiment:
+					// the epistemic role needs the distilled observation, not raw operational
+					// detail. Nudge it once to report; force the return only if it keeps probing.
+					this._leaseReportNudged = true;
+					this.agent.steer({
+						role: "user",
+						content: [
+							{ type: "text", text: "You have gathered enough evidence. Report your observation in one concise sentence." },
+						],
+						timestamp: Date.now(),
+					});
+				} else if (this._frameHorizon <= 0) {
+					// Already nudged once and still probing — force the return.
+					this._role = "epistemic";
+					this.agent.steer({
+						role: "user",
+						content: [{ type: "text", text: "Based on the observation, update your hypothesis." }],
 						timestamp: Date.now(),
 					});
 				}
@@ -726,6 +753,7 @@ export class AgentSession {
 			this._systemPromptOverride ??
 			buildSystemPrompt({
 				...this._baseSystemPromptOptions,
+				role: this._role === "execution" ? "coding" : this._role,
 				selectedTools: toolNames,
 				toolSnippets: snippets,
 				promptGuidelines: guidelines,
@@ -737,13 +765,24 @@ export class AgentSession {
 		switch (this._role) {
 			case "epistemic":
 				return (
-					"\n\nInvestigate this task by forming and testing beliefs about the product and code. " +
-					"Record and update your beliefs with declare_belief, and read them with view_beliefs."
+					"\n\nYou are a scientific mind. Investigate by the hypothesis → experiment → update protocol " +
+					"rather than acting blindly: propose a hypothesis (a belief) about the product or code — a named " +
+					"relation, its falsifiable expectation (what you would observe if it were true), and how many " +
+					"evidence rounds it needs. Once a hypothesis is proposed, the experiment runs and its observation " +
+					"is reported back to you; then update the hypothesis (support, refute, or refine it) from that " +
+					"observation, and read your beliefs with view_beliefs. Settle each hypothesis before proposing " +
+					"the next; when none is left open and the task is answered, you are done."
 				);
 			case "execution":
-				return "\n\nGather evidence for the current investigation, then report a concise result.";
+				return (
+					"\n\nYou are a scientific mind running the experiment: probe the open hypothesis's prediction " +
+					"in the code or product, then report one concise observation of what you actually saw."
+				);
 			case "finalAnswer":
-				return "";
+				return (
+					"\n\nYou are a scientific mind writing the conclusion: answer the original task directly and " +
+					"concisely, grounded in the hypotheses you have settled."
+				);
 		}
 	}
 
