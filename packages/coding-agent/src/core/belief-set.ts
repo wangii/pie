@@ -188,14 +188,19 @@ export function validateBelief(statement: string, domain: BeliefDomain): void {
 /**
  * Render the live beliefs as a system-prompt reference block. Empty when there
  * is nothing the model currently holds; once beliefs exist they are listed here
- * so later turns measure every result against them.
+ * with their ids so later turns can support/refute/refine them by reference.
  */
 export function formatBeliefsForPrompt(beliefs: readonly Belief[]): string {
 	if (beliefs.length === 0) {
 		return "";
 	}
-	const lines = beliefs.map((b) => `- [${b.domain}] ${b.statement} (${b.status})`);
-	return `\n\n[CURRENT BELIEFS]\n${lines.join("\n")}`;
+	const lines = beliefs.map((b) => `- ${b.id} [${b.domain}] ${b.statement} (${b.status})`);
+	return (
+		`\n\n[CURRENT BELIEFS]\n${lines.join("\n")}\n` +
+		"Keep these current: as each result arrives, support or refute the beliefs it bears on (using their id), " +
+		"and refine any that turn out wrong. Before you answer, resolve every `proposed` belief to `supported` or " +
+		"`refuted`."
+	);
 }
 
 /**

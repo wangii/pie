@@ -102,7 +102,7 @@ export function createDeclareBeliefToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Applied ${input.op}: ${belief.statement} [${belief.domain}] (${belief.status}).`,
+							text: `Applied ${input.op}: ${belief.id} ${belief.statement} [${belief.domain}] (${belief.status}).`,
 						},
 					],
 					details: undefined,

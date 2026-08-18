@@ -108,14 +108,17 @@ describe("validateBelief", () => {
 });
 
 describe("formatBeliefsForPrompt", () => {
-	test("renders only live beliefs, empty when none", () => {
+	test("renders live beliefs with ids and a resolve directive", () => {
 		expect(formatBeliefsForPrompt([])).toBe("");
 
 		const set = new BeliefSet();
 		set.apply({ op: "propose", statement: "authorizationSource returns stale-replica", domain: "code" });
 		const text = formatBeliefsForPrompt(set.open());
 		expect(text).toContain("[CURRENT BELIEFS]");
+		expect(text).toContain("belief-1");
 		expect(text).toContain("[code] authorizationSource returns stale-replica");
+		expect(text).toContain("support or refute");
+		expect(text).toContain("resolve every `proposed` belief");
 	});
 
 	test("formatBeliefBootstrap is a mandatory first-step directive", () => {
