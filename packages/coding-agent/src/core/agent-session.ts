@@ -1255,6 +1255,10 @@ export class AgentSession {
 			// Build messages array (custom message if any, then user message)
 			messages = [];
 
+			// Re-root the belief set on this instruction: the first belief of the
+			// task must trace back to what the user just asked.
+			this._beliefSet.setRootInstruction(expandedText);
+
 			// Add user message
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 			if (currentImages) {

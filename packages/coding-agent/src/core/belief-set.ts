@@ -45,6 +45,56 @@ export type BeliefDelta =
 /** Thrown when a delta names an invalid statement or an illegal transition. */
 export class BeliefValidationError extends Error {}
 
+// ---- Relatedness / contradiction heuristics for the propose gate ----
+// "related" = the two statements share at least one significant token;
+// "contradicts" = they share a token and flip negation polarity. These are
+// coarse (no stemming, no referent extraction): they catch off-topic beliefs
+// and explicit-negation contradictions, not subtle ones. Back with ablation,
+// not faith.
+
+const STOPWORDS = new Set([
+	"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+	"of", "in", "on", "to", "for", "and", "or", "but", "if", "then", "than",
+	"that", "this", "these", "those", "it", "its", "as", "at", "by", "from",
+	"with", "about", "into", "over", "under", "between", "through",
+	"not", "no", "nor", "does", "do", "did", "have", "has", "had", "will",
+	"would", "can", "could", "should", "shall", "may", "might", "must",
+	"there", "here", "where", "which", "who", "whose", "what", "when", "why",
+	"how", "you", "your", "we", "our", "they", "their", "he", "she", "his",
+	"her", "them", "my", "me", "us",
+]);
+
+const NEGATION =
+	/\b(not|doesn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|won'?t|don'?t|can'?t|cannot|never|no|without|fails? to|unable to)\b/i;
+
+function tokenize(text: string): Set<string> {
+	const tokens = new Set<string>();
+	for (const raw of text.split(/[^a-zA-Z0-9]+/)) {
+		if (!raw) continue;
+		// Split camelCase / PascalCase runs ("authorizationSource" -> "authorization", "Source").
+		for (const part of raw.split(/(?=[A-Z])/)) {
+			const token = part.toLowerCase();
+			if (token.length < 3 || STOPWORDS.has(token)) continue;
+			tokens.add(token);
+		}
+	}
+	return tokens;
+}
+
+function relatedTo(a: string, b: string): boolean {
+	const ta = tokenize(a);
+	const tb = tokenize(b);
+	for (const token of ta) {
+		if (tb.has(token)) return true;
+	}
+	return false;
+}
+
+function contradicts(a: string, b: string): boolean {
+	if (!relatedTo(a, b)) return false;
+	return NEGATION.test(a) !== NEGATION.test(b);
+}
+
 /**
  * Mutable in-memory belief set. `apply` is the single choke point: every delta is
  * validated and applied here, so callers (the `declare_belief` tool, tests) cannot
@@ -53,6 +103,7 @@ export class BeliefValidationError extends Error {}
 export class BeliefSet {
 	private readonly _beliefs: Belief[] = [];
 	private _nextId = 1;
+	private _rootInstruction = "";
 
 	/** All beliefs, including refuted/superseded negatives — the full current model. */
 	get beliefs(): readonly Belief[] {
@@ -68,10 +119,20 @@ export class BeliefSet {
 		return this._beliefs.find((b) => b.id === id);
 	}
 
+	/**
+	 * Set the task root: the user's current instruction that every belief must
+	 * ultimately trace back to. Used by the propose gate to keep an empty belief
+	 * set on-topic (a first belief must relate to the instruction).
+	 */
+	setRootInstruction(text: string): void {
+		this._rootInstruction = text;
+	}
+
 	apply(delta: BeliefDelta): Belief {
 		switch (delta.op) {
 			case "propose": {
 				validateBelief(delta.statement, delta.domain);
+				this._validateRelatedness(delta.statement);
 				const belief: Belief = {
 					id: this._allocateId(),
 					statement: delta.statement.trim(),
@@ -126,6 +187,34 @@ export class BeliefSet {
 		const belief = this._require(id, allowed);
 		belief.status = next;
 		return belief;
+	}
+
+	/**
+	 * The propose gate: keep the belief set a coherent, on-topic graph rooted in
+	 * the user's instruction. With no beliefs yet, a new belief must relate to the
+	 * instruction; otherwise it must relate to at least one current belief and
+	 * contradict none of them.
+	 */
+	private _validateRelatedness(statement: string): void {
+		const open = this.open();
+		if (open.length === 0) {
+			if (this._rootInstruction.trim() !== "" && !relatedTo(statement, this._rootInstruction)) {
+				throw new BeliefValidationError(
+					"Belief must relate to the user's instruction. Name a referent the instruction already names.",
+				);
+			}
+			return;
+		}
+		if (!open.some((b) => relatedTo(statement, b.statement))) {
+			throw new BeliefValidationError(
+				"Belief must relate to at least one current belief. Tie it to an existing referent, or propose that referent first.",
+			);
+		}
+		if (open.some((b) => contradicts(statement, b.statement))) {
+			throw new BeliefValidationError(
+				"Belief contradicts a current belief. Refute or refine the existing one instead of asserting its opposite.",
+			);
+		}
 	}
 }
 

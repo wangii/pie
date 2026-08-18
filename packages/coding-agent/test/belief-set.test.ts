@@ -131,3 +131,55 @@ describe("formatBeliefsForPrompt", () => {
 		expect(bootstrap).toContain("domain=code");
 	});
 });
+
+describe("propose relatedness gate", () => {
+	test("empty set: a belief must relate to the root instruction", () => {
+		const set = new BeliefSet();
+		set.setRootInstruction("check the system prompt structure");
+
+		expect(() =>
+			set.apply({ op: "propose", statement: "system-prompt.ts assembles the system prompt", domain: "code" }),
+		).not.toThrow();
+
+		const other = new BeliefSet();
+		other.setRootInstruction("check the system prompt structure");
+		expect(() =>
+			other.apply({ op: "propose", statement: "the cache is warm", domain: "code" }),
+		).toThrow(BeliefValidationError);
+	});
+
+	test("empty set without a root instruction skips the relatedness check", () => {
+		const set = new BeliefSet();
+		expect(() => set.apply({ op: "propose", statement: "the cache is warm", domain: "code" })).not.toThrow();
+	});
+
+	test("non-empty set: a belief must relate to at least one current belief", () => {
+		const set = new BeliefSet();
+		set.apply({ op: "propose", statement: "the system prompt is assembled by buildSystemPrompt", domain: "code" });
+
+		expect(() =>
+			set.apply({ op: "propose", statement: "system-prompt.ts builds the prompt sections", domain: "code" }),
+		).not.toThrow();
+
+		expect(() =>
+			set.apply({ op: "propose", statement: "the cache is warm", domain: "code" }),
+		).toThrow(BeliefValidationError);
+	});
+
+	test("non-empty set: a belief must not contradict a current belief", () => {
+		const set = new BeliefSet();
+		set.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
+
+		// Consistent extension passes.
+		expect(() =>
+			set.apply({ op: "propose", statement: "the cache survives logout for 30s", domain: "product" }),
+		).not.toThrow();
+
+		// Explicit negation of a shared referent is a contradiction.
+		const other = new BeliefSet();
+		other.apply({ op: "propose", statement: "the cache survives logout", domain: "product" });
+		expect(() =>
+			other.apply({ op: "propose", statement: "the cache does not survive logout", domain: "product" }),
+		).toThrow(BeliefValidationError);
+	});
+});
