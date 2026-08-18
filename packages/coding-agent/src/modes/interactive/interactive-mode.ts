@@ -2955,6 +2955,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/bs") {
+				this.handleBeliefSetCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -6106,6 +6111,32 @@ export class InteractiveMode {
 					cacheWaste.missedCost >= 0.0001
 						? `\n${theme.fg("dim", "Cache Re-billed:")} $${cacheWaste.missedCost.toFixed(3)} ${theme.fg("dim", `(${detail})`)}`
 						: `\n${theme.fg("dim", "Cache Re-billed:")} ${detail}`;
+			}
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private handleBeliefSetCommand(): void {
+		const beliefs = this.session.beliefs;
+		let info = `${theme.bold("Belief Set")}\n\n`;
+
+		if (beliefs.length === 0) {
+			info += theme.fg("dim", "No beliefs yet. The model records beliefs with declare_belief.");
+		} else {
+			const openCount = beliefs.filter((b) => b.status === "proposed" || b.status === "supported").length;
+			info += `${theme.fg("dim", `Open: ${openCount}  ·  Total: ${beliefs.length}`)}\n\n`;
+			for (const belief of beliefs) {
+				const statusLabel = {
+					proposed: theme.fg("muted", "proposed"),
+					supported: theme.fg("success", "supported"),
+					refuted: theme.fg("error", "refuted"),
+					superseded: theme.fg("dim", "superseded"),
+				}[belief.status];
+				info += `${statusLabel} ${theme.fg("accent", `[${belief.domain}]`)} ${belief.statement}\n`;
+				info += `  ${theme.fg("dim", belief.id)}\n`;
 			}
 		}
 

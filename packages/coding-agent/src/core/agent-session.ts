@@ -53,7 +53,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { BeliefSet, formatBeliefsForPrompt } from "./belief-set.ts";
+import { BeliefSet, type Belief, formatBeliefsForPrompt } from "./belief-set.ts";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -572,6 +572,11 @@ export class AgentSession {
 	private _systemPromptWithBeliefs(): string {
 		const base = this._systemPromptOverride ?? this._baseSystemPrompt;
 		return base + formatBeliefsForPrompt(this._beliefSet.open());
+	}
+
+	/** The live belief set, read-only. Exposed for `/bs` and diagnostics. */
+	get beliefs(): readonly Belief[] {
+		return this._beliefSet.beliefs;
 	}
 
 	// =========================================================================
