@@ -19,7 +19,7 @@
 
 ## Pie Architecture Direction
 
-Pie is a fork of Pi at the context boundary. Pi remains the execution chassis; Pie owns model-facing context construction. Read `README.md` for the thesis and `roadmap.md` for phase gates before changing context, session, compaction, or agent-loop code.
+Pie is a fork of Pi at the context boundary. Pi remains the execution chassis; Pie owns model-facing context construction. Read `README.md` for the thesis and `roadmap/` (phase gates, `roadmap/index.md`) before changing context, session, compaction, or agent-loop code.
 
 ### Current Scope
 
@@ -44,7 +44,7 @@ Pie is a fork of Pi at the context boundary. Pi remains the execution chassis; P
 
 - Introduce candidate primitives only in this order: Anchor, Frame, Action, Observation.
 - Add one primitive at a time and compare it with the immediately preceding baseline.
-- Require each primitive to pass the ablation and kill gate in `roadmap.md`; remove or redesign failed machinery instead of adding schema to justify it.
+- Require each primitive to pass the ablation and kill gate in `roadmap/`; remove or redesign failed machinery instead of adding schema to justify it.
 - Do not add claims, questions, hypothesis graphs, dependencies, confidence scores, belief scores, or task-specific ontologies unless the roadmap is explicitly revised first.
 - Prefer deterministic structural projection over LLM summarization. `ContextCompiler` must not become another compactor.
 
