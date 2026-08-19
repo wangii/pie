@@ -1,7 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { describe, expect, test } from "vitest";
-import { createHarness, type FauxResponse } from "./test-harness.ts";
+import { createHarness, type FauxResponse, type FauxResponseInput } from "./test-harness.ts";
 
 function messageText(message: { content: unknown }): string {
 	const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
@@ -1016,6 +1016,74 @@ describe("declare_belief integration", () => {
 
 			// And the loop actually completes: belief-1 was proposed and settled.
 			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("a follow-up message after conclusion re-enters the loop and retains the belief set", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		// One full propose → probe → settle → conclude cycle, parameterized so the second
+		// task's belief id can be distinct (the belief set is retained, so ids keep counting).
+		const task = (beliefId: string, statement: string, conclusion: string): FauxResponseInput[] => [
+			{
+				toolCalls: [
+					{
+						name: "declare_belief",
+						args: {
+							op: "propose",
+							statement,
+							domain: "product",
+							expectation: "a probe keeps the value",
+							evidenceRounds: 1,
+						},
+					},
+				],
+				stopReason: "toolUse",
+			},
+			{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+			"the value persisted",
+			{
+				toolCalls: [{ name: "declare_belief", args: { op: "support", beliefId, evidence: "the value persisted" } }],
+				stopReason: "toolUse",
+			},
+			conclude,
+			conclusion,
+		];
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				...task("belief-1", "the cache survives logout", "conclusion one"),
+				...task("belief-2", "login is stateless", "conclusion two"),
+			],
+		});
+		try {
+			await harness.session.prompt("task one");
+			await harness.session.prompt("task two");
+
+			// The belief set is the session's accumulated knowledge: the second task re-entered
+			// the loop (its belief was proposed and settled) without discarding the first task's.
+			expect(harness.session.beliefs.map((b) => b.statement)).toEqual([
+				"the cache survives logout",
+				"login is stateless",
+			]);
+			expect(harness.session.beliefs.every((b) => b.supportedBy.length === 1)).toBe(true);
+
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("conclusion one");
+			expect(assistantTexts).toContain("conclusion two");
 		} finally {
 			harness.cleanup();
 		}

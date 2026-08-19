@@ -392,6 +392,12 @@ export class AgentSession {
 	 * accumulating stale raw output. Advances when the epistemic role dispatches (moves on).
 	 */
 	private _evidenceWatermark = 0;
+	/**
+	 * Set when a follow-up user message is queued while the previous loop is concluding
+	 * (`_role === "finalAnswer"`). Consumed on delivery in `_advanceRole` to reset the loop
+	 * for the new task; the idle path resets inline in `prompt()` instead.
+	 */
+	private _pendingNewTask = false;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -701,9 +707,35 @@ export class AgentSession {
 		return message;
 	}
 
+	/**
+	 * Reset the loop's transient bookkeeping for a new task, without touching the belief
+	 * set. The belief set is the session's accumulated knowledge — the settled beliefs from
+	 * prior tasks that the next epistemic role builds on — so it is deliberately retained.
+	 * Only the per-task state resets: the role returns to epistemic, the dispatch ledger
+	 * empties, no execution lease remains, and the prior task's raw operational detail is
+	 * masked from the fresh epistemic role.
+	 */
+	private _resetLoopForNewTask(): void {
+		this._role = "epistemic";
+		this._dispatchedFrameIds = new Set();
+		this._frameHorizon = 0;
+		this._leaseReportNudged = false;
+		this._evidenceWatermark = this.agent.state.messages.length;
+	}
+
 	/** Advance the role from the just-completed turn and project the next role's surface. */
 	private _advanceRole(turn: PrepareNextTurnContext): void {
 		if (!this._enableBeliefSet || !this._beliefSetUsable) {
+			this._applyRoleSurface();
+			return;
+		}
+		// A follow-up queued while the previous loop was concluding is delivered on the next
+		// turn: reset the loop for the new task before projecting a surface for it. (The idle
+		// path resets inline in `prompt()` instead, since `_advanceRole` does not run until
+		// after that path's first turn.)
+		if (this._pendingNewTask) {
+			this._pendingNewTask = false;
+			this._resetLoopForNewTask();
 			this._applyRoleSurface();
 			return;
 		}
@@ -1580,8 +1612,13 @@ export class AgentSession {
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// If streaming, queue via steer() or followUp() based on option
+			// If streaming, queue via steer() or followUp() based on option. A follow-up typed
+			// while the previous loop is concluding must reset the loop when it is delivered, so
+			// mark it here; `_advanceRole` consumes the flag on delivery.
 			if (this.isStreaming) {
+				if (this._role === "finalAnswer") {
+					this._pendingNewTask = true;
+				}
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -1673,6 +1710,12 @@ export class AgentSession {
 			} else {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this._systemPromptOverride = undefined;
+			}
+			// A fresh user task after the previous loop concluded re-runs the belief loop
+			// from the epistemic role instead of staying parked in the no-tools finalAnswer
+			// role. The belief set is retained as session knowledge; only the loop resets.
+			if (this._role === "finalAnswer") {
+				this._resetLoopForNewTask();
 			}
 			this._applyRoleSurface();
 		} catch (error) {
