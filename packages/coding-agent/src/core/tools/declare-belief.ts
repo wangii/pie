@@ -18,7 +18,10 @@ const declareBeliefSchema = Type.Object({
 			Type.Literal("refine"),
 			Type.Literal("retract"),
 		],
-		{ description: "What to do: add a new belief, or reclassify an existing one." },
+		{
+			description:
+				"What to do. propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId).",
+		},
 	),
 	statement: Type.Optional(
 		Type.String({
@@ -132,7 +135,8 @@ export function createDeclareBeliefToolDefinition(
 		description:
 			"Record or update your current beliefs about the product or code. A belief names a relation between two referents " +
 			"plus a falsifiable expectation. Ops: propose (add a belief — several may be open at once), support/refute " +
-			"(settle a proposed belief with evidence), refine (replace a belief with a corrected version), retract (withdraw).",
+			"(settle a proposed belief with the observed evidence), refine (replace a belief: supply a corrected " +
+			"statement AND expectation, not evidence), retract (withdraw).",
 		promptSnippet: declareBeliefSystemPromptContribution.snippet,
 		promptGuidelines: declareBeliefSystemPromptContribution.guidelines,
 		parameters: declareBeliefSchema,

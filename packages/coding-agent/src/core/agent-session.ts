@@ -737,11 +737,12 @@ export class AgentSession {
 						],
 						timestamp: Date.now(),
 					});
-				} else if (proposed.length === 0 && !ranTools) {
-					// Stopped with no open hypotheses. If it has settled beliefs, settling is not
-					// concluding — prompt it to deepen (propose the next hypothesis) or conclude.
-					// If it never proposed anything, it is answering directly (or gave up), not
-					// running the belief loop — conclude without requiring `conclude`.
+				} else if (proposed.length === 0) {
+					// No open hypotheses. If it has settled beliefs, settling is not concluding —
+					// prompt it to deepen (propose the next hypothesis) or conclude, whether it just
+					// settled the last one (ranTools) or stopped on its own. If it never proposed
+					// anything, it is answering directly (or gave up), not running the belief loop —
+					// conclude without requiring `conclude`.
 					if (this._beliefSet.beliefs.length > 0) {
 						this.agent.steer({
 							role: "user",
@@ -753,11 +754,11 @@ export class AgentSession {
 							],
 							timestamp: Date.now(),
 						});
-					} else {
+					} else if (!ranTools) {
 						this._role = "finalAnswer";
 					}
 				}
-				// Otherwise (no open hypotheses but the model just acted, e.g. `view_beliefs` on an
+				// Otherwise (no beliefs yet, but the model just acted — e.g. `view_beliefs` on an
 				// empty set): stay in the epistemic role — it is bootstrapping, not concluding.
 				break;
 			}
@@ -850,13 +851,17 @@ export class AgentSession {
 		switch (this._role) {
 			case "epistemic":
 				return (
-					"\n\nYou are a scientific mind. Investigate by the hypothesis → experiment → update protocol " +
-					"rather than acting blindly: propose a hypothesis (a belief) about the product or code — a named " +
-					"relation, its falsifiable expectation (what you would observe if it were true), and how many " +
-					"evidence rounds it needs. Once a hypothesis is proposed, the experiment runs and its observation " +
-					"is reported back to you; then update the hypothesis (support, refute, or refine it) from that " +
-					"observation, and read your beliefs with view_beliefs. Settle each hypothesis, then keep proposing " +
-					"more until the task is fully answered — only then call conclude."
+					"\n\nYou are the epistemic role of a two-role investigation loop. You cannot read files or run " +
+					"commands — those tools belong to a separate execution role that runs automatically, so do not try " +
+					"to inspect the codebase yourself. Your only tools are declare_belief, view_beliefs, and conclude.\n\n" +
+					"Work the hypothesis → experiment → update protocol:\n" +
+					"1. Propose a hypothesis with declare_belief: name a relation about the product or code, state what " +
+					"you would observe if it were true (its falsifiable expectation), and how many evidence rounds it needs.\n" +
+					"2. A separate execution role then probes the code or product and reports its observation back to you " +
+					"as the next message — you never run the probe yourself.\n" +
+					"3. From that observation, update the hypothesis: support, refute, or refine it via declare_belief, " +
+					"and review your beliefs with view_beliefs.\n" +
+					"4. Keep proposing and settling hypotheses until the task is fully answered, then call conclude."
 				);
 			case "execution":
 				return (

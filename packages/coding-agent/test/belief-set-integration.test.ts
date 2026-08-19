@@ -98,7 +98,11 @@ describe("declare_belief integration", () => {
 			expect(prompt).toContain("scientific mind");
 			expect(prompt).toContain("hypothesis → experiment → update protocol");
 			expect(prompt).toContain("falsifiable expectation");
-			expect(prompt).toContain("only then call conclude");
+			expect(prompt).toContain("then call conclude");
+			// It must state plainly that experiments run in a separate role, not in this
+			// one — otherwise the model burns turns re-deriving how it probes the codebase.
+			expect(prompt).toContain("cannot read files or run commands");
+			expect(prompt).toContain("separate execution role");
 		} finally {
 			harness.cleanup();
 		}
