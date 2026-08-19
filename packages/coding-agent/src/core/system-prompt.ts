@@ -11,7 +11,7 @@ import { formatSkillsForPrompt, type Skill } from "./skills.ts";
  * belief-loop roles render a narrower scientific preamble and omit the pi-docs block:
  * `"epistemic"` and `"finalAnswer"` have no `read`/`bash`/`edit`/`write` (advertising them
  * would only mislead the model), while `"execution"` holds those probe tools but must not
- * be distracted by the pi-docs block, which is unrelated to the hypothesis it is probing.
+ * be distracted by the pi-docs block, which is unrelated to the belief it is probing.
  */
 export type SystemPromptRole = "coding" | "epistemic" | "execution" | "finalAnswer";
 
@@ -135,9 +135,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const preamble =
 		role === "epistemic"
-			? "You are a scientific mind investigating a task by forming and testing hypotheses about the product and code."
+			? "You are a scientific mind investigating a task by forming and testing beliefs about the product and code."
 			: role === "execution"
-				? "You are a scientific mind running an experiment: you probe the code or product for evidence about a hypothesis and report what you observe."
+				? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."
 				: role === "finalAnswer"
 					? "You are a scientific mind concluding an investigation and answering the user's task."
 					: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";

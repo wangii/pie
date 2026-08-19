@@ -144,7 +144,7 @@ Accept mild drift; prevent reification.
   - `_advanceRole`: on `concluded`, reject into a steer-back if any `proposed()` belief has
     `domain === "framing"` (Rule 2).
 - `view-beliefs.ts` / `formatBeliefsForView`: render framing beliefs under a `[FRAMING]` section
-  (open obligations) instead of `[FRAME]` (dispatchable world hypotheses).
+  (open obligations) instead of `[FRAME]` (dispatchable world beliefs).
 
 ## Known warts (honest)
 

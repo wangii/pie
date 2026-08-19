@@ -118,10 +118,10 @@ describe("declare_belief integration", () => {
 			expect(prompt).not.toContain("expert coding assistant");
 			expect(prompt).not.toContain("In addition to the tools above");
 			expect(prompt).not.toContain("Pi documentation");
-			// It frames the role as a scientific mind following the hypothesis → experiment
+			// It frames the role as a scientific mind following the belief → experiment
 			// → update protocol, rather than "start working" blindly.
 			expect(prompt).toContain("scientific mind");
-			expect(prompt).toContain("hypothesis → experiment → update protocol");
+			expect(prompt).toContain("belief → experiment → update protocol");
 			expect(prompt).toContain("falsifiable expectation");
 			expect(prompt).toContain("then call conclude");
 			// It must state plainly that experiments run in a separate role, not in this
@@ -441,7 +441,7 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Execution: read its hypothesis, then probe.
+				// Execution: read its belief, then probe.
 				{ toolCalls: [{ name: "view_beliefs", args: {} }], stopReason: "toolUse" },
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled sentence.
@@ -473,7 +473,7 @@ describe("declare_belief integration", () => {
 				expect(contextText(c)).not.toContain("Applied support");
 				// …and it must not be able to mutate: no declare_belief in its tool list.
 				expect(contextToolNames(c)).not.toContain("declare_belief");
-				// …but it holds view_beliefs read-only so it can recall its hypothesis.
+				// …but it holds view_beliefs read-only so it can recall its belief.
 				expect(contextToolNames(c)).toContain("view_beliefs");
 			}
 			// The view_beliefs result (the frame + expectation) is visible, not masked.

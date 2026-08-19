@@ -4,7 +4,7 @@
  * A belief is a named relational assertion about product or code, carrying a
  * falsifiable `expectation` and a structured `evidenceRounds` estimate. Any number
  * of beliefs may be `proposed` (unadjudicated) at once: those open beliefs are the
- * *frame* — the set of hypotheses the next execution episode probes. Each is
+ * *frame* — the set of beliefs the next execution episode probes. Each is
  * validated independently, so a batch of proposals is legal as long as every one
  * passes its own structural rules.
  *
@@ -146,7 +146,7 @@ export class BeliefSet {
 	apply(delta: BeliefDelta): Belief {
 		switch (delta.op) {
 			case "propose": {
-				// Any number of hypotheses may be open at once; each is validated on its own.
+				// Any number of beliefs may be open at once; each is validated on its own.
 				validateBelief(delta.statement, delta.domain);
 				validateExpectation(delta.expectation);
 				validateEvidenceRounds(delta.evidenceRounds);

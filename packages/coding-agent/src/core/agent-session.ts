@@ -308,7 +308,7 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 
 /**
  * The steer that returns the loop from the execution role to the epistemic role. It
- * deliberately does not say "update your hypothesis" — that invites the model to
+ * deliberately does not say "update your belief" — that invites the model to
  * re-process the whole observation. The epistemic uplink walks three steps instead:
  * explain what the current beliefs already account for, isolate the residual they do
  * not, and update on that residual alone.
@@ -376,7 +376,7 @@ export class AgentSession {
 	private _role: "epistemic" | "execution" | "finalAnswer" = "epistemic";
 	/** Remaining execution actions for the current frame's lease (derived from `evidenceRounds`, never fixed). */
 	private _frameHorizon = 0;
-	/** The belief ids already dispatched to execution — distinguishes fresh hypotheses from dispatched-but-unsettled ones. */
+	/** The belief ids already dispatched to execution — distinguishes fresh beliefs from dispatched-but-unsettled ones. */
 	private _dispatchedFrameIds: Set<string> = new Set();
 	/** True once the execution lease has been exhausted and the role has been nudged to report its observation. */
 	private _leaseReportNudged = false;
@@ -630,7 +630,7 @@ export class AgentSession {
 	 *   once (see `_evidenceWatermark`) to stimulate updates, then masked.
 	 * - execution: the belief *mutation* echo (declare_belief) is masked so the probe role is
 	 *   not tempted to propose/update beliefs, but the read-only `view_beliefs` stays visible so
-	 *   it can recall the hypothesis it is testing; raw operational detail stays.
+	 *   it can recall the belief it is testing; raw operational detail stays.
 	 * - finalAnswer: raw operational detail is discarded; the settled beliefs remain.
 	 */
 	private _projectContextMessages(): AgentMessage[] {
@@ -690,7 +690,7 @@ export class AgentSession {
 	 * epistemic role, so exposing the "Applied propose/support/refute" echoes here only invites
 	 * the probe role to step out of its lane instead of reporting a plain observation. The
 	 * read-only `view_beliefs` result is left intact — the execution role needs it to recall the
-	 * hypothesis it is testing.
+	 * belief it is testing.
 	 */
 	private _maskBeliefBookkeeping(message: AgentMessage): AgentMessage {
 		if (message.role === "toolResult" && message.toolName === "declare_belief") {
@@ -711,7 +711,7 @@ export class AgentSession {
 				const proposed = this._beliefSet.proposed();
 				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
 				// Completion is the model's explicit call, never inferred from the open-belief
-				// count: a settled hypothesis does not mean the task is answered.
+				// count: a settled belief does not mean the task is answered.
 				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
 				if (concluded) {
 					// Concluding with an unmet framing obligation is premature: the obligation
@@ -739,7 +739,7 @@ export class AgentSession {
 						});
 					}
 				} else if (undispatched.length > 0) {
-					// Fresh hypotheses. Dispatching to the experiment step is automatic:
+					// Fresh beliefs. Dispatching to the experiment step is automatic:
 					// proposing is the signal to run the experiments, so the epistemic role
 					// must not linger to "explore" on its own — no probe tools exist there.
 					this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
@@ -756,13 +756,13 @@ export class AgentSession {
 						content: [
 							{
 								type: "text",
-								text: `Run the experiments for the hypotheses ${statements} and report your observations.`,
+								text: `Run the experiments for the beliefs ${statements} and report your observations.`,
 							},
 						],
 						timestamp: Date.now(),
 					});
 				} else if (proposed.length > 0 && !ranTools) {
-					// Dispatched-but-unsettled hypotheses, and the model stopped instead of
+					// Dispatched-but-unsettled beliefs, and the model stopped instead of
 					// updating them — nudge it in its own terms, not the harness machinery.
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					this.agent.steer({
@@ -770,14 +770,14 @@ export class AgentSession {
 						content: [
 							{
 								type: "text",
-								text: `Some hypotheses are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
+								text: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
 							},
 						],
 						timestamp: Date.now(),
 					});
 				} else if (proposed.length === 0) {
-					// No open hypotheses. If it has settled beliefs, settling is not concluding —
-					// prompt it to deepen (propose the next hypothesis) or conclude, whether it just
+					// No open beliefs. If it has settled beliefs, settling is not concluding —
+					// prompt it to deepen (propose the next belief) or conclude, whether it just
 					// settled the last one (ranTools) or stopped on its own. If it never proposed
 					// anything, it is answering directly (or gave up), not running the belief loop —
 					// conclude without requiring `conclude`.
@@ -787,7 +787,7 @@ export class AgentSession {
 							content: [
 								{
 									type: "text",
-									text: "Propose the next hypothesis to deepen the investigation, or conclude if the task is answered.",
+									text: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
 								},
 							],
 							timestamp: Date.now(),
@@ -851,7 +851,7 @@ export class AgentSession {
 				return [];
 			case "execution":
 				// The probe role gets `view_beliefs` read-only — it must be able to recall the
-				// hypothesis it is testing (statement + expectation) without drifting, but it
+				// belief it is testing (statement + expectation) without drifting, but it
 				// must not mutate the belief set (`declare_belief`) or conclude (`conclude`),
 				// both of which are the epistemic role's calls.
 				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "conclude");
@@ -892,7 +892,7 @@ export class AgentSession {
 					"\n\nYou are the epistemic role of a two-role investigation loop. You cannot read files or run " +
 					"commands — those tools belong to a separate execution role that runs automatically, so do not try " +
 					"to inspect the codebase yourself. Your only tools are declare_belief, view_beliefs, and conclude.\n\n" +
-					"Work the hypothesis → experiment → update protocol:\n" +
+					"Work the belief → experiment → update protocol:\n" +
 					"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
 					"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
 					"how many evidence rounds it needs. A framing belief (domain framing) states what the final answer " +
@@ -908,16 +908,16 @@ export class AgentSession {
 				);
 			case "execution":
 				return (
-					"\n\nRead the hypothesis you are probing with view_beliefs if you need its exact expectation, then " +
+					"\n\nRead the belief you are probing with view_beliefs if you need its exact expectation, then " +
 					"probe the code or product to test it. Report in plain text what you observed and how it meets or " +
-					"diverges from the hypothesis's expectation — name that divergence (the prediction error) explicitly, " +
+					"diverges from the belief's expectation — name that divergence (the prediction error) explicitly, " +
 					"because the epistemic role updates only on it. Proposing or updating beliefs is a separate step you " +
 					"do not perform."
 				);
 			case "finalAnswer":
 				return (
 					"\n\nYou are a scientific mind writing the conclusion: answer the original task directly and " +
-					"concisely, grounded in the hypotheses you have settled."
+					"concisely, grounded in the beliefs you have settled."
 				);
 		}
 	}

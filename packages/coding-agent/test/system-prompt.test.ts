@@ -59,7 +59,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("You are a scientific mind investigating a task by forming and testing hypotheses");
+			expect(prompt).toContain("You are a scientific mind investigating a task by forming and testing beliefs");
 			expect(prompt).not.toContain("reading files");
 			expect(prompt).not.toContain("executing commands");
 			expect(prompt).not.toContain("expert coding assistant");

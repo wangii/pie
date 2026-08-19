@@ -19,7 +19,7 @@ export function createViewBeliefsToolDefinition(
 		name: "view_beliefs",
 		label: "view beliefs",
 		description:
-			"Show your current beliefs: the open hypotheses, the open framing obligations, and the settled beliefs.",
+			"Show your current beliefs: the open beliefs, the open framing obligations, and the settled beliefs.",
 		promptSnippet: "View your current beliefs",
 		promptGuidelines: [],
 		parameters: viewBeliefsSchema,

@@ -5,7 +5,7 @@ import type { ToolDefinition } from "../extensions/types.ts";
  * The `conclude` tool — the epistemic role's explicit "done" signal.
  *
  * The belief loop must not infer completion from the belief set's open count: a settled
- * hypothesis does not mean the task is answered. Completion is the model's call, expressed by
+ * belief does not mean the task is answered. Completion is the model's call, expressed by
  * invoking this tool, which hands the loop to the finalAnswer role to write the conclusion.
  */
 
