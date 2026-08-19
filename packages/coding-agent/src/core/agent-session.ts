@@ -714,12 +714,30 @@ export class AgentSession {
 				// count: a settled hypothesis does not mean the task is answered.
 				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
 				if (concluded) {
-					this._role = "finalAnswer";
-					this.agent.steer({
-						role: "user",
-						content: [{ type: "text", text: "Write your conclusion." }],
-						timestamp: Date.now(),
-					});
+					// Concluding with an unmet framing obligation is premature: the obligation
+					// states what the answer must establish, so it must be closed (support),
+					// reframed (refine), or dropped (retract) before the answer is written.
+					const openFramings = this._beliefSet.framings();
+					if (openFramings.length > 0) {
+						const statements = openFramings.map((b) => `"${b.statement}"`).join(", ");
+						this.agent.steer({
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text: `Concluding is premature — these obligations for what the answer must establish are still open (${statements}). Support, reframe, or retract each via declare_belief before concluding.`,
+								},
+							],
+							timestamp: Date.now(),
+						});
+					} else {
+						this._role = "finalAnswer";
+						this.agent.steer({
+							role: "user",
+							content: [{ type: "text", text: "Write your conclusion." }],
+							timestamp: Date.now(),
+						});
+					}
 				} else if (undispatched.length > 0) {
 					// Fresh hypotheses. Dispatching to the experiment step is automatic:
 					// proposing is the signal to run the experiments, so the epistemic role
@@ -875,15 +893,18 @@ export class AgentSession {
 					"commands — those tools belong to a separate execution role that runs automatically, so do not try " +
 					"to inspect the codebase yourself. Your only tools are declare_belief, view_beliefs, and conclude.\n\n" +
 					"Work the hypothesis → experiment → update protocol:\n" +
-					"1. Propose a hypothesis with declare_belief: name a relation about the product or code, state what " +
-					"you would observe if it were true (its falsifiable expectation), and how many evidence rounds it needs.\n" +
-					"2. A separate execution role then probes the code or product and reports back what it observed, " +
-					"including where that diverges from your expectation — you never run the probe yourself.\n" +
+					"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
+					"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
+					"how many evidence rounds it needs. A framing belief (domain framing) states what the final answer " +
+					"must establish — an obligation, not a probe target.\n" +
+					"2. A separate execution role then probes the code or product for the world beliefs and reports back " +
+					"what it observed, including where that diverges from your expectation — you never run the probe yourself.\n" +
 					"3. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
 					"report your current beliefs already account for; isolate the residual — the observations and " +
 					"prediction errors they do not explain; then use only that residual to support, refute, refine, or " +
 					"propose beliefs via declare_belief, and review them with view_beliefs.\n" +
-					"4. Keep proposing and settling hypotheses until the task is fully answered, then call conclude."
+					"4. Keep proposing and settling beliefs until the task is fully answered, close every open framing " +
+					"obligation (support, reframe, or retract it), then call conclude."
 				);
 			case "execution":
 				return (

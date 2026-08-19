@@ -645,6 +645,78 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("a framing belief does not dispatch, and conclude is gated until it is closed", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose a framing obligation only (no world belief).
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the answer must establish whether it is one bug or two",
+								domain: "framing",
+								expectation: "no second independent mechanism",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Still epistemic: framing did not dispatch. View beliefs.
+				{ toolCalls: [{ name: "view_beliefs", args: {} }], stopReason: "toolUse" },
+				// Conclude while the obligation is still open — must be rejected.
+				conclude,
+				// Epistemic: close the obligation by retracting it.
+				{
+					toolCalls: [{ name: "declare_belief", args: { op: "retract", beliefId: "belief-1" } }],
+					stopReason: "toolUse",
+				},
+				// Conclude again — now valid.
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.domain).toBe("framing");
+
+			// The turn after the framing-only proposal is still epistemic (no dispatch to the probe role).
+			const afterFraming = harness.faux.contexts[1];
+			expect(contextToolNames(afterFraming)).toContain("declare_belief");
+			expect(contextToolNames(afterFraming)).not.toContain("echo");
+
+			// The turn after the rejected conclude is still epistemic, and carries the rejection steer.
+			const afterRejectedConclude = harness.faux.contexts[3];
+			expect(contextToolNames(afterRejectedConclude)).toContain("declare_belief");
+			expect(contextText(afterRejectedConclude)).toContain("Concluding is premature");
+
+			// The final turn is finalAnswer (no tools), and the loop completed.
+			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
+			expect(contextToolNames(last)).toEqual([]);
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("conclude transitions to finalAnswer with no tools", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",

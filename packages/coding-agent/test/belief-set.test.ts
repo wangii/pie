@@ -81,6 +81,34 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 		expect(set.proposed().map((b) => b.statement)).toEqual(["the cache is warm", "login is stateless"]);
 	});
 
+	test("framing beliefs are obligations, excluded from the open frame", () => {
+		const set = new BeliefSet();
+		const framing = set.apply({
+			op: "propose",
+			statement: "the answer must establish whether it is one bug or two",
+			domain: "framing",
+			expectation: "no second independent mechanism",
+			evidenceRounds: 1,
+		});
+		const world = set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit cache",
+			evidenceRounds: 1,
+		});
+
+		// The open frame holds only the dispatchable world belief; framing is a separate obligation.
+		expect(set.proposed().map((b) => b.id)).toEqual([world.id]);
+		expect(set.framings().map((b) => b.id)).toEqual([framing.id]);
+		expect(
+			set
+				.open()
+				.map((b) => b.id)
+				.sort(),
+		).toEqual([framing.id, world.id].sort());
+	});
+
 	test("each proposal in a batch is still validated individually", () => {
 		const set = new BeliefSet();
 		set.apply({
@@ -213,6 +241,10 @@ describe("validateBelief (structural)", () => {
 		expect(() => validateBelief("", "code")).toThrow(BeliefValidationError);
 		expect(() => validateBelief("x", "bogus" as "code")).toThrow(BeliefValidationError);
 	});
+
+	test("accepts a framing domain", () => {
+		expect(() => validateBelief("the answer must establish X", "framing")).not.toThrow();
+	});
 });
 
 describe("validateExpectation", () => {
@@ -271,5 +303,27 @@ describe("formatBeliefsForView", () => {
 		const text = formatBeliefsForView(set.beliefs);
 		expect(text).toContain("[SETTLED]");
 		expect(text).toContain("the cache survives logout");
+	});
+
+	test("renders framing obligations separately from dispatchable frames", () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the answer must establish X",
+			domain: "framing",
+			expectation: "no second mechanism",
+			evidenceRounds: 1,
+		});
+		set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit cache",
+			evidenceRounds: 1,
+		});
+		const text = formatBeliefsForView(set.beliefs);
+		expect(text).toContain("[FRAMING]");
+		expect(text).toContain("[FRAME]");
+		expect(text).toContain("reframe if:");
 	});
 });

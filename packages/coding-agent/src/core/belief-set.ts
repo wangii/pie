@@ -18,7 +18,7 @@
  * languages.
  */
 
-export type BeliefDomain = "product" | "code";
+export type BeliefDomain = "product" | "code" | "framing";
 
 /**
  * Lifecycle of a belief. Monotone in one direction:
@@ -85,8 +85,8 @@ export function validateBelief(statement: string, domain: BeliefDomain): void {
 	if (!statement.trim()) {
 		throw new BeliefValidationError("Belief statement must not be empty.");
 	}
-	if (domain !== "product" && domain !== "code") {
-		throw new BeliefValidationError("Belief domain must be 'product' or 'code'.");
+	if (domain !== "product" && domain !== "code" && domain !== "framing") {
+		throw new BeliefValidationError("Belief domain must be 'product', 'code', or 'framing'.");
 	}
 }
 
@@ -118,9 +118,17 @@ export class BeliefSet {
 		return this._beliefs;
 	}
 
-	/** The unadjudicated beliefs driving action — the open frame (may be empty or hold several). */
+	/**
+	 * The unadjudicated *world* beliefs driving action — the open frame (may be empty or hold
+	 * several). Framing beliefs are excluded: they are obligations, never dispatch targets.
+	 */
 	proposed(): Belief[] {
-		return this._beliefs.filter((b) => statusOf(b) === "proposed");
+		return this._beliefs.filter((b) => statusOf(b) === "proposed" && b.domain !== "framing");
+	}
+
+	/** The unadjudicated framing beliefs — open obligations for what the final answer must establish. */
+	framings(): Belief[] {
+		return this._beliefs.filter((b) => statusOf(b) === "proposed" && b.domain === "framing");
 	}
 
 	/** Beliefs still actionable: proposed or supported, not superseded. */
@@ -243,11 +251,17 @@ export function formatBeliefsForView(beliefs: readonly Belief[]): string {
 		return "No beliefs yet.";
 	}
 	const lines: string[] = [];
-	const frames = beliefs.filter((b) => statusOf(b) === "proposed");
+	const proposed = beliefs.filter((b) => statusOf(b) === "proposed");
+	const frames = proposed.filter((b) => b.domain !== "framing");
 	for (const frame of frames) {
 		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
 		lines.push(`  expectation: ${frame.expectation}`);
 		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);
+	}
+	const framings = proposed.filter((b) => b.domain === "framing");
+	for (const framing of framings) {
+		lines.push(`[FRAMING] ${framing.id} ${framing.statement}`);
+		lines.push(`  reframe if: ${framing.expectation}`);
 	}
 	const settled = beliefs.filter((b) => {
 		const status = statusOf(b);

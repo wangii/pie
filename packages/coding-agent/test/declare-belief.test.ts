@@ -26,6 +26,27 @@ describe("declare_belief tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
 	});
 
+	test("propose accepts a framing belief", async () => {
+		const set = new BeliefSet();
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{
+				op: "propose",
+				statement: "the answer must establish X",
+				domain: "framing",
+				expectation: "no second mechanism",
+				evidenceRounds: 1,
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect(set.framings()).toHaveLength(1);
+		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
+	});
+
 	test("a rejected belief is returned as text, not thrown", async () => {
 		const set = new BeliefSet();
 		const tool = createDeclareBeliefToolDefinition(set);

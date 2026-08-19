@@ -30,9 +30,9 @@ const declareBeliefSchema = Type.Object({
 		}),
 	),
 	domain: Type.Optional(
-		Type.Union([Type.Literal("product"), Type.Literal("code")], {
+		Type.Union([Type.Literal("product"), Type.Literal("code"), Type.Literal("framing")], {
 			description:
-				"Is this belief about the product's observable behavior, or the code's behavior/structure? Required for propose.",
+				"product/code: a relation about the world. framing: what the final answer must establish (an obligation). Required for propose.",
 		}),
 	),
 	expectation: Type.Optional(
@@ -62,7 +62,8 @@ const declareBeliefSchema = Type.Object({
 export type DeclareBeliefInput = Static<typeof declareBeliefSchema>;
 
 export const declareBeliefSystemPromptContribution = {
-	snippet: "Record or update what you currently believe about the product or code",
+	snippet:
+		"Record or update what you currently believe about the product, the code, or what the answer must establish",
 	guidelines: [
 		"A belief names a relation and its falsifiable expectation; support or refute it with the evidence you observed",
 	],
@@ -74,8 +75,8 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 			if (!input.statement?.trim()) {
 				throw new Error("propose requires a non-empty `statement`.");
 			}
-			if (input.domain !== "product" && input.domain !== "code") {
-				throw new Error("propose requires `domain` of 'product' or 'code'.");
+			if (input.domain !== "product" && input.domain !== "code" && input.domain !== "framing") {
+				throw new Error("propose requires `domain` of 'product', 'code', or 'framing'.");
 			}
 			if (!input.expectation?.trim()) {
 				throw new Error(
@@ -133,7 +134,7 @@ export function createDeclareBeliefToolDefinition(
 		name: "declare_belief",
 		label: "declare belief",
 		description:
-			"Record or update your current beliefs about the product or code. A belief names a relation between two referents " +
+			"Record or update your current beliefs about the product, the code, or what the answer must establish. A belief names a relation between two referents " +
 			"plus a falsifiable expectation. Ops: propose (add a belief — several may be open at once), support/refute " +
 			"(settle a proposed belief with the observed evidence), refine (replace a belief: supply a corrected " +
 			"statement AND expectation, not evidence), retract (withdraw).",
