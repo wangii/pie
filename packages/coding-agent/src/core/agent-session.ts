@@ -108,6 +108,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { createConcludeToolDefinition } from "./tools/conclude.ts";
 import { createDeclareBeliefToolDefinition } from "./tools/declare-belief.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -648,7 +649,11 @@ export class AgentSession {
 	private _maskOperationalDetail(message: AgentMessage): AgentMessage {
 		switch (message.role) {
 			case "toolResult":
-				if (message.toolName === "declare_belief" || message.toolName === "view_beliefs") {
+				if (
+					message.toolName === "declare_belief" ||
+					message.toolName === "view_beliefs" ||
+					message.toolName === "conclude"
+				) {
 					return message;
 				}
 				return { ...message, content: [{ type: "text", text: "[operational detail omitted]" }] };
@@ -685,7 +690,17 @@ export class AgentSession {
 			case "epistemic": {
 				const proposed = this._beliefSet.proposed();
 				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
-				if (undispatched.length > 0) {
+				// Completion is the model's explicit call, never inferred from the open-belief
+				// count: a settled hypothesis does not mean the task is answered.
+				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
+				if (concluded) {
+					this._role = "finalAnswer";
+					this.agent.steer({
+						role: "user",
+						content: [{ type: "text", text: "Write your conclusion." }],
+						timestamp: Date.now(),
+					});
+				} else if (undispatched.length > 0) {
 					// Fresh hypotheses. Dispatching to the experiment step is automatic:
 					// proposing is the signal to run the experiments, so the epistemic role
 					// must not linger to "explore" on its own — no probe tools exist there.
@@ -722,16 +737,28 @@ export class AgentSession {
 						],
 						timestamp: Date.now(),
 					});
-				} else if (proposed.length === 0) {
-					// No open hypotheses remain. Conclude — but not while the epistemic role is
-					// still bootstrapping: its first action is usually `view_beliefs` on an empty
-					// set (ranTools with no belief ever proposed), which must not be mistaken for a
-					// conclusion or the role would lose its belief tools before proposing anything.
-					const bootstrapping = ranTools && this._beliefSet.beliefs.length === 0;
-					if (!bootstrapping) {
+				} else if (proposed.length === 0 && !ranTools) {
+					// Stopped with no open hypotheses. If it has settled beliefs, settling is not
+					// concluding — prompt it to deepen (propose the next hypothesis) or conclude.
+					// If it never proposed anything, it is answering directly (or gave up), not
+					// running the belief loop — conclude without requiring `conclude`.
+					if (this._beliefSet.beliefs.length > 0) {
+						this.agent.steer({
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text: "Propose the next hypothesis to deepen the investigation, or conclude if the task is answered.",
+								},
+							],
+							timestamp: Date.now(),
+						});
+					} else {
 						this._role = "finalAnswer";
 					}
 				}
+				// Otherwise (no open hypotheses but the model just acted, e.g. `view_beliefs` on an
+				// empty set): stay in the epistemic role — it is bootstrapping, not concluding.
 				break;
 			}
 			case "execution": {
@@ -752,7 +779,10 @@ export class AgentSession {
 					this.agent.steer({
 						role: "user",
 						content: [
-							{ type: "text", text: "You have gathered enough evidence. Report your observation in one concise sentence." },
+							{
+								type: "text",
+								text: "You have gathered enough evidence. Report your observation in one concise sentence.",
+							},
 						],
 						timestamp: Date.now(),
 					});
@@ -777,14 +807,15 @@ export class AgentSession {
 	private _roleToolNames(): string[] {
 		switch (this._role) {
 			case "epistemic":
-				return ["declare_belief", "view_beliefs"];
+				return ["declare_belief", "view_beliefs", "conclude"];
 			case "finalAnswer":
 				return [];
 			case "execution":
 				// The probe role gets `view_beliefs` read-only — it must be able to recall the
 				// hypothesis it is testing (statement + expectation) without drifting, but it
-				// must not mutate the belief set, so `declare_belief` stays absent.
-				return this._fullActiveToolNames.filter((name) => name !== "declare_belief");
+				// must not mutate the belief set (`declare_belief`) or conclude (`conclude`),
+				// both of which are the epistemic role's calls.
+				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "conclude");
 		}
 	}
 
@@ -824,8 +855,8 @@ export class AgentSession {
 					"relation, its falsifiable expectation (what you would observe if it were true), and how many " +
 					"evidence rounds it needs. Once a hypothesis is proposed, the experiment runs and its observation " +
 					"is reported back to you; then update the hypothesis (support, refute, or refine it) from that " +
-					"observation, and read your beliefs with view_beliefs. Settle each hypothesis before proposing " +
-					"the next; when none is left open and the task is answered, you are done."
+					"observation, and read your beliefs with view_beliefs. Settle each hypothesis, then keep proposing " +
+					"more until the task is fully answered — only then call conclude."
 				);
 			case "execution":
 				return (
@@ -2963,6 +2994,7 @@ export class AgentSession {
 				"view_beliefs",
 				createViewBeliefsToolDefinition(this._beliefSet) as ToolDefinition,
 			);
+			this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
 		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -2988,7 +3020,7 @@ export class AgentSession {
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
 			: this._enableBeliefSet
-				? ["read", "bash", "edit", "write", "declare_belief", "view_beliefs"]
+				? ["read", "bash", "edit", "write", "declare_belief", "view_beliefs", "conclude"]
 				: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		// The belief set is on by default, so its tools must be active even when the
@@ -2996,7 +3028,7 @@ export class AgentSession {
 		// of `["read", "bash", "edit", "write"]` that would otherwise drop them). An
 		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
 		// back out via `allowedToolNames`.
-		const beliefToolNames = ["declare_belief", "view_beliefs"];
+		const beliefToolNames = ["declare_belief", "view_beliefs", "conclude"];
 		const activeToolNames =
 			this._enableBeliefSet && baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
 				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]

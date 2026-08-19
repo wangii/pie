@@ -80,6 +80,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 				.sort(),
 		).toEqual([
 			"bash",
+			"conclude",
 			"declare_belief",
 			"dynamic_tool",
 			"edit",

@@ -40,7 +40,6 @@ export type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
-	SystemPromptRole,
 	// Context
 	CompactOptions,
 	// Events - Agent
@@ -146,6 +145,7 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	SystemPromptRole,
 	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,

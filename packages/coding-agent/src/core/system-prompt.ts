@@ -149,7 +149,8 @@ ${toolsList}
 `;
 
 	if (role === "coding") {
-		prompt += "\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n";
+		prompt +=
+			"\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n";
 	}
 
 	prompt += `

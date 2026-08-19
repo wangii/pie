@@ -27,6 +27,9 @@ function contextToolNames(ctx: { tools?: Array<{ name: string }> }): string[] {
 	return (ctx.tools ?? []).map((t) => t.name);
 }
 
+/** The epistemic role's explicit "done" signal, ending the investigation. */
+const conclude: FauxResponse = { toolCalls: [{ name: "conclude", args: {} }], stopReason: "toolUse" };
+
 describe("declare_belief integration", () => {
 	test("declare_belief and view_beliefs are active when enabled", async () => {
 		const harness = await createHarness({ enableBeliefSet: true });
@@ -68,7 +71,11 @@ describe("declare_belief integration", () => {
 		try {
 			// The model-facing tool list is the epistemic role's subset; the full active
 			// list (read/bash/…) is still available via `getActiveToolNames`.
-			expect(harness.session.agent.state.tools.map((t) => t.name)).toEqual(["declare_belief", "view_beliefs"]);
+			expect(harness.session.agent.state.tools.map((t) => t.name)).toEqual([
+				"declare_belief",
+				"view_beliefs",
+				"conclude",
+			]);
 		} finally {
 			harness.cleanup();
 		}
@@ -91,7 +98,7 @@ describe("declare_belief integration", () => {
 			expect(prompt).toContain("scientific mind");
 			expect(prompt).toContain("hypothesis → experiment → update protocol");
 			expect(prompt).toContain("falsifiable expectation");
-			expect(prompt).toContain("Settle each hypothesis before proposing the next");
+			expect(prompt).toContain("only then call conclude");
 		} finally {
 			harness.cleanup();
 		}
@@ -143,7 +150,8 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: finalize.
+				conclude,
+				// finalAnswer.
 				"the cache survives logout for 30s",
 			],
 		});
@@ -206,7 +214,9 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: finalize.
+				conclude,
+				conclude,
+				// finalAnswer.
 				"done",
 			],
 		});
@@ -271,7 +281,9 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: finalize.
+				conclude,
+				conclude,
+				// finalAnswer.
 				"done",
 			],
 		});
@@ -280,9 +292,7 @@ describe("declare_belief integration", () => {
 
 			// The raw execution result is NOT omitted from the epistemic role: it sees it
 			// (alongside the distilled sentence) so it can update or propose beliefs.
-			const epistemicContexts = harness.faux.contexts.filter((c) =>
-				contextToolNames(c).includes("declare_belief"),
-			);
+			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
 			expect(epistemicContexts.length).toBeGreaterThan(0);
 			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
 		} finally {
@@ -350,7 +360,9 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Epistemic: finalize.
+				conclude,
+				conclude,
+				// finalAnswer.
 				"done",
 			],
 		});
@@ -404,11 +416,15 @@ describe("declare_belief integration", () => {
 				// Epistemic: settle the last belief.
 				{
 					toolCalls: [
-						{ name: "declare_belief", args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" } },
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
 					],
 					stopReason: "toolUse",
 				},
-				// finalAnswer: conclusion.
+				conclude,
+				// finalAnswer.
 				"the conclusion",
 			],
 		});
@@ -452,7 +468,13 @@ describe("declare_belief integration", () => {
 			toolCalls: [
 				{
 					name: "declare_belief",
-					args: { op: "propose", statement, domain: "product", expectation: "a probe keeps the value", evidenceRounds: 1 },
+					args: {
+						op: "propose",
+						statement,
+						domain: "product",
+						expectation: "a probe keeps the value",
+						evidenceRounds: 1,
+					},
 				},
 			],
 			stopReason: "toolUse",
@@ -469,8 +491,20 @@ describe("declare_belief integration", () => {
 				// Epistemic: settle belief-1 AND propose belief-2 (next frame).
 				{
 					toolCalls: [
-						{ name: "declare_belief", args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" } },
-						{ name: "declare_belief", args: { op: "propose", statement: "login is stateless", domain: "product", expectation: "no session reuse", evidenceRounds: 1 } },
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
 					],
 					stopReason: "toolUse",
 				},
@@ -479,9 +513,15 @@ describe("declare_belief integration", () => {
 				"no session reuse observed",
 				// Epistemic: settle belief-2.
 				{
-					toolCalls: [{ name: "declare_belief", args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" } }],
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
 					stopReason: "toolUse",
 				},
+				conclude,
 				// finalAnswer.
 				"done",
 			],
@@ -489,9 +529,7 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			const epistemicContexts = harness.faux.contexts.filter((c) =>
-				contextToolNames(c).includes("declare_belief"),
-			);
+			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
 			expect(epistemicContexts.length).toBeGreaterThan(0);
 
 			// Each round's raw evidence was shown at least once…
@@ -506,7 +544,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("settling the last belief transitions to finalAnswer with no tools", async () => {
+	test("conclude transitions to finalAnswer with no tools", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -542,13 +580,18 @@ describe("declare_belief integration", () => {
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled sentence.
 				"the value persisted",
-				// Epistemic: settle the last belief — must trigger finalAnswer, not linger.
+				// Epistemic: settle the last belief.
 				{
 					toolCalls: [
-						{ name: "declare_belief", args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" } },
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
 					],
 					stopReason: "toolUse",
 				},
+				// Epistemic: explicitly conclude — the signal that ends the investigation.
+				conclude,
 				// finalAnswer: conclusion with no tools.
 				"the conclusion",
 			],
@@ -567,6 +610,98 @@ describe("declare_belief integration", () => {
 
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
 			expect(assistantTexts).toContain("the conclusion");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("settling the last belief keeps the epistemic role so the model can keep proposing", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Frame 1.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				// Settle the only belief — this must NOT auto-conclude the investigation.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Frame 2: the model is still epistemic and keeps proposing.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"no session reuse observed",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The turn right after settling belief-1 (index 4 = the belief-2 propose) is still the
+			// epistemic role — `declare_belief` present — not finalAnswer (empty tools).
+			const afterSettle = harness.faux.contexts[4];
+			expect(contextToolNames(afterSettle)).toContain("declare_belief");
+			expect(contextToolNames(afterSettle)).toContain("conclude");
+
+			// Both frames were settled, so the loop advanced through the full investigation.
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+			expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
 		} finally {
 			harness.cleanup();
 		}
@@ -613,10 +748,14 @@ describe("declare_belief integration", () => {
 				// Epistemic: settle.
 				{
 					toolCalls: [
-						{ name: "declare_belief", args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" } },
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
 					],
 					stopReason: "toolUse",
 				},
+				conclude,
 				// finalAnswer.
 				"done",
 			],

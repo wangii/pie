@@ -63,8 +63,8 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["grep", "find", "declare_belief", "view_beliefs"]);
+		).toEqual(["bash", "conclude", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
+		expect(session.getActiveToolNames()).toEqual(["grep", "find", "declare_belief", "view_beliefs", "conclude"]);
 		expect(session.systemPrompt).toContain("- grep:");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
@@ -108,6 +108,7 @@ describe("defaultTools setting", () => {
 		await session.bindExtensions({});
 
 		expect(session.getActiveToolNames().sort()).toEqual([
+			"conclude",
 			"declare_belief",
 			"dynamic_tool",
 			"grep",
@@ -127,7 +128,7 @@ describe("defaultTools setting", () => {
 		allowlistedSession.dispose();
 
 		const excludedSession = await createSession(["read", "grep"], { excludeTools: ["read"] });
-		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "declare_belief", "view_beliefs"]);
+		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "declare_belief", "view_beliefs", "conclude"]);
 		excludedSession.dispose();
 
 		const toolLessSession = await createSession(["read"], { noTools: "all" });
@@ -150,8 +151,8 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["ls", "declare_belief", "view_beliefs"]);
+		).toEqual(["bash", "conclude", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
+		expect(session.getActiveToolNames()).toEqual(["ls", "declare_belief", "view_beliefs", "conclude"]);
 		session.dispose();
 	});
 });
