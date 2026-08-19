@@ -26,7 +26,7 @@ const declareBeliefSchema = Type.Object({
 	statement: Type.Optional(
 		Type.String({
 			description:
-				"The belief as a named relation about product or code, e.g. 'authorizationSource(1003,1001) returns stale-replica'. Required for propose and refine.",
+				"The belief as a named relation about the product or code, written in Chinese, with each referent tagged by kind: [code] (implementation), [prod] (product behavior or documented claim), [user] (user intent/requirement), [convention] (repo idiom/naming/pattern). Tag referents, not every noun. Required for propose and refine.",
 		}),
 	),
 	domain: Type.Optional(
@@ -66,6 +66,7 @@ export const declareBeliefSystemPromptContribution = {
 		"Record or update what you currently believe about the product, the code, or what the answer must establish",
 	guidelines: [
 		"A belief names a relation and its falsifiable expectation; support or refute it with the evidence you observed",
+		"Write every belief in Chinese, and tag each referent in the statement with one of [code] / [prod] / [user] / [convention]",
 	],
 };
 

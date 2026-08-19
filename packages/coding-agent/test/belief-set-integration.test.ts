@@ -150,8 +150,20 @@ describe("declare_belief integration", () => {
 			expect(prompt).toContain("then call conclude");
 			// It must state plainly that experiments run in a separate role, not in this
 			// one — otherwise the model burns turns re-deriving how it probes the codebase.
-			expect(prompt).toContain("cannot read files or run commands");
 			expect(prompt).toContain("separate execution role");
+			expect(prompt).toContain("You never do the probing");
+			// It must not name the probe tools even in the negative — listing "read files / run
+			// commands / read/bash/edit/write" primes the model to call them.
+			expect(prompt).not.toContain("read files");
+			expect(prompt).not.toContain("run commands");
+			expect(prompt).not.toContain("read/bash");
+			// The belief vocabulary is typed and written in Chinese: each referent is tagged by
+			// one of four kinds, and belief content is Chinese.
+			expect(prompt).toContain("[code]");
+			expect(prompt).toContain("[prod]");
+			expect(prompt).toContain("[user]");
+			expect(prompt).toContain("[convention]");
+			expect(prompt).toContain("in Chinese");
 			// The update step is a residual filter: explain → isolate → update, not a full re-read.
 			expect(prompt).toContain("epistemic residual");
 			expect(prompt).toContain("isolate the residual");
@@ -761,10 +773,14 @@ describe("declare_belief integration", () => {
 			// finalAnswer: no tools, and the probe role's internal reasoning is distilled.
 			expect(contextToolNames(lastContext)).toEqual([]);
 			expect(contextThinking(lastContext)).not.toContain("EXEC_THINKING");
-			// The echo tool-call arguments are emptied; id + name survive for result association.
-			const echoCalls = contextToolCalls(lastContext).filter((t) => t.name === "echo");
-			expect(echoCalls.length).toBe(1);
-			expect(echoCalls[0].arguments).toEqual({});
+			// The echo tool-call is neutralized: its name is replaced so the finalAnswer role
+			// cannot imitate it, its arguments are emptied, and the id still pairs with the
+			// masked result.
+			const probeCalls = contextToolCalls(lastContext).filter((t) => t.name === "[probe]");
+			expect(probeCalls.length).toBe(1);
+			expect(probeCalls[0].arguments).toEqual({});
+			// The real tool name never leaks into the distilled projection.
+			expect(contextToolCalls(lastContext).some((t) => t.name === "echo")).toBe(false);
 			// The distilled text report and the settled beliefs survive.
 			expect(contextText(lastContext)).toContain("the value persisted");
 			expect(contextText(lastContext)).toContain("Applied support");
@@ -837,6 +853,10 @@ describe("declare_belief integration", () => {
 			const executionContext = harness.faux.contexts.find((c) => contextToolNames(c).includes("echo"));
 			expect(executionContext).toBeDefined();
 			expect(executionContext!.systemPrompt).toContain("prediction error");
+			// It must also surface what the belief did not name — inconsistencies or staleness
+			// beyond the probed hypothesis — so the epistemic role can expand its beliefs
+			// horizontally instead of only confirming the narrow hypotheses it proposed.
+			expect(executionContext!.systemPrompt).toContain("what the belief did not name");
 
 			// The epistemic return steer asks for the residual, not a full re-update.
 			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));

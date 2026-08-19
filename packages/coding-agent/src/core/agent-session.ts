@@ -326,6 +326,15 @@ const EPISTEMIC_RESIDUAL_STEER =
  */
 const FRAME_HORIZON_HEADROOM = 1.3;
 
+/**
+ * The neutral name substituted for a probe tool's real name in the epistemic and finalAnswer
+ * projections. Stripping the real name removes the imitation trigger — a role that sees the
+ * probe call `bash`/`read` tends to imitate it and call a tool it does not have — while the
+ * placeholder keeps the tool-call block well-formed so the (already masked) tool result still
+ * associates by id.
+ */
+const MASKED_PROBE_TOOL_NAME = "[probe]";
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -694,7 +703,11 @@ export class AgentSession {
 				) {
 					return message;
 				}
-				return { ...message, content: [{ type: "text", text: "[operational detail omitted]" }] };
+				return {
+					...message,
+					toolName: MASKED_PROBE_TOOL_NAME,
+					content: [{ type: "text", text: "[operational detail omitted]" }],
+				};
 			case "bashExecution":
 				return { ...message, output: "[output omitted]" };
 			case "assistant":
@@ -722,8 +735,10 @@ export class AgentSession {
 	}
 
 	/** Distill a probe-role assistant turn for the epistemic/finalAnswer view: drop its
-	 *  thinking blocks and empty its tool-call arguments, keeping only the textual report.
-	 *  The tool-call id + name survive so the (already masked) tool result still associates. */
+	 *  thinking blocks, strip its tool-call name, and empty its arguments, keeping only the
+	 *  textual report. The tool-call id survives so the (already masked) tool result still
+	 *  associates, but the real name is replaced — seeing the probe's `bash`/`read` here is
+	 *  what drives a role to imitate the probe and call a tool it does not have. */
 	private _maskProbeAssistant(message: AssistantMessage): AssistantMessage {
 		const content: AssistantMessage["content"] = [];
 		for (const block of message.content) {
@@ -731,7 +746,7 @@ export class AgentSession {
 				continue;
 			}
 			if (block.type === "toolCall") {
-				content.push({ ...block, arguments: {} });
+				content.push({ ...block, name: MASKED_PROBE_TOOL_NAME, arguments: {} });
 				continue;
 			}
 			content.push(block);
@@ -975,15 +990,15 @@ export class AgentSession {
 			case "epistemic":
 				text =
 					`You tried to call ${names}, which the epistemic role does not have. Your only tools are ` +
-					`declare_belief, view_beliefs, and conclude — read/bash/edit/write belong to the execution ` +
-					`role, which runs automatically after you propose a belief. Use declare_belief to propose the ` +
-					`belief you wanted to test instead of probing it yourself.`;
+					`declare_belief, view_beliefs, and conclude — nothing else. A separate execution role runs ` +
+					`the probe automatically after you propose a belief; express what you wanted to inspect as a ` +
+					`declare_belief proposal instead.`;
 				break;
 			case "execution":
 				text =
 					`You tried to call ${names}, which the execution role does not have. You probe with read/bash ` +
-					`and report observations; declare_belief and conclude belong to the epistemic role. Report ` +
-					`your observation in plain text instead.`;
+					`and report observations; belief updates and concluding happen in a separate epistemic role ` +
+					`after you report. Report your observation in plain text instead.`;
 				break;
 			case "finalAnswer":
 				text = `You tried to call ${names}, but the finalAnswer role has no tools. Write your conclusion in plain text.`;
@@ -1063,19 +1078,25 @@ export class AgentSession {
 		switch (this._role) {
 			case "epistemic":
 				return (
-					"\n\nYou are the epistemic role of a two-role investigation loop. You cannot read files or run " +
-					"commands — those tools belong to a separate execution role that runs automatically, so do not try " +
-					"to inspect the codebase yourself. Your only tools are declare_belief, view_beliefs, and conclude.\n\n" +
+					"\n\nYou are the epistemic role of a two-role investigation loop. You work entirely through beliefs: " +
+					"you decide what to test and what to conclude, while a separate execution role performs the actual " +
+					"probing. Your only tools are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
+					"Write every belief — its statement, expectation, and evidence — in Chinese.\n\n" +
 					"Work the belief → experiment → update protocol:\n" +
 					"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
 					"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
-					"how many evidence rounds it needs. A framing belief (domain framing) states what the final answer " +
+					"how many evidence rounds it needs. Tag each referent in the statement with one of four kinds — " +
+					"[code] (implementation: symbol/file/logic), [prod] (product behavior or documented claim), " +
+					"[user] (user intent/requirement), [convention] (repo idiom/naming/pattern) — tagging only the " +
+					"referents the relation points at, not every noun (e.g. `_projectMessagesFor[code]` 计算 `status[prod]` " +
+					"的 context 统计规则). A framing belief (domain framing) states what the final answer " +
 					"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
 					"audit something, the framing obligation must include surfacing any inconsistency between what the " +
 					"project's documentation and code claim and what the implementation actually does — not merely " +
 					"describing where things are defined.\n" +
-					"2. A separate execution role then probes the code or product for the world beliefs and reports back " +
-					"what it observed, including where that diverges from your expectation — you never run the probe yourself.\n" +
+					"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
+					"what it observed, including where that diverges from your expectation. You never do the probing — " +
+					"you only state what should be tested and then interpret the report.\n" +
 					"3. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
 					"report your current beliefs already account for; isolate the residual — the observations and " +
 					"prediction errors they do not explain; then use only that residual to update beliefs. The single " +
@@ -1090,8 +1111,10 @@ export class AgentSession {
 					"\n\nRead the belief you are probing with view_beliefs if you need its exact expectation, then " +
 					"probe the code or product to test it. Report in plain text what you observed and how it meets or " +
 					"diverges from the belief's expectation — name that divergence (the prediction error) explicitly, " +
-					"because the epistemic role updates only on it. Proposing or updating beliefs is a separate step you " +
-					"do not perform."
+					"because the epistemic role updates only on it. While probing, also surface what the belief did not " +
+					"name: any inconsistency between what documentation or a contract claims and what the code actually " +
+					"does, or anything that reads as stale or out of sync — the epistemic role can only expand its " +
+					"beliefs from what you report. Proposing or updating beliefs is a separate step you do not perform."
 				);
 			case "finalAnswer":
 				return (
