@@ -1,9 +1,16 @@
 # EpistemicView skeleton — the belief set
 
+> **Status: superseded by implementation.** This is an aspirational design sketch written
+> before the belief set was built. The implemented object is `Belief` in `belief-set.ts` —
+> a free-text `statement` + `domain: "product" | "code" | "framing"` + `expectation` +
+> `evidenceRounds`, with `status` derived from append-only provenance — not the
+> `subject`/`relation`/`object` triplets and `EpistemicDecision`/`Anchor` types below.
+> The companion `research-epistemic-vs-execution.md` and the `pie-agent-loop.ts` FSM it
+> references no longer exist; see `framing-belief.md` for the current framing design.
+
 Draft only. Defines the *shape* and the *derivation* of a belief set that gives the
 epistemic loop a grip; it does not touch implementation. Companion to
-`research-epistemic-vs-execution.md` — that doc maps what the code does today, this
-doc proposes what the epistemic surface should become.
+`framing-belief.md` (the current framing design).
 
 ## The problem this fixes
 

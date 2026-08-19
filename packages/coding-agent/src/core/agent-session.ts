@@ -317,11 +317,13 @@ const EPISTEMIC_RESIDUAL_STEER =
 	"Account for the observation: explain what your beliefs already explain, isolate the residual they do not, and update only on that residual.";
 
 /**
- * How many executed non-`declare_belief` tool results may accumulate before the
- * middle gate blocks the next dispatch and forces a belief reconciliation. Two
- * gives the model room for a locate-then-read pair without letting evidence pile
- * up inert (the failure mode where beliefs are only retro-judged at the end).
+ * Headroom applied to a frame's evidence-round total when sizing the execution lease
+ * (`_frameHorizon`). Evidence rounds are the model's estimate of how many tool results
+ * a probe needs; the 1.3 factor (30% headroom) absorbs under-estimates — a locate-then-read
+ * pair costs two results, not one — without letting raw evidence pile up inert in the
+ * execution role's context.
  */
+const FRAME_HORIZON_HEADROOM = 1.3;
 
 // ============================================================================
 // AgentSession Class
@@ -714,18 +716,30 @@ export class AgentSession {
 				// count: a settled belief does not mean the task is answered.
 				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
 				if (concluded) {
-					// Concluding with an unmet framing obligation is premature: the obligation
-					// states what the answer must establish, so it must be closed (support),
-					// reframed (refine), or dropped (retract) before the answer is written.
+					// Concluding is premature while anything is still unresolved: an open
+					// framing obligation (what the answer must establish) or an open world
+					// belief (a proposed claim that was never settled). Each must be settled
+					// (support/refute), corrected (refine), or dropped (retract) first.
 					const openFramings = this._beliefSet.framings();
-					if (openFramings.length > 0) {
-						const statements = openFramings.map((b) => `"${b.statement}"`).join(", ");
+					const openWorld = proposed;
+					if (openFramings.length > 0 || openWorld.length > 0) {
+						const reasons: string[] = [];
+						if (openFramings.length > 0) {
+							reasons.push(
+								`these obligations for what the answer must establish are still open (${openFramings.map((b) => `"${b.statement}"`).join(", ")})`,
+							);
+						}
+						if (openWorld.length > 0) {
+							reasons.push(
+								`these beliefs are still unresolved (${openWorld.map((b) => `"${b.statement}"`).join(", ")})`,
+							);
+						}
 						this.agent.steer({
 							role: "user",
 							content: [
 								{
 									type: "text",
-									text: `Concluding is premature — these obligations for what the answer must establish are still open (${statements}). Support, reframe, or retract each via declare_belief before concluding.`,
+									text: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
 								},
 							],
 							timestamp: Date.now(),
@@ -748,7 +762,7 @@ export class AgentSession {
 					// forward so the next epistemic turn sees only the fresh round.
 					this._evidenceWatermark = this.agent.state.messages.length;
 					const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
-					this._frameHorizon = Math.ceil(totalRounds * 1.3);
+					this._frameHorizon = Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM);
 					this._leaseReportNudged = false;
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					this.agent.steer({
@@ -793,6 +807,10 @@ export class AgentSession {
 							timestamp: Date.now(),
 						});
 					} else if (!ranTools) {
+						// Never proposed a belief and did not run tools: the model is answering
+						// directly (or gave up), not running the belief loop. Accept its answer
+						// without steering — unlike the `conclude` path, the answer already exists,
+						// so a "Write your conclusion." steer would only elicit a redundant turn.
 						this._role = "finalAnswer";
 					}
 				}
@@ -896,15 +914,20 @@ export class AgentSession {
 					"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
 					"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
 					"how many evidence rounds it needs. A framing belief (domain framing) states what the final answer " +
-					"must establish — an obligation, not a probe target.\n" +
+					"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
+					"audit something, the framing obligation must include surfacing any inconsistency between what the " +
+					"project's documentation and code claim and what the implementation actually does — not merely " +
+					"describing where things are defined.\n" +
 					"2. A separate execution role then probes the code or product for the world beliefs and reports back " +
 					"what it observed, including where that diverges from your expectation — you never run the probe yourself.\n" +
 					"3. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
 					"report your current beliefs already account for; isolate the residual — the observations and " +
-					"prediction errors they do not explain; then use only that residual to support, refute, refine, or " +
-					"propose beliefs via declare_belief, and review them with view_beliefs.\n" +
+					"prediction errors they do not explain; then use only that residual to update beliefs. The single " +
+					"declare_belief tool takes an `op` argument — one of propose, support, refute, refine, or retract — " +
+					"to add, settle, correct, or withdraw a belief; these are op values, never separate tools. Review " +
+					"the set with view_beliefs.\n" +
 					"4. Keep proposing and settling beliefs until the task is fully answered, close every open framing " +
-					"obligation (support, reframe, or retract it), then call conclude."
+					"obligation (support, refine, or retract it via declare_belief), then call conclude."
 				);
 			case "execution":
 				return (

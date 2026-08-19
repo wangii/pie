@@ -98,6 +98,26 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- view_beliefs:");
 		});
 
+		test("non-read roles omit project context files", () => {
+			const contextFiles = [{ path: "AGENTS.md", content: "read files in full" }];
+			const coding = buildSystemPrompt({ contextFiles, skills: [], cwd: process.cwd() });
+			const epistemic = buildSystemPrompt({
+				role: "epistemic",
+				selectedTools: ["declare_belief", "view_beliefs"],
+				toolSnippets: { declare_belief: "Record beliefs", view_beliefs: "View beliefs" },
+				contextFiles,
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			// The coding role has read, so it receives the project instructions…
+			expect(coding).toContain("<project_context>");
+			expect(coding).toContain("read files in full");
+			// …but the epistemic role (no read) does not, matching the skills gate.
+			expect(epistemic).not.toContain("<project_context>");
+			expect(epistemic).not.toContain("read files in full");
+		});
+
 		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],

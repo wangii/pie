@@ -717,6 +717,78 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("conclude is gated until open world beliefs are resolved", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose a world belief.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: probe.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Epistemic: conclude while the belief is still open — must be rejected.
+				conclude,
+				// Epistemic: settle the belief.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Epistemic: conclude again — now valid.
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The rejected conclude steers back to the epistemic role and names the unresolved
+			// world belief (previously only framing obligations blocked conclusion).
+			const afterRejectedConclude = harness.faux.contexts[4];
+			expect(contextToolNames(afterRejectedConclude)).toContain("declare_belief");
+			expect(contextText(afterRejectedConclude)).toContain("Concluding is premature");
+			expect(contextText(afterRejectedConclude)).toContain("the cache survives logout");
+
+			// The loop still completes once the belief is settled.
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("conclude transitions to finalAnswer with no tools", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",

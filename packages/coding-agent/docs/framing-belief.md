@@ -1,9 +1,13 @@
 # Framing beliefs — the revisable "what must be answered"
 
-Draft design. Companion to `epistemic-view-skeleton.md` (which defines the world-belief
-set) and to the execution→epistemic residual pipeline in `agent-session.ts`. This doc
-proposes the **minimal** addition that gives the loop a revisable notion of "what counts as
-answered", without introducing a second belief class.
+> **Status: implemented.** The `domain: "framing"` primitive, the Rule 1 dispatch
+> exclusion, and the Rule 2 conclude gate described below are all implemented in
+> `belief-set.ts` and `agent-session.ts`. Kept as the design rationale.
+
+Companion to `epistemic-view-skeleton.md` (which defines the world-belief set) and to the
+execution→epistemic residual pipeline in `agent-session.ts`. This doc proposes the
+**minimal** addition that gives the loop a revisable notion of "what counts as answered",
+without introducing a second belief class.
 
 ## The problem
 
