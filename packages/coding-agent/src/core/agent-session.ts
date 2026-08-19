@@ -687,9 +687,46 @@ export class AgentSession {
 				return { ...message, content: [{ type: "text", text: "[operational detail omitted]" }] };
 			case "bashExecution":
 				return { ...message, output: "[output omitted]" };
+			case "assistant":
+				// The probe (execution) role's assistant turns carry raw operational detail the
+				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
+				// (thinking) and its tool-call arguments. Distill those, but keep the textual
+				// report — that is the distilled uplink the epistemic role updates on.
+				return this._isProbeAssistant(message) ? this._maskProbeAssistant(message) : message;
 			default:
 				return message;
 		}
+	}
+
+	/** Whether an assistant turn belongs to the probe role, i.e. it invoked a non-belief tool.
+	 *  `declare_belief`/`view_beliefs`/`conclude` mark the epistemic role; anything else
+	 *  (read/bash/grep/…) marks the probe role. */
+	private _isProbeAssistant(message: AssistantMessage): boolean {
+		return message.content.some(
+			(block) =>
+				block.type === "toolCall" &&
+				block.name !== "declare_belief" &&
+				block.name !== "view_beliefs" &&
+				block.name !== "conclude",
+		);
+	}
+
+	/** Distill a probe-role assistant turn for the epistemic/finalAnswer view: drop its
+	 *  thinking blocks and empty its tool-call arguments, keeping only the textual report.
+	 *  The tool-call id + name survive so the (already masked) tool result still associates. */
+	private _maskProbeAssistant(message: AssistantMessage): AssistantMessage {
+		const content: AssistantMessage["content"] = [];
+		for (const block of message.content) {
+			if (block.type === "thinking") {
+				continue;
+			}
+			if (block.type === "toolCall") {
+				content.push({ ...block, arguments: {} });
+				continue;
+			}
+			content.push(block);
+		}
+		return { ...message, content };
 	}
 
 	/**

@@ -27,6 +27,30 @@ function contextToolNames(ctx: { tools?: Array<{ name: string }> }): string[] {
 	return (ctx.tools ?? []).map((t) => t.name);
 }
 
+/** Concatenate the thinking blocks across a captured LLM context's messages. */
+function contextThinking(ctx: { messages: Array<{ content: unknown }> }): string {
+	return ctx.messages
+		.flatMap((m) => {
+			const content = (m as { content: string | Array<{ type: string; thinking?: string }> }).content;
+			if (!Array.isArray(content)) return [];
+			return content
+				.filter((part): part is { type: "thinking"; thinking: string } => part.type === "thinking")
+				.map((part) => part.thinking);
+		})
+		.join("\n");
+}
+
+/** The tool calls (name + arguments) present across a captured LLM context's messages. */
+function contextToolCalls(ctx: { messages: Array<{ content: unknown }> }): Array<{ name: string; arguments: unknown }> {
+	return ctx.messages.flatMap((m) => {
+		const content = (m as { content: string | Array<{ type: string; name?: string; arguments?: unknown }> }).content;
+		if (!Array.isArray(content)) return [];
+		return content
+			.filter((part): part is { type: "toolCall"; name: string; arguments: unknown } => part.type === "toolCall")
+			.map((part) => ({ name: part.name, arguments: part.arguments }));
+	});
+}
+
 /** The epistemic role's explicit "done" signal, ending the investigation. */
 const conclude: FauxResponse = { toolCalls: [{ name: "conclude", args: {} }], stopReason: "toolUse" };
 
@@ -572,6 +596,183 @@ describe("declare_belief integration", () => {
 			const last = epistemicContexts[epistemicContexts.length - 1];
 			expect(contextText(last)).toContain("RAW_two");
 			expect(contextText(last)).not.toContain("RAW_one");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("epistemic role distills the probe role's thinking below the evidence watermark", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async (_tc, params: unknown) => ({
+				content: [{ type: "text", text: `RAW_${(params as { text: string }).text}` }],
+				details: undefined,
+			}),
+		};
+
+		const propose = (statement: string): FauxResponse => ({
+			toolCalls: [
+				{
+					name: "declare_belief",
+					args: {
+						op: "propose",
+						statement,
+						domain: "product",
+						expectation: "a probe keeps the value",
+						evidenceRounds: 1,
+					},
+				},
+			],
+			stopReason: "toolUse",
+		});
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				propose("the cache survives logout"),
+				{
+					thinking: "EXEC_THINKING_ONE",
+					toolCalls: [{ name: "echo", args: { text: "one" } }],
+					stopReason: "toolUse",
+				},
+				"the value persisted",
+				// Settle belief-1 AND propose belief-2, advancing the watermark past frame 1's probe round.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{
+					thinking: "EXEC_THINKING_TWO",
+					toolCalls: [{ name: "echo", args: { text: "two" } }],
+					stopReason: "toolUse",
+				},
+				"no session reuse observed",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
+			expect(epistemicContexts.length).toBeGreaterThan(0);
+			const last = epistemicContexts[epistemicContexts.length - 1];
+
+			// Frame 1's probe round is now below the watermark: its internal reasoning is
+			// distilled, while its distilled text report survives.
+			expect(contextThinking(last)).not.toContain("EXEC_THINKING_ONE");
+			expect(contextText(last)).toContain("the value persisted");
+			// Frame 2's probe round is still fresh (shown once): raw reasoning present.
+			expect(contextThinking(last)).toContain("EXEC_THINKING_TWO");
+
+			// The execution role itself still sees its own raw reasoning.
+			const executionContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("echo"));
+			expect(executionContexts.some((c) => contextThinking(c).includes("EXEC_THINKING_ONE"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("finalAnswer distills the probe role's thinking and tool arguments", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: probe with internal reasoning and a verbose tool call.
+				{
+					thinking: "EXEC_THINKING",
+					toolCalls: [{ name: "echo", args: { text: "probe" } }],
+					stopReason: "toolUse",
+				},
+				// Execution: distilled report.
+				"the value persisted",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				// finalAnswer.
+				"the conclusion",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			const lastContext = harness.faux.contexts[harness.faux.contexts.length - 1];
+			// finalAnswer: no tools, and the probe role's internal reasoning is distilled.
+			expect(contextToolNames(lastContext)).toEqual([]);
+			expect(contextThinking(lastContext)).not.toContain("EXEC_THINKING");
+			// The echo tool-call arguments are emptied; id + name survive for result association.
+			const echoCalls = contextToolCalls(lastContext).filter((t) => t.name === "echo");
+			expect(echoCalls.length).toBe(1);
+			expect(echoCalls[0].arguments).toEqual({});
+			// The distilled text report and the settled beliefs survive.
+			expect(contextText(lastContext)).toContain("the value persisted");
+			expect(contextText(lastContext)).toContain("Applied support");
+
+			// The execution role itself still sees its own raw reasoning (the probe turn's
+			// thinking enters the execution context of the following report turn).
+			const executionContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("echo"));
+			expect(executionContexts.some((c) => contextThinking(c).includes("EXEC_THINKING"))).toBe(true);
 		} finally {
 			harness.cleanup();
 		}
