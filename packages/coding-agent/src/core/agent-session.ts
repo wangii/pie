@@ -776,6 +776,17 @@ export class AgentSession {
 			this._applyRoleSurface();
 			return;
 		}
+		// A role that emitted a tool outside its own surface — the model imitating a
+		// prior turn's tool call (e.g. the epistemic role copying a `bash` call it saw the
+		// execution role make) — is rejected by the dispatch layer with a dead-end
+		// "Tool <name> not found". Steer the role back to its own tools instead of letting
+		// that error vanish into the transcript unaddressed.
+		const strayTools = this._strayToolNames(turn.message);
+		if (strayTools.length > 0) {
+			this._steerStrayToolCall(strayTools);
+			this._applyRoleSurface();
+			return;
+		}
 		const ranTools = turn.toolResults.length > 0;
 		switch (this._role) {
 			case "epistemic": {
@@ -927,6 +938,47 @@ export class AgentSession {
 				break;
 		}
 		this._applyRoleSurface();
+	}
+
+	/** Tool-call names in the just-finished turn that the current role was not offered. */
+	private _strayToolNames(message: AssistantMessage): string[] {
+		const allowed = new Set(this._roleToolNames());
+		const stray = new Set<string>();
+		for (const block of message.content) {
+			if (block.type === "toolCall" && !allowed.has(block.name)) {
+				stray.add(block.name);
+			}
+		}
+		return [...stray];
+	}
+
+	/** Steer the current role back to its own tools after it emitted a tool outside its surface. */
+	private _steerStrayToolCall(strayTools: string[]): void {
+		const names = strayTools.map((name) => `"${name}"`).join(", ");
+		let text: string;
+		switch (this._role) {
+			case "epistemic":
+				text =
+					`You tried to call ${names}, which the epistemic role does not have. Your only tools are ` +
+					`declare_belief, view_beliefs, and conclude — read/bash/edit/write belong to the execution ` +
+					`role, which runs automatically after you propose a belief. Use declare_belief to propose the ` +
+					`belief you wanted to test instead of probing it yourself.`;
+				break;
+			case "execution":
+				text =
+					`You tried to call ${names}, which the execution role does not have. You probe with read/bash ` +
+					`and report observations; declare_belief and conclude belong to the epistemic role. Report ` +
+					`your observation in plain text instead.`;
+				break;
+			case "finalAnswer":
+				text = `You tried to call ${names}, but the finalAnswer role has no tools. Write your conclusion in plain text.`;
+				break;
+		}
+		this.agent.steer({
+			role: "user",
+			content: [{ type: "text", text }],
+			timestamp: Date.now(),
+		});
 	}
 
 	/** The active tool names available to the current role. */

@@ -1289,4 +1289,72 @@ describe("declare_belief integration", () => {
 			harness.cleanup();
 		}
 	});
+
+	test("a stray probe tool call from the epistemic role is steered back, not silently swallowed", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: emits `bash`, which is not in its tool list (it imitated a prior
+				// execution turn). The dispatch layer would reject it with "Tool bash not found";
+				// the loop must steer the role back instead of letting the error vanish.
+				{ toolCalls: [{ name: "bash", args: { command: "true" } }], stopReason: "toolUse" },
+				// After the corrective steer, the epistemic role proposes properly.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("investigate");
+
+			// The corrective steer reached the transcript as a user message naming the stray
+			// tool and re-stating the epistemic role's own tools — the error was not swallowed.
+			const userTexts = harness.session.messages.filter((m) => m.role === "user").map(messageText);
+			expect(userTexts.some((t) => t.includes('"bash"') && t.includes("epistemic role does not have"))).toBe(true);
+
+			// The loop recovered: the belief was proposed and settled, and the task concluded.
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("done");
+		} finally {
+			harness.cleanup();
+		}
+	});
 });
