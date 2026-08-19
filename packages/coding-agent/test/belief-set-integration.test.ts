@@ -66,6 +66,31 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("getRoleContextUsage returns per-role context estimates when the belief loop is active", async () => {
+		const harness = await createHarness({ enableBeliefSet: true });
+		try {
+			const roleUsage = harness.session.getRoleContextUsage();
+			expect(roleUsage).toBeDefined();
+			expect(roleUsage!.epistemic.contextWindow).toBeGreaterThan(0);
+			expect(roleUsage!.execution.contextWindow).toBe(roleUsage!.epistemic.contextWindow);
+			expect(roleUsage!.epistemic.tokens).toBeTypeOf("number");
+			expect(roleUsage!.execution.tokens).toBeTypeOf("number");
+			expect(roleUsage!.epistemic.percent).toBeTypeOf("number");
+			expect(roleUsage!.execution.percent).toBeTypeOf("number");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("getRoleContextUsage is undefined when the belief set is disabled", async () => {
+		const harness = await createHarness({ enableBeliefSet: false });
+		try {
+			expect(harness.session.getRoleContextUsage()).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("initial role is epistemic: only belief tools are projected", async () => {
 		const harness = await createHarness({ enableBeliefSet: true });
 		try {

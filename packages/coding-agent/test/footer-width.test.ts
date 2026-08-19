@@ -79,6 +79,7 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getRoleContextUsage: () => undefined,
 		modelRuntime: {
 			isUsingSubscription: () => options.usingSubscription ?? false,
 		},

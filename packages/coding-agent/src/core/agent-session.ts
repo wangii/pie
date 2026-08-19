@@ -637,12 +637,21 @@ export class AgentSession {
 		if (!this._enableBeliefSet || !this._beliefSetUsable) {
 			return this.agent.state.messages.slice();
 		}
-		return this.agent.state.messages.map((message, index) => this._projectMessage(message, index));
+		return this._projectMessagesFor(this._role);
 	}
 
-	/** Project one message for the current role. */
-	private _projectMessage(message: AgentMessage, index: number): AgentMessage {
-		switch (this._role) {
+	/** Project the full transcript for an explicit role (used to size each role's context). */
+	private _projectMessagesFor(role: "epistemic" | "execution" | "finalAnswer"): AgentMessage[] {
+		return this.agent.state.messages.map((message, index) => this._projectMessage(message, index, role));
+	}
+
+	/** Project one message for a role. */
+	private _projectMessage(
+		message: AgentMessage,
+		index: number,
+		role: "epistemic" | "execution" | "finalAnswer",
+	): AgentMessage {
+		switch (role) {
 			case "epistemic":
 				return index < this._evidenceWatermark ? this._maskOperationalDetail(message) : message;
 			case "execution":
@@ -3643,12 +3652,37 @@ export class AgentSession {
 	}
 
 	getContextUsage(): ContextUsage | undefined {
+		const contextWindow = this._contextWindow();
+		if (contextWindow === undefined) return undefined;
+		return this._estimateContextUsage(this.messages, contextWindow);
+	}
+
+	/**
+	 * Per-role context usage for the belief loop: the epistemic role's projected context vs the
+	 * execution role's. The epistemic projection masks raw operational detail (see
+	 * `_evidenceWatermark`), so it is typically much leaner than the execution projection, which
+	 * keeps raw tool output. Returns undefined when the belief loop is not active.
+	 */
+	getRoleContextUsage(): { epistemic: ContextUsage; execution: ContextUsage } | undefined {
+		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
+		const contextWindow = this._contextWindow();
+		if (contextWindow === undefined) return undefined;
+		return {
+			epistemic: this._estimateContextUsage(this._projectMessagesFor("epistemic"), contextWindow),
+			execution: this._estimateContextUsage(this._projectMessagesFor("execution"), contextWindow),
+		};
+	}
+
+	/** The model's context window, or undefined when there is no model or a non-positive window. */
+	private _contextWindow(): number | undefined {
 		const model = this.model;
 		if (!model) return undefined;
-
 		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return undefined;
+		return contextWindow > 0 ? contextWindow : undefined;
+	}
 
+	/** Estimate context usage for a message list, honoring the post-compaction uncertainty gate. */
+	private _estimateContextUsage(messages: AgentMessage[], contextWindow: number): ContextUsage {
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
@@ -3678,7 +3712,7 @@ export class AgentSession {
 			}
 		}
 
-		const estimate = estimateContextTokens(this.messages);
+		const estimate = estimateContextTokens(messages);
 		const percent = (estimate.tokens / contextWindow) * 100;
 
 		return {

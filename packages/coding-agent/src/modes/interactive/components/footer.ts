@@ -107,8 +107,6 @@ export class FooterComponent implements Component {
 		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
-		const contextPercentValue = contextUsage?.percent ?? 0;
-		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		// Replace home directory with ~
 		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
@@ -144,19 +142,39 @@ export class FooterComponent implements Component {
 			statsParts.push(costStr);
 		}
 
-		// Colorize context percentage based on usage
+		// Colorize context usage based on how close the largest projection is to the window.
 		let contextPercentStr: string;
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay =
-			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
-		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
+		const roleUsage = this.session.getRoleContextUsage();
+		if (roleUsage) {
+			// Belief loop active: show the epistemic and execution contexts separately. The two
+			// roles see different projections (the epistemic role masks raw operational detail), so
+			// a single number hides how much leaner the epistemic role's view is.
+			const epiTokens = formatTokens(roleUsage.epistemic.tokens ?? 0);
+			const execTokens = formatTokens(roleUsage.execution.tokens ?? 0);
+			const maxPercent = Math.max(roleUsage.epistemic.percent ?? 0, roleUsage.execution.percent ?? 0);
+			const contextDisplay = `epi ${epiTokens} · exec ${execTokens} / ${formatTokens(contextWindow)}${autoIndicator}`;
+			if (maxPercent > 90) {
+				contextPercentStr = theme.fg("error", contextDisplay);
+			} else if (maxPercent > 70) {
+				contextPercentStr = theme.fg("warning", contextDisplay);
+			} else {
+				contextPercentStr = contextDisplay;
+			}
 		} else {
-			contextPercentStr = contextPercentDisplay;
+			const contextPercentValue = contextUsage?.percent ?? 0;
+			const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+			const contextPercentDisplay =
+				contextPercent === "?"
+					? `?/${formatTokens(contextWindow)}${autoIndicator}`
+					: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+			if (contextPercentValue > 90) {
+				contextPercentStr = theme.fg("error", contextPercentDisplay);
+			} else if (contextPercentValue > 70) {
+				contextPercentStr = theme.fg("warning", contextPercentDisplay);
+			} else {
+				contextPercentStr = contextPercentDisplay;
+			}
 		}
 		statsParts.push(contextPercentStr);
 		if (areExperimentalFeaturesEnabled()) {
