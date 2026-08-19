@@ -398,6 +398,15 @@ export class AgentSession {
 	 * for the new task; the idle path resets inline in `prompt()` instead.
 	 */
 	private _pendingNewTask = false;
+	/**
+	 * Belief-set size at the moment the loop was (re)started for the current task. The belief
+	 * set is retained across tasks, so `beliefs.length > this._beliefsAtTaskReset` distinguishes
+	 * beliefs produced by *this* task from retained ones. A direct text answer (no belief ops)
+	 * on a task that produced no beliefs is accepted as the conclusion rather than being steered
+	 * to "propose the next belief" — this is what keeps a follow-up answered after a conclusion
+	 * from re-running a redundant investigation loop.
+	 */
+	private _beliefsAtTaskReset = 0;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -758,6 +767,9 @@ export class AgentSession {
 		this._frameHorizon = 0;
 		this._leaseReportNudged = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
+		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
+		// this task's own and re-enable the "deepen or conclude" steer.
+		this._beliefsAtTaskReset = this._beliefSet.beliefs.length;
 	}
 
 	/** Advance the role from the just-completed turn and project the next role's surface. */
@@ -870,12 +882,14 @@ export class AgentSession {
 						timestamp: Date.now(),
 					});
 				} else if (proposed.length === 0) {
-					// No open beliefs. If it has settled beliefs, settling is not concluding —
-					// prompt it to deepen (propose the next belief) or conclude, whether it just
-					// settled the last one (ranTools) or stopped on its own. If it never proposed
-					// anything, it is answering directly (or gave up), not running the belief loop —
-					// conclude without requiring `conclude`.
-					if (this._beliefSet.beliefs.length > 0) {
+					// No open beliefs. If *this* task has produced settled beliefs, settling is not
+					// concluding — prompt it to deepen (propose the next belief) or conclude. If it
+					// never proposed anything for this task, it is answering directly (or gave up),
+					// not running the belief loop — conclude without requiring `conclude`. The
+					// `_beliefsAtTaskReset` baseline keeps a direct answer to a follow-up (which
+					// inherits the prior task's retained beliefs) from being mistaken for a
+					// mid-investigation pause and re-steered into a redundant loop.
+					if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset) {
 						this.agent.steer({
 							role: "user",
 							content: [
