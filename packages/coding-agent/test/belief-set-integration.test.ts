@@ -103,6 +103,10 @@ describe("declare_belief integration", () => {
 			// one — otherwise the model burns turns re-deriving how it probes the codebase.
 			expect(prompt).toContain("cannot read files or run commands");
 			expect(prompt).toContain("separate execution role");
+			// The update step is a residual filter: explain → isolate → update, not a full re-read.
+			expect(prompt).toContain("epistemic residual");
+			expect(prompt).toContain("isolate the residual");
+			expect(prompt).toContain("prediction errors");
 		} finally {
 			harness.cleanup();
 		}
@@ -543,6 +547,74 @@ describe("declare_belief integration", () => {
 			const last = epistemicContexts[epistemicContexts.length - 1];
 			expect(contextText(last)).toContain("RAW_two");
 			expect(contextText(last)).not.toContain("RAW_one");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("execution reports the prediction error and the epistemic return asks for the residual", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: probe.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Epistemic: settle.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The execution turn's prompt tells it to surface the divergence (the prediction
+			// error), which is what the epistemic role updates on.
+			const executionContext = harness.faux.contexts.find((c) => contextToolNames(c).includes("echo"));
+			expect(executionContext).toBeDefined();
+			expect(executionContext!.systemPrompt).toContain("prediction error");
+
+			// The epistemic return steer asks for the residual, not a full re-update.
+			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
+			expect(epistemicContexts.some((c) => contextText(c).includes("isolate the residual"))).toBe(true);
 		} finally {
 			harness.cleanup();
 		}

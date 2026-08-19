@@ -306,6 +306,16 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
 /**
+ * The steer that returns the loop from the execution role to the epistemic role. It
+ * deliberately does not say "update your hypothesis" — that invites the model to
+ * re-process the whole observation. The epistemic uplink walks three steps instead:
+ * explain what the current beliefs already account for, isolate the residual they do
+ * not, and update on that residual alone.
+ */
+const EPISTEMIC_RESIDUAL_STEER =
+	"Account for the observation: explain what your beliefs already explain, isolate the residual they do not, and update only on that residual.";
+
+/**
  * How many executed non-`declare_belief` tool results may accumulate before the
  * middle gate blocks the next dispatch and forces a belief reconciliation. Two
  * gives the model room for a locate-then-read pair without letting evidence pile
@@ -769,7 +779,7 @@ export class AgentSession {
 					this._role = "epistemic";
 					this.agent.steer({
 						role: "user",
-						content: [{ type: "text", text: "Based on the observation, update your hypothesis." }],
+						content: [{ type: "text", text: EPISTEMIC_RESIDUAL_STEER }],
 						timestamp: Date.now(),
 					});
 				} else if (this._frameHorizon <= 0 && !this._leaseReportNudged) {
@@ -792,7 +802,7 @@ export class AgentSession {
 					this._role = "epistemic";
 					this.agent.steer({
 						role: "user",
-						content: [{ type: "text", text: "Based on the observation, update your hypothesis." }],
+						content: [{ type: "text", text: EPISTEMIC_RESIDUAL_STEER }],
 						timestamp: Date.now(),
 					});
 				}
@@ -857,17 +867,21 @@ export class AgentSession {
 					"Work the hypothesis → experiment → update protocol:\n" +
 					"1. Propose a hypothesis with declare_belief: name a relation about the product or code, state what " +
 					"you would observe if it were true (its falsifiable expectation), and how many evidence rounds it needs.\n" +
-					"2. A separate execution role then probes the code or product and reports its observation back to you " +
-					"as the next message — you never run the probe yourself.\n" +
-					"3. From that observation, update the hypothesis: support, refute, or refine it via declare_belief, " +
-					"and review your beliefs with view_beliefs.\n" +
+					"2. A separate execution role then probes the code or product and reports back what it observed, " +
+					"including where that diverges from your expectation — you never run the probe yourself.\n" +
+					"3. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
+					"report your current beliefs already account for; isolate the residual — the observations and " +
+					"prediction errors they do not explain; then use only that residual to support, refute, refine, or " +
+					"propose beliefs via declare_belief, and review them with view_beliefs.\n" +
 					"4. Keep proposing and settling hypotheses until the task is fully answered, then call conclude."
 				);
 			case "execution":
 				return (
 					"\n\nRead the hypothesis you are probing with view_beliefs if you need its exact expectation, then " +
-					"probe the code or product to test it and report one concise sentence stating what you actually " +
-					"observed. Report as plain text — proposing or updating beliefs is a separate step you do not perform."
+					"probe the code or product to test it. Report in plain text what you observed and how it meets or " +
+					"diverges from the hypothesis's expectation — name that divergence (the prediction error) explicitly, " +
+					"because the epistemic role updates only on it. Proposing or updating beliefs is a separate step you " +
+					"do not perform."
 				);
 			case "finalAnswer":
 				return (
