@@ -99,6 +99,7 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import { resolveCliModel } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -630,7 +631,7 @@ export class AgentSession {
 					tools: this.agent.state.tools.slice(),
 					messages: this._projectContextMessages(),
 				},
-				model: this.agent.state.model,
+				model: this._roleModel(),
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
 		};
@@ -1009,6 +1010,26 @@ export class AgentSession {
 				// both of which are the epistemic role's calls.
 				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "conclude");
 		}
+	}
+
+	/**
+	 * The model for the next turn. The execution (probe) role may run on a separately
+	 * configured model from settings (`executionModel`); every other role and any turn
+	 * outside the belief loop uses the session's main model. Only the next request's model
+	 * is overridden — `state.model` is left untouched so footer/compaction/context-window
+	 * keep the main model as their baseline.
+	 */
+	private _roleModel(): Model<any> | undefined {
+		if (this._enableBeliefSet && this._beliefSetUsable && this._role === "execution") {
+			const spec = this.settingsManager.getExecutionModel();
+			if (spec) {
+				const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
+				if (resolved.model) {
+					return resolved.model;
+				}
+			}
+		}
+		return this.agent.state.model;
 	}
 
 	/** The role system prompt: base prompt with only the role's tools described, plus a natural role instruction. */

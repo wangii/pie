@@ -91,6 +91,8 @@ export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
+	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
+	executionModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -686,6 +688,10 @@ export class SettingsManager {
 
 	getDefaultModel(): string | undefined {
 		return this.settings.defaultModel;
+	}
+
+	getExecutionModel(): string | undefined {
+		return this.settings.executionModel;
 	}
 
 	setDefaultProvider(provider: string): void {

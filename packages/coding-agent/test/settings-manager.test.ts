@@ -198,6 +198,18 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("executionModel", () => {
+		it("returns the configured execution model", () => {
+			expect(SettingsManager.inMemory({ executionModel: "claude-haiku-4-5" }).getExecutionModel()).toBe(
+				"claude-haiku-4-5",
+			);
+		});
+
+		it("is undefined when not configured", () => {
+			expect(SettingsManager.inMemory().getExecutionModel()).toBeUndefined();
+		});
+	});
+
 	describe("theme setting", () => {
 		it("stores slash-separated automatic theme settings separately from fixed theme names", async () => {
 			const settingsPath = join(agentDir, "settings.json");
