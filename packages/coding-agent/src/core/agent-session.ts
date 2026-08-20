@@ -318,6 +318,27 @@ const EPISTEMIC_RESIDUAL_STEER =
 	"Account for the observation: explain what your beliefs already explain, isolate the residual they do not, and update only on that residual.";
 
 /**
+ * The steer that runs once, just before the loop hands off to the finalAnswer role. It
+ * makes the belief set itself the object of one last test, mirroring the residual protocol
+ * at one level up: the epistemic residual isolates what a single observation does not
+ * explain, this isolates what the *whole set* does not name. Three falsifiable checks —
+ * coverage, composition, completeness — each map to a failure mode the residual filter
+ * cannot see because the probe never ran. Firing only when the task produced beliefs and
+ * only once (`_reflected`) keeps a direct answer on an empty set, or a reflection that
+ * proposes nothing, from looping forever.
+ */
+const REFLECTION_STEER =
+	"Before you conclude, reflect on the belief set itself as the object of one final test. " +
+	"For each check that fails, propose the missing belief and let it be probed — do not conclude yet. " +
+	"(1) Coverage — every path or @reference the task named has appeared as the referent of some belief; " +
+	"if any is untouched, propose a belief to probe it. " +
+	"(2) Composition — the conjunction of two supported beliefs may smuggle a claim that was never proposed; " +
+	"propose that implied claim. " +
+	"(3) Completeness — every belief that calls something consistent or free of drift treated it as complete; " +
+	"check its own internals and the reverse direction (does the contract lag the code, does one document lag another). " +
+	"If all three pass with nothing to add, conclude again.";
+
+/**
  * Headroom applied to a frame's evidence-round total when sizing the execution lease
  * (`_frameHorizon`). Evidence rounds are the model's estimate of how many tool results
  * a probe needs; the 1.3 factor (30% headroom) absorbs under-estimates — a locate-then-read
@@ -392,6 +413,8 @@ export class AgentSession {
 	private _dispatchedFrameIds: Set<string> = new Set();
 	/** True once the execution lease has been exhausted and the role has been nudged to report its observation. */
 	private _leaseReportNudged = false;
+	/** True once the pre-conclusion reflection steer has fired for the current task (one round only). */
+	private _reflected = false;
 	/** The full active tool names, independent of the current role's projected subset. */
 	private _fullActiveToolNames: string[] = [];
 	/**
@@ -782,6 +805,7 @@ export class AgentSession {
 		this._dispatchedFrameIds = new Set();
 		this._frameHorizon = 0;
 		this._leaseReportNudged = false;
+		this._reflected = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
 		// this task's own and re-enable the "deepen or conclude" steer.
@@ -850,6 +874,16 @@ export class AgentSession {
 									text: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
 								},
 							],
+							timestamp: Date.now(),
+						});
+					} else if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
+						// Everything is settled, but the belief set has not yet been reflected
+						// on as a whole. Fire the one-round reflection steer and stay epistemic
+						// so any belief it proposes is probed normally; a second conclude passes.
+						this._reflected = true;
+						this.agent.steer({
+							role: "user",
+							content: [{ type: "text", text: REFLECTION_STEER }],
 							timestamp: Date.now(),
 						});
 					} else {
