@@ -177,7 +177,12 @@ export class BeliefSet {
 					domain: prior.domain,
 					expectation: delta.expectation.trim(),
 					evidenceRounds: delta.evidenceRounds,
-					supportedBy: [{ evidence: `refined from ${prior.id}` }],
+					// A refinement is a corrected hypothesis that still needs probing, not a
+					// settled result — its new expectation has no evidence yet. Provenance is
+					// carried by the prior record's `supersededBy` pointer, never as a fabricated
+					// `supportedBy` entry (which would falsely mark it supported and drop it out
+					// of the dispatch frame).
+					supportedBy: [],
 					refutedBy: [],
 				};
 				this._replace(prior.id, { ...prior, supersededBy: refined.id });

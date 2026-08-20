@@ -159,7 +159,7 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 		expect(() => set.apply({ op: "support", beliefId: belief.id, evidence: "again" })).toThrow(BeliefValidationError);
 	});
 
-	test("refine supersedes the prior belief and adds a supported replacement", () => {
+	test("refine supersedes the prior belief and adds a proposed replacement", () => {
 		const set = new BeliefSet();
 		const belief = set.apply({
 			op: "propose",
@@ -178,8 +178,10 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 		});
 
 		expect(statusOf(set.get(belief.id)!)).toBe("superseded");
-		expect(statusOf(refined)).toBe("supported");
-		expect(set.open().map((b) => b.id)).toEqual([refined.id]);
+		expect(statusOf(refined)).toBe("proposed");
+		// The refined belief is a new hypothesis: it must re-enter the dispatch frame
+		// (`proposed()`), not be pre-settled without evidence.
+		expect(set.proposed().map((b) => b.id)).toEqual([refined.id]);
 	});
 
 	test("retract withdraws a belief", () => {

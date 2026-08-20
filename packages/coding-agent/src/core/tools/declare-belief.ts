@@ -10,18 +10,20 @@ import type { ToolDefinition } from "../extensions/types.ts";
  */
 
 const declareBeliefSchema = Type.Object({
-	op: Type.Union(
-		[
-			Type.Literal("propose"),
-			Type.Literal("support"),
-			Type.Literal("refute"),
-			Type.Literal("refine"),
-			Type.Literal("retract"),
-		],
-		{
-			description:
-				"What to do. propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId).",
-		},
+	op: Type.Optional(
+		Type.Union(
+			[
+				Type.Literal("propose"),
+				Type.Literal("support"),
+				Type.Literal("refute"),
+				Type.Literal("refine"),
+				Type.Literal("retract"),
+			],
+			{
+				description:
+					"What to do. Omit it to propose (the default). propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId).",
+			},
+		),
 	),
 	statement: Type.Optional(
 		Type.String({
@@ -71,7 +73,17 @@ export const declareBeliefSystemPromptContribution = {
 };
 
 function toDelta(input: DeclareBeliefInput): BeliefDelta {
-	switch (input.op) {
+	const op = input.op ?? "propose";
+	// `op` is optional so the model can batch several proposes without restating the
+	// discriminator on each. But support/refute/refine/retract each carry a `beliefId`
+	// and must be explicit — reject an omitted `op` there rather than guess.
+	if (input.op === undefined && input.beliefId?.trim()) {
+		throw new Error(
+			"`op` is required when `beliefId` is supplied (support/refute/refine/retract each need an explicit `op`). " +
+				"To propose a new belief, omit `beliefId`.",
+		);
+	}
+	switch (op) {
 		case "propose":
 			if (!input.statement?.trim()) {
 				throw new Error("propose requires a non-empty `statement`.");
@@ -150,7 +162,7 @@ export function createDeclareBeliefToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Applied ${input.op}: ${belief.id} ${belief.statement} [${belief.domain}] (${statusOf(belief)}).`,
+							text: `Applied ${delta.op}: ${belief.id} ${belief.statement} [${belief.domain}] (${statusOf(belief)}).`,
 						},
 					],
 					details: undefined,

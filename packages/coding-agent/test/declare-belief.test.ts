@@ -26,6 +26,48 @@ describe("declare_belief tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
 	});
 
+	test("propose applies when `op` is omitted (defaults to propose)", async () => {
+		const set = new BeliefSet();
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{
+				statement: "authorizationSource(1003,1001) returns stale-replica",
+				domain: "code",
+				expectation: "reading it shows a stale replica",
+				evidenceRounds: 2,
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect(set.proposed()).toHaveLength(1);
+		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
+	});
+
+	test("an omitted `op` with a beliefId is rejected, not guessed", async () => {
+		const set = new BeliefSet();
+		const belief = set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{ beliefId: belief.id, evidence: "reads hit the cache" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+		expect((result.content[0] as { text: string }).text).toContain("`op`");
+	});
+
 	test("propose accepts a framing belief", async () => {
 		const set = new BeliefSet();
 		const tool = createDeclareBeliefToolDefinition(set);

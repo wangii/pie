@@ -1185,9 +1185,9 @@ export class AgentSession {
 					"3. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
 					"report your current beliefs already account for; isolate the residual — the observations and " +
 					"prediction errors they do not explain; then use only that residual to update beliefs. The single " +
-					"declare_belief tool takes an `op` argument — one of propose, support, refute, refine, or retract — " +
-					"to add, settle, correct, or withdraw a belief; these are op values, never separate tools. Review " +
-					"the set with view_beliefs.\n" +
+					"declare_belief tool takes an `op` argument — one of propose, support, refute, refine, or retract " +
+					"(omit `op` to propose) — to add, settle, correct, or withdraw a belief; these are op values, " +
+					"never separate tools. Review the set with view_beliefs.\n" +
 					"4. Keep proposing and settling beliefs until the task is fully answered, close every open framing " +
 					"obligation (support, refine, or retract it via declare_belief), then call conclude."
 				);
