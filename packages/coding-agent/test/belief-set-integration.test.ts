@@ -51,6 +51,27 @@ function contextToolCalls(ctx: { messages: Array<{ content: unknown }> }): Array
 	});
 }
 
+/** Tool-call ids orphaned in a projected context: a `toolResult` whose immediately preceding
+ *  message is not an assistant turn carrying a matching `toolCall`. Strict providers reject such
+ *  a sequence ("tool must be a response to tool_calls"), so this must stay empty. */
+function orphanedToolResultIds(ctx: {
+	messages: Array<{ role: string; content: unknown; toolCallId?: string }>;
+}): string[] {
+	const orphaned: string[] = [];
+	for (let i = 0; i < ctx.messages.length; i++) {
+		const msg = ctx.messages[i];
+		if (msg.role !== "toolResult") continue;
+		const prev = ctx.messages[i - 1];
+		const prevContent = (prev?.content ?? []) as Array<{ type: string; id?: string }>;
+		const matched =
+			prev?.role === "assistant" &&
+			Array.isArray(prevContent) &&
+			prevContent.some((part) => part.type === "toolCall" && part.id === msg.toolCallId);
+		if (!matched) orphaned.push(msg.toolCallId ?? `index-${i}`);
+	}
+	return orphaned;
+}
+
 /** The epistemic role's explicit "done" signal, ending the investigation. */
 const conclude: FauxResponse = { toolCalls: [{ name: "conclude", args: {} }], stopReason: "toolUse" };
 
@@ -529,6 +550,89 @@ describe("declare_belief integration", () => {
 				false,
 			);
 			expect(executionContexts.some((c) => contextToolCalls(c).some((t) => t.name === "[belief]"))).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("belief-side roles fold a view_beliefs result whose call was elided from a probe turn", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async (_tc, params: unknown) => ({
+				content: [{ type: "text", text: `RAW_${(params as { text: string }).text}` }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: read its belief AND probe in the same turn — the mixed turn whose
+				// view_beliefs call is elided from the belief-side view (the orphan trigger).
+				{
+					toolCalls: [
+						{ name: "view_beliefs", args: {} },
+						{ name: "echo", args: { text: "probe" } },
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Epistemic: settle the last belief.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				// finalAnswer.
+				"the conclusion",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The belief-side roles (propose + distill) must never see an orphaned `tool` message —
+			// the execution turn's view_beliefs call is elided, so its result must be folded too.
+			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
+			expect(epistemicContexts.length).toBeGreaterThan(0);
+			for (const c of epistemicContexts) {
+				expect(orphanedToolResultIds(c)).toEqual([]);
+			}
+			// The execution turn's view_beliefs result is folded to a plain note, not left as a raw
+			// `toolResult` (the epistemic role never calls view_beliefs itself in this script).
+			expect(
+				epistemicContexts.some((c) =>
+					c.messages.some(
+						(m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "view_beliefs",
+					),
+				),
+			).toBe(false);
 		} finally {
 			harness.cleanup();
 		}

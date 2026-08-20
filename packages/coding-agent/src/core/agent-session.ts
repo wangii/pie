@@ -702,8 +702,9 @@ export class AgentSession {
 
 	/** Project the full transcript for an explicit role (used to size each role's context). */
 	private _projectMessagesFor(role: "propose" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
+		const elidedProbeToolCalls = this._elidedProbeToolCallIds();
 		return this.agent.state.messages
-			.map((message, index) => this._projectMessage(message, index, role))
+			.map((message, index) => this._projectMessage(message, index, role, elidedProbeToolCalls))
 			.filter((message): message is AgentMessage => message !== undefined);
 	}
 
@@ -713,6 +714,7 @@ export class AgentSession {
 		message: AgentMessage,
 		index: number,
 		role: "propose" | "distill" | "execution" | "finalAnswer",
+		elidedProbeToolCalls: Set<string>,
 	): AgentMessage | undefined {
 		switch (role) {
 			case "propose":
@@ -721,12 +723,36 @@ export class AgentSession {
 				// calls and reasoning are always elided — that is the imitation trigger regardless of
 				// age — while the raw result *content* (the fresh evidence to update on) is folded into
 				// a plain note only once it falls below the watermark.
-				return this._maskOperationalDetail(message, index < this._evidenceWatermark);
+				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
 			case "finalAnswer":
-				return this._maskOperationalDetail(message, true);
+				return this._maskOperationalDetail(message, true, elidedProbeToolCalls);
 		}
+	}
+
+	/**
+	 * Tool-call ids elided from the belief-side view: every tool call in a probe (execution) turn.
+	 * `_maskProbeAssistant` drops them all, so any `toolResult` carrying one of these ids has no
+	 * surviving call and must be folded rather than left as an orphaned `tool` message (which strict
+	 * providers reject with "tool must be a response to tool_calls"). This mirrors the elision in
+	 * `_maskProbeAssistant`; a *belief* tool (e.g. `view_beliefs`) called *inside* a probe turn is
+	 * caught here even though its name is not a probe tool, because the call id — not the name — is
+	 * what links a result to its (elided) call.
+	 */
+	private _elidedProbeToolCallIds(): Set<string> {
+		const elided = new Set<string>();
+		for (const message of this.agent.state.messages) {
+			if (message.role !== "assistant" || !this._isProbeAssistant(message)) {
+				continue;
+			}
+			for (const block of message.content) {
+				if (block.type === "toolCall") {
+					elided.add(block.id);
+				}
+			}
+		}
+		return elided;
 	}
 
 	/**
@@ -735,17 +761,24 @@ export class AgentSession {
 	 * - the probe-role assistant turn is always elided (thinking dropped, tool calls removed) —
 	 *   seeing the probe call `bash`/`read` is what drives a role to imitate it, so this is
 	 *   age-independent;
-	 * - the raw result *content* (non-belief tool results and bash output) is folded into a plain
-	 *   text note only when `maskResult` is true — the epistemic role must see the freshest result
-	 *   once to update on it, so it is masked below the watermark but not above it.
+	 * - a tool result whose call was elided (a probe tool, or a belief tool called inside a probe
+	 *   turn) is folded into a plain text note — masked to a placeholder only when `maskResult` is
+	 *   true. The epistemic role must see the freshest result once to update on it, so it is
+	 *   masked below the watermark but not above it.
 	 */
-	private _maskOperationalDetail(message: AgentMessage, maskResult: boolean): AgentMessage | undefined {
+	private _maskOperationalDetail(
+		message: AgentMessage,
+		maskResult: boolean,
+		elidedProbeToolCalls: Set<string>,
+	): AgentMessage | undefined {
 		switch (message.role) {
 			case "toolResult":
-				if (this._isProbeTool(message.toolName)) {
-					// The probe's tool call is elided from this role's view, so its result has no
-					// matching call. Fold the raw content into a plain note — never a `tool` result
-					// whose id would orphan, and never a tool-call name the role could imitate.
+				// Fold any result whose tool call is elided from this role's view: a probe tool's
+				// call is always elided, and a belief tool (e.g. `view_beliefs`) called *inside* a
+				// probe turn is elided along with it. Either way the result has no matching call, so
+				// it must become a plain note — never a `tool` result whose id would orphan, and
+				// never a tool-call name the role could imitate.
+				if (this._isProbeTool(message.toolName) || elidedProbeToolCalls.has(message.toolCallId)) {
 					if (maskResult) {
 						return {
 							role: "user",
