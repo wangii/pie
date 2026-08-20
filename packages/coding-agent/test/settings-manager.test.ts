@@ -210,6 +210,24 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("distillationModel", () => {
+		it("returns the configured distillation model", () => {
+			expect(SettingsManager.inMemory({ distillationModel: "deepseek-v4-pro" }).getDistillationModel()).toBe(
+				"deepseek-v4-pro",
+			);
+		});
+
+		it("defaults to defaultModel when not configured", () => {
+			expect(SettingsManager.inMemory({ defaultModel: "deepseek-v4-pro" }).getDistillationModel()).toBe(
+				"deepseek-v4-pro",
+			);
+		});
+
+		it("is undefined when neither distillationModel nor defaultModel is configured", () => {
+			expect(SettingsManager.inMemory().getDistillationModel()).toBeUndefined();
+		});
+	});
+
 	describe("theme setting", () => {
 		it("stores slash-separated automatic theme settings separately from fixed theme names", async () => {
 			const settingsPath = join(agentDir, "settings.json");

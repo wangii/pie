@@ -93,6 +93,12 @@ export interface Settings {
 	defaultModel?: string;
 	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
 	executionModel?: string;
+	/**
+	 * Model for the belief loop's distillation (prediction-error) step — the epistemic role's
+	 * residual accounting that turns the probe's raw observations into what the belief set must
+	 * update on. Defaults to `defaultModel` so the distillation stays on the strong default model
+	 * even when the probe role is on a cheaper `executionModel`. */
+	distillationModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -692,6 +698,10 @@ export class SettingsManager {
 
 	getExecutionModel(): string | undefined {
 		return this.settings.executionModel;
+	}
+
+	getDistillationModel(): string | undefined {
+		return this.settings.distillationModel ?? this.settings.defaultModel;
 	}
 
 	setDefaultProvider(provider: string): void {

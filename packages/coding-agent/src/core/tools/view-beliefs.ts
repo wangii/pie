@@ -14,18 +14,23 @@ const viewBeliefsSchema = Type.Object({});
 
 export function createViewBeliefsToolDefinition(
 	beliefSet: BeliefSet,
+	currentRole: () => "epistemic" | "execution" | "finalAnswer" = () => "epistemic",
 ): ToolDefinition<typeof viewBeliefsSchema, undefined> {
 	return {
 		name: "view_beliefs",
 		label: "view beliefs",
 		description:
-			"Show your current beliefs: the open beliefs, the open framing obligations, and the settled beliefs.",
+			"Show your current beliefs: the open beliefs (the frame), the open framing obligations, and the settled beliefs.",
 		promptSnippet: "View your current beliefs",
 		promptGuidelines: [],
 		parameters: viewBeliefsSchema,
 		async execute(_toolCallId, _input, _signal, _onUpdate, _ctx) {
+			// The execution role only needs the frame it is probing (statement + expectation);
+			// the epistemic role sees the full set. Scoping the output keeps the probe role from
+			// being handed framing obligations and settled history it must not act on.
+			const scope = currentRole() === "execution" ? "frame" : "all";
 			return {
-				content: [{ type: "text", text: formatBeliefsForView(beliefSet.beliefs) }],
+				content: [{ type: "text", text: formatBeliefsForView(beliefSet.beliefs, scope) }],
 				details: undefined,
 			};
 		},

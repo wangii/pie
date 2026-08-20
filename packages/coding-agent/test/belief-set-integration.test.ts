@@ -522,6 +522,13 @@ describe("declare_belief integration", () => {
 			expect(executionContexts.some((c) => contextText(c).includes("[FRAME]"))).toBe(true);
 			// …and it still sees the raw probe output (its own operational detail).
 			expect(executionContexts.some((c) => contextText(c).includes("RAW_probe"))).toBe(true);
+			// The epistemic role's declare_belief tool-call blocks are neutralized, not the real
+			// name — seeing `declare_belief` in the transcript is what drives the probe role to
+			// imitate the mutation it must not perform.
+			expect(executionContexts.some((c) => contextToolCalls(c).some((t) => t.name === "declare_belief"))).toBe(
+				false,
+			);
+			expect(executionContexts.some((c) => contextToolCalls(c).some((t) => t.name === "[belief]"))).toBe(true);
 		} finally {
 			harness.cleanup();
 		}
@@ -710,8 +717,11 @@ describe("declare_belief integration", () => {
 			// distilled, while its distilled text report survives.
 			expect(contextThinking(last)).not.toContain("EXEC_THINKING_ONE");
 			expect(contextText(last)).toContain("the value persisted");
-			// Frame 2's probe round is still fresh (shown once): raw reasoning present.
-			expect(contextThinking(last)).toContain("EXEC_THINKING_TWO");
+			// Frame 2's probe round is still fresh (above the watermark), but the probe's
+			// internal reasoning is distilled regardless of age — that is the imitation trigger,
+			// so it is always stripped. Its distilled text report survives.
+			expect(contextThinking(last)).not.toContain("EXEC_THINKING_TWO");
+			expect(contextText(last)).toContain("no session reuse observed");
 
 			// The execution role itself still sees its own raw reasoning.
 			const executionContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("echo"));
@@ -803,7 +813,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("execution reports the prediction error and the epistemic return asks for the residual", async () => {
+	test("execution reports raw observations and the epistemic return asks for the residual", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -858,15 +868,16 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			// The execution turn's prompt tells it to surface the divergence (the prediction
-			// error), which is what the epistemic role updates on.
+			// The execution turn's prompt tells it to report raw observations in one sentence and
+			// leaves the prediction-error distillation to the epistemic role (which updates on it).
 			const executionContext = harness.faux.contexts.find((c) => contextToolNames(c).includes("echo"));
 			expect(executionContext).toBeDefined();
-			expect(executionContext!.systemPrompt).toContain("prediction error");
-			// It must also surface what the belief did not name — inconsistencies or staleness
-			// beyond the probed hypothesis — so the epistemic role can expand its beliefs
-			// horizontally instead of only confirming the narrow hypotheses it proposed.
-			expect(executionContext!.systemPrompt).toContain("what the belief did not name");
+			expect(executionContext!.systemPrompt).toContain("prediction-error");
+			expect(executionContext!.systemPrompt).toContain("epistemic role's step");
+			// It must still surface what the belief did not name — inconsistencies or staleness
+			// beyond the probed hypothesis — as raw observations, so the epistemic role can expand
+			// its beliefs horizontally instead of only confirming the narrow hypotheses it proposed.
+			expect(executionContext!.systemPrompt).toContain("contradiction");
 
 			// The epistemic return steer asks for the residual, not a full re-update.
 			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));

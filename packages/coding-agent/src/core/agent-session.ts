@@ -357,6 +357,15 @@ const FRAME_HORIZON_HEADROOM = 1.3;
 const MASKED_PROBE_TOOL_NAME = "[probe]";
 
 /**
+ * The neutral name substituted for a belief-mutation tool's real name (`declare_belief` /
+ * `conclude`) in the execution projection. Mirror of `MASKED_PROBE_TOOL_NAME`: the execution
+ * role seeing the epistemic role call `declare_belief` is what drives it to step out of its
+ * probe lane and mutate beliefs itself. The placeholder keeps the block well-formed so the
+ * (already masked) `declare_belief` result still associates by id.
+ */
+const MASKED_BELIEF_TOOL_NAME = "[belief]";
+
+/**
  * The belief loop's phase, as a discriminated union. Each variant carries only the
  * transient state meaningful to that phase — the execution phase owns its probe lease
  * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while epistemic
@@ -718,20 +727,29 @@ export class AgentSession {
 	): AgentMessage {
 		switch (role) {
 			case "epistemic":
-				return index < this._evidenceWatermark ? this._maskOperationalDetail(message) : message;
+				// The probe's tool-call names and reasoning are always distilled — that is the
+				// imitation trigger regardless of age — while the raw result *content* (the fresh
+				// evidence the epistemic role updates on) is masked only once it falls below the
+				// watermark.
+				return this._maskOperationalDetail(message, index < this._evidenceWatermark);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
 			case "finalAnswer":
-				return this._maskOperationalDetail(message);
+				return this._maskOperationalDetail(message, true);
 		}
 	}
 
 	/**
-	 * Redact raw operational detail (non-belief tool results and bash output) from one message,
-	 * preserving the belief bookkeeping. Used by the epistemic role below its watermark and by
-	 * the finalAnswer role everywhere.
+	 * Redact raw operational detail from one message, preserving the belief bookkeeping. Two
+	 * independent layers:
+	 * - the probe-role assistant turn is always distilled (thinking dropped, tool-call name
+	 *   neutralized, arguments emptied) — seeing the probe call `bash`/`read` is what drives a
+	 *   role to imitate it, so this is age-independent;
+	 * - the raw result *content* (non-belief tool results and bash output) is masked only when
+	 *   `maskResult` is true — the epistemic role must see the freshest result once to update
+	 *   on it, so it is masked below the watermark but not above it.
 	 */
-	private _maskOperationalDetail(message: AgentMessage): AgentMessage {
+	private _maskOperationalDetail(message: AgentMessage, maskResult: boolean): AgentMessage {
 		switch (message.role) {
 			case "toolResult":
 				if (
@@ -741,13 +759,16 @@ export class AgentSession {
 				) {
 					return message;
 				}
+				if (!maskResult) {
+					return message;
+				}
 				return {
 					...message,
 					toolName: MASKED_PROBE_TOOL_NAME,
 					content: [{ type: "text", text: "[operational detail omitted]" }],
 				};
 			case "bashExecution":
-				return { ...message, output: "[output omitted]" };
+				return maskResult ? { ...message, output: "[output omitted]" } : message;
 			case "assistant":
 				// The probe (execution) role's assistant turns carry raw operational detail the
 				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
@@ -793,18 +814,57 @@ export class AgentSession {
 	}
 
 	/**
-	 * Redact the belief *mutation* echo (declare_belief results) from one message, for the
-	 * execution role. The execution role probes and reports; belief updates happen in the
-	 * epistemic role, so exposing the "Applied propose/support/refute" echoes here only invites
-	 * the probe role to step out of its lane instead of reporting a plain observation. The
-	 * read-only `view_beliefs` result is left intact — the execution role needs it to recall the
-	 * belief it is testing.
+	 * Redact the belief *mutation* surface (declare_belief / conclude) from one message, for the
+	 * execution role. The execution role probes and reports; belief updates and concluding happen
+	 * in the epistemic role, so exposing the mutation echo — both its "Applied propose/support/
+	 * refute" results and its tool-call blocks on the epistemic role's assistant turns — only
+	 * invites the probe role to step out of its lane instead of reporting a plain observation.
+	 * The read-only `view_beliefs` result is left intact — the execution role needs it to recall
+	 * the belief it is testing.
 	 */
 	private _maskBeliefBookkeeping(message: AgentMessage): AgentMessage {
-		if (message.role === "toolResult" && message.toolName === "declare_belief") {
-			return { ...message, content: [{ type: "text", text: "[belief update omitted]" }] };
+		switch (message.role) {
+			case "toolResult":
+				if (message.toolName === "declare_belief") {
+					return { ...message, content: [{ type: "text", text: "[belief update omitted]" }] };
+				}
+				return message;
+			case "assistant":
+				return this._isEpistemicMutation(message) ? this._maskEpistemicAssistant(message) : message;
+			default:
+				return message;
 		}
-		return message;
+	}
+
+	/** Whether an assistant turn carries a belief *mutation* tool call (`declare_belief` /
+	 *  `conclude`) — the epistemic role's exclusive surface, which the execution role must not
+	 *  imitate. `view_beliefs` is deliberately excluded: it is read-only and shared with the
+	 *  execution role. */
+	private _isEpistemicMutation(message: AssistantMessage): boolean {
+		return message.content.some(
+			(block) => block.type === "toolCall" && (block.name === "declare_belief" || block.name === "conclude"),
+		);
+	}
+
+	/** Distill an epistemic-role assistant turn for the execution view: drop its thinking and
+	 *  neutralize its belief-mutation tool calls (declare_belief / conclude), keeping its text
+	 *  and any read-only view_beliefs call. Mirrors `_maskProbeAssistant` in the other direction:
+	 *  the tool-call id survives so the (already masked) `declare_belief` result still associates,
+	 *  but the real name is replaced — seeing the epistemic role call `declare_belief` here is
+	 *  what drives the execution role to step out of its lane. */
+	private _maskEpistemicAssistant(message: AssistantMessage): AssistantMessage {
+		const content: AssistantMessage["content"] = [];
+		for (const block of message.content) {
+			if (block.type === "thinking") {
+				continue;
+			}
+			if (block.type === "toolCall" && (block.name === "declare_belief" || block.name === "conclude")) {
+				content.push({ ...block, name: MASKED_BELIEF_TOOL_NAME, arguments: {} });
+				continue;
+			}
+			content.push(block);
+		}
+		return { ...message, content };
 	}
 
 	/**
@@ -1040,15 +1100,22 @@ export class AgentSession {
 	}
 
 	/**
-	 * The model for the next turn. The execution (probe) role may run on a separately
-	 * configured model from settings (`executionModel`); every other role and any turn
-	 * outside the belief loop uses the session's main model. Only the next request's model
-	 * is overridden — `state.model` is left untouched so footer/compaction/context-window
-	 * keep the main model as their baseline.
+	 * The model for the next turn. Two belief-loop roles may run on separately configured
+	 * models from settings: the execution (probe) role on `executionModel`, and the epistemic
+	 * (distillation) role on `distillationModel` (defaulting to `defaultModel`, so the
+	 * prediction-error distillation stays on the strong default model even when the probe runs
+	 * on a cheaper one). Every other role and any turn outside the belief loop uses the session's
+	 * main model. Only the next request's model is overridden — `state.model` is left untouched so
+	 * footer/compaction/context-window keep the main model as their baseline.
 	 */
 	private _roleModel(): Model<any> | undefined {
-		if (this._enableBeliefSet && this._beliefSetUsable && this._role === "execution") {
-			const spec = this.settingsManager.getExecutionModel();
+		if (this._enableBeliefSet && this._beliefSetUsable) {
+			const spec =
+				this._role === "execution"
+					? this.settingsManager.getExecutionModel()
+					: this._role === "epistemic"
+						? this.settingsManager.getDistillationModel()
+						: undefined;
 			if (spec) {
 				const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
 				if (resolved.model) {
@@ -1127,12 +1194,12 @@ export class AgentSession {
 			case "execution":
 				return (
 					"\n\nRead the belief you are probing with view_beliefs if you need its exact expectation, then " +
-					"probe the code or product to test it. Report in plain text what you observed and how it meets or " +
-					"diverges from the belief's expectation — name that divergence (the prediction error) explicitly, " +
-					"because the epistemic role updates only on it. While probing, also surface what the belief did not " +
-					"name: any inconsistency between what documentation or a contract claims and what the code actually " +
-					"does, or anything that reads as stale or out of sync — the epistemic role can only expand its " +
-					"beliefs from what you report. Proposing or updating beliefs is a separate step you do not perform."
+					"probe the code or product to test it. Report in one concise sentence what you observed — the raw " +
+					"observations and any contradiction with documentation or a contract you noticed, not an analysis " +
+					"of them. The prediction-error distillation (comparing the observation to the expectation and " +
+					"deciding what the belief set must update on) is the epistemic role's step, not yours: it reads " +
+					"your raw report and does that accounting itself. Proposing or updating beliefs is likewise a " +
+					"separate step you do not perform."
 				);
 			case "finalAnswer":
 				return (
@@ -3292,7 +3359,7 @@ export class AgentSession {
 			);
 			this._baseToolDefinitions.set(
 				"view_beliefs",
-				createViewBeliefsToolDefinition(this._beliefSet) as ToolDefinition,
+				createViewBeliefsToolDefinition(this._beliefSet, () => this._role) as ToolDefinition,
 			);
 			this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
 		}

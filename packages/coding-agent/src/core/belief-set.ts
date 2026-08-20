@@ -245,18 +245,26 @@ export class BeliefSet {
  * Render the belief set as structured text for the read-only `view_beliefs` tool — the
  * model's only surface onto beliefs (never injected into the system prompt). The frame
  * is called out with its expectation and evidence-round estimate.
+ *
+ * Two scopes:
+ * - `"all"` (the epistemic role): the full set — the frame, the framing obligations, and the
+ *   settled beliefs.
+ * - `"frame"` (the execution role): only the open frame it is probing (statement + expectation
+ *   + evidence-round estimate). Settled history and framing obligations are the epistemic
+ *   role's object, not the probe target, and dumping them here only invites the probe role to
+ *   step out of its lane.
  */
-export function formatBeliefsForView(beliefs: readonly Belief[]): string {
-	if (beliefs.length === 0) {
-		return "No beliefs yet.";
-	}
-	const lines: string[] = [];
+export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | "frame" = "all"): string {
 	const proposed = beliefs.filter((b) => statusOf(b) === "proposed");
 	const frames = proposed.filter((b) => b.domain !== "framing");
+	const lines: string[] = [];
 	for (const frame of frames) {
 		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
 		lines.push(`  expectation: ${frame.expectation}`);
 		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);
+	}
+	if (scope === "frame") {
+		return lines.length > 0 ? lines.join("\n") : "No open beliefs to probe.";
 	}
 	const framings = proposed.filter((b) => b.domain === "framing");
 	for (const framing of framings) {
@@ -273,5 +281,5 @@ export function formatBeliefsForView(beliefs: readonly Belief[]): string {
 			lines.push(`  ${b.id} [${b.domain}] ${b.statement} (${statusOf(b)})`);
 		}
 	}
-	return lines.join("\n");
+	return lines.length > 0 ? lines.join("\n") : "No beliefs yet.";
 }

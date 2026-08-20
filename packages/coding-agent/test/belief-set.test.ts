@@ -326,4 +326,41 @@ describe("formatBeliefsForView", () => {
 		expect(text).toContain("[FRAME]");
 		expect(text).toContain("reframe if:");
 	});
+
+	test('scope "frame" renders only the open frame, not framing obligations or settled history', () => {
+		const set = new BeliefSet();
+		const settled = set.apply({
+			op: "propose",
+			statement: "the old belief",
+			domain: "product",
+			expectation: "stale",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: settled.id, evidence: "held" });
+		set.apply({
+			op: "propose",
+			statement: "the answer must establish Y",
+			domain: "framing",
+			expectation: "no second mechanism",
+			evidenceRounds: 1,
+		});
+		set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit cache",
+			evidenceRounds: 1,
+		});
+
+		const frame = formatBeliefsForView(set.beliefs, "frame");
+		expect(frame).toContain("[FRAME]");
+		expect(frame).toContain("the cache is warm");
+		expect(frame).toContain("expectation: reads hit cache");
+		expect(frame).not.toContain("[FRAMING]");
+		expect(frame).not.toContain("[SETTLED]");
+		expect(frame).not.toContain("the old belief");
+		// The full scope still surfaces everything.
+		expect(formatBeliefsForView(set.beliefs, "all")).toContain("[FRAMING]");
+		expect(formatBeliefsForView(set.beliefs, "all")).toContain("[SETTLED]");
+	});
 });
