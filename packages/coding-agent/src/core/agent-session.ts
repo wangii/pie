@@ -321,6 +321,15 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 const FRAME_HORIZON_HEADROOM = 1.3;
 
 /**
+ * The minimum number of settled beliefs this task must produce before the conclusion path
+ * runs the one-round whole-set reflection. Below this the set is too small for the
+ * reflection's coverage/composition/completeness checks to be meaningful — each would
+ * trivially pass — so the reflection round would be pure ceremony (a round-trip that
+ * proposes nothing and re-concludes).
+ */
+const REFLECTION_MIN_SETTLED_BELIEFS = 3;
+
+/**
  * The belief loop's phase, as a discriminated union. Each variant carries only the
  * transient state meaningful to that phase — the execution phase owns its probe lease
  * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while propose,
@@ -1084,10 +1093,15 @@ export class AgentSession {
 				steer: TRANSITION_STEERS.concludePremature(reasons.join(" and ")),
 			};
 		}
-		if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
-			// Everything is settled, but the belief set has not yet been reflected on as a whole.
-			// Fire the one-round reflection and stay put so any belief it proposes is probed
-			// normally; a second conclude passes.
+		const settledThisTask = this._beliefSet.beliefs
+			.slice(this._beliefsAtTaskReset)
+			.filter((b) => statusOf(b) === "supported").length;
+		if (settledThisTask >= REFLECTION_MIN_SETTLED_BELIEFS && !this._reflected) {
+			// Everything is settled, and this task settled enough beliefs for the whole-set
+			// reflection to be worth a round-trip. Fire the one-round reflection and stay put so
+			// any belief it proposes is probed normally; a second conclude passes. Below the
+			// threshold the reflection's checks are vacuous, so the conclude goes straight to the
+			// terminal handoff instead.
 			this._reflected = true;
 			return { state, steer: TRANSITION_STEERS.reflection };
 		}

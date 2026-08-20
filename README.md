@@ -1,3 +1,20 @@
+# Pie: Pi + Epistemology
+
+PIE is an experimental coding-agent harness that makes the epistemic process itself an explicit runtime object. Rather than allowing one model invocation to freely mix hypothesis formation, investigation, interpretation and answer generation, PIE separates these cognitive operations and controls the information allowed to cross between them.
+
+Pie 是一个以四阶段信念循环为核心、默认启用的可自我扩展编码智能体；其余 workspace 只提供通用支撑能力。
+Pie is a self-extensible coding agent whose core is a default-enabled four-phase belief loop; the other workspaces only provide generic support.
+
+
+- **四阶段信念循环（Four-phase belief loop）**：propose → execution → distill → finalAnswer，由 ROLE_SPECS/TRANSITION_STEERS 单一权威源驱动，默认启用（`enableBeliefSet` 默认为 true）。The four phases are driven by the single source of truth ROLE_SPECS/TRANSITION_STEERS and are enabled by default (`enableBeliefSet` defaults to true).
+- **角色级隔离（Role-level isolation）**：每阶段的指令、工具面、模型选择与消息投影互相隔离，越权工具调用会被纠正。Each phase keeps its instruction, tool surface, model choice, and message projection isolated; out-of-surface tool calls are steered back.
+- **证据水位线（Evidence watermark）**：原始证据只向蒸馏角色展示一次，随后被掩码，抑制上下文污染。Raw evidence is shown to the distill role exactly once, then masked, curbing context pollution.
+- **执行租约（Execution lease）**：探测帧有工具轮次上限（ceil(Σ证据轮数×1.3)），先提醒后强制返回。Each probe frame has a tool-call budget (ceil(Σ evidence rounds × 1.3)); it nudges once, then forces the return.
+- **结论门控（Conclusion gating）**：conclude 在开放信念或框架义务未清时被阻止，终局前执行一次性覆盖性反思。`conclude` is blocked while beliefs or framing obligations stay open; a one-time reflection runs before the terminal handoff.
+- **终局快照（Terminal snapshot）**：finalAnswer 无工具，仅凭注入的 `<final_answer_context>` 信念快照作答。The finalAnswer role has no tools and answers solely from the injected `<final_answer_context>` belief snapshot.
+
+Built on top of Pi: https://pi.dev
+
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
@@ -10,15 +27,9 @@
 
 > New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-# Pi Agent Harness（Pi 智能体框架）
-
-Pi 是一个极简的终端编码智能体框架（agent harness），也是本项目自我扩展的编码智能体（self-extensible coding agent）的家园。它保持核心小巧，用 TypeScript 扩展（Extensions）、技能（Skills）、提示词模板（Prompt Templates）与主题（Themes）来适配你的工作流，而不是反过来。Pi 以交互式、打印/JSON、RPC 与 SDK 四种模式运行。
-
-Pi is a minimal terminal coding agent harness and the home of our self-extensible coding agent. It stays small at the core and adapts to your workflow — not the other way around — through TypeScript extensions, skills, prompt templates, and themes. Pi runs in four modes: interactive, print/JSON, RPC for process integration, and an SDK for embedding in your own apps.
-
 ## 项目思想：四阶段信念循环（The project idea: the four-phase belief loop）
 
-Pi 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 coding-agent 包（`packages/coding-agent`）实现并默认启用（`enableBeliefSet` 默认为 true，`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。四个阶段由 `packages/coding-agent/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
+Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 coding-agent 包（`packages/coding-agent`）实现并默认启用（`enableBeliefSet` 默认为 true，`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。四个阶段由 `packages/coding-agent/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
 
 | 阶段 | 职责 |
 |------|------|
@@ -29,7 +40,7 @@ Pi 在本次迭代中的核心思想，是把"智能体如何回答问题"显式
 
 信念按指称类型打标签：`[code]`（实现）、`[prod]`（产品行为或文档声明）、`[user]`（用户意图/需求）、`[convention]`（仓库惯例）。信念本身用中文书写。`/bs` 命令可查看当前信念集，`/thinking` 可设置思考级别。详见 [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md)。
 
-The core idea of Pi in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the coding-agent package (`packages/coding-agent`) — `enableBeliefSet` defaults to true and `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four phases are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/coding-agent/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
+The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the coding-agent package (`packages/coding-agent`) — `enableBeliefSet` defaults to true and `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four phases are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/coding-agent/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
 
 | Phase | Job |
 |-------|-----|
@@ -40,55 +51,36 @@ The core idea of Pi in this iteration is to model "how the agent answers a quest
 
 Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (product behavior or documented claim), `[user]` (user intent/requirement), `[convention]` (repo idiom/naming/pattern) — and are written in Chinese. Use `/bs` to view the current belief set and `/thinking` to set the thinking level. See [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md).
 
-## 设计原则（Design principles）
 
-Pi 刻意保持内核最小、攻击性可扩展，把决策权交给你，而不是反过来让你适配它。
+### 角色模型配置（Role model configuration）
 
-Pi is aggressively extensible so it doesn't have to dictate your workflow. Features other tools bake in can be built with extensions, skills, or installed from third-party pi packages, keeping the core minimal:
+信念循环允许为两个角色单独配置模型（仅在信念集启用时生效，`enableBeliefSet` 默认开启）：
 
-- **无 MCP（No MCP）**：构建带 README 的 CLI 工具（见 Skills），或用扩展自行添加 MCP 支持。
-- **无子代理（No sub-agents）**：通过 tmux 派生 Pi 实例，或用扩展自己实现。
-- **无权限弹窗（No permission popups）**：在容器中运行，或用扩展按你的环境与安全要求实现确认流程。
-- **无计划模式（No plan mode）**：把计划写进文件，或用扩展实现。
-- **无内置待办（No built-in to-dos）**：用 TODO.md 文件，或用扩展实现。
-- **无后台 bash（No background bash）**：使用 tmux，保持完全可观测、可直接交互。
+- `executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
+- `distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
+
+propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型字符串使用 `provider/modelId` 格式，配置在全局 `~/.pi/agent/settings.json` 或项目 `.pi/settings.json`：
+
+```json
+{
+  "defaultModel": "provider/defaultModel",
+  "executionModel": "provider/probeModel",
+  "distillationModel": "provider/strongModel"
+}
+```
+
+回退链：`executionModel` 未配置或解析失败时，execution 回退到会话主模型；`distillationModel` 未配置时先回退 `defaultModel`，仍未解析再回退会话主模型——模型名解析失败时两者最终都使用会话主模型。
+
+The belief loop lets two roles run on separately configured models (only while the belief set is enabled — `enableBeliefSet` defaults to true):
+
+- `executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
+- `distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
+
+The propose and finalAnswer roles always use the session's main model (`defaultModel`). Model strings use the `provider/modelId` format and live in the global `~/.pi/agent/settings.json` or the project `.pi/settings.json` (see the example above).
+
+Fallbacks: if `executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model.
 
 ## 最小上手路径（Quick start）
-
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-```
-
-`--ignore-scripts` 在安装时禁用依赖生命周期脚本；正常 npm 安装不需要 Pi 的安装脚本。安装器替代方案：
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
-
-用 API 密钥认证：
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-pi
-```
-
-或使用你已有的订阅：
-
-```bash
-pi
-/login  # 然后选择提供商
-```
-
-然后直接与 pi 对话即可。平台说明：[Windows](packages/coding-agent/docs/windows.md) | [Termux (Android)](packages/coding-agent/docs/termux.md) | [tmux](packages/coding-agent/docs/tmux.md) | [终端设置](packages/coding-agent/docs/terminal-setup.md) | [Shell 别名](packages/coding-agent/docs/shell-aliases.md)。
-
-Install the CLI globally, then authenticate and talk to pi:
-
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-curl -fsSL https://pi.dev/install.sh | sh   # installer alternative
-export ANTHROPIC_API_KEY=sk-ant-...          # or run `pi` then `/login` for a subscription
-pi
-```
 
 Platform notes: [Windows](packages/coding-agent/docs/windows.md) | [Termux (Android)](packages/coding-agent/docs/termux.md) | [tmux](packages/coding-agent/docs/tmux.md) | [Terminal setup](packages/coding-agent/docs/terminal-setup.md) | [Shell aliases](packages/coding-agent/docs/shell-aliases.md).
 
@@ -115,64 +107,9 @@ npm run build         # 刷新模型数据后构建所有包
 npm run build:offline # 用既有模型数据离线重建
 npm run check         # 检查：lint、格式、类型、固定依赖、shrinkwrap 等
 ./test.sh             # 运行测试（无 API 密钥时跳过依赖 LLM 的测试）
-./pi-test.sh          # 从源码运行 pi（可在任意目录执行）
+./pie.sh          # 从源码运行 pi（可在任意目录执行）
 ```
-
-```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, type check, pinned deps, shrinkwrap
-./test.sh             # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh          # Run pi from sources (can be run from any directory)
-```
-
-## 文档入口（Documentation）
-
-- 编码智能体完整文档：[packages/coding-agent/README.md](packages/coding-agent/README.md) 与 [packages/coding-agent/docs/index.md](packages/coding-agent/docs/index.md)
-- 快速上手：[quickstart.md](packages/coding-agent/docs/quickstart.md)
-- 四阶段信念循环：[belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md)
-- 提供商与模型：[providers.md](packages/coding-agent/docs/providers.md) · [models.md](packages/coding-agent/docs/models.md) · [custom-provider.md](packages/coding-agent/docs/custom-provider.md)
-- 扩展与技能：[extensions.md](packages/coding-agent/docs/extensions.md) · [skills.md](packages/coding-agent/docs/skills.md)
-- 会话与压缩：[sessions.md](packages/coding-agent/docs/sessions.md) · [compaction.md](packages/coding-agent/docs/compaction.md)
-- 设置与环境变量：[settings.md](packages/coding-agent/docs/settings.md) · [environment-variables.md](packages/coding-agent/docs/environment-variables.md)
-- 开发者指南：[development.md](packages/coding-agent/docs/development.md)
-
-- Full coding-agent docs: [packages/coding-agent/README.md](packages/coding-agent/README.md) and [packages/coding-agent/docs/index.md](packages/coding-agent/docs/index.md)
-- Quickstart: [quickstart.md](packages/coding-agent/docs/quickstart.md)
-- The four-phase belief loop: [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md)
-- Providers & models: [providers.md](packages/coding-agent/docs/providers.md) · [models.md](packages/coding-agent/docs/models.md) · [custom-provider.md](packages/coding-agent/docs/custom-provider.md)
-- Extensions & skills: [extensions.md](packages/coding-agent/docs/extensions.md) · [skills.md](packages/coding-agent/docs/skills.md)
-- Sessions & compaction: [sessions.md](packages/coding-agent/docs/sessions.md) · [compaction.md](packages/coding-agent/docs/compaction.md)
-- Settings & environment variables: [settings.md](packages/coding-agent/docs/settings.md) · [environment-variables.md](packages/coding-agent/docs/environment-variables.md)
-- Developer guide: [development.md](packages/coding-agent/docs/development.md)
-
-## 权限与容器化（Permissions & containerization）
-
-Pi 不内置权限系统来限制文件系统、进程、网络或凭证访问。默认情况下，它以启动它的用户和进程的权限运行。如需更强的边界，请将 Pi 容器化或沙箱化。见 [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) 中的三种模式：Gondolin 扩展（宿主机保留 pi 与提供商认证，内置工具与 `!` 命令路由进本地 Linux 微虚拟机）、普通 Docker（整个 pi 进程在本地容器中运行）、OpenShell（整个 pi 进程在策略控制的沙箱中运行）。
-
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it. To enforce stronger boundaries, containerize or sandbox Pi — see [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for the Gondolin extension, plain Docker, and OpenShell patterns.
-
-## 供应链加固（Supply-chain hardening）
-
-我们把 npm 依赖变更当作需评审的代码变更对待。直接外部依赖固定精确版本；`.npmrc` 设置 `save-exact=true` 与 `min-release-age=2`；`package-lock.json` 是依赖的 ground truth，pre-commit 默认阻止锁文件提交（除非设置 `PI_ALLOW_LOCKFILE_CHANGE=1`）；发布的 CLI 包内含 `packages/coding-agent/npm-shrinkwrap.json` 以固定传递依赖；CI 用 `npm ci --ignore-scripts` 安装，并由定时工作流运行 `npm audit`。
-
-We treat npm dependency changes as reviewed code changes: direct external deps are pinned to exact versions, `.npmrc` sets `save-exact=true` and `min-release-age=2`, `package-lock.json` is the dependency ground truth (pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`), the published CLI ships `packages/coding-agent/npm-shrinkwrap.json` to pin transitive deps, and CI installs with `npm ci --ignore-scripts` plus scheduled `npm audit`.
-
-## 分享你的 OSS 编码智能体会话（Share your OSS coding agent sessions）
-
-如果你用 Pi 或其他编码智能体做开源工作，请分享你的会话。公开的 OSS 会话数据有助于用真实任务改进编码智能体。完整说明见[这篇 X 帖子](https://x.com/badlogicgames/status/2037811643774652911)；发布会话请使用 [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf)，只需 Hugging Face 账号与 CLI。我定期发布自己的 `pi-mono` 工作会话：[badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)。
-
-If you use Pi or other coding agents for open source work, please share your sessions. Public OSS session data helps improve coding agents with real-world tasks. For the full explanation see [this post on X](https://x.com/badlogicgames/status/2037811643774652911); to publish sessions use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). I regularly publish my own `pi-mono` sessions at [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono).
-
-## 贡献（Contributing）
-
-贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，项目特定规则（面向人与智能体）见 [AGENTS.md](AGENTS.md)。Pi 的长期规划见 [RFCs](https://rfc.earendil.com/keyword/pi/)。
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents). Longer term plans live in [RFCs](https://rfc.earendil.com/keyword/pi/).
-
 ## License
-
 MIT
 
 <p align="center">

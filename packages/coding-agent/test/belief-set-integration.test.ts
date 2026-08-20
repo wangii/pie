@@ -1311,7 +1311,8 @@ describe("declare_belief integration", () => {
 			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
-				// Epistemic: propose.
+				// Epistemic: propose three beliefs so the settled set crosses the reflection
+				// threshold.
 				{
 					toolCalls: [
 						{
@@ -1324,17 +1325,45 @@ describe("declare_belief integration", () => {
 								evidenceRounds: 1,
 							},
 						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "logout clears the token",
+								domain: "product",
+								expectation: "the token is gone",
+								evidenceRounds: 1,
+							},
+						},
 					],
 					stopReason: "toolUse",
 				},
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				"the value persisted",
-				// Epistemic: settle the last belief.
+				// Epistemic: settle all three beliefs.
 				{
 					toolCalls: [
 						{
 							name: "declare_belief",
 							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-3", evidence: "the token was cleared" },
 						},
 					],
 					stopReason: "toolUse",
@@ -1367,7 +1396,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("the reflection round can propose a new belief that is probed before concluding", async () => {
+	test("a small settled set skips the reflection round and concludes directly", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -1383,7 +1412,7 @@ describe("declare_belief integration", () => {
 			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
-				// Epistemic: propose and settle the first belief.
+				// Epistemic: propose a single belief.
 				{
 					toolCalls: [
 						{
@@ -1410,11 +1439,122 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// First conclude → reflection steer.
+				// One conclude: a single settled belief is below the reflection threshold, so the
+				// loop goes straight to finalAnswer instead of firing the reflection round.
 				conclude,
-				// Reflection surfaces a missing check as a new belief → auto-dispatches.
+				"the conclusion",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// No context ever carries the reflection steer — the small set skipped the ceremony.
+			for (const ctx of harness.faux.contexts) {
+				expect(contextText(ctx)).not.toContain("reflect on the belief set");
+			}
+
+			// The final turn is finalAnswer (no tools), and the conclusion was written.
+			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
+			expect(contextToolNames(last)).toEqual([]);
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("the conclusion");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("conclude in the same turn as the final settle is honored", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
 				{
 					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				// Settle and conclude in the SAME turn — the transition honors the conclude and
+				// hands straight to finalAnswer without a redundant "deepen or conclude" round.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{ name: "conclude", args: {} },
+					],
+					stopReason: "toolUse",
+				},
+				"the conclusion",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The settle+conclude turn moved straight to finalAnswer (no tools on the last turn),
+			// and the conclusion was written.
+			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
+			expect(contextToolNames(last)).toEqual([]);
+			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
+			expect(assistantTexts).toContain("the conclusion");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("the reflection round can propose a new belief that is probed before concluding", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose and settle three beliefs so the first conclude crosses the
+				// reflection threshold.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
 						{
 							name: "declare_belief",
 							args: {
@@ -1425,16 +1565,63 @@ describe("declare_belief integration", () => {
 								evidenceRounds: 1,
 							},
 						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "logout clears the token",
+								domain: "product",
+								expectation: "the token is gone",
+								evidenceRounds: 1,
+							},
+						},
 					],
 					stopReason: "toolUse",
 				},
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
-				"no session reuse observed",
+				"the value persisted",
 				{
 					toolCalls: [
 						{
 							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
 							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-3", evidence: "the token was cleared" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// First conclude → reflection steer.
+				conclude,
+				// Reflection surfaces a missing check as a new belief → auto-dispatches.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "re-auth revokes old sessions",
+								domain: "product",
+								expectation: "a re-auth invalidates the prior token",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the prior token was invalidated",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-4", evidence: "the prior token was invalidated" },
 						},
 					],
 					stopReason: "toolUse",
@@ -1447,9 +1634,9 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			// The reflection turn proposed belief-2, which was probed and settled — the loop
+			// The reflection turn proposed belief-4, which was probed and settled — the loop
 			// expanded instead of concluding on the narrowed first frame.
-			expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
+			expect(harness.session.beliefs.find((b) => b.id === "belief-4")?.supportedBy).toHaveLength(1);
 
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
 			expect(assistantTexts).toContain("done");

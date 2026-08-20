@@ -81,7 +81,8 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"You never do the probing and you never do that accounting — you only state what should be tested " +
 			"and then decide what to test next.\n" +
 			"3. Keep proposing beliefs until the task is fully answered, close every open framing obligation " +
-			"(support, refine, or retract it via declare_belief), then call conclude.",
+			"(support, refine, or retract it via declare_belief), then call conclude — in the same turn " +
+			"as your final belief update when nothing remains to test.",
 		tools: ["declare_belief", "view_beliefs", "conclude"],
 		beliefScope: "all",
 		modelPolicy: "default",
@@ -164,7 +165,9 @@ export const TRANSITION_STEERS = {
 	openBeliefs: (statements: string) =>
 		`Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
 	/** propose stay / distill → propose: deepen the investigation or conclude. */
-	deepenOrConclude: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
+	deepenOrConclude:
+		"Propose the next belief to deepen the investigation, or conclude if the task is answered. " +
+		"You may conclude in the same turn as your final belief update — a separate conclude-only turn is unnecessary.",
 	/**
 	 * execution → distill: the probe's observation is in. Deliberately does not say "update
 	 * your belief" — that invites the model to re-process the whole observation. The
