@@ -48,7 +48,7 @@ describe("buildSystemPrompt", () => {
 
 		test("epistemic role omits the coding-agent preamble, pi docs, and file-path guideline", () => {
 			const prompt = buildSystemPrompt({
-				role: "epistemic",
+				role: "propose",
 				selectedTools: ["declare_belief", "view_beliefs"],
 				toolSnippets: {
 					declare_belief: "Record or update what you currently believe",
@@ -102,7 +102,7 @@ describe("buildSystemPrompt", () => {
 			const contextFiles = [{ path: "AGENTS.md", content: "read files in full" }];
 			const coding = buildSystemPrompt({ contextFiles, skills: [], cwd: process.cwd() });
 			const epistemic = buildSystemPrompt({
-				role: "epistemic",
+				role: "propose",
 				selectedTools: ["declare_belief", "view_beliefs"],
 				toolSnippets: { declare_belief: "Record beliefs", view_beliefs: "View beliefs" },
 				contextFiles,

@@ -9,11 +9,12 @@ import { formatSkillsForPrompt, type Skill } from "./skills.ts";
  * The operating role the prompt is assembled for. The default `"coding"` role renders
  * the file/command-agent preamble plus the pi-docs index and file-path guideline. The
  * belief-loop roles render a narrower scientific preamble and omit the pi-docs block:
- * `"epistemic"` and `"finalAnswer"` have no `read`/`bash`/`edit`/`write` (advertising them
- * would only mislead the model), while `"execution"` holds those probe tools but must not
- * be distracted by the pi-docs block, which is unrelated to the belief it is probing.
+ * `"propose"`, `"distill"`, and `"finalAnswer"` have no `read`/`bash`/`edit`/`write`
+ * (advertising them would only mislead the model), while `"execution"` holds those probe
+ * tools but must not be distracted by the pi-docs block, which is unrelated to the belief
+ * it is probing.
  */
-export type SystemPromptRole = "coding" | "epistemic" | "execution" | "finalAnswer";
+export type SystemPromptRole = "coding" | "propose" | "distill" | "execution" | "finalAnswer";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -134,7 +135,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
 	const preamble =
-		role === "epistemic"
+		role === "propose" || role === "distill"
 			? "You are a scientific mind investigating a task by forming and testing beliefs about the product and code."
 			: role === "execution"
 				? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."

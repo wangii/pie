@@ -350,14 +350,17 @@ const FRAME_HORIZON_HEADROOM = 1.3;
 /**
  * The belief loop's phase, as a discriminated union. Each variant carries only the
  * transient state meaningful to that phase — the execution phase owns its probe lease
- * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while epistemic
- * or finalAnswer. Task-scoped bookkeeping (`_reflected`, `_dispatchedFrameIds`,
- * `_evidenceWatermark`, `_beliefsAtTaskReset`) stays outside the union because it must
- * survive a phase change (e.g. a reflection-dispatched probe must come back to epistemic
- * with `_reflected` still latched).
+ * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while propose,
+ * distill, or finalAnswer. The old single `epistemic` role is split into two steps that
+ * run on different models: `propose` decides what to test and whether to conclude, and
+ * `distill` turns each probe's report into belief updates. Task-scoped bookkeeping
+ * (`_reflected`, `_dispatchedFrameIds`, `_evidenceWatermark`, `_beliefsAtTaskReset`)
+ * stays outside the union because it must survive a phase change (e.g. a
+ * reflection-dispatched probe must come back to distill with `_reflected` still latched).
  */
 type LoopState =
-	| { role: "epistemic" }
+	| { role: "propose" }
+	| { role: "distill" }
 	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean }
 	| { role: "finalAnswer" };
 
@@ -411,7 +414,7 @@ export class AgentSession {
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private readonly _beliefSet = new BeliefSet();
 	/** The belief loop's current phase; see the `LoopState` type. */
-	private _loopState: LoopState = { role: "epistemic" };
+	private _loopState: LoopState = { role: "propose" };
 	/** The belief ids already dispatched to execution — distinguishes fresh beliefs from dispatched-but-unsettled ones. */
 	private _dispatchedFrameIds: Set<string> = new Set();
 	/** True once the pre-conclusion reflection steer has fired for the current task (one round only). */
@@ -507,7 +510,7 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		// Apply the initial epistemic role surface (belief tools only).
+		// Apply the initial propose role surface (belief tools only).
 		this._applyRoleSurface();
 	}
 
@@ -642,12 +645,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Install the two-role (epistemic vs execution) loop. The role is advanced in
+	 * Install the belief loop (propose/distill vs execution). The role is advanced in
 	 * `prepareNextTurnWithContext`, which also projects the next role's surface
-	 * (tool subset + system prompt). Separation is structural: the epistemic role
-	 * has only `declare_belief`/`view_beliefs` in its tool list, so it cannot reach
-	 * `read`/`bash`; the execution role has no belief tools. No constraint is
-	 * preached in the prompt — it is enforced by what is simply absent.
+	 * (tool subset + system prompt). Separation is structural: the belief-side roles
+	 * (propose + distill) have only `declare_belief`/`view_beliefs`/`conclude` in their
+	 * tool list, so they cannot reach `read`/`bash`; the execution role has no belief
+	 * mutation tools. No constraint is preached in the prompt — it is enforced by what
+	 * is simply absent.
 	 */
 	private _installAgentNextTurnRefresh(): void {
 		const previousPrepareNextTurnWithContext =
@@ -697,7 +701,7 @@ export class AgentSession {
 	}
 
 	/** Project the full transcript for an explicit role (used to size each role's context). */
-	private _projectMessagesFor(role: "epistemic" | "execution" | "finalAnswer"): AgentMessage[] {
+	private _projectMessagesFor(role: "propose" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
 		return this.agent.state.messages
 			.map((message, index) => this._projectMessage(message, index, role))
 			.filter((message): message is AgentMessage => message !== undefined);
@@ -708,14 +712,15 @@ export class AgentSession {
 	private _projectMessage(
 		message: AgentMessage,
 		index: number,
-		role: "epistemic" | "execution" | "finalAnswer",
+		role: "propose" | "distill" | "execution" | "finalAnswer",
 	): AgentMessage | undefined {
 		switch (role) {
-			case "epistemic":
-				// The probe's tool calls and reasoning are always elided — that is the imitation
-				// trigger regardless of age — while the raw result *content* (the fresh evidence the
-				// epistemic role updates on) is folded into a plain note only once it falls below the
-				// watermark.
+			case "propose":
+			case "distill":
+				// The belief-side roles (propose + distill) share one projection: the probe's tool
+				// calls and reasoning are always elided — that is the imitation trigger regardless of
+				// age — while the raw result *content* (the fresh evidence to update on) is folded into
+				// a plain note only once it falls below the watermark.
 				return this._maskOperationalDetail(message, index < this._evidenceWatermark);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
@@ -863,7 +868,7 @@ export class AgentSession {
 	 * masked from the fresh epistemic role.
 	 */
 	private _resetLoopForNewTask(): void {
-		this._loopState = { role: "epistemic" };
+		this._loopState = { role: "propose" };
 		this._dispatchedFrameIds = new Set();
 		this._reflected = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
@@ -922,97 +927,82 @@ export class AgentSession {
 	private _transition(state: LoopState, turn: PrepareNextTurnContext): { state: LoopState; steer?: string } {
 		const ranTools = turn.toolResults.length > 0;
 		switch (state.role) {
-			case "epistemic": {
+			case "propose": {
 				const proposed = this._beliefSet.proposed();
 				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
-				// Completion is the model's explicit call, never inferred from the open-belief
-				// count: a settled belief does not mean the task is answered.
 				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
 				if (concluded) {
-					// Concluding is premature while anything is still unresolved: an open
-					// framing obligation or an open world belief must be settled (support/
-					// refute), corrected (refine), or dropped (retract) first.
-					const openFramings = this._beliefSet.framings();
-					if (openFramings.length > 0 || proposed.length > 0) {
-						const reasons: string[] = [];
-						if (openFramings.length > 0) {
-							reasons.push(
-								`these obligations for what the answer must establish are still open (${openFramings.map((b) => `"${b.statement}"`).join(", ")})`,
-							);
-						}
-						if (proposed.length > 0) {
-							reasons.push(
-								`these beliefs are still unresolved (${proposed.map((b) => `"${b.statement}"`).join(", ")})`,
-							);
-						}
-						return {
-							state,
-							steer: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
-						};
-					}
-					if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
-						// Everything is settled, but the belief set has not yet been reflected on
-						// as a whole. Fire the one-round reflection and stay epistemic so any belief
-						// it proposes is probed normally; a second conclude passes.
-						this._reflected = true;
-						return { state, steer: REFLECTION_STEER };
-					}
-					return { state: { role: "finalAnswer" }, steer: "Write your conclusion." };
+					return this._concludeTransition(state, proposed);
 				}
 				if (undispatched.length > 0) {
-					// Fresh beliefs — dispatching to the experiment step is automatic: proposing
-					// is the signal to run the experiments, so the epistemic role must not linger.
-					this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
-					this._evidenceWatermark = this.agent.state.messages.length;
-					const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
+					return this._dispatchToExecution(proposed);
+				}
+				if (proposed.length > 0) {
+					// Open (dispatched) beliefs should have been settled by the distill step; route
+					// them back there rather than letting the propose step stall.
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					return {
-						state: {
-							role: "execution",
-							frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
-							leaseReportNudged: false,
-						},
-						steer: `Run the experiments for the beliefs ${statements} and report your observations.`,
+						state: { role: "distill" },
+						steer: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
 					};
 				}
+				if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset) {
+					// No open beliefs, and *this* task produced settled beliefs: settling is not
+					// concluding — prompt it to deepen or conclude.
+					return {
+						state,
+						steer: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
+					};
+				}
+				if (!ranTools) {
+					// Accept a direct answer without steering — unlike the `conclude` path, the
+					// answer already exists, so "Write your conclusion." would be redundant.
+					return { state: { role: "finalAnswer" } };
+				}
+				// No beliefs yet, but the model just acted (e.g. `view_beliefs` on an empty set):
+				// stay propose — it is bootstrapping, not concluding.
+				return { state };
+			}
+			case "distill": {
+				const proposed = this._beliefSet.proposed();
+				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
+				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
+				if (concluded) {
+					return this._concludeTransition(state, proposed);
+				}
+				if (undispatched.length > 0) {
+					// A refine (or an opportunistic propose) during distillation re-opens the frame —
+					// dispatch those fresh beliefs to be probed before returning to propose.
+					return this._dispatchToExecution(proposed);
+				}
 				if (proposed.length > 0 && !ranTools) {
-					// Dispatched-but-unsettled beliefs, and the model stopped instead of updating
-					// them — nudge it in its own terms, not the harness machinery.
+					// Open beliefs, and the model stopped instead of updating them — nudge it in its
+					// own terms, not the harness machinery.
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					return {
 						state,
 						steer: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
 					};
 				}
-				if (proposed.length === 0) {
-					// No open beliefs. If *this* task produced settled beliefs, settling is not
-					// concluding — prompt it to deepen or conclude. If it never proposed anything,
-					// it is answering directly (or gave up), not running the belief loop.
-					if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset) {
-						return {
-							state,
-							steer: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
-						};
-					}
-					if (!ranTools) {
-						// Accept a direct answer without steering — unlike the `conclude` path, the
-						// answer already exists, so "Write your conclusion." would be redundant.
-						return { state: { role: "finalAnswer" } };
-					}
+				if (proposed.length > 0) {
+					// Settled some but not all — keep distilling until every open belief is updated.
+					return { state };
 				}
-				// Otherwise (no beliefs yet, but the model just acted — e.g. `view_beliefs` on an
-				// empty set): stay epistemic — it is bootstrapping, not concluding.
-				return { state };
+				// Every open belief is settled — hand back to the propose step to deepen or conclude.
+				return {
+					state: { role: "propose" },
+					steer: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
+				};
 			}
 			case "execution": {
 				const frameHorizon = state.frameHorizon - turn.toolResults.length;
 				if (!ranTools) {
-					// The experiment's observation is in — return to epistemic to update.
-					return { state: { role: "epistemic" }, steer: EPISTEMIC_RESIDUAL_STEER };
+					// The experiment's observation is in — return to distill to update.
+					return { state: { role: "distill" }, steer: EPISTEMIC_RESIDUAL_STEER };
 				}
 				if (frameHorizon <= 0 && !state.leaseReportNudged) {
 					// Lease exhausted while still probing — nudge once to report; force the return
-					// only if it keeps probing (the epistemic role needs the distilled observation).
+					// only if it keeps probing (the distill role needs the distilled observation).
 					return {
 						state: { role: "execution", frameHorizon, leaseReportNudged: true },
 						steer: "You have gathered enough evidence. Report your observation in one concise sentence.",
@@ -1020,13 +1010,60 @@ export class AgentSession {
 				}
 				if (frameHorizon <= 0) {
 					// Already nudged once and still probing — force the return.
-					return { state: { role: "epistemic" }, steer: EPISTEMIC_RESIDUAL_STEER };
+					return { state: { role: "distill" }, steer: EPISTEMIC_RESIDUAL_STEER };
 				}
 				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
 			}
 			case "finalAnswer":
 				return { state };
 		}
+	}
+
+	/** The conclude handling shared by the two belief-side roles (propose and distill). */
+	private _concludeTransition(state: LoopState, proposed: Belief[]): { state: LoopState; steer?: string } {
+		// Completion is the model's explicit call, never inferred from the open-belief count: a
+		// settled belief does not mean the task is answered. Concluding is premature while an open
+		// framing obligation or an open world belief remains.
+		const openFramings = this._beliefSet.framings();
+		if (openFramings.length > 0 || proposed.length > 0) {
+			const reasons: string[] = [];
+			if (openFramings.length > 0) {
+				reasons.push(
+					`these obligations for what the answer must establish are still open (${openFramings.map((b) => `"${b.statement}"`).join(", ")})`,
+				);
+			}
+			if (proposed.length > 0) {
+				reasons.push(`these beliefs are still unresolved (${proposed.map((b) => `"${b.statement}"`).join(", ")})`);
+			}
+			return {
+				state,
+				steer: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
+			};
+		}
+		if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
+			// Everything is settled, but the belief set has not yet been reflected on as a whole.
+			// Fire the one-round reflection and stay put so any belief it proposes is probed
+			// normally; a second conclude passes.
+			this._reflected = true;
+			return { state, steer: REFLECTION_STEER };
+		}
+		return { state: { role: "finalAnswer" }, steer: "Write your conclusion." };
+	}
+
+	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
+	private _dispatchToExecution(proposed: Belief[]): { state: LoopState; steer: string } {
+		this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
+		this._evidenceWatermark = this.agent.state.messages.length;
+		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
+		const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
+		return {
+			state: {
+				role: "execution",
+				frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
+				leaseReportNudged: false,
+			},
+			steer: `Run the experiments for the beliefs ${statements} and report your observations.`,
+		};
 	}
 
 	/** Tool-call names in the just-finished turn that the current role was not offered. */
@@ -1046,18 +1083,24 @@ export class AgentSession {
 		const names = strayTools.map((name) => `"${name}"`).join(", ");
 		let text: string;
 		switch (this._role) {
-			case "epistemic":
+			case "propose":
 				text =
-					`You tried to call ${names}, which the epistemic role does not have. Your only tools are ` +
+					`You tried to call ${names}, which the propose role does not have. Your only tools are ` +
 					`declare_belief, view_beliefs, and conclude — nothing else. A separate execution role runs ` +
 					`the probe automatically after you propose a belief; express what you wanted to inspect as a ` +
 					`declare_belief proposal instead.`;
 				break;
+			case "distill":
+				text =
+					`You tried to call ${names}, which the distill role does not have. Your only tools are ` +
+					`declare_belief, view_beliefs, and conclude — nothing else. The execution role has already ` +
+					`probed; account for its report by updating beliefs with declare_belief instead.`;
+				break;
 			case "execution":
 				text =
 					`You tried to call ${names}, which the execution role does not have. You probe with read/bash ` +
-					`and report observations; belief updates and concluding happen in a separate epistemic role ` +
-					`after you report. Report your observation in plain text instead.`;
+					`and report observations; belief updates and concluding happen in separate roles after you ` +
+					`report. Report your observation in plain text instead.`;
 				break;
 			case "finalAnswer":
 				text = `You tried to call ${names}, but the finalAnswer role has no tools. Write your conclusion in plain text.`;
@@ -1073,7 +1116,8 @@ export class AgentSession {
 	/** The active tool names available to the current role. */
 	private _roleToolNames(): string[] {
 		switch (this._role) {
-			case "epistemic":
+			case "propose":
+			case "distill":
 				return ["declare_belief", "view_beliefs", "conclude"];
 			case "finalAnswer":
 				return [];
@@ -1081,26 +1125,26 @@ export class AgentSession {
 				// The probe role gets `view_beliefs` read-only — it must be able to recall the
 				// belief it is testing (statement + expectation) without drifting, but it
 				// must not mutate the belief set (`declare_belief`) or conclude (`conclude`),
-				// both of which are the epistemic role's calls.
+				// both of which are the belief-side roles' calls.
 				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "conclude");
 		}
 	}
 
 	/**
 	 * The model for the next turn. Two belief-loop roles may run on separately configured
-	 * models from settings: the execution (probe) role on `executionModel`, and the epistemic
-	 * (distillation) role on `distillationModel` (defaulting to `defaultModel`, so the
-	 * prediction-error distillation stays on the strong default model even when the probe runs
-	 * on a cheaper one). Every other role and any turn outside the belief loop uses the session's
-	 * main model. Only the next request's model is overridden — `state.model` is left untouched so
-	 * footer/compaction/context-window keep the main model as their baseline.
+	 * models from settings: the execution (probe) role on `executionModel`, and the distill
+	 * (prediction-error) role on `distillationModel` (defaulting to `defaultModel`, so the
+	 * distillation stays on the strong default model even when the probe runs on a cheaper one).
+	 * The propose role — and any turn outside the belief loop — uses the session's main model
+	 * (`defaultModel`). Only the next request's model is overridden — `state.model` is left
+	 * untouched so footer/compaction/context-window keep the main model as their baseline.
 	 */
 	private _roleModel(): Model<any> | undefined {
 		if (this._enableBeliefSet && this._beliefSetUsable) {
 			const spec =
 				this._role === "execution"
 					? this.settingsManager.getExecutionModel()
-					: this._role === "epistemic"
+					: this._role === "distill"
 						? this.settingsManager.getDistillationModel()
 						: undefined;
 			if (spec) {
@@ -1142,11 +1186,12 @@ export class AgentSession {
 
 	private _roleInstruction(): string {
 		switch (this._role) {
-			case "epistemic":
+			case "propose":
 				return (
-					"\n\nYou are the epistemic role of a two-role investigation loop. You work entirely through beliefs: " +
+					"\n\nYou are the propose role of a two-role investigation loop. You work entirely through beliefs: " +
 					"you decide what to test and what to conclude, while a separate execution role performs the actual " +
-					"probing. Your only tools are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
+					"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
+					"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
 					"Write every belief — its statement, expectation, and evidence — in Chinese.\n\n" +
 					"Work the belief → experiment → update protocol:\n" +
 					"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
@@ -1167,16 +1212,28 @@ export class AgentSession {
 					"whether two parts of one side contradict each other, whether one side's summary or status table " +
 					"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
 					"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
-					"what it observed, including where that diverges from your expectation. You never do the probing — " +
-					"you only state what should be tested and then interpret the report.\n" +
-					"3. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
+					"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
+					"You never do the probing and you never do that accounting — you only state what should be tested " +
+					"and then decide what to test next.\n" +
+					"3. Keep proposing beliefs until the task is fully answered, close every open framing obligation " +
+					"(support, refine, or retract it via declare_belief), then call conclude."
+				);
+			case "distill":
+				return (
+					"\n\nYou are the distill role of a two-role investigation loop. The execution role has just probed " +
+					"and reported its raw observation; your job is the prediction-error distillation that turns that " +
+					"observation into what the belief set must update on. Your only tools are declare_belief, " +
+					"view_beliefs, and conclude — exactly these three, and nothing else. Write every belief in Chinese.\n\n" +
+					"1. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
 					"report your current beliefs already account for; isolate the residual — the observations and " +
-					"prediction errors they do not explain; then use only that residual to update beliefs. The single " +
-					"declare_belief tool takes an `op` argument — one of propose, support, refute, refine, or retract " +
-					"(omit `op` to propose) — to add, settle, correct, or withdraw a belief; these are op values, " +
-					"never separate tools. Review the set with view_beliefs.\n" +
-					"4. Keep proposing and settling beliefs until the task is fully answered, close every open framing " +
-					"obligation (support, refine, or retract it via declare_belief), then call conclude."
+					"prediction errors they do not explain; then use only that residual to update beliefs.\n" +
+					"2. Update via declare_belief: support or refute an open belief with the observed evidence, or refine " +
+					"a belief whose statement/expectation was wrong. The single declare_belief tool takes an `op` " +
+					"argument — one of propose, support, refute, refine, or retract (omit `op` to propose) — to add, " +
+					"settle, correct, or withdraw a belief; these are op values, never separate tools. Review the set " +
+					"with view_beliefs.\n" +
+					"3. Once every open belief is updated from the residual, stop — proposing the next belief is a " +
+					"separate propose step, not yours."
 				);
 			case "execution":
 				return (
@@ -1184,7 +1241,7 @@ export class AgentSession {
 					"probe the code or product to test it. Report in one concise sentence what you observed — the raw " +
 					"observations and any contradiction with documentation or a contract you noticed, not an analysis " +
 					"of them. The prediction-error distillation (comparing the observation to the expectation and " +
-					"deciding what the belief set must update on) is the epistemic role's step, not yours: it reads " +
+					"deciding what the belief set must update on) is the distill role's step, not yours: it reads " +
 					"your raw report and does that accounting itself. Proposing or updating beliefs is likewise a " +
 					"separate step you do not perform."
 				);
@@ -3974,7 +4031,9 @@ export class AgentSession {
 		const contextWindow = this._contextWindow();
 		if (contextWindow === undefined) return undefined;
 		return {
-			epistemic: this._estimateContextUsage(this._projectMessagesFor("epistemic"), contextWindow),
+			// The propose and distill roles share one (belief-side) projection; `epistemic` here
+			// is the retained public label for that shared projection.
+			epistemic: this._estimateContextUsage(this._projectMessagesFor("propose"), contextWindow),
 			execution: this._estimateContextUsage(this._projectMessagesFor("execution"), contextWindow),
 		};
 	}

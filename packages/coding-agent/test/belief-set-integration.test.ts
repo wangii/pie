@@ -130,11 +130,11 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("epistemic prompt describes the belief-action cycle and never advertises file/command tools", async () => {
+	test("propose prompt describes the belief-action cycle and never advertises file/command tools", async () => {
 		const harness = await createHarness({ enableBeliefSet: true });
 		try {
 			const prompt = harness.session.agent.state.systemPrompt;
-			// The epistemic role has no read/bash/edit/write, so the prompt must not
+			// The propose role has no read/bash/edit/write, so the prompt must not
 			// claim them (the coding-agent preamble did, which drove the model to call
 			// `bash` and get "Tool bash not found").
 			expect(prompt).not.toContain("reading files");
@@ -168,10 +168,10 @@ describe("declare_belief integration", () => {
 			// partition its wording imposes — as a presupposition to falsify, not a given.
 			expect(prompt).toContain("implicit frame");
 			expect(prompt).toContain("contradicts its own body");
-			// The update step is a residual filter: explain → isolate → update, not a full re-read.
-			expect(prompt).toContain("epistemic residual");
-			expect(prompt).toContain("isolate the residual");
-			expect(prompt).toContain("prediction errors");
+			// The residual filter — explain → isolate → update — is the distill role's step, not the
+			// propose role's, so the propose prompt must hand it off rather than fold it in.
+			expect(prompt).toContain("separate distill step");
+			expect(prompt).not.toContain("epistemic residual");
 		} finally {
 			harness.cleanup();
 		}
@@ -871,7 +871,7 @@ describe("declare_belief integration", () => {
 			const executionContext = harness.faux.contexts.find((c) => contextToolNames(c).includes("echo"));
 			expect(executionContext).toBeDefined();
 			expect(executionContext!.systemPrompt).toContain("prediction-error");
-			expect(executionContext!.systemPrompt).toContain("epistemic role's step");
+			expect(executionContext!.systemPrompt).toContain("distill role's step");
 			// It must still surface what the belief did not name — inconsistencies or staleness
 			// beyond the probed hypothesis — as raw observations, so the epistemic role can expand
 			// its beliefs horizontally instead of only confirming the narrow hypotheses it proposed.
@@ -880,6 +880,14 @@ describe("declare_belief integration", () => {
 			// The epistemic return steer asks for the residual, not a full re-update.
 			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
 			expect(epistemicContexts.some((c) => contextText(c).includes("isolate the residual"))).toBe(true);
+
+			// The distill role's own prompt carries the residual accounting that the propose role
+			// hands off — the split is what lets the two steps run on different models.
+			const distillContext = harness.faux.contexts.find((c) => c.systemPrompt?.includes("You are the distill role"));
+			expect(distillContext).toBeDefined();
+			expect(distillContext!.systemPrompt).toContain("epistemic residual");
+			expect(distillContext!.systemPrompt).toContain("isolate the residual");
+			expect(distillContext!.systemPrompt).toContain("prediction errors");
 		} finally {
 			harness.cleanup();
 		}
@@ -1554,9 +1562,9 @@ describe("declare_belief integration", () => {
 			await harness.session.prompt("investigate");
 
 			// The corrective steer reached the transcript as a user message naming the stray
-			// tool and re-stating the epistemic role's own tools — the error was not swallowed.
+			// tool and re-stating the propose role's own tools — the error was not swallowed.
 			const userTexts = harness.session.messages.filter((m) => m.role === "user").map(messageText);
-			expect(userTexts.some((t) => t.includes('"bash"') && t.includes("epistemic role does not have"))).toBe(true);
+			expect(userTexts.some((t) => t.includes('"bash"') && t.includes("propose role does not have"))).toBe(true);
 
 			// The loop recovered: the belief was proposed and settled, and the task concluded.
 			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
