@@ -37,8 +37,9 @@ export interface Belief {
 	readonly expectation: string;
 	/** Structured evidence-round estimate: how many tool results this test needs. */
 	readonly evidenceRounds: number;
-	/** Append-only evidence that settled the belief as supported. */
-	readonly supportedBy: readonly { evidence: string }[];
+	/** Append-only evidence that settled the belief as supported. A framing belief's entries
+	 *  also carry the ids of the product/code beliefs whose support discharged the obligation. */
+	readonly supportedBy: readonly { evidence: string; beliefIds?: readonly string[] }[];
 	/** Append-only evidence that settled the belief as refuted. */
 	readonly refutedBy: readonly { evidence: string }[];
 	/** The id of the belief that superseded this one (`refine`), or the `WITHDRAWN` sentinel (`retract`). */
@@ -55,7 +56,7 @@ export const WITHDRAWN = "withdrawn";
  */
 export type BeliefDelta =
 	| { op: "propose"; statement: string; domain: BeliefDomain; expectation: string; evidenceRounds: number }
-	| { op: "support"; beliefId: string; evidence: string }
+	| { op: "support"; beliefId: string; evidence: string; evidenceBeliefIds?: readonly string[] }
 	| { op: "refute"; beliefId: string; evidence: string }
 	| { op: "refine"; beliefId: string; statement: string; expectation: string; evidenceRounds: number }
 	| { op: "retract"; beliefId: string };
@@ -163,7 +164,7 @@ export class BeliefSet {
 				return belief;
 			}
 			case "support":
-				return this._adjudicate(delta.beliefId, delta.evidence, "supported");
+				return this._adjudicate(delta.beliefId, delta.evidence, "supported", delta.evidenceBeliefIds);
 			case "refute":
 				return this._adjudicate(delta.beliefId, delta.evidence, "refuted");
 			case "refine": {
@@ -201,7 +202,12 @@ export class BeliefSet {
 	 * only with evidence — the observed result and how it met or diverged from the
 	 * expectation. This is the R → B′ arrow: an action's result is what moves the belief.
 	 */
-	private _adjudicate(id: string, evidence: string, sign: "supported" | "refuted"): Belief {
+	private _adjudicate(
+		id: string,
+		evidence: string,
+		sign: "supported" | "refuted",
+		evidenceBeliefIds?: readonly string[],
+	): Belief {
 		const trimmed = evidence.trim();
 		if (!trimmed) {
 			throw new BeliefValidationError(`Cannot ${sign === "supported" ? "support" : "refute"} without evidence.`);
@@ -215,11 +221,49 @@ export class BeliefSet {
 				`Only an open belief can be ${sign === "supported" ? "supported" : "refuted"}; belief ${id} is already ${statusOf(belief)}.`,
 			);
 		}
+		// A framing belief is discharged only by supported product/code beliefs that establish
+		// the obligation — the structural conclude gate cannot see whether the obligation was
+		// actually satisfied, so the discharge link is enforced here instead of trusting a
+		// bare evidence string. Refuting, refining, or retracting a framing keeps its original
+		// semantics; only `support` requires the reference list.
+		const beliefIds =
+			sign === "supported" && belief.domain === "framing"
+				? this._validateFramingDischarge(id, evidenceBeliefIds)
+				: undefined;
+		const entry = beliefIds !== undefined ? { evidence: trimmed, beliefIds } : { evidence: trimmed };
 		const updated =
 			sign === "supported"
-				? { ...belief, supportedBy: [...belief.supportedBy, { evidence: trimmed }] }
+				? { ...belief, supportedBy: [...belief.supportedBy, entry] }
 				: { ...belief, refutedBy: [...belief.refutedBy, { evidence: trimmed }] };
 		return this._replace(id, updated);
+	}
+
+	/** Validate a framing belief's discharge references: at least one id, all existing, all
+	 *  product/code (never framing), all already supported. Returns the ids to persist. */
+	private _validateFramingDischarge(id: string, evidenceBeliefIds?: readonly string[]): readonly string[] {
+		const ids = evidenceBeliefIds ?? [];
+		if (ids.length === 0) {
+			throw new BeliefValidationError(
+				`Supporting framing belief ${id} requires \`evidenceBeliefIds\`: reference the product/code beliefs that establish this obligation.`,
+			);
+		}
+		const missing = ids.filter((refId) => !this.get(refId));
+		if (missing.length > 0) {
+			throw new BeliefValidationError(`Unknown belief id in evidenceBeliefIds: ${missing.join(", ")}.`);
+		}
+		const framingRefs = ids.filter((refId) => this.get(refId)!.domain === "framing");
+		if (framingRefs.length > 0) {
+			throw new BeliefValidationError(
+				`evidenceBeliefIds must reference product/code beliefs, not framing beliefs: ${framingRefs.join(", ")}.`,
+			);
+		}
+		const unsupported = ids.filter((refId) => statusOf(this.get(refId)!) !== "supported");
+		if (unsupported.length > 0) {
+			throw new BeliefValidationError(
+				`evidenceBeliefIds must reference supported beliefs; these are not supported yet: ${unsupported.join(", ")}.`,
+			);
+		}
+		return ids;
 	}
 
 	private _replace(id: string, next: Belief): Belief {

@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { describe, expect, test } from "vitest";
+import { BeliefSet, statusOf } from "../src/core/belief-set.ts";
 import { createHarness, type FauxResponse, type FauxResponseInput } from "./test-harness.ts";
 
 function messageText(message: { content: unknown }): string {
@@ -198,7 +199,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("two-role flow: propose dispatches to execution, then adjudication settles the frame", async () => {
+	test("four-phase flow: propose dispatches to execution, then adjudication settles the frame", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -902,9 +903,14 @@ describe("declare_belief integration", () => {
 			expect(contextToolCalls(lastContext).some((t) => t.name === "[probe]")).toBe(false);
 			// The real tool name never leaks into the distilled projection.
 			expect(contextToolCalls(lastContext).some((t) => t.name === "echo")).toBe(false);
-			// The distilled text report and the settled beliefs survive.
+			// The distilled text report survives, but the belief tools' echo is masked: the
+			// finalAnswer role reads the explicit final-answer context instead of incidental
+			// declare_belief/view_beliefs results.
 			expect(contextText(lastContext)).toContain("the value persisted");
-			expect(contextText(lastContext)).toContain("Applied support");
+			expect(contextText(lastContext)).not.toContain("Applied support");
+			expect(contextText(lastContext)).toContain("[belief bookkeeping omitted]");
+			expect(contextText(lastContext)).toContain("<final_answer_context>");
+			expect(contextText(lastContext)).toContain("the cache survives logout");
 
 			// The execution role itself still sees its own raw reasoning (the probe turn's
 			// thinking enters the execution context of the following report turn).
@@ -1070,6 +1076,77 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("framing support requires evidenceBeliefIds referencing supported world beliefs", () => {
+		const set = new BeliefSet();
+		const world = set.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a probe keeps the value",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: world.id, evidence: "the value persisted" });
+		const framing = set.apply({
+			op: "propose",
+			statement: "the task is one root-cause bug",
+			domain: "framing",
+			expectation: "no second independent mechanism appears",
+			evidenceRounds: 1,
+		});
+		// No references: rejected with an actionable message.
+		expect(() => set.apply({ op: "support", beliefId: framing.id, evidence: "two mechanisms established" })).toThrow(
+			/evidenceBeliefIds/,
+		);
+		// Unknown reference id: rejected.
+		expect(() =>
+			set.apply({ op: "support", beliefId: framing.id, evidence: "x", evidenceBeliefIds: ["belief-99"] }),
+		).toThrow(/Unknown belief id/);
+		// Framing→framing reference: rejected (only product/code beliefs may discharge an obligation).
+		expect(() =>
+			set.apply({ op: "support", beliefId: framing.id, evidence: "x", evidenceBeliefIds: [framing.id] }),
+		).toThrow(/product\/code/);
+		// Unsupported (still proposed) world reference: rejected.
+		const open = set.apply({
+			op: "propose",
+			statement: "login is stateless",
+			domain: "product",
+			expectation: "a probe sees no session state",
+			evidenceRounds: 1,
+		});
+		expect(() =>
+			set.apply({ op: "support", beliefId: framing.id, evidence: "x", evidenceBeliefIds: [open.id] }),
+		).toThrow(/not supported/);
+		// Valid discharge: accepted, and the references are persisted on the evidence entry.
+		const discharged = set.apply({
+			op: "support",
+			beliefId: framing.id,
+			evidence: "two mechanisms established",
+			evidenceBeliefIds: [world.id],
+		});
+		expect(statusOf(discharged)).toBe("supported");
+		expect(discharged.supportedBy[0].beliefIds).toEqual([world.id]);
+	});
+
+	test("evidenceBeliefIds is ignored for non-framing support", () => {
+		const set = new BeliefSet();
+		const world = set.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a probe keeps the value",
+			evidenceRounds: 1,
+		});
+		// Unknown ids are not validated for world beliefs: the field only gates framing discharge.
+		const supported = set.apply({
+			op: "support",
+			beliefId: world.id,
+			evidence: "the value persisted",
+			evidenceBeliefIds: ["belief-99"],
+		});
+		expect(statusOf(supported)).toBe("supported");
+		expect(supported.supportedBy[0].beliefIds).toBeUndefined();
+	});
+
 	test("conclude is gated until open world beliefs are resolved", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
@@ -1202,11 +1279,14 @@ describe("declare_belief integration", () => {
 			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
 
 			// The last turn ran in the finalAnswer role: no tools, and its context redacts the
-			// raw probe output while keeping the settled beliefs.
+			// raw probe output and the belief tools' echo, replacing them with the explicit
+			// final-answer context.
 			const lastContext = harness.faux.contexts[harness.faux.contexts.length - 1];
 			expect(contextToolNames(lastContext)).toEqual([]);
 			expect(contextText(lastContext)).not.toContain("echoed");
-			expect(contextText(lastContext)).toContain("Applied support");
+			expect(contextText(lastContext)).not.toContain("Applied support");
+			expect(contextText(lastContext)).toContain("<final_answer_context>");
+			expect(contextText(lastContext)).toContain("the cache survives logout");
 
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
 			expect(assistantTexts).toContain("the conclusion");

@@ -53,7 +53,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { type Belief, BeliefSet } from "./belief-set.ts";
+import { type Belief, BeliefSet, statusOf } from "./belief-set.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -103,6 +103,7 @@ import { resolveCliModel } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import { ROLE_SPECS, TRANSITION_STEERS } from "./role-specs.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -309,37 +310,6 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // ============================================================================
 // Constants
 // ============================================================================
-
-/**
- * The steer that returns the loop from the execution role to the epistemic role. It
- * deliberately does not say "update your belief" — that invites the model to
- * re-process the whole observation. The epistemic uplink walks three steps instead:
- * explain what the current beliefs already account for, isolate the residual they do
- * not, and update on that residual alone.
- */
-const EPISTEMIC_RESIDUAL_STEER =
-	"Account for the observation: explain what your beliefs already explain, isolate the residual they do not, and update only on that residual.";
-
-/**
- * The steer that runs once, just before the loop hands off to the finalAnswer role. It
- * makes the belief set itself the object of one last test, mirroring the residual protocol
- * at one level up: the epistemic residual isolates what a single observation does not
- * explain, this isolates what the *whole set* does not name. Three falsifiable checks —
- * coverage, composition, completeness — each map to a failure mode the residual filter
- * cannot see because the probe never ran. Firing only when the task produced beliefs and
- * only once (`_reflected`) keeps a direct answer on an empty set, or a reflection that
- * proposes nothing, from looping forever.
- */
-const REFLECTION_STEER =
-	"Before you conclude, reflect on the belief set itself as the object of one final test. " +
-	"For each check that fails, propose the missing belief and let it be probed — do not conclude yet. " +
-	"(1) Coverage — every path or @reference the task named has appeared as the referent of some belief; " +
-	"if any is untouched, propose a belief to probe it. " +
-	"(2) Composition — the conjunction of two supported beliefs may smuggle a claim that was never proposed; " +
-	"propose that implied claim. " +
-	"(3) Completeness — every belief that calls something consistent or free of drift treated it as complete; " +
-	"check its own internals and the reverse direction (does the contract lag the code, does one document lag another). " +
-	"If all three pass with nothing to add, conclude again.";
 
 /**
  * Headroom applied to a frame's evidence-round total when sizing the execution lease
@@ -719,18 +689,29 @@ export class AgentSession {
 		role: "propose" | "distill" | "execution" | "finalAnswer",
 		elidedProbeToolCalls: Set<string>,
 	): AgentMessage | undefined {
-		switch (role) {
-			case "propose":
-			case "distill":
-				// The belief-side roles (propose + distill) share one projection: the probe's tool
-				// calls and reasoning are always elided — that is the imitation trigger regardless of
-				// age — while the raw result *content* (the fresh evidence to update on) is folded into
-				// a plain note only once it falls below the watermark.
+		// The projection per role is declared in ROLE_SPECS; the masking helpers below implement
+		// each kind. The belief-side roles (propose + distill) share one projection: the probe's
+		// tool calls and reasoning are always elided — that is the imitation trigger regardless
+		// of age — while the raw result *content* (the fresh evidence to update on) is folded
+		// into a plain note only once it falls below the watermark.
+		switch (ROLE_SPECS[role].projection) {
+			case "belief":
 				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
-			case "finalAnswer":
-				return this._maskOperationalDetail(message, true, elidedProbeToolCalls);
+			case "finalAnswer": {
+				// Raw operational detail is discarded, and the belief tools' echoes are masked too:
+				// the finalAnswer role reads the explicit final-answer context injected at the
+				// handoff instead of whatever declare_belief/view_beliefs results happen to survive.
+				const masked = this._maskOperationalDetail(message, true, elidedProbeToolCalls);
+				if (masked === undefined) return undefined;
+				// Epistemic assistant turns are distilled too (thinking + every belief tool call
+				// dropped, text kept): finalAnswer has no tools and grounds on the snapshot, so the
+				// propose/distill bookkeeping — including a read-only `view_beliefs` call whose result
+				// `_maskBeliefEchoes` masks — must not survive as a dangling tool call.
+				const stripped = masked.role === "assistant" ? this._maskEpistemicAssistant(masked, false) : masked;
+				return stripped === undefined ? undefined : this._maskBeliefEchoes(stripped);
+			}
 		}
 	}
 
@@ -876,23 +857,50 @@ export class AgentSession {
 		);
 	}
 
-	/** Distill an epistemic-role assistant turn for the execution view: drop its thinking and
-	 *  its belief-mutation tool calls (declare_belief / conclude), keeping its text and any
-	 *  read-only view_beliefs call. Eliding the call (rather than renaming it) is what stops the
-	 *  execution role from imitating the mutation — and what keeps the transcript free of
-	 *  tool-call names the provider may reject. */
-	private _maskEpistemicAssistant(message: AssistantMessage): AssistantMessage | undefined {
+	/** Distill an epistemic-role assistant turn for a role that must not see the belief
+	 *  bookkeeping: drop its thinking and its belief tool calls, keeping only its text. Eliding
+	 *  the call (rather than renaming it) is what stops the role from imitating the bookkeeping —
+	 *  and what keeps the transcript free of tool-call names the provider may reject. The
+	 *  read-only `view_beliefs` call is kept for the execution role (`keepViewBeliefs`, the
+	 *  default), which needs it to recall the frame it is probing; finalAnswer drops it too,
+	 *  since it has no tools and its `view_beliefs` result is masked to a note. */
+	private _maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = true): AssistantMessage | undefined {
 		const content: AssistantMessage["content"] = [];
 		for (const block of message.content) {
 			if (block.type === "thinking") {
 				continue;
 			}
-			if (block.type === "toolCall" && (block.name === "declare_belief" || block.name === "conclude")) {
-				continue;
+			if (block.type === "toolCall") {
+				const isMutation = block.name === "declare_belief" || block.name === "conclude";
+				const isReadOnly = block.name === "view_beliefs";
+				if (isMutation || (isReadOnly && !keepViewBeliefs)) {
+					continue;
+				}
 			}
 			content.push(block);
 		}
 		return content.length > 0 ? { ...message, content } : undefined;
+	}
+
+	/** Mask the belief tools' echo from a finalAnswer message: the explicit final-answer context
+	 *  injected at the handoff replaces incidental `declare_belief`/`view_beliefs`/`conclude`
+	 *  results, which may be stale or partial, so they are dropped here rather than left to be read
+	 *  as facts. `conclude` is included so its "Investigation concluded." result does not orphan
+	 *  once `_maskEpistemicAssistant` elides the call. */
+	private _maskBeliefEchoes(message: AgentMessage): AgentMessage | undefined {
+		if (
+			message.role === "toolResult" &&
+			(message.toolName === "declare_belief" ||
+				message.toolName === "view_beliefs" ||
+				message.toolName === "conclude")
+		) {
+			return {
+				role: "user",
+				content: [{ type: "text", text: "[belief bookkeeping omitted]" }],
+				timestamp: message.timestamp,
+			};
+		}
+		return message;
 	}
 
 	/**
@@ -979,7 +987,7 @@ export class AgentSession {
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					return {
 						state: { role: "distill" },
-						steer: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
+						steer: TRANSITION_STEERS.openBeliefs(statements),
 					};
 				}
 				if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset) {
@@ -987,7 +995,7 @@ export class AgentSession {
 					// concluding — prompt it to deepen or conclude.
 					return {
 						state,
-						steer: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
+						steer: TRANSITION_STEERS.deepenOrConclude,
 					};
 				}
 				if (!ranTools) {
@@ -1017,7 +1025,7 @@ export class AgentSession {
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					return {
 						state,
-						steer: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
+						steer: TRANSITION_STEERS.openBeliefs(statements),
 					};
 				}
 				if (proposed.length > 0) {
@@ -1027,26 +1035,26 @@ export class AgentSession {
 				// Every open belief is settled — hand back to the propose step to deepen or conclude.
 				return {
 					state: { role: "propose" },
-					steer: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
+					steer: TRANSITION_STEERS.deepenOrConclude,
 				};
 			}
 			case "execution": {
 				const frameHorizon = state.frameHorizon - turn.toolResults.length;
 				if (!ranTools) {
 					// The experiment's observation is in — return to distill to update.
-					return { state: { role: "distill" }, steer: EPISTEMIC_RESIDUAL_STEER };
+					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
 				}
 				if (frameHorizon <= 0 && !state.leaseReportNudged) {
 					// Lease exhausted while still probing — nudge once to report; force the return
 					// only if it keeps probing (the distill role needs the distilled observation).
 					return {
 						state: { role: "execution", frameHorizon, leaseReportNudged: true },
-						steer: "You have gathered enough evidence. Report your observation in one concise sentence.",
+						steer: TRANSITION_STEERS.leaseNudge,
 					};
 				}
 				if (frameHorizon <= 0) {
 					// Already nudged once and still probing — force the return.
-					return { state: { role: "distill" }, steer: EPISTEMIC_RESIDUAL_STEER };
+					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
 				}
 				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
 			}
@@ -1073,7 +1081,7 @@ export class AgentSession {
 			}
 			return {
 				state,
-				steer: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
+				steer: TRANSITION_STEERS.concludePremature(reasons.join(" and ")),
 			};
 		}
 		if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
@@ -1081,9 +1089,53 @@ export class AgentSession {
 			// Fire the one-round reflection and stay put so any belief it proposes is probed
 			// normally; a second conclude passes.
 			this._reflected = true;
-			return { state, steer: REFLECTION_STEER };
+			return { state, steer: TRANSITION_STEERS.reflection };
 		}
-		return { state: { role: "finalAnswer" }, steer: "Write your conclusion." };
+		// The terminal handoff: the finalAnswer role has no tools and the belief set is never
+		// injected into the system prompt, so it must receive an explicit, current snapshot of
+		// what it is to ground the conclusion on — instead of whatever declare_belief/view_beliefs
+		// echoes happen to survive in the masked transcript.
+		return {
+			state: { role: "finalAnswer" },
+			steer: `${TRANSITION_STEERS.writeConclusion}\n\n${this._formatFinalAnswerContext()}`,
+		};
+	}
+
+	/** Render the explicit final-answer context: the settled world beliefs (with their evidence),
+	 *  the framing outcomes, and the refuted beliefs the answer must not treat as facts. */
+	private _formatFinalAnswerContext(): string {
+		const beliefs = this._beliefSet.beliefs;
+		const settledWorld = beliefs.filter((b) => statusOf(b) === "supported" && b.domain !== "framing");
+		const framingOutcomes = beliefs.filter((b) => b.domain === "framing" && statusOf(b) !== "proposed");
+		const refuted = beliefs.filter((b) => statusOf(b) === "refuted");
+		const lines: string[] = ["<final_answer_context>"];
+		if (settledWorld.length > 0) {
+			lines.push("Settled world beliefs:");
+			for (const b of settledWorld) {
+				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
+				lines.push(`  expectation: ${b.expectation}`);
+				for (const e of b.supportedBy) {
+					lines.push(`  evidence: ${e.evidence}`);
+				}
+			}
+		}
+		if (framingOutcomes.length > 0) {
+			lines.push("Framing outcomes:");
+			for (const b of framingOutcomes) {
+				lines.push(`- ${b.id} [${b.domain}] ${b.statement} (${statusOf(b)})`);
+				for (const e of b.supportedBy) {
+					lines.push(`  evidence: ${e.evidence}`);
+				}
+			}
+		}
+		if (refuted.length > 0) {
+			lines.push("Refuted beliefs (not part of the answer):");
+			for (const b of refuted) {
+				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
+			}
+		}
+		lines.push("</final_answer_context>");
+		return lines.join("\n");
 	}
 
 	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
@@ -1098,7 +1150,7 @@ export class AgentSession {
 				frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
 				leaseReportNudged: false,
 			},
-			steer: `Run the experiments for the beliefs ${statements} and report your observations.`,
+			steer: TRANSITION_STEERS.dispatch(statements),
 		};
 	}
 
@@ -1117,31 +1169,7 @@ export class AgentSession {
 	/** Steer the current role back to its own tools after it emitted a tool outside its surface. */
 	private _steerStrayToolCall(strayTools: string[]): void {
 		const names = strayTools.map((name) => `"${name}"`).join(", ");
-		let text: string;
-		switch (this._role) {
-			case "propose":
-				text =
-					`You tried to call ${names}, which the propose role does not have. Your only tools are ` +
-					`declare_belief, view_beliefs, and conclude — nothing else. A separate execution role runs ` +
-					`the probe automatically after you propose a belief; express what you wanted to inspect as a ` +
-					`declare_belief proposal instead.`;
-				break;
-			case "distill":
-				text =
-					`You tried to call ${names}, which the distill role does not have. Your only tools are ` +
-					`declare_belief, view_beliefs, and conclude — nothing else. The execution role has already ` +
-					`probed; account for its report by updating beliefs with declare_belief instead.`;
-				break;
-			case "execution":
-				text =
-					`You tried to call ${names}, which the execution role does not have. You probe with read/bash ` +
-					`and report observations; belief updates and concluding happen in separate roles after you ` +
-					`report. Report your observation in plain text instead.`;
-				break;
-			case "finalAnswer":
-				text = `You tried to call ${names}, but the finalAnswer role has no tools. Write your conclusion in plain text.`;
-				break;
-		}
+		const text = ROLE_SPECS[this._role].strayToolSteer(names);
 		this.agent.steer({
 			role: "user",
 			content: [{ type: "text", text }],
@@ -1149,21 +1177,13 @@ export class AgentSession {
 		});
 	}
 
-	/** The active tool names available to the current role. */
+	/** The active tool names available to the current role, declared in ROLE_SPECS. */
 	private _roleToolNames(): string[] {
-		switch (this._role) {
-			case "propose":
-			case "distill":
-				return ["declare_belief", "view_beliefs", "conclude"];
-			case "finalAnswer":
-				return [];
-			case "execution":
-				// The probe role gets `view_beliefs` read-only — it must be able to recall the
-				// belief it is testing (statement + expectation) without drifting, but it
-				// must not mutate the belief set (`declare_belief`) or conclude (`conclude`),
-				// both of which are the belief-side roles' calls.
-				return this._fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "conclude");
+		const tools = ROLE_SPECS[this._role].tools;
+		if (typeof tools === "function") {
+			return tools({ fullActiveToolNames: this._fullActiveToolNames });
 		}
+		return [...tools];
 	}
 
 	/**
@@ -1177,10 +1197,13 @@ export class AgentSession {
 	 */
 	private _roleModel(): Model<any> | undefined {
 		if (this._enableBeliefSet && this._beliefSetUsable) {
+			// The model policy per role is declared in ROLE_SPECS; only execution and distill
+			// may run on separately configured models from settings.
+			const policy = ROLE_SPECS[this._role].modelPolicy;
 			const spec =
-				this._role === "execution"
+				policy === "execution"
 					? this.settingsManager.getExecutionModel()
-					: this._role === "distill"
+					: policy === "distillation"
 						? this.settingsManager.getDistillationModel()
 						: undefined;
 			if (spec) {
@@ -1221,72 +1244,7 @@ export class AgentSession {
 	}
 
 	private _roleInstruction(): string {
-		switch (this._role) {
-			case "propose":
-				return (
-					"\n\nYou are the propose role of a two-role investigation loop. You work entirely through beliefs: " +
-					"you decide what to test and what to conclude, while a separate execution role performs the actual " +
-					"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
-					"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
-					"Write every belief — its statement, expectation, and evidence — in Chinese.\n\n" +
-					"Work the belief → experiment → update protocol:\n" +
-					"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
-					"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
-					"how many evidence rounds it needs. Tag each referent in the statement with one of four kinds — " +
-					"[code] (implementation: symbol/file/logic), [prod] (product behavior or documented claim), " +
-					"[user] (user intent/requirement), [convention] (repo idiom/naming/pattern) — tagging only the " +
-					"referents the relation points at, not every noun (e.g. `_projectMessagesFor[code]` 计算 `status[prod]` " +
-					"的 context 统计规则). A framing belief (domain framing) states what the final answer " +
-					"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
-					"audit something, the framing obligation must include surfacing any inconsistency between what the " +
-					"project's documentation and code claim and what the implementation actually does — not merely " +
-					"describing where things are defined. Every examine/review/audit question also carries an implicit " +
-					'frame you must not inherit silently: it splits the world into two sides (e.g. "server" vs ' +
-					'"client") and thereby presupposes each side is internally coherent, is the current authority, ' +
-					"and that drift lives only across that line. Make that frame explicit and falsify it — name the " +
-					"presuppositions the question's wording imports and propose each as a testable belief, including " +
-					"whether two parts of one side contradict each other, whether one side's summary or status table " +
-					"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
-					"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
-					"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
-					"You never do the probing and you never do that accounting — you only state what should be tested " +
-					"and then decide what to test next.\n" +
-					"3. Keep proposing beliefs until the task is fully answered, close every open framing obligation " +
-					"(support, refine, or retract it via declare_belief), then call conclude."
-				);
-			case "distill":
-				return (
-					"\n\nYou are the distill role of a two-role investigation loop. The execution role has just probed " +
-					"and reported its raw observation; your job is the prediction-error distillation that turns that " +
-					"observation into what the belief set must update on. Your only tools are declare_belief, " +
-					"view_beliefs, and conclude — exactly these three, and nothing else. Write every belief in Chinese.\n\n" +
-					"1. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
-					"report your current beliefs already account for; isolate the residual — the observations and " +
-					"prediction errors they do not explain; then use only that residual to update beliefs.\n" +
-					"2. Update via declare_belief: support or refute an open belief with the observed evidence, or refine " +
-					"a belief whose statement/expectation was wrong. The single declare_belief tool takes an `op` " +
-					"argument — one of propose, support, refute, refine, or retract (omit `op` to propose) — to add, " +
-					"settle, correct, or withdraw a belief; these are op values, never separate tools. Review the set " +
-					"with view_beliefs.\n" +
-					"3. Once every open belief is updated from the residual, stop — proposing the next belief is a " +
-					"separate propose step, not yours."
-				);
-			case "execution":
-				return (
-					"\n\nRead the belief you are probing with view_beliefs if you need its exact expectation, then " +
-					"probe the code or product to test it. Report in one concise sentence what you observed — the raw " +
-					"observations and any contradiction with documentation or a contract you noticed, not an analysis " +
-					"of them. The prediction-error distillation (comparing the observation to the expectation and " +
-					"deciding what the belief set must update on) is the distill role's step, not yours: it reads " +
-					"your raw report and does that accounting itself. Proposing or updating beliefs is likewise a " +
-					"separate step you do not perform."
-				);
-			case "finalAnswer":
-				return (
-					"\n\nYou are a scientific mind writing the conclusion: answer the original task directly and " +
-					"concisely, grounded in the beliefs you have settled."
-				);
-		}
+		return ROLE_SPECS[this._role].instruction;
 	}
 
 	/** Project the current role's tool subset and system prompt onto the agent state. */

@@ -21,7 +21,7 @@ const declareBeliefSchema = Type.Object({
 			],
 			{
 				description:
-					"What to do. Omit it to propose (the default). propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId).",
+					"What to do. Omit it to propose (the default). propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence; supporting a framing belief also needs evidenceBeliefIds). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId).",
 			},
 		),
 	),
@@ -57,6 +57,12 @@ const declareBeliefSchema = Type.Object({
 		Type.String({
 			description:
 				"The observed result and how it met or diverged from the belief's expectation. Required for support and refute.",
+		}),
+	),
+	evidenceBeliefIds: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"Belief ids that discharge this support. Required when supporting a framing belief: reference the product/code beliefs (each must already be supported) that establish the obligation. Ignored for non-framing support.",
 		}),
 	),
 });
@@ -108,7 +114,12 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 			if (!input.evidence?.trim()) {
 				throw new Error("support requires `evidence` (the observed result and how it met the expectation).");
 			}
-			return { op: "support", beliefId: input.beliefId, evidence: input.evidence };
+			return {
+				op: "support",
+				beliefId: input.beliefId,
+				evidence: input.evidence,
+				...(input.evidenceBeliefIds ? { evidenceBeliefIds: input.evidenceBeliefIds } : {}),
+			};
 		case "refute":
 			if (!input.beliefId) throw new Error("refute requires a `beliefId`.");
 			if (!input.evidence?.trim()) {

@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { type BeliefSet, formatBeliefsForView } from "../belief-set.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { ROLE_SPECS } from "../role-specs.ts";
 
 /**
  * The `view_beliefs` tool — the epistemic role's read-only surface onto the belief set.
@@ -26,9 +27,10 @@ export function createViewBeliefsToolDefinition(
 		parameters: viewBeliefsSchema,
 		async execute(_toolCallId, _input, _signal, _onUpdate, _ctx) {
 			// The execution role only needs the frame it is probing (statement + expectation);
-			// the epistemic role sees the full set. Scoping the output keeps the probe role from
-			// being handed framing obligations and settled history it must not act on.
-			const scope = currentRole() === "execution" ? "frame" : "all";
+			// the belief-side roles see the full set. The scope per role is declared in
+			// ROLE_SPECS; scoping the output keeps the probe role from being handed framing
+			// obligations and settled history it must not act on.
+			const scope = ROLE_SPECS[currentRole()].beliefScope;
 			return {
 				content: [{ type: "text", text: formatBeliefsForView(beliefSet.beliefs, scope) }],
 				details: undefined,

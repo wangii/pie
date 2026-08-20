@@ -30,7 +30,8 @@ the ones that justify a new object — and only a small one.
 Deliberately excluded, to keep it from becoming a planner or a schema:
 
 - **Not a report template or outline.** No `Architecture / Files / Root Cause / Tests` slots.
-  The finalAnswer role writes from world beliefs, never from framing beliefs.
+  World beliefs are the factual basis of the answer; settled framing beliefs contribute only
+  completion metadata (the obligation was discharged), never report substance.
 - **Not an action path.** It names a *knowledge destination*, never a probe. It is structurally
   barred from dispatching to execution.
 - **Not a second belief class.** Same record shape, same status machine, same `declare_belief`
@@ -73,10 +74,14 @@ harness rejects `conclude` and steers the epistemic role back: *"you still have 
 obligation: <statement>. Satisfy it (support), reframe it (refine), or drop it (retract)."*
 
 The gate is structural — it checks only "no open obligation remains", never "is the obligation
-*actually* satisfied". Satisfaction is the model's judgment, expressed as `support`/`refute`/
-`refine`/`retract` on the framing belief, at exactly the same trust level as world-belief
-support. The `retract` escape hatch is mandatory: it is what prevents an obligation from
-becoming a permanent blocker.
+*actually* satisfied". To give the gate a mechanical purchase without pretending to judge
+semantics, supporting a framing belief now requires `evidenceBeliefIds`: a list of ids of
+product/code beliefs that establish the obligation. The harness rejects the `support` unless
+at least one id is given, every id exists, all are `product`/`code` (never `framing`), and all
+are already `supported`. The references are persisted on the evidence entry
+(`supportedBy[].beliefIds`), so the discharge is a structured link to the world beliefs that
+carry the answer's facts, not a bare assertion. `refute`/`refine`/`retract` on a framing keep
+their original semantics; the rule applies only to `support`.
 
 ## Worked example: the bug that was actually two bugs
 
@@ -89,8 +94,9 @@ becoming a permanent blocker.
    not explained by current world beliefs **and** it contradicts F1's expectation.
 4. The residual pass routes it as a **reframe**, not a fill: `refine` F1 → F2 *"the task is two
    independent mechanisms"*, and propose world beliefs for the second mechanism.
-5. Eventually world beliefs establish both mechanisms. The model `support`s F2 with evidence
-   referencing those beliefs (*"W1, W2, W3 establish both mechanisms and their evidence"*).
+5. Eventually world beliefs establish both mechanisms. The model `support`s F2 with
+   `evidenceBeliefIds: [W1, W2, W3]` — the now-supported world beliefs that establish both
+   mechanisms — which the harness accepts as the structured discharge.
 6. No framing belief is `proposed` anymore. `conclude` is now valid → finalAnswer.
 
 ## Reframing vs filling (the falsifiability asymmetry)
@@ -132,8 +138,12 @@ all cheap:
 - **1–3 live framing beliefs, typically 1.** A set is a schema; a single revisable frame is not.
 - **Structural-only validation.** Same `validateBelief` rule as world beliefs: non-empty,
   valid domain. No content heuristic, no "must mention evidence" rule.
-- **finalAnswer never reads framing as an outline.** It is an epistemic-side judge, not a
-  template for the report.
+- **finalAnswer consumes an explicit snapshot, not the transcript.** At the handoff the
+  harness injects a `<final_answer_context>` block — settled world beliefs with their evidence,
+  framing outcomes with their status, refuted beliefs — and the finalAnswer projection masks
+  raw operational detail plus the belief bookkeeping (epistemic thinking/tool calls and the
+  `declare_belief`/`view_beliefs`/`conclude` echoes), so framing data reaches finalAnswer only
+  as completion metadata, never as an outline to write from.
 
 Accept mild drift; prevent reification.
 
@@ -147,6 +157,13 @@ Accept mild drift; prevent reification.
   - dispatch: exclude `domain === "framing"` from `undispatched` (Rule 1).
   - `_advanceRole`: on `concluded`, reject into a steer-back if any `proposed()` belief has
     `domain === "framing"` (Rule 2).
+  - `_concludeTransition`: on the terminal handoff, append the `<final_answer_context>` block
+    rendered by `_formatFinalAnswerContext` (settled world beliefs + framing outcomes + refuted
+    beliefs); the finalAnswer projection masks belief-tool echoes via `_maskBeliefEchoes` and
+    distills epistemic assistant turns via `_maskEpistemicAssistant`.
+- `belief-set.ts`: `_adjudicate` requires `evidenceBeliefIds` (≥1, all existing, product/code,
+  supported) when supporting a framing belief; `refute`/`refine`/`retract` are unchanged.
+- `declare-belief.ts`: accept the optional `evidenceBeliefIds` array on `support`.
 - `view-beliefs.ts` / `formatBeliefsForView`: render framing beliefs under a `[FRAMING]` section
   (open obligations) instead of `[FRAME]` (dispatchable world beliefs).
 
@@ -161,6 +178,9 @@ Accept mild drift; prevent reification.
   before the harness rejects it, so the model sees "concluded" then a corrective steer. Acceptable
   for a first cut; wiring the belief set into the `conclude` tool for a clean refusal is a later
   refinement.
+- The discharge rule is structural, not semantic: any supported world belief can discharge an
+  obligation, so a hallucinated `support` on the world belief itself still passes. It raises the
+  bar (the obligation must name its ground), it does not remove model judgment.
 
 ## What we deliberately do NOT build
 
