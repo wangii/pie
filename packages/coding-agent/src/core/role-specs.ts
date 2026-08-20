@@ -10,8 +10,10 @@
  *
  * Naming: the loop has four phases — `propose` (decide what to test), `execution` (probe
  * the code/product), `distill` (account for the observation), `finalAnswer` (write the
- * conclusion). Older names ("epistemic", "two-role") are retired from prompts; `epistemic`
- * survives only as a compatibility key in `getRoleContextUsage` (deprecated).
+ * conclusion). The old role names — the single `epistemic` role and the "two-role" model — are
+ * retired as phase labels; `epistemic` survives only as a deprecated compatibility key in
+ * `getRoleContextUsage` and in the protocol phrase "epistemic residual" in the distill
+ * instruction.
  */
 
 export type LoopRole = "propose" | "distill" | "execution" | "finalAnswer";
