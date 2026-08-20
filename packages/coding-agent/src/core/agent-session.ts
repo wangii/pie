@@ -348,24 +348,6 @@ const REFLECTION_STEER =
 const FRAME_HORIZON_HEADROOM = 1.3;
 
 /**
- * The neutral name substituted for a probe tool's real name in the epistemic and finalAnswer
- * projections. Stripping the real name removes the imitation trigger — a role that sees the
- * probe call `bash`/`read` tends to imitate it and call a tool it does not have — while the
- * placeholder keeps the tool-call block well-formed so the (already masked) tool result still
- * associates by id.
- */
-const MASKED_PROBE_TOOL_NAME = "[probe]";
-
-/**
- * The neutral name substituted for a belief-mutation tool's real name (`declare_belief` /
- * `conclude`) in the execution projection. Mirror of `MASKED_PROBE_TOOL_NAME`: the execution
- * role seeing the epistemic role call `declare_belief` is what drives it to step out of its
- * probe lane and mutate beliefs itself. The placeholder keeps the block well-formed so the
- * (already masked) `declare_belief` result still associates by id.
- */
-const MASKED_BELIEF_TOOL_NAME = "[belief]";
-
-/**
  * The belief loop's phase, as a discriminated union. Each variant carries only the
  * transient state meaningful to that phase — the execution phase owns its probe lease
  * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while epistemic
@@ -716,20 +698,23 @@ export class AgentSession {
 
 	/** Project the full transcript for an explicit role (used to size each role's context). */
 	private _projectMessagesFor(role: "epistemic" | "execution" | "finalAnswer"): AgentMessage[] {
-		return this.agent.state.messages.map((message, index) => this._projectMessage(message, index, role));
+		return this.agent.state.messages
+			.map((message, index) => this._projectMessage(message, index, role))
+			.filter((message): message is AgentMessage => message !== undefined);
 	}
 
-	/** Project one message for a role. */
+	/** Project one message for a role. Returns undefined when the projection reduces the message
+	 *  to nothing (e.g. a probe turn whose tool calls and thinking are all elided). */
 	private _projectMessage(
 		message: AgentMessage,
 		index: number,
 		role: "epistemic" | "execution" | "finalAnswer",
-	): AgentMessage {
+	): AgentMessage | undefined {
 		switch (role) {
 			case "epistemic":
-				// The probe's tool-call names and reasoning are always distilled — that is the
-				// imitation trigger regardless of age — while the raw result *content* (the fresh
-				// evidence the epistemic role updates on) is masked only once it falls below the
+				// The probe's tool calls and reasoning are always elided — that is the imitation
+				// trigger regardless of age — while the raw result *content* (the fresh evidence the
+				// epistemic role updates on) is folded into a plain note only once it falls below the
 				// watermark.
 				return this._maskOperationalDetail(message, index < this._evidenceWatermark);
 			case "execution":
@@ -742,75 +727,68 @@ export class AgentSession {
 	/**
 	 * Redact raw operational detail from one message, preserving the belief bookkeeping. Two
 	 * independent layers:
-	 * - the probe-role assistant turn is always distilled (thinking dropped, tool-call name
-	 *   neutralized, arguments emptied) — seeing the probe call `bash`/`read` is what drives a
-	 *   role to imitate it, so this is age-independent;
-	 * - the raw result *content* (non-belief tool results and bash output) is masked only when
-	 *   `maskResult` is true — the epistemic role must see the freshest result once to update
-	 *   on it, so it is masked below the watermark but not above it.
+	 * - the probe-role assistant turn is always elided (thinking dropped, tool calls removed) —
+	 *   seeing the probe call `bash`/`read` is what drives a role to imitate it, so this is
+	 *   age-independent;
+	 * - the raw result *content* (non-belief tool results and bash output) is folded into a plain
+	 *   text note only when `maskResult` is true — the epistemic role must see the freshest result
+	 *   once to update on it, so it is masked below the watermark but not above it.
 	 */
-	private _maskOperationalDetail(message: AgentMessage, maskResult: boolean): AgentMessage {
+	private _maskOperationalDetail(message: AgentMessage, maskResult: boolean): AgentMessage | undefined {
 		switch (message.role) {
 			case "toolResult":
-				if (
-					message.toolName === "declare_belief" ||
-					message.toolName === "view_beliefs" ||
-					message.toolName === "conclude"
-				) {
-					return message;
+				if (this._isProbeTool(message.toolName)) {
+					// The probe's tool call is elided from this role's view, so its result has no
+					// matching call. Fold the raw content into a plain note — never a `tool` result
+					// whose id would orphan, and never a tool-call name the role could imitate.
+					if (maskResult) {
+						return {
+							role: "user",
+							content: [{ type: "text", text: "[operational detail omitted]" }],
+							timestamp: message.timestamp,
+						};
+					}
+					return { role: "user", content: message.content, timestamp: message.timestamp };
 				}
-				if (!maskResult) {
-					return message;
-				}
-				return {
-					...message,
-					toolName: MASKED_PROBE_TOOL_NAME,
-					content: [{ type: "text", text: "[operational detail omitted]" }],
-				};
+				return message;
 			case "bashExecution":
 				return maskResult ? { ...message, output: "[output omitted]" } : message;
 			case "assistant":
 				// The probe (execution) role's assistant turns carry raw operational detail the
 				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
-				// (thinking) and its tool-call arguments. Distill those, but keep the textual
-				// report — that is the distilled uplink the epistemic role updates on.
+				// (thinking) and its tool calls. Drop those, but keep the textual report — that is
+				// the distilled uplink the epistemic role updates on.
 				return this._isProbeAssistant(message) ? this._maskProbeAssistant(message) : message;
 			default:
 				return message;
 		}
 	}
 
-	/** Whether an assistant turn belongs to the probe role, i.e. it invoked a non-belief tool.
-	 *  `declare_belief`/`view_beliefs`/`conclude` mark the epistemic role; anything else
-	 *  (read/bash/grep/…) marks the probe role. */
+	/** A probe (execution) tool is anything outside the belief surface: `declare_belief` /
+	 *  `view_beliefs` / `conclude` mark the epistemic role; anything else (read/bash/grep/…)
+	 *  marks the probe role. */
+	private _isProbeTool(name: string): boolean {
+		return name !== "declare_belief" && name !== "view_beliefs" && name !== "conclude";
+	}
+
+	/** Whether an assistant turn belongs to the probe role, i.e. it invoked a non-belief tool. */
 	private _isProbeAssistant(message: AssistantMessage): boolean {
-		return message.content.some(
-			(block) =>
-				block.type === "toolCall" &&
-				block.name !== "declare_belief" &&
-				block.name !== "view_beliefs" &&
-				block.name !== "conclude",
-		);
+		return message.content.some((block) => block.type === "toolCall" && this._isProbeTool(block.name));
 	}
 
 	/** Distill a probe-role assistant turn for the epistemic/finalAnswer view: drop its
-	 *  thinking blocks, strip its tool-call name, and empty its arguments, keeping only the
-	 *  textual report. The tool-call id survives so the (already masked) tool result still
-	 *  associates, but the real name is replaced — seeing the probe's `bash`/`read` here is
-	 *  what drives a role to imitate the probe and call a tool it does not have. */
-	private _maskProbeAssistant(message: AssistantMessage): AssistantMessage {
+	 *  thinking blocks and its tool calls entirely, keeping only the textual report. Eliding the
+	 *  call (rather than renaming it) is what stops a role from imitating the probe — and what
+	 *  keeps the transcript free of tool-call names the provider may reject. */
+	private _maskProbeAssistant(message: AssistantMessage): AssistantMessage | undefined {
 		const content: AssistantMessage["content"] = [];
 		for (const block of message.content) {
-			if (block.type === "thinking") {
-				continue;
-			}
-			if (block.type === "toolCall") {
-				content.push({ ...block, name: MASKED_PROBE_TOOL_NAME, arguments: {} });
+			if (block.type === "thinking" || block.type === "toolCall") {
 				continue;
 			}
 			content.push(block);
 		}
-		return { ...message, content };
+		return content.length > 0 ? { ...message, content } : undefined;
 	}
 
 	/**
@@ -822,11 +800,22 @@ export class AgentSession {
 	 * The read-only `view_beliefs` result is left intact — the execution role needs it to recall
 	 * the belief it is testing.
 	 */
-	private _maskBeliefBookkeeping(message: AgentMessage): AgentMessage {
+	private _maskBeliefBookkeeping(message: AgentMessage): AgentMessage | undefined {
 		switch (message.role) {
 			case "toolResult":
 				if (message.toolName === "declare_belief") {
-					return { ...message, content: [{ type: "text", text: "[belief update omitted]" }] };
+					return {
+						role: "user",
+						content: [{ type: "text", text: "[belief update omitted]" }],
+						timestamp: message.timestamp,
+					};
+				}
+				if (message.toolName === "conclude") {
+					return {
+						role: "user",
+						content: [{ type: "text", text: "[investigation concluded]" }],
+						timestamp: message.timestamp,
+					};
 				}
 				return message;
 			case "assistant":
@@ -847,24 +836,22 @@ export class AgentSession {
 	}
 
 	/** Distill an epistemic-role assistant turn for the execution view: drop its thinking and
-	 *  neutralize its belief-mutation tool calls (declare_belief / conclude), keeping its text
-	 *  and any read-only view_beliefs call. Mirrors `_maskProbeAssistant` in the other direction:
-	 *  the tool-call id survives so the (already masked) `declare_belief` result still associates,
-	 *  but the real name is replaced — seeing the epistemic role call `declare_belief` here is
-	 *  what drives the execution role to step out of its lane. */
-	private _maskEpistemicAssistant(message: AssistantMessage): AssistantMessage {
+	 *  its belief-mutation tool calls (declare_belief / conclude), keeping its text and any
+	 *  read-only view_beliefs call. Eliding the call (rather than renaming it) is what stops the
+	 *  execution role from imitating the mutation — and what keeps the transcript free of
+	 *  tool-call names the provider may reject. */
+	private _maskEpistemicAssistant(message: AssistantMessage): AssistantMessage | undefined {
 		const content: AssistantMessage["content"] = [];
 		for (const block of message.content) {
 			if (block.type === "thinking") {
 				continue;
 			}
 			if (block.type === "toolCall" && (block.name === "declare_belief" || block.name === "conclude")) {
-				content.push({ ...block, name: MASKED_BELIEF_TOOL_NAME, arguments: {} });
 				continue;
 			}
 			content.push(block);
 		}
-		return { ...message, content };
+		return content.length > 0 ? { ...message, content } : undefined;
 	}
 
 	/**

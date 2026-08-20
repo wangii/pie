@@ -522,13 +522,13 @@ describe("declare_belief integration", () => {
 			expect(executionContexts.some((c) => contextText(c).includes("[FRAME]"))).toBe(true);
 			// …and it still sees the raw probe output (its own operational detail).
 			expect(executionContexts.some((c) => contextText(c).includes("RAW_probe"))).toBe(true);
-			// The epistemic role's declare_belief tool-call blocks are neutralized, not the real
-			// name — seeing `declare_belief` in the transcript is what drives the probe role to
-			// imitate the mutation it must not perform.
+			// The epistemic role's declare_belief tool-call blocks are elided entirely — seeing a
+			// tool call in the transcript is what drives the probe role to imitate the mutation it
+			// must not perform, and a masked placeholder name would still leave a call to imitate.
 			expect(executionContexts.some((c) => contextToolCalls(c).some((t) => t.name === "declare_belief"))).toBe(
 				false,
 			);
-			expect(executionContexts.some((c) => contextToolCalls(c).some((t) => t.name === "[belief]"))).toBe(true);
+			expect(executionContexts.some((c) => contextToolCalls(c).some((t) => t.name === "[belief]"))).toBe(false);
 		} finally {
 			harness.cleanup();
 		}
@@ -792,12 +792,10 @@ describe("declare_belief integration", () => {
 			// finalAnswer: no tools, and the probe role's internal reasoning is distilled.
 			expect(contextToolNames(lastContext)).toEqual([]);
 			expect(contextThinking(lastContext)).not.toContain("EXEC_THINKING");
-			// The echo tool-call is neutralized: its name is replaced so the finalAnswer role
-			// cannot imitate it, its arguments are emptied, and the id still pairs with the
-			// masked result.
-			const probeCalls = contextToolCalls(lastContext).filter((t) => t.name === "[probe]");
-			expect(probeCalls.length).toBe(1);
-			expect(probeCalls[0].arguments).toEqual({});
+			// The echo tool-call is elided entirely: dropping it (rather than renaming it to a
+			// placeholder) is what stops the finalAnswer role from imitating it — and keeps the
+			// transcript free of a tool-call name the provider would reject.
+			expect(contextToolCalls(lastContext).some((t) => t.name === "[probe]")).toBe(false);
 			// The real tool name never leaks into the distilled projection.
 			expect(contextToolCalls(lastContext).some((t) => t.name === "echo")).toBe(false);
 			// The distilled text report and the settled beliefs survive.
