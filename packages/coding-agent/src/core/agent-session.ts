@@ -340,7 +340,7 @@ const REFLECTION_STEER =
 
 /**
  * Headroom applied to a frame's evidence-round total when sizing the execution lease
- * (`_frameHorizon`). Evidence rounds are the model's estimate of how many tool results
+ * (`frameHorizon` in the execution phase). Evidence rounds are the model's estimate of how many tool results
  * a probe needs; the 1.3 factor (30% headroom) absorbs under-estimates — a locate-then-read
  * pair costs two results, not one — without letting raw evidence pile up inert in the
  * execution role's context.
@@ -355,6 +355,20 @@ const FRAME_HORIZON_HEADROOM = 1.3;
  * associates by id.
  */
 const MASKED_PROBE_TOOL_NAME = "[probe]";
+
+/**
+ * The belief loop's phase, as a discriminated union. Each variant carries only the
+ * transient state meaningful to that phase — the execution phase owns its probe lease
+ * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while epistemic
+ * or finalAnswer. Task-scoped bookkeeping (`_reflected`, `_dispatchedFrameIds`,
+ * `_evidenceWatermark`, `_beliefsAtTaskReset`) stays outside the union because it must
+ * survive a phase change (e.g. a reflection-dispatched probe must come back to epistemic
+ * with `_reflected` still latched).
+ */
+type LoopState =
+	| { role: "epistemic" }
+	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean }
+	| { role: "finalAnswer" };
 
 // ============================================================================
 // AgentSession Class
@@ -405,16 +419,17 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private readonly _beliefSet = new BeliefSet();
-	/** The current production role: epistemic (belief ops only) vs execution (probe) vs finalAnswer. */
-	private _role: "epistemic" | "execution" | "finalAnswer" = "epistemic";
-	/** Remaining execution actions for the current frame's lease (derived from `evidenceRounds`, never fixed). */
-	private _frameHorizon = 0;
+	/** The belief loop's current phase; see the `LoopState` type. */
+	private _loopState: LoopState = { role: "epistemic" };
 	/** The belief ids already dispatched to execution — distinguishes fresh beliefs from dispatched-but-unsettled ones. */
 	private _dispatchedFrameIds: Set<string> = new Set();
-	/** True once the execution lease has been exhausted and the role has been nudged to report its observation. */
-	private _leaseReportNudged = false;
 	/** True once the pre-conclusion reflection steer has fired for the current task (one round only). */
 	private _reflected = false;
+
+	/** The current role — the phase discriminator of `_loopState`. */
+	private get _role(): LoopState["role"] {
+		return this._loopState.role;
+	}
 	/** The full active tool names, independent of the current role's projected subset. */
 	private _fullActiveToolNames: string[] = [];
 	/**
@@ -801,10 +816,8 @@ export class AgentSession {
 	 * masked from the fresh epistemic role.
 	 */
 	private _resetLoopForNewTask(): void {
-		this._role = "epistemic";
+		this._loopState = { role: "epistemic" };
 		this._dispatchedFrameIds = new Set();
-		this._frameHorizon = 0;
-		this._leaseReportNudged = false;
 		this._reflected = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
@@ -839,8 +852,29 @@ export class AgentSession {
 			this._applyRoleSurface();
 			return;
 		}
+		const next = this._transition(this._loopState, turn);
+		this._loopState = next.state;
+		if (next.steer !== undefined) {
+			this.agent.steer({
+				role: "user",
+				content: [{ type: "text", text: next.steer }],
+				timestamp: Date.now(),
+			});
+		}
+		this._applyRoleSurface();
+	}
+
+	/**
+	 * The belief loop's transition function — the state machine as explicit rows. Given the
+	 * current phase and the just-finished turn, it returns the next phase and the steer to
+	 * deliver with it (`steer` is `undefined` to stay silent). Each branch is one transition:
+	 * its guard, its next state, and its effect. Two side effects stay inline where they are
+	 * tightly coupled to their transition — advancing `_dispatchedFrameIds`/`_evidenceWatermark`
+	 * on dispatch, and latching `_reflected` on the one-round reflection.
+	 */
+	private _transition(state: LoopState, turn: PrepareNextTurnContext): { state: LoopState; steer?: string } {
 		const ranTools = turn.toolResults.length > 0;
-		switch (this._role) {
+		switch (state.role) {
 			case "epistemic": {
 				const proposed = this._beliefSet.proposed();
 				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
@@ -849,159 +883,103 @@ export class AgentSession {
 				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
 				if (concluded) {
 					// Concluding is premature while anything is still unresolved: an open
-					// framing obligation (what the answer must establish) or an open world
-					// belief (a proposed claim that was never settled). Each must be settled
-					// (support/refute), corrected (refine), or dropped (retract) first.
+					// framing obligation or an open world belief must be settled (support/
+					// refute), corrected (refine), or dropped (retract) first.
 					const openFramings = this._beliefSet.framings();
-					const openWorld = proposed;
-					if (openFramings.length > 0 || openWorld.length > 0) {
+					if (openFramings.length > 0 || proposed.length > 0) {
 						const reasons: string[] = [];
 						if (openFramings.length > 0) {
 							reasons.push(
 								`these obligations for what the answer must establish are still open (${openFramings.map((b) => `"${b.statement}"`).join(", ")})`,
 							);
 						}
-						if (openWorld.length > 0) {
+						if (proposed.length > 0) {
 							reasons.push(
-								`these beliefs are still unresolved (${openWorld.map((b) => `"${b.statement}"`).join(", ")})`,
+								`these beliefs are still unresolved (${proposed.map((b) => `"${b.statement}"`).join(", ")})`,
 							);
 						}
-						this.agent.steer({
-							role: "user",
-							content: [
-								{
-									type: "text",
-									text: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
-								},
-							],
-							timestamp: Date.now(),
-						});
-					} else if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
-						// Everything is settled, but the belief set has not yet been reflected
-						// on as a whole. Fire the one-round reflection steer and stay epistemic
-						// so any belief it proposes is probed normally; a second conclude passes.
-						this._reflected = true;
-						this.agent.steer({
-							role: "user",
-							content: [{ type: "text", text: REFLECTION_STEER }],
-							timestamp: Date.now(),
-						});
-					} else {
-						this._role = "finalAnswer";
-						this.agent.steer({
-							role: "user",
-							content: [{ type: "text", text: "Write your conclusion." }],
-							timestamp: Date.now(),
-						});
+						return {
+							state,
+							steer: `Concluding is premature — ${reasons.join(" and ")}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
+						};
 					}
-				} else if (undispatched.length > 0) {
-					// Fresh beliefs. Dispatching to the experiment step is automatic:
-					// proposing is the signal to run the experiments, so the epistemic role
-					// must not linger to "explore" on its own — no probe tools exist there.
+					if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset && !this._reflected) {
+						// Everything is settled, but the belief set has not yet been reflected on
+						// as a whole. Fire the one-round reflection and stay epistemic so any belief
+						// it proposes is probed normally; a second conclude passes.
+						this._reflected = true;
+						return { state, steer: REFLECTION_STEER };
+					}
+					return { state: { role: "finalAnswer" }, steer: "Write your conclusion." };
+				}
+				if (undispatched.length > 0) {
+					// Fresh beliefs — dispatching to the experiment step is automatic: proposing
+					// is the signal to run the experiments, so the epistemic role must not linger.
 					this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
-					this._role = "execution";
-					// The epistemic role has consumed the evidence it just saw; mask it going
-					// forward so the next epistemic turn sees only the fresh round.
 					this._evidenceWatermark = this.agent.state.messages.length;
 					const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
-					this._frameHorizon = Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM);
-					this._leaseReportNudged = false;
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
-					this.agent.steer({
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: `Run the experiments for the beliefs ${statements} and report your observations.`,
-							},
-						],
-						timestamp: Date.now(),
-					});
-				} else if (proposed.length > 0 && !ranTools) {
-					// Dispatched-but-unsettled beliefs, and the model stopped instead of
-					// updating them — nudge it in its own terms, not the harness machinery.
+					return {
+						state: {
+							role: "execution",
+							frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
+							leaseReportNudged: false,
+						},
+						steer: `Run the experiments for the beliefs ${statements} and report your observations.`,
+					};
+				}
+				if (proposed.length > 0 && !ranTools) {
+					// Dispatched-but-unsettled beliefs, and the model stopped instead of updating
+					// them — nudge it in its own terms, not the harness machinery.
 					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
-					this.agent.steer({
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
-							},
-						],
-						timestamp: Date.now(),
-					});
-				} else if (proposed.length === 0) {
-					// No open beliefs. If *this* task has produced settled beliefs, settling is not
-					// concluding — prompt it to deepen (propose the next belief) or conclude. If it
-					// never proposed anything for this task, it is answering directly (or gave up),
-					// not running the belief loop — conclude without requiring `conclude`. The
-					// `_beliefsAtTaskReset` baseline keeps a direct answer to a follow-up (which
-					// inherits the prior task's retained beliefs) from being mistaken for a
-					// mid-investigation pause and re-steered into a redundant loop.
+					return {
+						state,
+						steer: `Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,
+					};
+				}
+				if (proposed.length === 0) {
+					// No open beliefs. If *this* task produced settled beliefs, settling is not
+					// concluding — prompt it to deepen or conclude. If it never proposed anything,
+					// it is answering directly (or gave up), not running the belief loop.
 					if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset) {
-						this.agent.steer({
-							role: "user",
-							content: [
-								{
-									type: "text",
-									text: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
-								},
-							],
-							timestamp: Date.now(),
-						});
-					} else if (!ranTools) {
-						// Never proposed a belief and did not run tools: the model is answering
-						// directly (or gave up), not running the belief loop. Accept its answer
-						// without steering — unlike the `conclude` path, the answer already exists,
-						// so a "Write your conclusion." steer would only elicit a redundant turn.
-						this._role = "finalAnswer";
+						return {
+							state,
+							steer: "Propose the next belief to deepen the investigation, or conclude if the task is answered.",
+						};
+					}
+					if (!ranTools) {
+						// Accept a direct answer without steering — unlike the `conclude` path, the
+						// answer already exists, so "Write your conclusion." would be redundant.
+						return { state: { role: "finalAnswer" } };
 					}
 				}
 				// Otherwise (no beliefs yet, but the model just acted — e.g. `view_beliefs` on an
-				// empty set): stay in the epistemic role — it is bootstrapping, not concluding.
-				break;
+				// empty set): stay epistemic — it is bootstrapping, not concluding.
+				return { state };
 			}
 			case "execution": {
-				this._frameHorizon -= turn.toolResults.length;
+				const frameHorizon = state.frameHorizon - turn.toolResults.length;
 				if (!ranTools) {
 					// The experiment's observation is in — return to epistemic to update.
-					this._role = "epistemic";
-					this.agent.steer({
-						role: "user",
-						content: [{ type: "text", text: EPISTEMIC_RESIDUAL_STEER }],
-						timestamp: Date.now(),
-					});
-				} else if (this._frameHorizon <= 0 && !this._leaseReportNudged) {
-					// Lease exhausted while still probing. Do not yank it back mid-experiment:
-					// the epistemic role needs the distilled observation, not raw operational
-					// detail. Nudge it once to report; force the return only if it keeps probing.
-					this._leaseReportNudged = true;
-					this.agent.steer({
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: "You have gathered enough evidence. Report your observation in one concise sentence.",
-							},
-						],
-						timestamp: Date.now(),
-					});
-				} else if (this._frameHorizon <= 0) {
-					// Already nudged once and still probing — force the return.
-					this._role = "epistemic";
-					this.agent.steer({
-						role: "user",
-						content: [{ type: "text", text: EPISTEMIC_RESIDUAL_STEER }],
-						timestamp: Date.now(),
-					});
+					return { state: { role: "epistemic" }, steer: EPISTEMIC_RESIDUAL_STEER };
 				}
-				break;
+				if (frameHorizon <= 0 && !state.leaseReportNudged) {
+					// Lease exhausted while still probing — nudge once to report; force the return
+					// only if it keeps probing (the epistemic role needs the distilled observation).
+					return {
+						state: { role: "execution", frameHorizon, leaseReportNudged: true },
+						steer: "You have gathered enough evidence. Report your observation in one concise sentence.",
+					};
+				}
+				if (frameHorizon <= 0) {
+					// Already nudged once and still probing — force the return.
+					return { state: { role: "epistemic" }, steer: EPISTEMIC_RESIDUAL_STEER };
+				}
+				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
 			}
 			case "finalAnswer":
-				break;
+				return { state };
 		}
-		this._applyRoleSurface();
 	}
 
 	/** Tool-call names in the just-finished turn that the current role was not offered. */
