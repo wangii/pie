@@ -1093,7 +1093,13 @@ export class AgentSession {
 					"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
 					"audit something, the framing obligation must include surfacing any inconsistency between what the " +
 					"project's documentation and code claim and what the implementation actually does — not merely " +
-					"describing where things are defined.\n" +
+					"describing where things are defined. Every examine/review/audit question also carries an implicit " +
+					'frame you must not inherit silently: it splits the world into two sides (e.g. "server" vs ' +
+					'"client") and thereby presupposes each side is internally coherent, is the current authority, ' +
+					"and that drift lives only across that line. Make that frame explicit and falsify it — name the " +
+					"presuppositions the question's wording imports and propose each as a testable belief, including " +
+					"whether two parts of one side contradict each other, whether one side's summary or status table " +
+					"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
 					"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
 					"what it observed, including where that diverges from your expectation. You never do the probing — " +
 					"you only state what should be tested and then interpret the report.\n" +

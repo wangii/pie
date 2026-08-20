@@ -164,6 +164,10 @@ describe("declare_belief integration", () => {
 			expect(prompt).toContain("[user]");
 			expect(prompt).toContain("[convention]");
 			expect(prompt).toContain("in Chinese");
+			// The framing obligation must also surface the question's own implicit frame — the
+			// partition its wording imposes — as a presupposition to falsify, not a given.
+			expect(prompt).toContain("implicit frame");
+			expect(prompt).toContain("contradicts its own body");
 			// The update step is a residual filter: explain → isolate → update, not a full re-read.
 			expect(prompt).toContain("epistemic residual");
 			expect(prompt).toContain("isolate the residual");
