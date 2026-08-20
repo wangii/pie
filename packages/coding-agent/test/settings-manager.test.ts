@@ -201,7 +201,7 @@ describe("SettingsManager", () => {
 
 	describe("executionModel", () => {
 		it("returns the configured execution model", () => {
-			expect(SettingsManager.inMemory({ executionModel: "claude-haiku-4-5" }).getExecutionModel()).toBe(
+			expect(SettingsManager.inMemory({ pie: { executionModel: "claude-haiku-4-5" } }).getExecutionModel()).toBe(
 				"claude-haiku-4-5",
 			);
 		});
@@ -213,9 +213,9 @@ describe("SettingsManager", () => {
 
 	describe("distillationModel", () => {
 		it("returns the configured distillation model", () => {
-			expect(SettingsManager.inMemory({ distillationModel: "deepseek-v4-pro" }).getDistillationModel()).toBe(
-				"deepseek-v4-pro",
-			);
+			expect(
+				SettingsManager.inMemory({ pie: { distillationModel: "deepseek-v4-pro" } }).getDistillationModel(),
+			).toBe("deepseek-v4-pro");
 		});
 
 		it("defaults to defaultModel when not configured", () => {

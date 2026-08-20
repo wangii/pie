@@ -1202,8 +1202,8 @@ export class AgentSession {
 
 	/**
 	 * The model for the next turn. Two belief-loop roles may run on separately configured
-	 * models from settings: the execution (probe) role on `executionModel`, and the distill
-	 * (prediction-error) role on `distillationModel` (defaulting to `defaultModel`, so the
+	 * models from settings: the execution (probe) role on `pie.executionModel`, and the distill
+	 * (prediction-error) role on `pie.distillationModel` (defaulting to `defaultModel`, so the
 	 * distillation stays on the strong default model even when the probe runs on a cheaper one).
 	 * The propose role — and any turn outside the belief loop — uses the session's main model
 	 * (`defaultModel`). Only the next request's model is overridden — `state.model` is left

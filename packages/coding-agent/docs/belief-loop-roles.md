@@ -23,7 +23,7 @@ surfaces, model selection, and message projections cannot drift apart.
 | job | decide what to test; open/close framing obligations | probe the belief's referent | turn the observation into belief updates | write the conclusion |
 | tools | `declare_belief` `view_beliefs` `conclude` | all probe tools + `view_beliefs` (no `declare_belief`/`conclude`) | `declare_belief` `view_beliefs` `conclude` | none |
 | `view_beliefs` scope | `all` | `frame` | `all` | n/a |
-| model | session default | `executionModel` (settings) | `distillationModel` (settings) | session default |
+| model | session default | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | session default |
 | projection | operational detail masked by watermark; probe calls elided | belief bookkeeping masked (`declare_belief`/`conclude`) | same as `propose` | all operational detail and belief-tool echoes masked |
 | output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation | `support`/`refute`/`refine`/`retract` | the conclusion text |
 

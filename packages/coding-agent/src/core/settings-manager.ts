@@ -88,10 +88,8 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
-export interface Settings {
-	lastChangelogVersion?: string;
-	defaultProvider?: string;
-	defaultModel?: string;
+/** Settings scoped to the belief-loop ("pie") subsystem. */
+export interface PieSettings {
 	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
 	executionModel?: string;
 	/**
@@ -100,6 +98,14 @@ export interface Settings {
 	 * update on. Defaults to `defaultModel` so the distillation stays on the strong default model
 	 * even when the probe role is on a cheaper `executionModel`. */
 	distillationModel?: string;
+}
+
+export interface Settings {
+	lastChangelogVersion?: string;
+	defaultProvider?: string;
+	defaultModel?: string;
+	/** Settings for the belief-loop ("pie") subsystem. */
+	pie?: PieSettings;
 	defaultThinkingLevel?: ThinkingLevel;
 	modelThinkingLevels?: Record<string, ThinkingLevel>; // per-model default thinking level overrides keyed by "provider/modelId"
 	transport?: TransportSetting; // default: "auto"
@@ -727,11 +733,11 @@ export class SettingsManager {
 	}
 
 	getExecutionModel(): string | undefined {
-		return this.settings.executionModel;
+		return this.settings.pie?.executionModel;
 	}
 
 	getDistillationModel(): string | undefined {
-		return this.settings.distillationModel ?? this.settings.defaultModel;
+		return this.settings.pie?.distillationModel ?? this.settings.defaultModel;
 	}
 
 	setDefaultProvider(provider: string): void {

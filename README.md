@@ -56,29 +56,31 @@ Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (pro
 
 信念循环允许为两个角色单独配置模型（仅在信念集启用时生效，`enableBeliefSet` 默认开启）：
 
-- `executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
-- `distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
+- `pie.executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
+- `pie.distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
 
 propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型字符串使用 `provider/modelId` 格式，配置在全局 `~/.pi/agent/settings.json` 或项目 `.pi/settings.json`：
 
 ```json
 {
   "defaultModel": "provider/defaultModel",
-  "executionModel": "provider/probeModel",
-  "distillationModel": "provider/strongModel"
+  "pie": {
+    "executionModel": "provider/probeModel",
+    "distillationModel": "provider/strongModel"
+  }
 }
 ```
 
-回退链：`executionModel` 未配置或解析失败时，execution 回退到会话主模型；`distillationModel` 未配置时先回退 `defaultModel`，仍未解析再回退会话主模型——模型名解析失败时两者最终都使用会话主模型。
+回退链：`pie.executionModel` 未配置或解析失败时，execution 回退到会话主模型；`pie.distillationModel` 未配置时先回退 `defaultModel`，仍未解析再回退会话主模型——模型名解析失败时两者最终都使用会话主模型。
 
 The belief loop lets two roles run on separately configured models (only while the belief set is enabled — `enableBeliefSet` defaults to true):
 
-- `executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
-- `distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
+- `pie.executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
+- `pie.distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
 
 The propose and finalAnswer roles always use the session's main model (`defaultModel`). Model strings use the `provider/modelId` format and live in the global `~/.pi/agent/settings.json` or the project `.pi/settings.json` (see the example above).
 
-Fallbacks: if `executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model.
+Fallbacks: if `pie.executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `pie.distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model.
 
 ## 最小上手路径（Quick start）
 
