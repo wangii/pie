@@ -91,7 +91,7 @@ export const KEYBINDINGS = {
 		description: "Toggle thinking blocks",
 	},
 	"app.beliefSet.toggle": {
-		defaultKeys: "alt+b",
+		defaultKeys: "shift+ctrl+b",
 		description: "Toggle belief set panel",
 	},
 	"app.session.toggleNamedFilter": {
