@@ -1242,7 +1242,7 @@ export class AgentSession {
 			}
 			const toolGuidelines = this._toolPromptGuidelines.get(name);
 			if (toolGuidelines) {
-				guidelines.push(...toolGuidelines);
+				guidelines.push(...toolGuidelines.map((g) => this._beliefLangPrompt(g)));
 			}
 		}
 		const base =
@@ -1257,8 +1257,13 @@ export class AgentSession {
 		return base + this._roleInstruction();
 	}
 
+	/** Substitute the configured belief language into prompt text placeholders. */
+	private _beliefLangPrompt(text: string): string {
+		return text.replaceAll("{beliefLang}", this.settingsManager.getBeliefLang());
+	}
+
 	private _roleInstruction(): string {
-		return ROLE_SPECS[this._role].instruction;
+		return this._beliefLangPrompt(ROLE_SPECS[this._role].instruction);
 	}
 
 	/** Project the current role's tool subset and system prompt onto the agent state. */
@@ -1765,7 +1770,7 @@ export class AgentSession {
 
 			const toolGuidelines = this._toolPromptGuidelines.get(name);
 			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
+				promptGuidelines.push(...toolGuidelines.map((g) => this._beliefLangPrompt(g)));
 			}
 		}
 

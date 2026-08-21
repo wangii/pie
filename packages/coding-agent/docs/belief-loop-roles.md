@@ -31,6 +31,10 @@ Each row is a `RoleSpec` in `role-specs.ts` (`instruction`, `tools`, `beliefScop
 `modelPolicy`, `projection`, `strayToolSteer`). The execution tool list is derived from the
 full active set minus the belief-mutation tools, so custom tools stay available to it.
 
+Beliefs must be written in the language configured by `pie.beliefLang` in settings
+(default `Chinese`); the role instructions and belief-tool guidelines substitute it at
+prompt assembly.
+
 ## Transitions
 
 The state machine lives in `_transition`; every steer text lives in `TRANSITION_STEERS`:

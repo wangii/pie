@@ -229,6 +229,16 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("beliefLang", () => {
+		it("defaults to Chinese when not configured", () => {
+			expect(SettingsManager.inMemory().getBeliefLang()).toBe("Chinese");
+		});
+
+		it("returns the configured belief language", () => {
+			expect(SettingsManager.inMemory({ pie: { beliefLang: "English" } }).getBeliefLang()).toBe("English");
+		});
+	});
+
 	describe("theme setting", () => {
 		it("stores slash-separated automatic theme settings separately from fixed theme names", async () => {
 			const settingsPath = join(agentDir, "settings.json");

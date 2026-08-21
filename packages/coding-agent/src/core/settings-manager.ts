@@ -98,6 +98,8 @@ export interface PieSettings {
 	 * update on. Defaults to `defaultModel` so the distillation stays on the strong default model
 	 * even when the probe role is on a cheaper `executionModel`. */
 	distillationModel?: string;
+	/** The language belief-set prompts must write in. Defaults to "Chinese". */
+	beliefLang?: string;
 }
 
 export interface Settings {
@@ -738,6 +740,10 @@ export class SettingsManager {
 
 	getDistillationModel(): string | undefined {
 		return this.settings.pie?.distillationModel ?? this.settings.defaultModel;
+	}
+
+	getBeliefLang(): string {
+		return this.settings.pie?.beliefLang ?? "Chinese";
 	}
 
 	setDefaultProvider(provider: string): void {

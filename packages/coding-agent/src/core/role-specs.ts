@@ -57,7 +57,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"you decide what to test and what to conclude, while a separate execution role performs the actual " +
 			"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
 			"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
-			"Write every belief — its statement, expectation, and evidence — in Chinese.\n\n" +
+			"Write every belief — its statement, expectation, and evidence — in {beliefLang}.\n\n" +
 			"Work the belief → experiment → update protocol:\n" +
 			"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
 			"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
@@ -98,7 +98,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"\n\nYou are the distill role of the four-phase investigation loop (propose → execution → distill → finalAnswer). The execution role has just probed " +
 			"and reported its raw observation; your job is the prediction-error distillation that turns that " +
 			"observation into what the belief set must update on. Your only tools are declare_belief, " +
-			"view_beliefs, and conclude — exactly these three, and nothing else. Write every belief in Chinese.\n\n" +
+			"view_beliefs, and conclude — exactly these three, and nothing else. Write every belief in {beliefLang}.\n\n" +
 			"1. Update from the epistemic residual, not the whole report. In order: explain which parts of the " +
 			"report your current beliefs already account for; isolate the residual — the observations and " +
 			"prediction errors they do not explain; then use only that residual to update beliefs.\n" +

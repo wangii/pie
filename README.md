@@ -38,7 +38,7 @@ Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显�
 | `distill`（蒸馏） | 做预测误差蒸馏（prediction-error distillation）：先用既有信念解释观察，再只对残差更新信念 |
 | `finalAnswer`（终答） | 依据注入的信念快照写出结论，无工具 |
 
-信念按指称类型打标签：`[code]`（实现）、`[prod]`（产品行为或文档声明）、`[user]`（用户意图/需求）、`[convention]`（仓库惯例）。信念本身用中文书写。`/bs` 命令可查看当前信念集，`/thinking` 可设置思考级别。详见 [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md)。
+信念按指称类型打标签：`[code]`（实现）、`[prod]`（产品行为或文档声明）、`[user]`（用户意图/需求）、`[convention]`（仓库惯例）。信念本身用 `pie.beliefLang` 指定的语言书写（默认 `Chinese`）。`/bs` 命令可查看当前信念集，`/thinking` 可设置思考级别。详见 [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md)。
 
 The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the coding-agent package (`packages/coding-agent`) — `enableBeliefSet` defaults to true and `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four phases are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/coding-agent/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
 
@@ -49,7 +49,7 @@ The core idea of Pie in this iteration is to model "how the agent answers a ques
 | `distill` | Performs prediction-error distillation: explains the observation with current beliefs first, then updates only on the residual |
 | `finalAnswer` | Writes the conclusion from the injected belief snapshot; no tools |
 
-Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (product behavior or documented claim), `[user]` (user intent/requirement), `[convention]` (repo idiom/naming/pattern) — and are written in Chinese. Use `/bs` to view the current belief set and `/thinking` to set the thinking level. See [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md).
+Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (product behavior or documented claim), `[user]` (user intent/requirement), `[convention]` (repo idiom/naming/pattern) — and are written in the language set by `pie.beliefLang` (default `Chinese`). Use `/bs` to view the current belief set and `/thinking` to set the thinking level. See [belief-loop-roles.md](packages/coding-agent/docs/belief-loop-roles.md).
 
 
 ### 角色模型配置（Role model configuration）
@@ -58,6 +58,7 @@ Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (pro
 
 - `pie.executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
 - `pie.distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
+- `pie.beliefLang`：信念循环提示词要求的书写语言，默认 `Chinese`，可改为任意语言名称（如 `English`）。
 
 propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型字符串使用 `provider/modelId` 格式，配置在全局 `~/.pi/agent/settings.json` 或项目 `.pi/settings.json`：
 
@@ -66,7 +67,8 @@ propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型
   "defaultModel": "provider/defaultModel",
   "pie": {
     "executionModel": "provider/probeModel",
-    "distillationModel": "provider/strongModel"
+    "distillationModel": "provider/strongModel",
+    "beliefLang": "Chinese"
   }
 }
 ```
@@ -77,6 +79,7 @@ The belief loop lets two roles run on separately configured models (only while t
 
 - `pie.executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
 - `pie.distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
+- `pie.beliefLang`: the language the belief-loop prompts must write in; defaults to `Chinese` — set it to another language name (e.g. `English`) to change it.
 
 The propose and finalAnswer roles always use the session's main model (`defaultModel`). Model strings use the `provider/modelId` format and live in the global `~/.pi/agent/settings.json` or the project `.pi/settings.json` (see the example above).
 

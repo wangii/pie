@@ -199,6 +199,21 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("belief language follows pie.beliefLang in the role prompt", async () => {
+		const harness = await createHarness({
+			enableBeliefSet: true,
+			settings: { pie: { beliefLang: "English" } },
+		});
+		try {
+			const prompt = harness.session.agent.state.systemPrompt;
+			expect(prompt).toContain("in English");
+			expect(prompt).not.toContain("in Chinese");
+			expect(prompt).not.toContain("{beliefLang}");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("four-phase flow: propose dispatches to execution, then adjudication settles the frame", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
