@@ -636,6 +636,7 @@ export class InteractiveMode {
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.beliefPanelContainer = new Container();
+
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -991,15 +992,25 @@ export class InteractiveMode {
 		const dock = new TuiLayouts.VStack([
 			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
 			{ component: this.statusContainer, shrink: 1, minSize: 0 },
-			{ component: this.beliefPanelContainer, shrink: 1, minSize: 0 },
 			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 3 },
 			{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
 			{ component: this.footerContainer, shrink: 1, minSize: 1 },
 		]);
-		this.fullscreenLayoutRoot = new TuiLayouts.VStack([
+		const main = new TuiLayouts.VStack([
 			{ component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+		]);
+		this.fullscreenLayoutRoot = new TuiLayouts.HStack([
+			{ component: main, basis: 0, grow: 2, shrink: 1, minSize: 1 },
+			{
+				component: this.beliefPanelContainer,
+				basis: 0,
+				grow: 1,
+				shrink: 1,
+				minSize: 0,
+				visible: () => this.beliefPanelVisible,
+			},
 		]);
 		this.mountInteractiveTui(this.renderer, [
 			this.documentContainer,
