@@ -350,7 +350,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("epistemic role masks raw execution evidence, keeping the distilled report", async () => {
+	test("distill role sees the raw execution evidence; propose role masks it", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -386,7 +386,7 @@ describe("declare_belief integration", () => {
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled sentence.
 				"the value persisted",
-				// Epistemic: support — settles from the distilled sentence (raw evidence is masked).
+				// Epistemic: support — settles from the raw evidence it just saw.
 				{
 					toolCalls: [
 						{
@@ -405,12 +405,20 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			// The raw execution result is masked from the epistemic role so the projected
-			// transcript stays append-only and cacheable; only the distilled sentence survives.
-			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
-			expect(epistemicContexts.length).toBeGreaterThan(0);
-			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(false);
-			expect(epistemicContexts.some((c) => contextText(c).includes("the value persisted"))).toBe(true);
+			// The distill role sees the raw execution result (above the evidence watermark) so it can
+			// update beliefs; the propose role masks it unconditionally so its projection stays
+			// append-only and cacheable. Both keep the distilled sentence.
+			const beliefContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
+			const distillContexts = beliefContexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the distill role"),
+			);
+			const proposeContexts = beliefContexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the propose role"),
+			);
+			expect(distillContexts.length).toBeGreaterThan(0);
+			expect(distillContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
+			expect(distillContexts.some((c) => contextText(c).includes("the value persisted"))).toBe(true);
+			expect(proposeContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(false);
 		} finally {
 			harness.cleanup();
 		}
@@ -659,7 +667,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("epistemic role masks each execution round's raw evidence", async () => {
+	test("distill role sees each execution round's raw evidence exactly once; propose masks it", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -737,19 +745,29 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
-			expect(epistemicContexts.length).toBeGreaterThan(0);
+			const beliefContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
+			expect(beliefContexts.length).toBeGreaterThan(0);
+			const distillContexts = beliefContexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the distill role"),
+			);
+			const proposeContexts = beliefContexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the propose role"),
+			);
 
-			// Each round's raw tool output is masked from the belief-side view (never shown), so
-			// the projected transcript is append-only and cacheable; only the distilled text
-			// report survives.
-			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_one"))).toBe(false);
-			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_two"))).toBe(false);
-			const last = epistemicContexts[epistemicContexts.length - 1];
-			expect(contextText(last)).toContain("the value persisted");
-			expect(contextText(last)).toContain("no session reuse observed");
-			expect(contextText(last)).not.toContain("RAW_one");
-			expect(contextText(last)).not.toContain("RAW_two");
+			// The distill role sees each episode's raw evidence exactly once — fresh above the
+			// watermark, masked below it…
+			expect(distillContexts.some((c) => contextText(c).includes("RAW_one"))).toBe(true);
+			expect(distillContexts.some((c) => contextText(c).includes("RAW_two"))).toBe(true);
+			const lastDistill = distillContexts[distillContexts.length - 1];
+			expect(contextText(lastDistill)).toContain("RAW_two");
+			expect(contextText(lastDistill)).not.toContain("RAW_one");
+			// …while the propose role never sees raw operational detail: its projection is
+			// append-only and cacheable, so it reads beliefs via `view_beliefs`, not raw output.
+			expect(proposeContexts.some((c) => contextText(c).includes("RAW_one"))).toBe(false);
+			expect(proposeContexts.some((c) => contextText(c).includes("RAW_two"))).toBe(false);
+			// The distilled text report survives in both roles' views.
+			expect(contextText(lastDistill)).toContain("the value persisted");
+			expect(contextText(lastDistill)).toContain("no session reuse observed");
 		} finally {
 			harness.cleanup();
 		}

@@ -22,7 +22,7 @@ export type LoopRole = "propose" | "distill" | "execution" | "finalAnswer";
 export type ModelPolicy = "default" | "execution" | "distillation";
 
 /** Which message projection the role's context uses (see `_projectMessage`). */
-export type ProjectionKind = "belief" | "execution" | "finalAnswer";
+export type ProjectionKind = "belief" | "distill" | "execution" | "finalAnswer";
 
 /** The belief-view scope: the belief-side roles read the full set, execution only the frame. */
 export type BeliefScope = "all" | "frame";
@@ -124,7 +124,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		tools: ["declare_belief", "view_beliefs", "conclude"],
 		beliefScope: "all",
 		modelPolicy: "distillation",
-		projection: "belief",
+		projection: "distill",
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the distill role does not have. Your only tools are ` +
 			`declare_belief, view_beliefs, and conclude — nothing else. The execution role has already ` +

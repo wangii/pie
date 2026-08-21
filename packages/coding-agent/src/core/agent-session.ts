@@ -336,7 +336,7 @@ const REFLECTION_MIN_SETTLED_BELIEFS = 3;
  * distill, or finalAnswer. The old single `epistemic` role is split into two steps that
  * run on different models: `propose` decides what to test and whether to conclude, and
  * `distill` turns each probe's report into belief updates. Task-scoped bookkeeping
- * (`_reflected`, `_dispatchedFrameIds`, `_beliefsAtTaskReset`)
+ * (`_reflected`, `_dispatchedFrameIds`, `_evidenceWatermark`, `_beliefsAtTaskReset`)
  * stays outside the union because it must survive a phase change (e.g. a
  * reflection-dispatched probe must come back to distill with `_reflected` still latched).
  */
@@ -408,6 +408,16 @@ export class AgentSession {
 	}
 	/** The full active tool names, independent of the current role's projected subset. */
 	private _fullActiveToolNames: string[] = [];
+	/**
+	 * Index into `agent.state.messages` below which operational detail (raw tool results and
+	 * bash output) has already been shown to the distill role. The distill role sees each
+	 * execution episode's raw evidence exactly once — the turn after execution produces it — then
+	 * that detail is masked so its context does not accumulate stale raw output. The propose and
+	 * finalAnswer roles mask operational detail unconditionally (their projections are append-only
+	 * and cacheable); only the distill role consults this marker. Advances when the frame is
+	 * dispatched (moves on to the next episode).
+	 */
+	private _evidenceWatermark = 0;
 	/**
 	 * Set when a follow-up user message is queued while the previous loop is concluding
 	 * (`_role === "finalAnswer"`). Consumed on delivery in `_advanceRole` to reset the loop
@@ -659,9 +669,11 @@ export class AgentSession {
 	 * projection and would silently accumulate).
 	 *
 	 * Each role sees a different projection:
-	 * - epistemic: the belief bookkeeping (declare_belief / view_beliefs results) is always
-	 *   visible — it is the operated-on object — while raw operational detail is always masked
-	 *   so the projected transcript stays append-only and cacheable.
+	 * - propose: the belief bookkeeping (declare_belief / view_beliefs results) is always visible
+	 *   — it is the operated-on object — while raw operational detail is always masked so the
+	 *   projected transcript stays append-only and cacheable.
+	 * - distill: like propose, but the current execution episode's raw evidence is shown exactly
+	 *   once (above the evidence watermark) so it can update beliefs on it.
 	 * - execution: the belief *mutation* echo (declare_belief) is masked so the probe role is
 	 *   not tempted to propose/update beliefs, but the read-only `view_beliefs` stays visible so
 	 *   it can recall the belief it is testing; raw operational detail stays.
@@ -678,7 +690,7 @@ export class AgentSession {
 	private _projectMessagesFor(role: "propose" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
 		const elidedProbeToolCalls = this._elidedProbeToolCallIds();
 		return this.agent.state.messages
-			.map((message) => this._projectMessage(message, role, elidedProbeToolCalls))
+			.map((message, index) => this._projectMessage(message, index, role, elidedProbeToolCalls))
 			.filter((message): message is AgentMessage => message !== undefined);
 	}
 
@@ -686,24 +698,29 @@ export class AgentSession {
 	 *  to nothing (e.g. a probe turn whose tool calls and thinking are all elided). */
 	private _projectMessage(
 		message: AgentMessage,
+		index: number,
 		role: "propose" | "distill" | "execution" | "finalAnswer",
 		elidedProbeToolCalls: Set<string>,
 	): AgentMessage | undefined {
 		// The projection per role is declared in ROLE_SPECS; the masking helpers below implement
-		// each kind. The belief-side roles (propose + distill) share one projection: the probe's
-		// tool calls and reasoning are always elided — that is the imitation trigger regardless
-		// of age — while the raw result *content* is always masked so the projected transcript
-		// stays append-only and its prefix stays cacheable across turns.
+		// each kind. The propose role masks raw operational detail unconditionally so its projected
+		// transcript is append-only and its prefix stays cacheable across turns; it reads beliefs
+		// through `view_beliefs`, not raw probe output. The distill role sees the current execution
+		// episode's raw evidence exactly once (above the watermark) to update beliefs on it, then
+		// that detail is masked below the watermark. The probe's tool calls and reasoning are always
+		// elided from both — that is the imitation trigger regardless of age.
 		switch (ROLE_SPECS[role].projection) {
 			case "belief":
-				return this._maskOperationalDetail(message, elidedProbeToolCalls);
+				return this._maskOperationalDetail(message, true, elidedProbeToolCalls);
+			case "distill":
+				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
 			case "finalAnswer": {
 				// Raw operational detail is discarded, and the belief tools' echoes are masked too:
 				// the finalAnswer role reads the explicit final-answer context injected at the
 				// handoff instead of whatever declare_belief/view_beliefs results happen to survive.
-				const masked = this._maskOperationalDetail(message, elidedProbeToolCalls);
+				const masked = this._maskOperationalDetail(message, true, elidedProbeToolCalls);
 				if (masked === undefined) return undefined;
 				// Epistemic assistant turns are distilled too (thinking + every belief tool call
 				// dropped, text kept): finalAnswer has no tools and grounds on the snapshot, so the
@@ -746,11 +763,16 @@ export class AgentSession {
 	 *   seeing the probe call `bash`/`read` is what drives a role to imitate it, so this is
 	 *   age-independent;
 	 * - a tool result whose call was elided (a probe tool, or a belief tool called inside a probe
-	 *   turn) is folded into a `[operational detail omitted]` placeholder. Masking is unconditional
-	 *   so the projected transcript is a pure, append-only function of the message history — never
-	 *   rewritten in place — which keeps the provider's prefix cache hit across turns.
+	 *   turn) is folded into a plain text note — masked to a placeholder only when `maskResult` is
+	 *   true. The propose/finalAnswer roles pass `true` unconditionally (append-only, cacheable);
+	 *   the distill role passes `index < watermark` so it sees the current episode's raw evidence
+	 *   once, then it is masked.
 	 */
-	private _maskOperationalDetail(message: AgentMessage, elidedProbeToolCalls: Set<string>): AgentMessage | undefined {
+	private _maskOperationalDetail(
+		message: AgentMessage,
+		maskResult: boolean,
+		elidedProbeToolCalls: Set<string>,
+	): AgentMessage | undefined {
 		switch (message.role) {
 			case "toolResult":
 				// Fold any result whose tool call is elided from this role's view: a probe tool's
@@ -759,15 +781,18 @@ export class AgentSession {
 				// it must become a plain note — never a `tool` result whose id would orphan, and
 				// never a tool-call name the role could imitate.
 				if (this._isProbeTool(message.toolName) || elidedProbeToolCalls.has(message.toolCallId)) {
-					return {
-						role: "user",
-						content: [{ type: "text", text: "[operational detail omitted]" }],
-						timestamp: message.timestamp,
-					};
+					if (maskResult) {
+						return {
+							role: "user",
+							content: [{ type: "text", text: "[operational detail omitted]" }],
+							timestamp: message.timestamp,
+						};
+					}
+					return { role: "user", content: message.content, timestamp: message.timestamp };
 				}
 				return message;
 			case "bashExecution":
-				return { ...message, output: "[output omitted]" };
+				return maskResult ? { ...message, output: "[output omitted]" } : message;
 			case "assistant":
 				// The probe (execution) role's assistant turns carry raw operational detail the
 				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
@@ -908,6 +933,7 @@ export class AgentSession {
 		this._loopState = { role: "propose" };
 		this._dispatchedFrameIds = new Set();
 		this._reflected = false;
+		this._evidenceWatermark = this.agent.state.messages.length;
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
 		// this task's own and re-enable the "deepen or conclude" steer.
 		this._beliefsAtTaskReset = this._beliefSet.beliefs.length;
@@ -957,8 +983,8 @@ export class AgentSession {
 	 * current phase and the just-finished turn, it returns the next phase and the steer to
 	 * deliver with it (`steer` is `undefined` to stay silent). Each branch is one transition:
 	 * its guard, its next state, and its effect. Two side effects stay inline where they are
-	 * tightly coupled to their transition — advancing `_dispatchedFrameIds` on dispatch, and
-	 * latching `_reflected` on the one-round reflection.
+	 * tightly coupled to their transition — advancing `_dispatchedFrameIds`/`_evidenceWatermark`
+	 * on dispatch, and latching `_reflected` on the one-round reflection.
 	 */
 	private _transition(state: LoopState, turn: PrepareNextTurnContext): { state: LoopState; steer?: string } {
 		const ranTools = turn.toolResults.length > 0;
@@ -1135,9 +1161,10 @@ export class AgentSession {
 		return lines.join("\n");
 	}
 
-	/** Dispatch the open frame to the execution role, advancing the dispatch ledger. */
+	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
 	private _dispatchToExecution(proposed: Belief[]): { state: LoopState; steer: string } {
 		this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
+		this._evidenceWatermark = this.agent.state.messages.length;
 		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
 		const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 		return {
