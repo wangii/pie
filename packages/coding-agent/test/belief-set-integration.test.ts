@@ -350,7 +350,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("epistemic role sees raw execution evidence so it can update beliefs", async () => {
+	test("epistemic role masks raw execution evidence, keeping the distilled report", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -386,7 +386,7 @@ describe("declare_belief integration", () => {
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled sentence.
 				"the value persisted",
-				// Epistemic: support — this turn must see the raw evidence to settle the belief.
+				// Epistemic: support — settles from the distilled sentence (raw evidence is masked).
 				{
 					toolCalls: [
 						{
@@ -405,11 +405,12 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			// The raw execution result is NOT omitted from the epistemic role: it sees it
-			// (alongside the distilled sentence) so it can update or propose beliefs.
+			// The raw execution result is masked from the epistemic role so the projected
+			// transcript stays append-only and cacheable; only the distilled sentence survives.
 			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
 			expect(epistemicContexts.length).toBeGreaterThan(0);
-			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
+			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(false);
+			expect(epistemicContexts.some((c) => contextText(c).includes("the value persisted"))).toBe(true);
 		} finally {
 			harness.cleanup();
 		}
@@ -658,7 +659,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("epistemic role sees each execution round's raw evidence exactly once", async () => {
+	test("epistemic role masks each execution round's raw evidence", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -739,19 +740,22 @@ describe("declare_belief integration", () => {
 			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
 			expect(epistemicContexts.length).toBeGreaterThan(0);
 
-			// Each round's raw evidence was shown at least once…
-			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_one"))).toBe(true);
-			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_two"))).toBe(true);
-			// …but the final epistemic turn sees only the fresh round, never the stale one.
+			// Each round's raw tool output is masked from the belief-side view (never shown), so
+			// the projected transcript is append-only and cacheable; only the distilled text
+			// report survives.
+			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_one"))).toBe(false);
+			expect(epistemicContexts.some((c) => contextText(c).includes("RAW_two"))).toBe(false);
 			const last = epistemicContexts[epistemicContexts.length - 1];
-			expect(contextText(last)).toContain("RAW_two");
+			expect(contextText(last)).toContain("the value persisted");
+			expect(contextText(last)).toContain("no session reuse observed");
 			expect(contextText(last)).not.toContain("RAW_one");
+			expect(contextText(last)).not.toContain("RAW_two");
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	test("epistemic role distills the probe role's thinking below the evidence watermark", async () => {
+	test("epistemic role always distills the probe role's thinking", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -790,7 +794,7 @@ describe("declare_belief integration", () => {
 					stopReason: "toolUse",
 				},
 				"the value persisted",
-				// Settle belief-1 AND propose belief-2, advancing the watermark past frame 1's probe round.
+				// Settle belief-1 AND propose belief-2 (the next frame).
 				{
 					toolCalls: [
 						{
@@ -837,13 +841,10 @@ describe("declare_belief integration", () => {
 			expect(epistemicContexts.length).toBeGreaterThan(0);
 			const last = epistemicContexts[epistemicContexts.length - 1];
 
-			// Frame 1's probe round is now below the watermark: its internal reasoning is
-			// distilled, while its distilled text report survives.
+			// The probe role's internal reasoning is distilled regardless of age — that is the
+			// imitation trigger, so it is always stripped — while its distilled text report survives.
 			expect(contextThinking(last)).not.toContain("EXEC_THINKING_ONE");
 			expect(contextText(last)).toContain("the value persisted");
-			// Frame 2's probe round is still fresh (above the watermark), but the probe's
-			// internal reasoning is distilled regardless of age — that is the imitation trigger,
-			// so it is always stripped. Its distilled text report survives.
 			expect(contextThinking(last)).not.toContain("EXEC_THINKING_TWO");
 			expect(contextText(last)).toContain("no session reuse observed");
 
