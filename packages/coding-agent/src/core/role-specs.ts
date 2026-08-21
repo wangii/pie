@@ -206,10 +206,12 @@ export const TRANSITION_STEERS = {
 	reflection:
 		"Before you conclude, reflect on the belief set itself as the object of one final test. " +
 		"For each check that fails, propose the missing belief and let it be probed — do not conclude yet. " +
-		"(1) Coverage — every path or @reference the task named has appeared as the referent of some belief, and every " +
-		"user-named concept the task treats as a unit is resolved: proven atomic, decomposed into adopted component " +
-		"beliefs, or explicitly excluded with a reason — an aggregate belief does not discharge coverage for its children. " +
-		"If any path is untouched or any user-named unit is unresolved, propose a belief to probe it. " +
+		"(1) Coverage — every path or @reference the task named has appeared as the referent of some belief. List each " +
+		"user-named concept the task treats as a unit, one per line, with its resolution and the belief ids behind it: " +
+		"`atomic` (name the belief whose evidence proved it), `decomposed` (name the scope-discovery belief and its " +
+		"adopted child beliefs), or `excluded` (name the reason). A concept you cannot attach to such a line is unresolved — " +
+		"an aggregate belief does not discharge coverage for its children. If any path is untouched or any concept is " +
+		"unresolved, propose a belief to probe it. " +
 		"(2) Composition — the conjunction of two supported beliefs may smuggle a claim that was never proposed; " +
 		"propose that implied claim. " +
 		"(3) Completeness — every belief that calls something consistent or free of drift treated it as complete; " +
