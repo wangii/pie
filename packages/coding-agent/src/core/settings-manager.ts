@@ -98,6 +98,8 @@ export interface PieSettings {
 	 * update on. Defaults to `defaultModel` so the distillation stays on the strong default model
 	 * even when the probe role is on a cheaper `executionModel`. */
 	distillationModel?: string;
+	/** Thinking level for the belief loop's distillation (prediction-error) role. Defaults to "low". */
+	distillationThinkingLevel?: ThinkingLevel;
 	/** The language belief-set prompts must write in. Defaults to "Chinese". */
 	beliefLang?: string;
 }
@@ -740,6 +742,10 @@ export class SettingsManager {
 
 	getDistillationModel(): string | undefined {
 		return this.settings.pie?.distillationModel ?? this.settings.defaultModel;
+	}
+
+	getDistillationThinkingLevel(): ThinkingLevel {
+		return this.settings.pie?.distillationThinkingLevel ?? "low";
 	}
 
 	getBeliefLang(): string {

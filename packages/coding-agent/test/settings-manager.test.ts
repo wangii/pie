@@ -229,6 +229,18 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("distillationThinkingLevel", () => {
+		it("defaults to low when not configured", () => {
+			expect(SettingsManager.inMemory().getDistillationThinkingLevel()).toBe("low");
+		});
+
+		it("returns the configured distillation thinking level", () => {
+			expect(
+				SettingsManager.inMemory({ pie: { distillationThinkingLevel: "high" } }).getDistillationThinkingLevel(),
+			).toBe("high");
+		});
+	});
+
 	describe("beliefLang", () => {
 		it("defaults to Chinese when not configured", () => {
 			expect(SettingsManager.inMemory().getBeliefLang()).toBe("Chinese");

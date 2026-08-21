@@ -687,7 +687,10 @@ export class AgentSession {
 					messages: this._projectContextMessages(),
 				},
 				model: this._roleModel(),
-				thinkingLevel: this.agent.state.thinkingLevel,
+				thinkingLevel:
+					this._role === "distill"
+						? this.settingsManager.getDistillationThinkingLevel()
+						: this.agent.state.thinkingLevel,
 			};
 		};
 	}

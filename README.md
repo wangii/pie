@@ -58,6 +58,7 @@ Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (pro
 
 - `pie.executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
 - `pie.distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
+- `pie.distillationThinkingLevel`：distill 角色的思考级别，默认 `low`；仅在该角色的请求边界生效，不影响其他角色与会话主模型的思考级别。
 - `pie.beliefLang`：信念循环提示词要求的书写语言，默认 `Chinese`，可改为任意语言名称（如 `English`）。
 
 propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型字符串使用 `provider/modelId` 格式，配置在全局 `~/.pi/agent/settings.json` 或项目 `.pi/settings.json`：
@@ -68,6 +69,7 @@ propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型
   "pie": {
     "executionModel": "provider/probeModel",
     "distillationModel": "provider/strongModel",
+    "distillationThinkingLevel": "low",
     "beliefLang": "Chinese"
   }
 }
@@ -79,6 +81,7 @@ The belief loop lets two roles run on separately configured models (only while t
 
 - `pie.executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
 - `pie.distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
+- `pie.distillationThinkingLevel`: the thinking level for the distill role; defaults to `low`. It applies only at that role's request boundary and does not affect other roles or the session's main-model thinking level.
 - `pie.beliefLang`: the language the belief-loop prompts must write in; defaults to `Chinese` — set it to another language name (e.g. `English`) to change it.
 
 The propose and finalAnswer roles always use the session's main model (`defaultModel`). Model strings use the `provider/modelId` format and live in the global `~/.pi/agent/settings.json` or the project `.pi/settings.json` (see the example above).
