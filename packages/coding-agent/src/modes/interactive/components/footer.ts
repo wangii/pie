@@ -44,23 +44,18 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 /**
- * Per-role cache hit rate in the footer: `epi50.0%`, or `epi-` when the role has no request yet.
+ * One role's merged stats+model unit in the footer: `epi 25.0% main-model`, with the provider in
+ * parentheses when multiple providers are available. The cache hit rate is `-` when the role has
+ * no request yet; the model is `—` when it could not be resolved.
  */
-function formatRoleCh(label: string, rate: number | undefined): string {
-	return rate !== undefined ? `${label}${rate.toFixed(1)}%` : `${label}-`;
-}
-
-/**
- * One role's model in the footer: `epi claude-…`, with provider when multiple providers are
- * available; `epi —` when the role's model could not be resolved.
- */
-function formatRoleModel(
+function formatRoleUnit(
 	label: string,
-	model: { provider: string; id: string } | undefined,
+	slot: { model: { provider: string; id: string } | undefined; latestCacheHitRate: number | undefined },
 	includeProvider: boolean,
 ): string {
-	if (!model) return `${label} —`;
-	return `${label} ${includeProvider ? `(${model.provider}) ` : ""}${model.id}`;
+	const ch = slot.latestCacheHitRate !== undefined ? `${slot.latestCacheHitRate.toFixed(1)}%` : "-";
+	const model = slot.model ? `${includeProvider ? `(${slot.model.provider}) ` : ""}${slot.model.id}` : "—";
+	return `${label} ${ch} ${model}`;
 }
 
 /**
@@ -153,11 +148,11 @@ export class FooterComponent implements Component {
 		if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
 		if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
 		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
-		if (roleStatus) {
-			statsParts.push(formatRoleCh("epi", roleStatus.epistemic.latestCacheHitRate));
-			statsParts.push(formatRoleCh("dist", roleStatus.distillation.latestCacheHitRate));
-			statsParts.push(formatRoleCh("exec", roleStatus.execution.latestCacheHitRate));
-		} else if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+		if (
+			!roleStatus &&
+			(usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) &&
+			latestCacheHitRate !== undefined
+		) {
 			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 		}
 
@@ -222,13 +217,14 @@ export class FooterComponent implements Component {
 		// Calculate available space for padding (minimum 2 spaces between stats and model)
 		const minPadding = 2;
 
-		// Add model names on the right side. In a belief loop, show each role's model separately;
-		// otherwise the single session model, plus thinking level if it supports reasoning.
+		// Add model names on the right side. In a belief loop, merge each role's cache hit rate
+		// with its model into one unit; otherwise the single session model, plus thinking level
+		// if it supports reasoning.
 		const modelName = state.model?.id || "no-model";
 		const includeProvider = this.footerData.getAvailableProviderCount() > 1;
 		let rightSideWithoutProvider: string;
 		if (roleStatus) {
-			rightSideWithoutProvider = `${formatRoleModel("epi", roleStatus.epistemic.model, includeProvider)} · ${formatRoleModel("dist", roleStatus.distillation.model, includeProvider)} · ${formatRoleModel("exec", roleStatus.execution.model, includeProvider)}`;
+			rightSideWithoutProvider = `${formatRoleUnit("epi", roleStatus.epistemic, includeProvider)} · ${formatRoleUnit("dist", roleStatus.distillation, includeProvider)} · ${formatRoleUnit("exec", roleStatus.execution, includeProvider)}`;
 			if (state.model?.reasoning) {
 				const thinkingLevel = state.thinkingLevel || "off";
 				rightSideWithoutProvider += ` • ${thinkingLevel === "off" ? "thinking off" : thinkingLevel}`;

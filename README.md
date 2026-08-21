@@ -34,7 +34,7 @@ Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显�
 | 阶段 | 职责 |
 |------|------|
 | `propose`（提议） | 决定测试什么；提出信念（statement/expectation/evidence）与框架义务（framing obligation） |
-| `execution`（执行） | 探测代码或产品，报告一句原始观察，不做分析 |
+| `execution`（执行） | 先观察探测；当用户意图要求实际修改时，以最小编辑作为检验信念的干预实验并验证，再报告一句原始观察 |
 | `distill`（蒸馏） | 做预测误差蒸馏（prediction-error distillation）：先用既有信念解释观察，再只对残差更新信念 |
 | `finalAnswer`（终答） | 依据注入的信念快照写出结论，无工具 |
 
@@ -45,7 +45,7 @@ The core idea of Pie in this iteration is to model "how the agent answers a ques
 | Phase | Job |
 |-------|-----|
 | `propose` | Decides what to test; proposes beliefs (statement/expectation/evidence) and framing obligations |
-| `execution` | Probes the code/product and reports one raw observation sentence, no analysis |
+| `execution` | Probes by observation first; when the intended outcome requires an actual change, makes the smallest edit as an intervention experiment, verifies it, then reports one raw observation sentence |
 | `distill` | Performs prediction-error distillation: explains the observation with current beliefs first, then updates only on the residual |
 | `finalAnswer` | Writes the conclusion from the injected belief snapshot; no tools |
 

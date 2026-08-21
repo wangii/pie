@@ -204,7 +204,7 @@ describe("FooterComponent width handling", () => {
 		expect(statsLine).toContain("$1.250");
 	});
 
-	it("shows per-role cache hit rates and role models when role status is present", () => {
+	it("merges per-role cache hit rates and role models when role status is present", () => {
 		const session = createSession({
 			sessionName: "",
 			usage: {
@@ -223,12 +223,9 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(200)[1]);
-		expect(statsLine).toContain("epi25.0%");
-		expect(statsLine).toContain("dist50.0%");
-		expect(statsLine).toContain("exec0.0%");
-		expect(statsLine).toContain("epi main-model");
-		expect(statsLine).toContain("dist distill-model");
-		expect(statsLine).toContain("exec exec-model");
+		expect(statsLine).toContain("epi 25.0% main-model");
+		expect(statsLine).toContain("dist 50.0% distill-model");
+		expect(statsLine).toContain("exec 0.0% exec-model");
 	});
 
 	it("renders explicit empty markers for roles without requests", () => {
@@ -243,12 +240,9 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(200)[1]);
-		expect(statsLine).toContain("epi-");
-		expect(statsLine).toContain("dist-");
-		expect(statsLine).toContain("exec-");
-		expect(statsLine).toContain("epi —");
-		expect(statsLine).toContain("dist —");
-		expect(statsLine).toContain("exec exec-model");
+		expect(statsLine).toContain("epi - —");
+		expect(statsLine).toContain("dist - —");
+		expect(statsLine).toContain("exec - exec-model");
 	});
 
 	it("shows the latest cache hit rate when cache usage is present", () => {

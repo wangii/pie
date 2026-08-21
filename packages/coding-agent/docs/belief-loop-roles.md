@@ -13,19 +13,19 @@ surfaces, model selection, and message projections cannot drift apart.
 |---|---|---|
 | `epistemic` (old single role) | `propose` + `distill` | the belief-side pair; `epistemic` survives only as a deprecated key in `getRoleContextUsage` |
 | `two-role loop` | four-phase loop | the loop has four phases, not two |
-| — | `execution` | probes the code/product and reports raw observations |
+| — | `execution` | probes by observation or minimal intervention and reports raw observations |
 | — | `finalAnswer` | writes the conclusion from the injected snapshot |
 
 ## The four roles
 
 | | `propose` | `execution` | `distill` | `finalAnswer` |
 |---|---|---|---|---|
-| job | decide what to test; open/close framing obligations | probe the belief's referent | turn the observation into belief updates | write the conclusion |
-| tools | `declare_belief` `view_beliefs` `conclude` | all probe tools + `view_beliefs` (no `declare_belief`/`conclude`) | `declare_belief` `view_beliefs` `conclude` | none |
+| job | decide what to test; open/close framing obligations | probe the belief's referent; intervene minimally when the intended outcome requires an actual change | turn the observation into belief updates | write the conclusion |
+| tools | `declare_belief` `view_beliefs` `conclude` | all active tools except `declare_belief`/`conclude` + `view_beliefs` | `declare_belief` `view_beliefs` `conclude` | none |
 | `view_beliefs` scope | `all` | `frame` | `all` | n/a |
 | model | session default | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | session default |
 | projection | operational detail masked by watermark; probe calls elided | belief bookkeeping masked (`declare_belief`/`conclude`) | same as `propose` | all operational detail and belief-tool echoes masked |
-| output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation | `support`/`refute`/`refine`/`retract` | the conclusion text |
+| output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation of the probe or intervention result | `support`/`refute`/`refine`/`retract` | the conclusion text |
 
 Each row is a `RoleSpec` in `role-specs.ts` (`instruction`, `tools`, `beliefScope`,
 `modelPolicy`, `projection`, `strayToolSteer`). The execution tool list is derived from the

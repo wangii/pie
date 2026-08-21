@@ -224,6 +224,13 @@ describe("declare_belief integration", () => {
 			// propose role's, so the propose prompt must hand it off rather than fold it in.
 			expect(prompt).toContain("separate distill step");
 			expect(prompt).not.toContain("epistemic residual");
+			// Imperative change requests must establish an action framing whose evidence is the
+			// executed change plus verification, or a concrete blocker observed after an attempt —
+			// a plan or a list of intended changes cannot discharge the obligation.
+			expect(prompt).toContain("intended outcome");
+			expect(prompt).toContain("actual execution is required");
+			expect(prompt).toContain("concrete blocker");
+			expect(prompt).toContain("does not discharge that obligation");
 		} finally {
 			harness.cleanup();
 		}
@@ -1050,6 +1057,12 @@ describe("declare_belief integration", () => {
 			// beyond the probed hypothesis — as raw observations, so the epistemic role can expand
 			// its beliefs horizontally instead of only confirming the narrow hypotheses it proposed.
 			expect(executionContext!.systemPrompt).toContain("contradiction");
+			// Observation-first, but the smallest edit/write is a valid intervention experiment when
+			// the user's intended outcome requires an actual change, with read/bash verification and
+			// a concrete observed blocker on failure — the prompt must carry this balance.
+			expect(executionContext!.systemPrompt).toContain("intervention experiment");
+			expect(executionContext!.systemPrompt).toContain("intended outcome");
+			expect(executionContext!.systemPrompt).toContain("concrete observed blocker");
 
 			// The epistemic return steer asks for the residual, not a full re-update.
 			const epistemicContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));

@@ -84,6 +84,13 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"default: if execution finds a single referent, support the discovery belief and stop; if it finds several, adopt " +
 			"each component that matters as its own referent, or explicitly exclude a component with a reason — exclusion is a " +
 			"successful resolution, not a failure. An aggregate belief does not discharge coverage for its children.\n" +
+			"Infer the user's intended outcome before proposing beliefs. If the request imperatively asks to " +
+			"change, add, remove, fix, or implement something, assume that actual execution is required unless " +
+			"the user explicitly asked only for analysis or a plan. For such a request, establish a framing " +
+			"belief that the final answer must be supported by evidence of either (a) the concrete executed " +
+			"change with proportionate verification of its result, or (b) a concrete blocker observed after " +
+			"a reasonable execution attempt. A plan, a list of intended changes, or a claim about what should " +
+			"work does not discharge that obligation.\n" +
 			"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
 			"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
 			"You never do the probing and you never do that accounting — you only state what should be tested " +
@@ -133,10 +140,16 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	execution: {
 		instruction:
 			"\n\nRead the belief you are probing with view_beliefs if you need its exact expectation, then " +
-			"probe the code or product to test it. Report in one concise sentence what you observed — the raw " +
-			"observations and any contradiction with documentation or a contract you noticed, not an analysis " +
-			"of them. The prediction-error distillation (comparing the observation to the expectation and " +
-			"deciding what the belief set must update on) is the distill role's step, not yours: it reads " +
+			"probe the code or product to test it. Prefer read/bash observation when it alone can reduce the " +
+			"relevant uncertainty. When the user's intended outcome requires an actual change and the remaining " +
+			"uncertainty is whether a proposed change can realize or test that outcome, treat the smallest " +
+			"appropriate edit/write as an intervention experiment: perform it instead of stopping at a plan, " +
+			"then verify the resulting artifact with read/bash. Choose the experiment that most directly " +
+			"reduces uncertainty in the open framing obligation. If execution cannot succeed, make a reasonable " +
+			"attempt and report the concrete observed blocker. Report in one concise sentence what you observed — " +
+			"the raw observations and any contradiction with documentation or a contract you noticed, not an " +
+			"analysis of them. The prediction-error distillation (comparing the observation to the expectation " +
+			"and deciding what the belief set must update on) is the distill role's step, not yours: it reads " +
 			"your raw report and does that accounting itself. Proposing or updating beliefs is likewise a " +
 			"separate step you do not perform.",
 		tools: ({ fullActiveToolNames }) =>
@@ -149,9 +162,11 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		modelPolicy: "execution",
 		projection: "execution",
 		strayToolSteer: (names) =>
-			`You tried to call ${names}, which the execution role does not have. You probe with read/bash ` +
-			`and report observations; belief updates and concluding happen in separate roles after you ` +
-			`report. Report your observation in plain text instead.`,
+			`You tried to call ${names}, which the execution role does not have. You test beliefs through ` +
+			`observation or minimal intervention: read/bash for observational probes, edit/write when an ` +
+			`actual change is the most direct experiment the user's intended outcome requires. Report ` +
+			`observations only; belief updates and concluding happen in separate roles after you report. ` +
+			`Report your observation in plain text instead.`,
 	},
 	finalAnswer: {
 		instruction:
