@@ -18,10 +18,11 @@ const declareBeliefSchema = Type.Object({
 				Type.Literal("refute"),
 				Type.Literal("refine"),
 				Type.Literal("retract"),
+				Type.Literal("route"),
 			],
 			{
 				description:
-					"What to do. Omit it to propose (the default). propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence; supporting a framing belief also needs evidenceBeliefIds). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId).",
+					"What to do. Omit it to propose (the default). propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence; supporting a framing belief also needs evidenceBeliefIds). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId). route: declare the fast-path routing decision for the current request (needs statement + decision + probabilities + estimatedSteps + difficulty).",
 			},
 		),
 	),
@@ -32,9 +33,9 @@ const declareBeliefSchema = Type.Object({
 		}),
 	),
 	domain: Type.Optional(
-		Type.Union([Type.Literal("product"), Type.Literal("code"), Type.Literal("framing")], {
+		Type.Union([Type.Literal("product"), Type.Literal("code"), Type.Literal("framing"), Type.Literal("routing")], {
 			description:
-				"product/code: a relation about the world. framing: what the final answer must establish (an obligation). Required for propose.",
+				"product/code: a relation about the world. framing: what the final answer must establish (an obligation). routing: the fast-path routing decision for the current request (used with op `route`). Required for propose.",
 		}),
 	),
 	expectation: Type.Optional(
@@ -63,6 +64,31 @@ const declareBeliefSchema = Type.Object({
 		Type.Array(Type.String(), {
 			description:
 				"Belief ids that discharge this support. Required when supporting a framing belief: reference the product/code beliefs (each must already be supported) that establish the obligation. Ignored for non-framing support.",
+		}),
+	),
+	decision: Type.Optional(
+		Type.Union([Type.Literal("fast-path"), Type.Literal("belief-loop")], {
+			description: "The routing decision. Required for op `route`.",
+		}),
+	),
+	suitabilityProbability: Type.Optional(
+		Type.Number({
+			description: "How suitable this request is for fast-path execution (0-1). Required for op `route`.",
+		}),
+	),
+	successProbability: Type.Optional(
+		Type.Number({
+			description: "Estimated probability the fast path completes the request (0-1). Required for op `route`.",
+		}),
+	),
+	estimatedSteps: Type.Optional(
+		Type.Number({
+			description: "Estimated number of tool steps the fast path needs. Required for op `route`.",
+		}),
+	),
+	difficulty: Type.Optional(
+		Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
+			description: "Estimated difficulty of the request. Required for op `route`.",
 		}),
 	),
 });
@@ -131,6 +157,47 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 		case "retract":
 			if (!input.beliefId) throw new Error("retract requires a `beliefId`.");
 			return { op: "retract", beliefId: input.beliefId };
+		case "route": {
+			if (!input.statement?.trim()) {
+				throw new Error("route requires a non-empty `statement`.");
+			}
+			if (input.decision !== "fast-path" && input.decision !== "belief-loop") {
+				throw new Error("route requires `decision` of 'fast-path' or 'belief-loop'.");
+			}
+			const { suitabilityProbability, successProbability, estimatedSteps, difficulty } = input;
+			if (
+				typeof suitabilityProbability !== "number" ||
+				!Number.isFinite(suitabilityProbability) ||
+				suitabilityProbability < 0 ||
+				suitabilityProbability > 1
+			) {
+				throw new Error("route requires `suitabilityProbability` between 0 and 1.");
+			}
+			if (
+				typeof successProbability !== "number" ||
+				!Number.isFinite(successProbability) ||
+				successProbability < 0 ||
+				successProbability > 1
+			) {
+				throw new Error("route requires `successProbability` between 0 and 1.");
+			}
+			if (typeof estimatedSteps !== "number" || !Number.isSafeInteger(estimatedSteps) || estimatedSteps < 0) {
+				throw new Error("route requires a non-negative integer `estimatedSteps`.");
+			}
+			if (difficulty !== "low" && difficulty !== "medium" && difficulty !== "high") {
+				throw new Error("route requires `difficulty` of 'low', 'medium', or 'high'.");
+			}
+			return {
+				op: "route",
+				statement: input.statement,
+				expectation: input.expectation?.trim() || `Routing decision for the request: ${input.decision}.`,
+				decision: input.decision,
+				suitabilityProbability,
+				successProbability,
+				estimatedSteps,
+				difficulty,
+			};
+		}
 		case "refine":
 			if (!input.beliefId) {
 				throw new Error("refine requires a `beliefId`.");
@@ -161,7 +228,8 @@ export function createDeclareBeliefToolDefinition(
 			"Record or update your current beliefs about the product, the code, or what the answer must establish. A belief names a relation between two referents " +
 			"plus a falsifiable expectation. Ops: propose (add a belief — several may be open at once), support/refute " +
 			"(settle a proposed belief with the observed evidence), refine (replace a belief: supply a corrected " +
-			"statement AND expectation, not evidence), retract (withdraw).",
+			"statement AND expectation, not evidence), retract (withdraw), route (declare the fast-path routing " +
+			"decision for the current request).",
 		promptSnippet: declareBeliefSystemPromptContribution.snippet,
 		promptGuidelines: declareBeliefSystemPromptContribution.guidelines,
 		parameters: declareBeliefSchema,

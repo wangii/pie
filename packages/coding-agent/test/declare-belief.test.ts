@@ -186,6 +186,56 @@ describe("declare_belief tool", () => {
 	});
 });
 
+describe("declare_belief route op", () => {
+	test("route applies a settled routing belief", async () => {
+		const set = new BeliefSet();
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				decision: "fast-path",
+				suitabilityProbability: 0.9,
+				successProbability: 0.85,
+				estimatedSteps: 2,
+				difficulty: "low",
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		const belief = set.beliefs[0]!;
+		expect(belief.domain).toBe("routing");
+		expect(belief.decision).toBe("fast-path");
+		expect(set.proposed()).toHaveLength(0);
+		expect((result.content[0] as { text: string }).text).toContain("Applied route");
+	});
+
+	test("route rejects a missing decision", async () => {
+		const set = new BeliefSet();
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				suitabilityProbability: 0.9,
+				successProbability: 0.9,
+				estimatedSteps: 1,
+				difficulty: "low",
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+		expect((result.content[0] as { text: string }).text).toContain("decision");
+	});
+});
+
 describe("view_beliefs tool", () => {
 	test("renders the current belief set as text", async () => {
 		const set = new BeliefSet();

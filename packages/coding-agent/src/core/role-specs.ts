@@ -58,6 +58,13 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
 			"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
 			"Write every belief — its statement, expectation, and evidence — in {beliefLang}.\n\n" +
+			"Before anything else, declare the routing belief with declare_belief op `route`: judge whether this " +
+			"request is suitable for fast-path execution. State the decision (`fast-path` or `belief-loop`), " +
+			"suitabilityProbability (0-1), successProbability (0-1), estimatedSteps, and difficulty " +
+			"(low/medium/high). Choose `fast-path` only for simple requests: low side-effect risk, few steps, low " +
+			"ambiguity, high success probability. If you route `fast-path`, do NOT propose any other beliefs — the " +
+			"execution role will execute the request directly and a separate distillation step will summarize it. " +
+			"If you route `belief-loop`, continue with the protocol below.\n\n" +
 			"Work the belief → experiment → update protocol:\n" +
 			"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
 			"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
@@ -188,6 +195,14 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 export const TRANSITION_STEERS = {
 	/** propose/distill → execution: dispatch the open frame. */
 	dispatch: (statements: string) => `Run the experiments for the beliefs ${statements} and report your observations.`,
+	/** propose → execution on the fast path: execute the request directly and answer. */
+	fastPathDispatch:
+		"Fast path: execute the user's request directly with your tools, then give the complete final answer to " +
+		"the user in your final message.",
+	/** execution → propose after a fast-path failure: continue the same task with the belief protocol. */
+	fastPathHandoff:
+		"Fast path could not complete the task. Continue the same task with the belief protocol; the fast-path " +
+		"execution summary is in the conversation. Do not repeat actions already performed.",
 	/** propose → distill / distill stay: some open beliefs were not updated. */
 	openBeliefs: (statements: string) =>
 		`Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,

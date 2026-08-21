@@ -28,6 +28,7 @@ import { contentText } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
+	Context,
 	ImageContent,
 	Model,
 	ProviderHeaders,
@@ -343,7 +344,7 @@ const REFLECTION_MIN_SETTLED_BELIEFS = 3;
 type LoopState =
 	| { role: "propose" }
 	| { role: "distill" }
-	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean }
+	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
 	| { role: "finalAnswer" };
 
 /**
@@ -462,6 +463,14 @@ export class AgentSession {
 	 * from re-running a redundant investigation loop.
 	 */
 	private _beliefsAtTaskReset = 0;
+
+	/**
+	 * Set when a fast-path run's execution turn reported a tool error: the run failed and must
+	 * hand the same task back to propose instead of resetting to the next task.
+	 */
+	private _fastPathFailure = false;
+	/** The current task's request text, captured at `prompt()`, used for the fast-path summary. */
+	private _currentTaskRequestText = "";
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -676,7 +685,7 @@ export class AgentSession {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
 
-			this._advanceRole(turn);
+			await this._advanceRole(turn);
 
 			return {
 				...previousSnapshot,
@@ -965,6 +974,7 @@ export class AgentSession {
 		this._loopState = { role: "propose" };
 		this._dispatchedFrameIds = new Set();
 		this._reflected = false;
+		this._fastPathFailure = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
 		// this task's own and re-enable the "deepen or conclude" steer.
@@ -972,7 +982,7 @@ export class AgentSession {
 	}
 
 	/** Advance the role from the just-completed turn and project the next role's surface. */
-	private _advanceRole(turn: PrepareNextTurnContext): void {
+	private async _advanceRole(turn: PrepareNextTurnContext): Promise<void> {
 		if (!this._enableBeliefSet || !this._beliefSetUsable) {
 			this._applyRoleSurface();
 			return;
@@ -998,7 +1008,7 @@ export class AgentSession {
 			this._applyRoleSurface();
 			return;
 		}
-		const next = this._transition(this._loopState, turn);
+		const next = await this._transition(this._loopState, turn);
 		this._loopState = next.state;
 		if (next.steer !== undefined) {
 			this.agent.steer({
@@ -1018,7 +1028,10 @@ export class AgentSession {
 	 * tightly coupled to their transition — advancing `_dispatchedFrameIds`/`_evidenceWatermark`
 	 * on dispatch, and latching `_reflected` on the one-round reflection.
 	 */
-	private _transition(state: LoopState, turn: PrepareNextTurnContext): { state: LoopState; steer?: string } {
+	private async _transition(
+		state: LoopState,
+		turn: PrepareNextTurnContext,
+	): Promise<{ state: LoopState; steer?: string }> {
 		const ranTools = turn.toolResults.length > 0;
 		switch (state.role) {
 			case "propose": {
@@ -1030,6 +1043,16 @@ export class AgentSession {
 				}
 				if (undispatched.length > 0) {
 					return this._dispatchToExecution(proposed);
+				}
+				// The propose role's routing belief decides this task's path. Route conservatively:
+				// fast-path only when this task has exactly one routing belief and it chose fast-path.
+				// A missing, duplicated, or rejected route falls through to the normal belief-loop
+				// protocol instead of silently bypassing routing.
+				const routes = this._beliefSet.beliefs
+					.slice(this._beliefsAtTaskReset)
+					.filter((b) => b.domain === "routing");
+				if (routes.length === 1 && routes[0].decision === "fast-path") {
+					return this._dispatchToFastExecution(routes[0]);
 				}
 				if (proposed.length > 0) {
 					// Open (dispatched) beliefs should have been settled by the distill step; route
@@ -1090,6 +1113,47 @@ export class AgentSession {
 			}
 			case "execution": {
 				const frameHorizon = state.frameHorizon - turn.toolResults.length;
+				if (state.fastPath) {
+					// Accumulate tool failures across the fast-path episode: the settle step only sees
+					// the final turn, whose tool results may not include the failing call.
+					if (turn.toolResults.some((r) => r.isError)) {
+						this._fastPathFailure = true;
+					}
+					// Fast path: the execution role answers the user directly. When its final
+					// observation is in (no tool results) or its lease is exhausted, settle the run:
+					// distill a summary, then either reset to the next task's propose (success) or
+					// hand the same task back to propose (failure).
+					if (!ranTools) {
+						await this._settleFastPath(turn);
+						if (this._fastPathFailure) {
+							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
+						}
+						this._resetLoopForNewTask();
+						return { state: { role: "propose" } };
+					}
+					if (frameHorizon <= 0 && !state.leaseReportNudged) {
+						return {
+							state: { role: "execution", frameHorizon, leaseReportNudged: true, fastPath: true },
+							steer: TRANSITION_STEERS.leaseNudge,
+						};
+					}
+					if (frameHorizon <= 0) {
+						await this._settleFastPath(turn);
+						if (this._fastPathFailure) {
+							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
+						}
+						this._resetLoopForNewTask();
+						return { state: { role: "propose" } };
+					}
+					return {
+						state: {
+							role: "execution",
+							frameHorizon,
+							leaseReportNudged: state.leaseReportNudged,
+							fastPath: true,
+						},
+					};
+				}
 				if (!ranTools) {
 					// The experiment's observation is in — return to distill to update.
 					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
@@ -1209,6 +1273,130 @@ export class AgentSession {
 		};
 	}
 
+	/** The current task's routing belief, if the propose role declared one (created settled via `route`). */
+	/** Dispatch the execution role on the fast path: execute the user's request directly and answer. */
+	private _dispatchToFastExecution(route: Belief): { state: LoopState; steer: string } {
+		this._dispatchedFrameIds = new Set();
+		this._fastPathFailure = false;
+		this._evidenceWatermark = this.agent.state.messages.length;
+		return {
+			state: {
+				role: "execution",
+				frameHorizon: Math.max(1, Math.ceil(((route.estimatedSteps ?? 1) + 1) * FRAME_HORIZON_HEADROOM)),
+				leaseReportNudged: false,
+				fastPath: true,
+			},
+			steer: TRANSITION_STEERS.fastPathDispatch,
+		};
+	}
+
+	/**
+	 * Settle a completed fast-path run: distill the execution context into a structured summary
+	 * with the distillation model, persist it as a `fast_path_distillation` custom message, and
+	 * record whether the run failed (any tool error) for the handoff decision. Never throws into
+	 * the loop: a failed distillation falls back to a deterministic minimal summary.
+	 */
+	private async _settleFastPath(turn: PrepareNextTurnContext): Promise<void> {
+		if (turn.toolResults.some((r) => r.isError)) {
+			this._fastPathFailure = true;
+		}
+		const summary = await this._distillFastPath(turn);
+		try {
+			await this.sendCustomMessage(
+				{
+					customType: "fast_path_distillation",
+					content: summary,
+					display: false,
+					details: {
+						runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+						outcome: this._fastPathFailure ? "failure" : "success",
+						request: this._currentTaskRequestText,
+					},
+				},
+				{ triggerTurn: false },
+			);
+		} catch {
+			// Persisting the summary must not block the state transition.
+		}
+	}
+
+	/** The model for the fast-path distillation summary: `pie.distillationModel`, else the session model. */
+	private _resolveDistillationModel(): Model<any> | undefined {
+		const spec = this.settingsManager.getDistillationModel();
+		if (spec) {
+			const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
+			if (resolved.model) {
+				return resolved.model;
+			}
+		}
+		return this.agent.state.model;
+	}
+
+	/** Distill the fast-path execution context into a summary with the distillation model. */
+	private async _distillFastPath(turn: PrepareNextTurnContext): Promise<string> {
+		const model = this._resolveDistillationModel();
+		if (!model) {
+			return this._fallbackFastPathSummary(turn);
+		}
+		try {
+			const context: Context = {
+				systemPrompt:
+					"Summarize the completed fast-path execution for the epistemic context. List: " +
+					"completed actions, side effects, key observations, the final result, any remaining " +
+					"goal, and actions that must not be repeated.",
+				messages: [
+					{
+						role: "user",
+						content: `Request: ${this._currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this._fastPathTranscript(turn)}`,
+						timestamp: Date.now(),
+					},
+				],
+			};
+			const result = await this._modelRuntime.completeSimple(model, context, {
+				toolChoice: "none",
+				cacheRetention: "none",
+				sessionId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+			});
+			const text = contentText(result.content).trim();
+			return text || this._fallbackFastPathSummary(turn);
+		} catch {
+			return this._fallbackFastPathSummary(turn);
+		}
+	}
+
+	/** Deterministic minimal summary for when the distillation model call fails. */
+	private _fallbackFastPathSummary(turn: PrepareNextTurnContext): string {
+		const lines = [
+			this._fastPathFailure ? "Fast-path run failed." : "Fast-path run completed.",
+			`Request: ${this._currentTaskRequestText || "(unknown)"}`,
+			...turn.toolResults.map((r) => `tool ${r.toolName}: ${r.isError ? "error" : "ok"}`),
+		];
+		return lines.join("\n");
+	}
+
+	/** The fast-path execution turn's text, for the distillation prompt. */
+	private _fastPathTranscript(turn: PrepareNextTurnContext): string {
+		const parts: string[] = [`assistant: ${this._messageText(turn.message)}`];
+		for (const r of turn.toolResults) {
+			parts.push(`tool ${r.toolName}: ${this._messageText(r)}`);
+		}
+		return parts.join("\n");
+	}
+
+	private _messageText(message: { content: unknown }): string {
+		const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
+		if (typeof content === "string") {
+			return content;
+		}
+		if (Array.isArray(content)) {
+			return content
+				.filter((p): p is { type: "text"; text: string } => p.type === "text")
+				.map((p) => p.text)
+				.join("\n");
+		}
+		return "";
+	}
+
 	/** Tool-call names in the just-finished turn that the current role was not offered. */
 	private _strayToolNames(message: AssistantMessage): string[] {
 		const allowed = new Set(this._roleToolNames());
@@ -1253,14 +1441,22 @@ export class AgentSession {
 	private _roleModelFor(role: "propose" | "distill" | "execution" | "finalAnswer"): Model<any> | undefined {
 		if (this._enableBeliefSet && this._beliefSetUsable) {
 			// The model policy per role is declared in ROLE_SPECS; only execution and distill
-			// may run on separately configured models from settings.
+			// may run on separately configured models from settings. The fast path runs the
+			// execution role on `pie.fastPathModel`; the first propose turn of a task (its
+			// routing turn) runs on the configured `defaultModel` rather than the session model.
 			const policy = ROLE_SPECS[role].modelPolicy;
-			const spec =
-				policy === "execution"
-					? this.settingsManager.getExecutionModel()
-					: policy === "distillation"
-						? this.settingsManager.getDistillationModel()
-						: undefined;
+			let spec: string | undefined;
+			if (policy === "execution") {
+				spec =
+					this._loopState.role === "execution" && this._loopState.fastPath
+						? this.settingsManager.getFastPathModel()
+						: this.settingsManager.getExecutionModel();
+			} else if (policy === "distillation") {
+				spec = this.settingsManager.getDistillationModel();
+			} else if (role === "propose" && this._beliefSet.beliefs.length === this._beliefsAtTaskReset) {
+				// The routing turn of a fresh task judges on the configured default model.
+				spec = this.settingsManager.getDefaultModel();
+			}
 			if (spec) {
 				const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
 				if (resolved.model) {
@@ -1958,6 +2154,8 @@ export class AgentSession {
 				expandedText = this._expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
+			// Capture the request text for the fast-path distillation summary.
+			this._currentTaskRequestText = expandedText;
 
 			// If streaming, queue via steer() or followUp() based on option. A follow-up typed
 			// while the previous loop is concluding must reset the loop when it is delivered, so

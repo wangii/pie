@@ -60,6 +60,7 @@ Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (pro
 - `pie.distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
 - `pie.distillationThinkingLevel`：distill 角色的思考级别，默认 `low`；仅在该角色的请求边界生效，不影响其他角色与会话主模型的思考级别。
 - `pie.beliefLang`：信念循环提示词要求的书写语言，默认 `Chinese`，可改为任意语言名称（如 `English`）。
+- `pie.fastPathModel`：fast path（快速路径）执行的模型。propose 角色第一回合先用配置的 `defaultModel` 对请求做路由判断（`route` 信念）：判定为 `fast-path` 时，execution 角色直接执行请求并在 `fastPathModel` 上作答，随后用 `distillationModel` 把执行上下文蒸馏成摘要写回 epistemic context，再复位到下一任务的 propose；判定为 `belief-loop` 时走完整信念循环。未配置时 fast path 沿用会话主模型。
 
 propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型字符串使用 `provider/modelId` 格式，配置在全局 `~/.pi/agent/settings.json` 或项目 `.pi/settings.json`：
 
@@ -70,12 +71,13 @@ propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型
     "executionModel": "provider/probeModel",
     "distillationModel": "provider/strongModel",
     "distillationThinkingLevel": "low",
-    "beliefLang": "Chinese"
+    "beliefLang": "Chinese",
+    "fastPathModel": "provider/fastModel"
   }
 }
 ```
 
-回退链：`pie.executionModel` 未配置或解析失败时，execution 回退到会话主模型；`pie.distillationModel` 未配置时先回退 `defaultModel`，仍未解析再回退会话主模型——模型名解析失败时两者最终都使用会话主模型。
+回退链：`pie.executionModel` 未配置或解析失败时，execution 回退到会话主模型；`pie.distillationModel` 未配置时先回退 `defaultModel`，仍未解析再回退会话主模型——模型名解析失败时两者最终都使用会话主模型。`pie.fastPathModel` 未配置或解析失败时，fast path 沿用会话主模型；fast-path 蒸馏始终使用 `pie.distillationModel`（未配置则 `defaultModel`，再否则会话主模型）。
 
 The belief loop lets two roles run on separately configured models (only while the belief set is enabled — `enableBeliefSet` defaults to true):
 
@@ -83,10 +85,11 @@ The belief loop lets two roles run on separately configured models (only while t
 - `pie.distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
 - `pie.distillationThinkingLevel`: the thinking level for the distill role; defaults to `low`. It applies only at that role's request boundary and does not affect other roles or the session's main-model thinking level.
 - `pie.beliefLang`: the language the belief-loop prompts must write in; defaults to `Chinese` — set it to another language name (e.g. `English`) to change it.
+- `pie.fastPathModel`: the model for fast-path execution. On the first propose turn of a request, the loop routes on the configured `defaultModel` (a `route` belief). A `fast-path` decision dispatches the execution role to execute the request directly on `fastPathModel`; the run is then distilled into a summary with `distillationModel` (written back to the epistemic context) and the loop resets to the next task's propose. A `belief-loop` decision keeps the full belief protocol. Unset means the fast path uses the session's main model.
 
 The propose and finalAnswer roles always use the session's main model (`defaultModel`). Model strings use the `provider/modelId` format and live in the global `~/.pi/agent/settings.json` or the project `.pi/settings.json` (see the example above).
 
-Fallbacks: if `pie.executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `pie.distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model.
+Fallbacks: if `pie.executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `pie.distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model. If `pie.fastPathModel` is unset or fails to resolve, the fast path uses the session's main model; fast-path distillation always uses `pie.distillationModel` (then `defaultModel`, then the session's main model).
 
 ## 开发命令（Development commands）
 

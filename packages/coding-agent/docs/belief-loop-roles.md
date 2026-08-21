@@ -7,7 +7,18 @@ The belief loop has four phases. Their policy is declared centrally in
 `src/core/role-specs.ts` (`ROLE_SPECS` + `TRANSITION_STEERS`) so prompts, tool
 surfaces, model selection, and message projections cannot drift apart.
 
+> **Fast path.** A request may skip this loop. The propose role's first turn declares a
+> `route` belief (op `route`, domain `routing`) with a `decision`, `suitabilityProbability`,
+> `successProbability`, `estimatedSteps`, and `difficulty`, judged on the configured
+> `defaultModel`. A `fast-path` decision (exactly one routing belief this task) dispatches the
+> execution role to execute the request directly on `pie.fastPathModel` and answer the user;
+> the run is then distilled with `pie.distillationModel` into a `fast_path_distillation`
+> custom summary and the loop resets to the next task's propose. A tool failure hands the same
+> task back to propose with the summary (no `_resetLoopForNewTask()`). A `belief-loop`
+> decision — or a missing/duplicated/rejected route — keeps the four-phase loop below.
+
 ## Terminology
+
 
 | legacy name | current name | meaning |
 |---|---|---|

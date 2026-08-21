@@ -18,7 +18,13 @@
  * languages.
  */
 
-export type BeliefDomain = "product" | "code" | "framing";
+export type BeliefDomain = "product" | "code" | "framing" | "routing";
+
+/** Routing decision for a request: whether it is suitable for fast-path execution. */
+export type RoutingDecision = "fast-path" | "belief-loop";
+
+/** Estimated difficulty of a request for fast-path routing. */
+export type RoutingDifficulty = "low" | "medium" | "high";
 
 /**
  * Lifecycle of a belief. Monotone in one direction:
@@ -44,6 +50,12 @@ export interface Belief {
 	readonly refutedBy: readonly { evidence: string }[];
 	/** The id of the belief that superseded this one (`refine`), or the `WITHDRAWN` sentinel (`retract`). */
 	readonly supersededBy?: string;
+	/** Routing fields, present only for domain "routing". */
+	readonly decision?: RoutingDecision;
+	readonly suitabilityProbability?: number;
+	readonly successProbability?: number;
+	readonly estimatedSteps?: number;
+	readonly difficulty?: RoutingDifficulty;
 }
 
 /** Sentinel `supersededBy` value for a withdrawn (retracted) belief. */
@@ -59,7 +71,17 @@ export type BeliefDelta =
 	| { op: "support"; beliefId: string; evidence: string; evidenceBeliefIds?: readonly string[] }
 	| { op: "refute"; beliefId: string; evidence: string }
 	| { op: "refine"; beliefId: string; statement: string; expectation: string; evidenceRounds: number }
-	| { op: "retract"; beliefId: string };
+	| { op: "retract"; beliefId: string }
+	| {
+			op: "route";
+			statement: string;
+			expectation: string;
+			decision: RoutingDecision;
+			suitabilityProbability: number;
+			successProbability: number;
+			estimatedSteps: number;
+			difficulty: RoutingDifficulty;
+	  };
 
 /** Thrown when a delta names an invalid statement or an illegal transition. */
 export class BeliefValidationError extends Error {}
@@ -86,8 +108,8 @@ export function validateBelief(statement: string, domain: BeliefDomain): void {
 	if (!statement.trim()) {
 		throw new BeliefValidationError("Belief statement must not be empty.");
 	}
-	if (domain !== "product" && domain !== "code" && domain !== "framing") {
-		throw new BeliefValidationError("Belief domain must be 'product', 'code', or 'framing'.");
+	if (domain !== "product" && domain !== "code" && domain !== "framing" && domain !== "routing") {
+		throw new BeliefValidationError("Belief domain must be 'product', 'code', 'framing', or 'routing'.");
 	}
 }
 
@@ -102,6 +124,34 @@ export function validateExpectation(expectation: string): void {
 export function validateEvidenceRounds(evidenceRounds: number): void {
 	if (!Number.isSafeInteger(evidenceRounds) || evidenceRounds < 1 || evidenceRounds > MAX_EVIDENCE_ROUNDS) {
 		throw new BeliefValidationError(`evidenceRounds must be an integer from 1 to ${MAX_EVIDENCE_ROUNDS}.`);
+	}
+}
+
+/** Structural validation for a routing decision. Throws on rejection. */
+export function validateRoutingDecision(decision: RoutingDecision): void {
+	if (decision !== "fast-path" && decision !== "belief-loop") {
+		throw new BeliefValidationError("decision must be 'fast-path' or 'belief-loop'.");
+	}
+}
+
+/** Structural validation for a routing probability field. Throws on rejection. */
+export function validateRoutingProbability(value: number, name: string): void {
+	if (!Number.isFinite(value) || value < 0 || value > 1) {
+		throw new BeliefValidationError(`${name} must be a number between 0 and 1.`);
+	}
+}
+
+/** Structural validation for the routing step estimate. Throws on rejection. */
+export function validateRoutingSteps(steps: number): void {
+	if (!Number.isSafeInteger(steps) || steps < 0 || steps > 100) {
+		throw new BeliefValidationError("estimatedSteps must be an integer from 0 to 100.");
+	}
+}
+
+/** Structural validation for the routing difficulty. Throws on rejection. */
+export function validateRoutingDifficulty(difficulty: RoutingDifficulty): void {
+	if (difficulty !== "low" && difficulty !== "medium" && difficulty !== "high") {
+		throw new BeliefValidationError("difficulty must be 'low', 'medium', or 'high'.");
 	}
 }
 
@@ -121,10 +171,13 @@ export class BeliefSet {
 
 	/**
 	 * The unadjudicated *world* beliefs driving action — the open frame (may be empty or hold
-	 * several). Framing beliefs are excluded: they are obligations, never dispatch targets.
+	 * several). Framing and routing beliefs are excluded: they are obligations/decisions, never
+	 * dispatch targets.
 	 */
 	proposed(): Belief[] {
-		return this._beliefs.filter((b) => statusOf(b) === "proposed" && b.domain !== "framing");
+		return this._beliefs.filter(
+			(b) => statusOf(b) === "proposed" && b.domain !== "framing" && b.domain !== "routing",
+		);
 	}
 
 	/** The unadjudicated framing beliefs — open obligations for what the final answer must establish. */
@@ -193,6 +246,37 @@ export class BeliefSet {
 			case "retract": {
 				const prior = this._require(delta.beliefId, ["proposed", "supported", "refuted"]);
 				return this._replace(prior.id, { ...prior, supersededBy: WITHDRAWN });
+			}
+			case "route": {
+				// A routing belief is created settled: it records this request's routing decision and
+				// never enters the dispatch frame (see `proposed()`). Its evidence is the decision.
+				validateBelief(delta.statement, "routing");
+				validateExpectation(delta.expectation);
+				validateRoutingDecision(delta.decision);
+				validateRoutingProbability(delta.suitabilityProbability, "suitabilityProbability");
+				validateRoutingProbability(delta.successProbability, "successProbability");
+				validateRoutingSteps(delta.estimatedSteps);
+				validateRoutingDifficulty(delta.difficulty);
+				const belief: Belief = {
+					id: this._allocateId(),
+					statement: delta.statement.trim(),
+					domain: "routing",
+					expectation: delta.expectation.trim(),
+					evidenceRounds: 1,
+					supportedBy: [
+						{
+							evidence: `decision=${delta.decision} suitability=${delta.suitabilityProbability} success=${delta.successProbability} steps=${delta.estimatedSteps} difficulty=${delta.difficulty}`,
+						},
+					],
+					refutedBy: [],
+					decision: delta.decision,
+					suitabilityProbability: delta.suitabilityProbability,
+					successProbability: delta.successProbability,
+					estimatedSteps: delta.estimatedSteps,
+					difficulty: delta.difficulty,
+				};
+				this._beliefs.push(belief);
+				return belief;
 			}
 		}
 	}

@@ -229,6 +229,18 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("fastPathModel", () => {
+		it("returns the configured fast-path model", () => {
+			expect(SettingsManager.inMemory({ pie: { fastPathModel: "claude-haiku-4-5" } }).getFastPathModel()).toBe(
+				"claude-haiku-4-5",
+			);
+		});
+
+		it("is undefined when not configured", () => {
+			expect(SettingsManager.inMemory().getFastPathModel()).toBeUndefined();
+		});
+	});
+
 	describe("distillationThinkingLevel", () => {
 		it("defaults to low when not configured", () => {
 			expect(SettingsManager.inMemory().getDistillationThinkingLevel()).toBe("low");

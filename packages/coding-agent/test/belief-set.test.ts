@@ -366,3 +366,102 @@ describe("formatBeliefsForView", () => {
 		expect(formatBeliefsForView(set.beliefs, "all")).toContain("[SETTLED]");
 	});
 });
+
+describe("route op (fast-path routing belief)", () => {
+	test("route creates a settled routing belief that never enters the dispatch frame", () => {
+		const set = new BeliefSet();
+		const belief = set.apply({
+			op: "route",
+			statement: "本请求适合 fast path 执行",
+			expectation: "该请求为简单任务",
+			decision: "fast-path",
+			suitabilityProbability: 0.9,
+			successProbability: 0.85,
+			estimatedSteps: 2,
+			difficulty: "low",
+		});
+
+		expect(belief.domain).toBe("routing");
+		expect(belief.decision).toBe("fast-path");
+		expect(belief.suitabilityProbability).toBe(0.9);
+		expect(belief.successProbability).toBe(0.85);
+		expect(belief.estimatedSteps).toBe(2);
+		expect(belief.difficulty).toBe("low");
+		// Created settled (evidence is the decision), so it is not an open dispatch target.
+		expect(statusOf(belief)).toBe("supported");
+		expect(set.proposed()).toHaveLength(0);
+		expect(set.open()).toContain(belief);
+	});
+
+	test("rejects an invalid routing decision", () => {
+		const set = new BeliefSet();
+		expect(() =>
+			set.apply({
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				expectation: "简单任务",
+				decision: "maybe" as never,
+				suitabilityProbability: 0.9,
+				successProbability: 0.9,
+				estimatedSteps: 1,
+				difficulty: "low",
+			}),
+		).toThrow("decision must be 'fast-path' or 'belief-loop'.");
+	});
+
+	test("rejects probabilities outside 0-1", () => {
+		const set = new BeliefSet();
+		expect(() =>
+			set.apply({
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				expectation: "简单任务",
+				decision: "fast-path",
+				suitabilityProbability: 1.2,
+				successProbability: 0.9,
+				estimatedSteps: 1,
+				difficulty: "low",
+			}),
+		).toThrow("suitabilityProbability must be a number between 0 and 1.");
+		expect(() =>
+			set.apply({
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				expectation: "简单任务",
+				decision: "fast-path",
+				suitabilityProbability: 0.9,
+				successProbability: -0.1,
+				estimatedSteps: 1,
+				difficulty: "low",
+			}),
+		).toThrow("successProbability must be a number between 0 and 1.");
+	});
+
+	test("rejects a non-integer step estimate and an unknown difficulty", () => {
+		const set = new BeliefSet();
+		expect(() =>
+			set.apply({
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				expectation: "简单任务",
+				decision: "fast-path",
+				suitabilityProbability: 0.9,
+				successProbability: 0.9,
+				estimatedSteps: 1.5,
+				difficulty: "low",
+			}),
+		).toThrow("estimatedSteps must be an integer from 0 to 100.");
+		expect(() =>
+			set.apply({
+				op: "route",
+				statement: "本请求适合 fast path 执行",
+				expectation: "简单任务",
+				decision: "fast-path",
+				suitabilityProbability: 0.9,
+				successProbability: 0.9,
+				estimatedSteps: 1,
+				difficulty: "extreme" as never,
+			}),
+		).toThrow("difficulty must be 'low', 'medium', or 'high'.");
+	});
+});

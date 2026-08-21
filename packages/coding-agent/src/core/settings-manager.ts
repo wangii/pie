@@ -102,6 +102,10 @@ export interface PieSettings {
 	distillationThinkingLevel?: ThinkingLevel;
 	/** The language belief-set prompts must write in. Defaults to "Chinese". */
 	beliefLang?: string;
+	/**
+	 * Model for fast-path execution: a request routed to the fast path runs its execution on this
+	 * model instead of `executionModel`/the session model. Unset means "use the session model". */
+	fastPathModel?: string;
 }
 
 export interface Settings {
@@ -738,6 +742,10 @@ export class SettingsManager {
 
 	getExecutionModel(): string | undefined {
 		return this.settings.pie?.executionModel;
+	}
+
+	getFastPathModel(): string | undefined {
+		return this.settings.pie?.fastPathModel;
 	}
 
 	getDistillationModel(): string | undefined {
