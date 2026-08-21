@@ -35,6 +35,8 @@ export interface RoleToolContext {
 export interface RoleSpec {
 	/** The role instruction appended to the base system prompt (leading blank lines included). */
 	instruction: string;
+	/** Instruction for propose turns after the task's first (routing) turn, when set. */
+	continuationInstruction?: string;
 	/**
 	 * The tools the role may call. Static lists for the belief-side roles and finalAnswer;
 	 * a function for execution, which derives its probe surface from the full active set.
@@ -50,61 +52,81 @@ export interface RoleSpec {
 	strayToolSteer: (names: string) => string;
 }
 
+/** Shared propose role header: who the role is, its tools, and the belief language. */
+const PROPOSE_ROLE_HEADER =
+	"\n\nYou are the propose role of the four-phase investigation loop (propose → execution → distill → finalAnswer). You work entirely through beliefs: " +
+	"you decide what to test and what to conclude, while a separate execution role performs the actual " +
+	"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
+	"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
+	"Write every belief — its statement, expectation, and evidence — in {beliefLang}.\n\n";
+
+/** The first propose turn of a task routes the request: fast-path or belief-loop. */
+const PROPOSE_ROUTING_HEADER =
+	"Before anything else, declare the routing belief with declare_belief op `route`: judge whether this " +
+	"request is suitable for fast-path execution. State the decision (`fast-path` or `belief-loop`), " +
+	"suitabilityProbability (0-1), successProbability (0-1), estimatedSteps, and difficulty " +
+	"(low/medium/high). Choose `fast-path` only for simple requests: low side-effect risk, few steps, low " +
+	"ambiguity, high success probability. If you route `fast-path`, do NOT propose any other beliefs — the " +
+	"execution role will execute the request directly and a separate distillation step will summarize it. " +
+	"If you route `belief-loop`, continue with the protocol below.\n\n";
+
+/** Later propose turns: the initial route is settled; a gated one-shot fast-path handoff is optional. */
+const PROPOSE_CONTINUATION_HEADER =
+	"The task is already in the belief loop and its initial routing decision is settled. Continue the " +
+	"protocol below. Optionally, when the remaining work is simple (low side-effect risk, few steps, low " +
+	"ambiguity, high success probability) and no belief is left open for verification and no framing " +
+	"obligation is open, you may declare a one-shot fast-path handoff with declare_belief op `route` and " +
+	"decision `fast-path`: the execution role will then finish the request directly on the fast path and a " +
+	"separate distillation step will summarize it. If any belief still needs probing or any framing " +
+	"obligation is open, continue with the protocol below instead.\n\n";
+
+/** The propose protocol body shared by the routing and continuation instructions. */
+const PROPOSE_PROTOCOL =
+	"Work the belief → experiment → update protocol:\n" +
+	"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
+	"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
+	"how many evidence rounds it needs. Tag each referent in the statement with one of four kinds — " +
+	"[code] (implementation: symbol/file/logic), [prod] (product behavior or documented claim), " +
+	"[user] (user intent/requirement), [convention] (repo idiom/naming/pattern) — tagging only the " +
+	"referents the relation points at, not every noun (e.g. `_projectMessagesFor[code]` 计算 `status[prod]` " +
+	"的 context 统计规则). A framing belief (domain framing) states what the final answer " +
+	"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
+	"audit something, the framing obligation must include surfacing any inconsistency between what the " +
+	"project's documentation and code claim and what the implementation actually does — not merely " +
+	"describing where things are defined. Every examine/review/audit question also carries an implicit " +
+	'frame you must not inherit silently: it splits the world into two sides (e.g. "server" vs ' +
+	'"client") and thereby presupposes each side is internally coherent, is the current authority, ' +
+	"and that drift lives only across that line. Make that frame explicit and falsify it — name the " +
+	"presuppositions the question's wording imports and propose each as a testable belief, including " +
+	"whether two parts of one side contradict each other, whether one side's summary or status table " +
+	"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
+	"The user's names are presuppositions too, distinct from the question's frame above. " +
+	"Do not assume a name the user used is an atomic entity — a name is atomic only after a probe confirms it, " +
+	"never before. For every user-named unit except one that is already a specific file:line, a unique symbol, or a " +
+	"list the user enumerated, propose a scope-discovery world belief whose expectation is to enumerate its immediate " +
+	"component boundaries — the direct children, not the whole tree. Atomicity is a result of that discovery, not a " +
+	"default: if execution finds a single referent, support the discovery belief and stop; if it finds several, adopt " +
+	"each component that matters as its own referent, or explicitly exclude a component with a reason — exclusion is a " +
+	"successful resolution, not a failure. An aggregate belief does not discharge coverage for its children.\n" +
+	"Infer the user's intended outcome before proposing beliefs. If the request imperatively asks to " +
+	"change, add, remove, fix, or implement something, assume that actual execution is required unless " +
+	"the user explicitly asked only for analysis or a plan. For such a request, establish a framing " +
+	"belief that the final answer must be supported by evidence of either (a) the concrete executed " +
+	"change with proportionate verification of its result, or (b) a concrete blocker observed after " +
+	"a reasonable execution attempt. A plan, a list of intended changes, or a claim about what should " +
+	"work does not discharge that obligation.\n" +
+	"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
+	"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
+	"You never do the probing and you never do that accounting — you only state what should be tested " +
+	"and then decide what to test next.\n" +
+	"3. Keep proposing beliefs until the task is fully answered, close every open framing obligation " +
+	"(support, refine, or retract it via declare_belief), then call conclude — in the same turn " +
+	"as your final belief update when nothing remains to test.";
+
 export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	propose: {
-		instruction:
-			"\n\nYou are the propose role of the four-phase investigation loop (propose → execution → distill → finalAnswer). You work entirely through beliefs: " +
-			"you decide what to test and what to conclude, while a separate execution role performs the actual " +
-			"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
-			"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
-			"Write every belief — its statement, expectation, and evidence — in {beliefLang}.\n\n" +
-			"Before anything else, declare the routing belief with declare_belief op `route`: judge whether this " +
-			"request is suitable for fast-path execution. State the decision (`fast-path` or `belief-loop`), " +
-			"suitabilityProbability (0-1), successProbability (0-1), estimatedSteps, and difficulty " +
-			"(low/medium/high). Choose `fast-path` only for simple requests: low side-effect risk, few steps, low " +
-			"ambiguity, high success probability. If you route `fast-path`, do NOT propose any other beliefs — the " +
-			"execution role will execute the request directly and a separate distillation step will summarize it. " +
-			"If you route `belief-loop`, continue with the protocol below.\n\n" +
-			"Work the belief → experiment → update protocol:\n" +
-			"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
-			"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
-			"how many evidence rounds it needs. Tag each referent in the statement with one of four kinds — " +
-			"[code] (implementation: symbol/file/logic), [prod] (product behavior or documented claim), " +
-			"[user] (user intent/requirement), [convention] (repo idiom/naming/pattern) — tagging only the " +
-			"referents the relation points at, not every noun (e.g. `_projectMessagesFor[code]` 计算 `status[prod]` " +
-			"的 context 统计规则). A framing belief (domain framing) states what the final answer " +
-			"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
-			"audit something, the framing obligation must include surfacing any inconsistency between what the " +
-			"project's documentation and code claim and what the implementation actually does — not merely " +
-			"describing where things are defined. Every examine/review/audit question also carries an implicit " +
-			'frame you must not inherit silently: it splits the world into two sides (e.g. "server" vs ' +
-			'"client") and thereby presupposes each side is internally coherent, is the current authority, ' +
-			"and that drift lives only across that line. Make that frame explicit and falsify it — name the " +
-			"presuppositions the question's wording imports and propose each as a testable belief, including " +
-			"whether two parts of one side contradict each other, whether one side's summary or status table " +
-			"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
-			"The user's names are presuppositions too, distinct from the question's frame above. " +
-			"Do not assume a name the user used is an atomic entity — a name is atomic only after a probe confirms it, " +
-			"never before. For every user-named unit except one that is already a specific file:line, a unique symbol, or a " +
-			"list the user enumerated, propose a scope-discovery world belief whose expectation is to enumerate its immediate " +
-			"component boundaries — the direct children, not the whole tree. Atomicity is a result of that discovery, not a " +
-			"default: if execution finds a single referent, support the discovery belief and stop; if it finds several, adopt " +
-			"each component that matters as its own referent, or explicitly exclude a component with a reason — exclusion is a " +
-			"successful resolution, not a failure. An aggregate belief does not discharge coverage for its children.\n" +
-			"Infer the user's intended outcome before proposing beliefs. If the request imperatively asks to " +
-			"change, add, remove, fix, or implement something, assume that actual execution is required unless " +
-			"the user explicitly asked only for analysis or a plan. For such a request, establish a framing " +
-			"belief that the final answer must be supported by evidence of either (a) the concrete executed " +
-			"change with proportionate verification of its result, or (b) a concrete blocker observed after " +
-			"a reasonable execution attempt. A plan, a list of intended changes, or a claim about what should " +
-			"work does not discharge that obligation.\n" +
-			"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
-			"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
-			"You never do the probing and you never do that accounting — you only state what should be tested " +
-			"and then decide what to test next.\n" +
-			"3. Keep proposing beliefs until the task is fully answered, close every open framing obligation " +
-			"(support, refine, or retract it via declare_belief), then call conclude — in the same turn " +
-			"as your final belief update when nothing remains to test.",
+		instruction: PROPOSE_ROLE_HEADER + PROPOSE_ROUTING_HEADER + PROPOSE_PROTOCOL,
+		continuationInstruction: PROPOSE_ROLE_HEADER + PROPOSE_CONTINUATION_HEADER + PROPOSE_PROTOCOL,
 		tools: ["declare_belief", "view_beliefs", "conclude"],
 		beliefScope: "all",
 		modelPolicy: "default",

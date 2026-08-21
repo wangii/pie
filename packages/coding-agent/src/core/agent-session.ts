@@ -422,6 +422,8 @@ export class AgentSession {
 	private _loopState: LoopState = { role: "propose" };
 	/** The belief ids already dispatched to execution — distinguishes fresh beliefs from dispatched-but-unsettled ones. */
 	private _dispatchedFrameIds: Set<string> = new Set();
+	/** Routing beliefs already evaluated for the current task (consumed by belief id). */
+	private _consumedRouteIds: Set<string> = new Set();
 	/** True once the pre-conclusion reflection steer has fired for the current task (one round only). */
 	private _reflected = false;
 	/**
@@ -973,6 +975,7 @@ export class AgentSession {
 	private _resetLoopForNewTask(): void {
 		this._loopState = { role: "propose" };
 		this._dispatchedFrameIds = new Set();
+		this._consumedRouteIds = new Set();
 		this._reflected = false;
 		this._fastPathFailure = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
@@ -1044,15 +1047,23 @@ export class AgentSession {
 				if (undispatched.length > 0) {
 					return this._dispatchToExecution(proposed);
 				}
-				// The propose role's routing belief decides this task's path. Route conservatively:
-				// fast-path only when this task has exactly one routing belief and it chose fast-path.
-				// A missing, duplicated, or rejected route falls through to the normal belief-loop
+				// The propose role's routing belief decides this task's path. Each routing belief is
+				// consumed on first evaluation (by id); only the latest unconsumed route decides, so
+				// a fresh route declared after belief updates can hand the remaining work to the fast
+				// path while the earlier decision stays in the history. The fast path dispatches only
+				// when the belief set is quiescent: no world belief pending verification and no open
+				// framing obligation (the same condition that makes an early conclude premature).
+				// A missing, rejected, or non-quiescent route falls through to the normal belief-loop
 				// protocol instead of silently bypassing routing.
 				const routes = this._beliefSet.beliefs
 					.slice(this._beliefsAtTaskReset)
-					.filter((b) => b.domain === "routing");
-				if (routes.length === 1 && routes[0].decision === "fast-path") {
-					return this._dispatchToFastExecution(routes[0]);
+					.filter((b) => b.domain === "routing" && !this._consumedRouteIds.has(b.id));
+				const route = routes[routes.length - 1];
+				if (route) {
+					this._consumedRouteIds.add(route.id);
+					if (route.decision === "fast-path" && this._fastPathQuiescent()) {
+						return this._dispatchToFastExecution(route);
+					}
 				}
 				if (proposed.length > 0) {
 					// Open (dispatched) beliefs should have been settled by the distill step; route
@@ -1273,7 +1284,16 @@ export class AgentSession {
 		};
 	}
 
-	/** The current task's routing belief, if the propose role declared one (created settled via `route`). */
+	/**
+	 * Whether the fast path may take over the current task: no world belief is pending verification
+	 * (proposed) and no framing obligation is open (proposed framing) — the same condition
+	 * `_concludeTransition` uses to reject an early conclude. Supported beliefs are settled context
+	 * for the fast-path execution, not blockers.
+	 */
+	private _fastPathQuiescent(): boolean {
+		return this._beliefSet.proposed().length === 0 && this._beliefSet.framings().length === 0;
+	}
+
 	/** Dispatch the execution role on the fast path: execute the user's request directly and answer. */
 	private _dispatchToFastExecution(route: Belief): { state: LoopState; steer: string } {
 		this._dispatchedFrameIds = new Set();
@@ -1505,7 +1525,18 @@ export class AgentSession {
 	}
 
 	private _roleInstruction(): string {
-		return this._beliefLangPrompt(ROLE_SPECS[this._role].instruction);
+		// The first propose turn of a task is its routing turn (route-first instruction). Later
+		// propose turns get the continuation instruction: the initial route is settled, and a
+		// fast-path handoff is one optional, gated output among deepening and concluding.
+		const spec = ROLE_SPECS[this._role];
+		if (
+			this._role === "propose" &&
+			this._beliefSet.beliefs.length > this._beliefsAtTaskReset &&
+			spec.continuationInstruction !== undefined
+		) {
+			return this._beliefLangPrompt(spec.continuationInstruction);
+		}
+		return this._beliefLangPrompt(spec.instruction);
 	}
 
 	/** Project the current role's tool subset and system prompt onto the agent state. */

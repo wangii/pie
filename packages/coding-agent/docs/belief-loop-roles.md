@@ -10,12 +10,18 @@ surfaces, model selection, and message projections cannot drift apart.
 > **Fast path.** A request may skip this loop. The propose role's first turn declares a
 > `route` belief (op `route`, domain `routing`) with a `decision`, `suitabilityProbability`,
 > `successProbability`, `estimatedSteps`, and `difficulty`, judged on the configured
-> `defaultModel`. A `fast-path` decision (exactly one routing belief this task) dispatches the
+> `defaultModel`. A `fast-path` decision dispatches the
 > execution role to execute the request directly on `pie.fastPathModel` and answer the user;
 > the run is then distilled with `pie.distillationModel` into a `fast_path_distillation`
-> custom summary and the loop resets to the next task's propose. A tool failure hands the same
-> task back to propose with the summary (no `_resetLoopForNewTask()`). A `belief-loop`
-> decision — or a missing/duplicated/rejected route — keeps the four-phase loop below.
+> custom summary and the loop resets to the next task's propose. Each `route` belief is
+> consumed by id on first evaluation, and only the latest unconsumed route decides; the fast
+> path dispatches only when the belief set is quiescent — no proposed world belief pending
+> verification, no open framing obligation. A later propose turn (after a distill batch
+> settles) may therefore declare a one-shot `fast-path` handoff for the remaining work. A tool
+> failure hands the same task back to propose with the summary (no `_resetLoopForNewTask()`);
+> the consumed route is not re-dispatched. A `belief-loop` decision — or a missing/rejected
+> route, or a route evaluated while the belief set is not quiescent — keeps the four-phase
+> loop below.
 
 ## Terminology
 

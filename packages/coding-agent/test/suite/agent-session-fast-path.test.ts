@@ -213,4 +213,181 @@ describe("AgentSession fast path", () => {
 		expect(assistantTexts).toContain("the cache survives logout for 30s");
 		expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
 	});
+
+	it("hands the remaining work to the fast path when propose re-routes mid-task", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+
+		harness.setResponses([
+			// First propose turn: the initial route is belief-loop.
+			routeResponse("belief-loop"),
+			// The belief loop continues: propose a task belief, probe it, settle it.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe keeps the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage("the value persisted"),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-2",
+					evidence: "the probe kept the value",
+				}),
+			]),
+			// Second propose turn: the belief set is quiescent, so re-route to the fast path.
+			routeResponse("fast-path"),
+			// Fast execution answers the user directly.
+			fauxAssistantMessage("Done."),
+			// Distillation summary for the fast-path run.
+			fauxAssistantMessage("Summary: completed the request."),
+		]);
+
+		await harness.session.prompt("is the cache persistent?");
+
+		// Both routing decisions are preserved in the history.
+		const routing = harness.session.beliefs.filter((b) => b.domain === "routing");
+		expect(routing.map((b) => b.decision)).toEqual(["belief-loop", "fast-path"]);
+
+		// The fast-path run was distilled and its answer reached the user.
+		const custom = harness.session.messages.find(
+			(m) => m.role === "custom" && m.customType === "fast_path_distillation",
+		);
+		expect(custom).toBeDefined();
+		expect((custom as { details?: { outcome?: string } }).details?.outcome).toBe("success");
+		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
+		expect(assistantTexts).toContain("Done.");
+	});
+
+	it("does not hand off mid-task while a framing obligation is open", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+
+		harness.setResponses([
+			// First propose turn: belief-loop route plus an open framing obligation.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "route",
+					statement: "本请求适合 fast path 执行",
+					expectation: "该请求为简单任务",
+					decision: "belief-loop",
+					suitabilityProbability: 0.2,
+					successProbability: 0.2,
+					estimatedSteps: 1,
+					difficulty: "low",
+				}),
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the final answer must establish that the cache survives logout",
+					domain: "framing",
+					expectation: "the conclusion states the cache behavior",
+					evidenceRounds: 1,
+				}),
+			]),
+			// Second propose turn: a fast-path route is declared but the open framing blocks it.
+			routeResponse("fast-path"),
+			// The belief loop continues: probe and settle the world belief, then the framing.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe keeps the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage("the value persisted"),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-4",
+					evidence: "the probe kept the value",
+				}),
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-2",
+					evidence: "the probed behavior establishes the obligation",
+					evidenceBeliefIds: ["belief-4"],
+				}),
+			]),
+			// Conclude: the reflection round fires (enough settled beliefs), then passes.
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("the cache survives logout for 30s"),
+		]);
+
+		await harness.session.prompt("is the cache persistent?");
+
+		// The fast-path route was declared but never dispatched: no distillation, normal conclusion.
+		const custom = harness.session.messages.find(
+			(m) => m.role === "custom" && m.customType === "fast_path_distillation",
+		);
+		expect(custom).toBeUndefined();
+		const routing = harness.session.beliefs.filter((b) => b.domain === "routing");
+		expect(routing.map((b) => b.decision)).toEqual(["belief-loop", "fast-path"]);
+		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
+		expect(assistantTexts).toContain("the cache survives logout for 30s");
+	});
+
+	it("does not re-dispatch a consumed fast-path route after a failed run", async () => {
+		const boomTool: AgentTool = {
+			name: "boom",
+			label: "Boom",
+			description: "Always fails",
+			parameters: Type.Object({}),
+			execute: async () => {
+				throw new Error("boom");
+			},
+		};
+		const harness = await createHarness({
+			...fastHarnessOptions,
+			tools: [boomTool],
+		});
+		harnesses.push(harness);
+
+		harness.setResponses([
+			routeResponse("fast-path"),
+			// Fast execution: a tool call that errors, then a final answer.
+			fauxAssistantMessage([fauxToolCall("boom", {})]),
+			fauxAssistantMessage("I failed."),
+			// Handed back to propose: it does not re-declare a route, and the consumed route
+			// must not re-dispatch — the belief loop continues.
+			fauxAssistantMessage("let me keep investigating"),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe keeps the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage("the value persisted"),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-2",
+					evidence: "the probe kept the value",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("belief loop took over"),
+		]);
+
+		await harness.session.prompt("run boom");
+
+		// Exactly one fast-path run: the failed one. The consumed route was not re-dispatched.
+		const customMessages = harness.session.messages.filter(
+			(m) => m.role === "custom" && m.customType === "fast_path_distillation",
+		);
+		expect(customMessages).toHaveLength(1);
+		expect((customMessages[0] as { details?: { outcome?: string } }).details?.outcome).toBe("failure");
+		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(1);
+		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
+		expect(assistantTexts).toContain("belief loop took over");
+	});
 });
