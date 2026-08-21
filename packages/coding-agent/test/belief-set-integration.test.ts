@@ -190,6 +190,10 @@ describe("declare_belief integration", () => {
 			// partition its wording imposes — as a presupposition to falsify, not a given.
 			expect(prompt).toContain("implicit frame");
 			expect(prompt).toContain("contradicts its own body");
+			// User-named concepts are presuppositions too: a container/umbrella name must be
+			// resolved through a scope-discovery belief, not treated as an atomic referent.
+			expect(prompt).toContain("scope-discovery");
+			expect(prompt).toContain("atomic entity");
 			// The residual filter — explain → isolate → update — is the distill role's step, not the
 			// propose role's, so the propose prompt must hand it off rather than fold it in.
 			expect(prompt).toContain("separate distill step");
@@ -1400,6 +1404,8 @@ describe("declare_belief integration", () => {
 			expect(contextToolNames(reflectionContext)).toContain("declare_belief");
 			expect(contextText(reflectionContext)).toContain("reflect on the belief set");
 			expect(contextText(reflectionContext)).toContain("Coverage");
+			// Coverage now also resolves user-named concepts (atomic / decomposed / excluded), not just paths.
+			expect(contextText(reflectionContext)).toContain("user-named concept");
 
 			// The final turn is finalAnswer (no tools), and the conclusion was written.
 			const last = harness.faux.contexts[harness.faux.contexts.length - 1];

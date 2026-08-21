@@ -76,6 +76,15 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"presuppositions the question's wording imports and propose each as a testable belief, including " +
 			"whether two parts of one side contradict each other, whether one side's summary or status table " +
 			"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
+			"The user's names are presuppositions too, distinct from the question's frame above. " +
+			"Do not treat a name the user used as an atomic entity — often the user uses it for convenience, not accuracy. " +
+			"When a named thing may be a container or umbrella (a module, layer, subsystem, feature, or a quality word such as " +
+			"consistency, drift, or architecture used as if it were a thing), first propose a scope-discovery world belief whose " +
+			"expectation is to enumerate its immediate component boundaries — the direct children, not the whole tree. After execution " +
+			"reports those components, adopt each component that matters as its own referent, or explicitly exclude a component with a " +
+			"reason — exclusion is a successful resolution, not a failure. If discovery shows the name is atomic after all, support the " +
+			"discovery belief and stop. An aggregate belief does not discharge coverage for its children. " +
+			"Skip this when the name is already a specific file:line, a unique symbol, or a list the user enumerated.\n" +
 			"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
 			"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
 			"You never do the probing and you never do that accounting — you only state what should be tested " +
@@ -107,7 +116,11 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"argument — one of propose, support, refute, refine, or retract (omit `op` to propose) — to add, " +
 			"settle, correct, or withdraw a belief; these are op values, never separate tools. Review the set " +
 			"with view_beliefs.\n" +
-			"3. Once every open belief is updated from the residual, stop — proposing the next belief is a " +
+			"3. When the residual shows a user-named referent resolving into several component boundaries or distinct " +
+			"senses, that observation refutes any belief that treated the name as atomic — including an atomicity that was " +
+			"never explicitly proposed. Refute or refine that belief (refute the atomic reading, or refine it to name the " +
+			"parts); do not propose the child division here — that is the next propose step, not yours.\n" +
+			"4. Once every open belief is updated from the residual, stop — proposing the next belief is a " +
 			"separate propose step, not yours.",
 		tools: ["declare_belief", "view_beliefs", "conclude"],
 		beliefScope: "all",
@@ -194,8 +207,10 @@ export const TRANSITION_STEERS = {
 	reflection:
 		"Before you conclude, reflect on the belief set itself as the object of one final test. " +
 		"For each check that fails, propose the missing belief and let it be probed — do not conclude yet. " +
-		"(1) Coverage — every path or @reference the task named has appeared as the referent of some belief; " +
-		"if any is untouched, propose a belief to probe it. " +
+		"(1) Coverage — every path or @reference the task named has appeared as the referent of some belief, and every " +
+		"user-named concept the task treats as a unit is resolved: proven atomic, decomposed into adopted component " +
+		"beliefs, or explicitly excluded with a reason — an aggregate belief does not discharge coverage for its children. " +
+		"If any path is untouched or any user-named unit is unresolved, propose a belief to probe it. " +
 		"(2) Composition — the conjunction of two supported beliefs may smuggle a claim that was never proposed; " +
 		"propose that implied claim. " +
 		"(3) Completeness — every belief that calls something consistent or free of drift treated it as complete; " +
