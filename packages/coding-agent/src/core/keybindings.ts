@@ -22,6 +22,7 @@ export interface AppKeybindings {
 	"app.model.select": true;
 	"app.tools.expand": true;
 	"app.thinking.toggle": true;
+	"app.beliefSet.toggle": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.message.copy": true;
@@ -88,6 +89,10 @@ export const KEYBINDINGS = {
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
+	},
+	"app.beliefSet.toggle": {
+		defaultKeys: "alt+b",
+		description: "Toggle belief set panel",
 	},
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",
