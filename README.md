@@ -85,25 +85,6 @@ The propose and finalAnswer roles always use the session's main model (`defaultM
 
 Fallbacks: if `pie.executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `pie.distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model.
 
-## 最小上手路径（Quick start）
-
-Platform notes: [Windows](packages/coding-agent/docs/windows.md) | [Termux (Android)](packages/coding-agent/docs/termux.md) | [tmux](packages/coding-agent/docs/tmux.md) | [Terminal setup](packages/coding-agent/docs/terminal-setup.md) | [Shell aliases](packages/coding-agent/docs/shell-aliases.md).
-
-## 完整工作区（Workspace）
-
-| Package | Description（描述） |
-|---------|---------------------|
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | 交互式编码智能体 CLI（Interactive coding agent CLI） |
-| **[@earendil-works/pi-agent-core](packages/agent)** | 带工具调用与状态管理的智能体运行时（Agent runtime with tool calling and state management） |
-| **[@earendil-works/pi-ai](packages/ai)** | 统一多提供商 LLM API：OpenAI、Anthropic、Google 等（Unified multi-provider LLM API） |
-| **[@earendil-works/pi-tui](packages/tui)** | 带差分渲染的终端 UI 库（Terminal UI library with differential rendering） |
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | 供应商中立的遥测契约、参考适配器与类型化 schema（Vendor-neutral telemetry contracts and typed schemas） |
-| **[@earendil-works/pi-client](packages/client)** | 远程 pi 会话的传输中立客户端（Transport-neutral client for remote pi sessions） |
-| **[@earendil-works/pi-protocol](packages/protocol)** | 实验性 pi 协议的运行时中立 schema、CBOR 编码与字节流框架（Runtime-neutral schemas and CBOR framing for the pi protocol） |
-| **[@earendil-works/pi-server](packages/server)** | 实验性 pi 服务器包（Experimental server package for pi） |
-| **[@earendil-works/pi-evals](packages/evals)** | 基于模型的行为化 Pi 工作流评估（Behavioral, model-backed checks for Pi workflows） |
-| **[@earendil-works/pi-session-backend-sqlite-node](packages/session-backends/sqlite-node)** | Agent 会话的 Node sqlite 会话后端（Node sqlite session backend） |
-
 ## 开发命令（Development commands）
 
 ```bash
@@ -116,9 +97,3 @@ npm run check         # 检查：lint、格式、类型、固定依赖、shrinkw
 ```
 ## License
 MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
