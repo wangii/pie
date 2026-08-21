@@ -44,17 +44,15 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 /**
- * One role's merged stats+model unit in the footer: `epi 25.0% main-model`, with the provider in
- * parentheses when multiple providers are available. The cache hit rate is `-` when the role has
- * no request yet; the model is `—` when it could not be resolved.
+ * One role's merged stats+model unit in the footer: `epi 25.0% main-model`. The cache hit rate is
+ * `-` when the role has no request yet; the model is `—` when it could not be resolved.
  */
 function formatRoleUnit(
 	label: string,
-	slot: { model: { provider: string; id: string } | undefined; latestCacheHitRate: number | undefined },
-	includeProvider: boolean,
+	slot: { model: { id: string } | undefined; latestCacheHitRate: number | undefined },
 ): string {
 	const ch = slot.latestCacheHitRate !== undefined ? `${slot.latestCacheHitRate.toFixed(1)}%` : "-";
-	const model = slot.model ? `${includeProvider ? `(${slot.model.provider}) ` : ""}${slot.model.id}` : "—";
+	const model = slot.model ? slot.model.id : "—";
 	return `${label} ${ch} ${model}`;
 }
 
@@ -221,10 +219,9 @@ export class FooterComponent implements Component {
 		// with its model into one unit; otherwise the single session model, plus thinking level
 		// if it supports reasoning.
 		const modelName = state.model?.id || "no-model";
-		const includeProvider = this.footerData.getAvailableProviderCount() > 1;
 		let rightSideWithoutProvider: string;
 		if (roleStatus) {
-			rightSideWithoutProvider = `${formatRoleUnit("epi", roleStatus.epistemic, includeProvider)} · ${formatRoleUnit("dist", roleStatus.distillation, includeProvider)} · ${formatRoleUnit("exec", roleStatus.execution, includeProvider)}`;
+			rightSideWithoutProvider = `${formatRoleUnit("epi", roleStatus.epistemic)} · ${formatRoleUnit("dist", roleStatus.distillation)} · ${formatRoleUnit("exec", roleStatus.execution)}`;
 			if (state.model?.reasoning) {
 				const thinkingLevel = state.thinkingLevel || "off";
 				rightSideWithoutProvider += ` • ${thinkingLevel === "off" ? "thinking off" : thinkingLevel}`;
@@ -238,16 +235,7 @@ export class FooterComponent implements Component {
 			}
 		}
 
-		// Prepend the provider in parentheses if there are multiple providers and there's enough room.
-		// In a belief loop each role slot already carries its own provider.
-		let rightSide = rightSideWithoutProvider;
-		if (!roleStatus && includeProvider && state.model) {
-			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
-			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
-				// Too wide, fall back
-				rightSide = rightSideWithoutProvider;
-			}
-		}
+		const rightSide = rightSideWithoutProvider;
 
 		const rightSideWidth = visibleWidth(rightSide);
 		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
