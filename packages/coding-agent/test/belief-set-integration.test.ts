@@ -137,6 +137,32 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("getRoleStatus returns per-role models and cache rates when the belief loop is active", async () => {
+		const harness = await createHarness({ enableBeliefSet: true });
+		try {
+			const roleStatus = harness.session.getRoleStatus();
+			expect(roleStatus).toBeDefined();
+			expect(roleStatus!.epistemic.model).toBeDefined();
+			expect(roleStatus!.distillation.model).toBeDefined();
+			expect(roleStatus!.execution.model).toBeDefined();
+			// No requests have completed yet, so no role has a cache hit rate.
+			expect(roleStatus!.epistemic.latestCacheHitRate).toBeUndefined();
+			expect(roleStatus!.distillation.latestCacheHitRate).toBeUndefined();
+			expect(roleStatus!.execution.latestCacheHitRate).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("getRoleStatus is undefined when the belief set is disabled", async () => {
+		const harness = await createHarness({ enableBeliefSet: false });
+		try {
+			expect(harness.session.getRoleStatus()).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("initial role is epistemic: only belief tools are projected", async () => {
 		const harness = await createHarness({ enableBeliefSet: true });
 		try {

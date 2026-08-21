@@ -44,6 +44,26 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 /**
+ * Per-role cache hit rate in the footer: `epi50.0%`, or `epi-` when the role has no request yet.
+ */
+function formatRoleCh(label: string, rate: number | undefined): string {
+	return rate !== undefined ? `${label}${rate.toFixed(1)}%` : `${label}-`;
+}
+
+/**
+ * One role's model in the footer: `epi claude-…`, with provider when multiple providers are
+ * available; `epi —` when the role's model could not be resolved.
+ */
+function formatRoleModel(
+	label: string,
+	model: { provider: string; id: string } | undefined,
+	includeProvider: boolean,
+): string {
+	if (!model) return `${label} —`;
+	return `${label} ${includeProvider ? `(${model.provider}) ` : ""}${model.id}`;
+}
+
+/**
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
  */
@@ -83,6 +103,10 @@ export class FooterComponent implements Component {
 
 	render(width: number): string[] {
 		const state = this.session.state;
+		// In a belief loop, show each role's model and latest cache hit rate separately instead
+		// of the single session model and aggregate CH. Undefined when the loop is not usable,
+		// in which case the footer keeps the classic single-model/CH display.
+		const roleStatus = this.session.getRoleStatus();
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
 		const usageTotals = createUsageTotals();
@@ -129,7 +153,11 @@ export class FooterComponent implements Component {
 		if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
 		if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
 		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
-		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+		if (roleStatus) {
+			statsParts.push(formatRoleCh("epi", roleStatus.epistemic.latestCacheHitRate));
+			statsParts.push(formatRoleCh("dist", roleStatus.distillation.latestCacheHitRate));
+			statsParts.push(formatRoleCh("exec", roleStatus.execution.latestCacheHitRate));
+		} else if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
 			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 		}
 
@@ -183,9 +211,6 @@ export class FooterComponent implements Component {
 
 		let statsLeft = statsParts.join(" ");
 
-		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
-
 		let statsLeftWidth = visibleWidth(statsLeft);
 
 		// If statsLeft is too wide, truncate it
@@ -197,17 +222,30 @@ export class FooterComponent implements Component {
 		// Calculate available space for padding (minimum 2 spaces between stats and model)
 		const minPadding = 2;
 
-		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
-		if (state.model?.reasoning) {
-			const thinkingLevel = state.thinkingLevel || "off";
-			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+		// Add model names on the right side. In a belief loop, show each role's model separately;
+		// otherwise the single session model, plus thinking level if it supports reasoning.
+		const modelName = state.model?.id || "no-model";
+		const includeProvider = this.footerData.getAvailableProviderCount() > 1;
+		let rightSideWithoutProvider: string;
+		if (roleStatus) {
+			rightSideWithoutProvider = `${formatRoleModel("epi", roleStatus.epistemic.model, includeProvider)} · ${formatRoleModel("dist", roleStatus.distillation.model, includeProvider)} · ${formatRoleModel("exec", roleStatus.execution.model, includeProvider)}`;
+			if (state.model?.reasoning) {
+				const thinkingLevel = state.thinkingLevel || "off";
+				rightSideWithoutProvider += ` • ${thinkingLevel === "off" ? "thinking off" : thinkingLevel}`;
+			}
+		} else {
+			rightSideWithoutProvider = modelName;
+			if (state.model?.reasoning) {
+				const thinkingLevel = state.thinkingLevel || "off";
+				rightSideWithoutProvider =
+					thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+			}
 		}
 
-		// Prepend the provider in parentheses if there are multiple providers and there's enough room
+		// Prepend the provider in parentheses if there are multiple providers and there's enough room.
+		// In a belief loop each role slot already carries its own provider.
 		let rightSide = rightSideWithoutProvider;
-		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
+		if (!roleStatus && includeProvider && state.model) {
 			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
 			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
 				// Too wide, fall back

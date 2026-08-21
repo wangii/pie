@@ -271,6 +271,20 @@ function hasDefaultModelProvider(providerId: string): providerId is keyof typeof
 	return providerId in defaultModelPerProvider;
 }
 
+/**
+ * One role's line in the /session panel: model (CH rate), with "—" when the model or rate is
+ * missing (role has not produced a request yet, or session reloaded after the in-memory snapshot).
+ */
+function formatRoleSlotLine(
+	dim: (text: string) => string,
+	label: string,
+	slot: { model?: { provider: string; id: string } | undefined; latestCacheHitRate?: number | undefined },
+): string {
+	const model = slot.model ? `${slot.model.provider}/${slot.model.id}` : "—";
+	const ch = slot.latestCacheHitRate !== undefined ? `${slot.latestCacheHitRate.toFixed(1)}%` : "—";
+	return `  ${dim(`${label}:`)} ${model} ${dim(`(CH ${ch})`)}`;
+}
+
 function llamaCppPostLoginGuidance(actionLabel: string, loadedModelCount: number): string {
 	return loadedModelCount === 0
 		? `${actionLabel}. No llama.cpp models are loaded. Use /llama to load a model, then /model to select it.`
@@ -931,6 +945,12 @@ export class InteractiveMode {
 
 		const dock = new TuiLayouts.VStack([
 			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
+			{
+				component: this.beliefPanelContainer,
+				shrink: 1,
+				minSize: 0,
+				visible: () => this.beliefPanelVisible,
+			},
 			{ component: this.statusContainer, shrink: 1, minSize: 0 },
 			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 3 },
@@ -943,20 +963,12 @@ export class InteractiveMode {
 		]);
 		this.fullscreenLayoutRoot = new TuiLayouts.HStack([
 			{ component: main, basis: 0, grow: 2, shrink: 1, minSize: 1 },
-			{
-				component: this.beliefPanelContainer,
-				basis: 0,
-				grow: 1,
-				shrink: 1,
-				minSize: 0,
-				visible: () => this.beliefPanelVisible,
-			},
 		]);
 		this.mountInteractiveTui(this.renderer, [
 			this.documentContainer,
 			this.pendingMessagesContainer,
-			this.statusContainer,
 			this.beliefPanelContainer,
+			this.statusContainer,
 			this.widgetContainerAbove,
 			this.editorContainer,
 			this.widgetContainerBelow,
@@ -6282,6 +6294,15 @@ export class InteractiveMode {
 		}
 		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
+
+		// Belief loop: show each role's resolved model and its latest cache hit rate separately.
+		const roleStatus = this.session.getRoleStatus();
+		if (roleStatus) {
+			info += `\n${theme.bold("Belief Loop")}\n`;
+			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Epistemic", roleStatus.epistemic)}\n`;
+			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Distillation", roleStatus.distillation)}\n`;
+			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Execution", roleStatus.execution)}\n`;
+		}
 
 		if (stats.cost > 0 || cacheWaste.missedTokens > 0) {
 			info += `\n${theme.bold("Cost")}\n`;

@@ -5,7 +5,7 @@ import { theme } from "../theme/theme.ts";
 /**
  * A live, read-only panel that renders the current belief set. It re-reads the
  * belief set on every render, so it reflects `declare_belief` mutations in real
- * time without re-invoking a command. Mounted above the editor; `/bs` toggles it.
+ * time without re-invoking a command. Mounted above the status area; `/bs` toggles it.
  */
 export class BeliefSetPanel implements Component {
 	private visible = true;

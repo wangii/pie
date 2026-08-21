@@ -346,6 +346,28 @@ type LoopState =
 	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean }
 	| { role: "finalAnswer" };
 
+/**
+ * One belief-loop status slot: the model the role runs on and the cache hit rate of its most
+ * recent assistant request. `model` is undefined when nothing could be resolved;
+ * `latestCacheHitRate` is undefined when the role has not produced a request yet (fresh session,
+ * or a reload — the snapshot is in-memory only and session entries carry no role).
+ */
+export interface RoleStatusSlot {
+	model: Model<any> | undefined;
+	latestCacheHitRate: number | undefined;
+}
+
+/**
+ * The three belief-loop status slots. `epistemic` covers the propose role only; the distillation
+ * and execution slots map to the distill and execution roles. The finalAnswer role and requests
+ * outside the belief loop never update a slot (see `getRoleStatus`).
+ */
+export interface RoleStatus {
+	epistemic: RoleStatusSlot;
+	distillation: RoleStatusSlot;
+	execution: RoleStatusSlot;
+}
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -401,6 +423,13 @@ export class AgentSession {
 	private _dispatchedFrameIds: Set<string> = new Set();
 	/** True once the pre-conclusion reflection steer has fired for the current task (one round only). */
 	private _reflected = false;
+	/**
+	 * Latest cache hit rate per belief-loop role, captured at message_end while the producing role
+	 * is still current. Only propose/distill/execution are kept — the finalAnswer role and requests
+	 * outside the belief loop never update a slot. In-memory only: session entries carry no role, so
+	 * after a reload every slot is empty until the loop produces new assistant messages.
+	 */
+	private _roleCacheHitRate: Partial<Record<"propose" | "distill" | "execution", number>> = {};
 
 	/** The current role — the phase discriminator of `_loopState`. */
 	private get _role(): LoopState["role"] {
@@ -1218,11 +1247,11 @@ export class AgentSession {
 	 * (`defaultModel`). Only the next request's model is overridden — `state.model` is left
 	 * untouched so footer/compaction/context-window keep the main model as their baseline.
 	 */
-	private _roleModel(): Model<any> | undefined {
+	private _roleModelFor(role: "propose" | "distill" | "execution" | "finalAnswer"): Model<any> | undefined {
 		if (this._enableBeliefSet && this._beliefSetUsable) {
 			// The model policy per role is declared in ROLE_SPECS; only execution and distill
 			// may run on separately configured models from settings.
-			const policy = ROLE_SPECS[this._role].modelPolicy;
+			const policy = ROLE_SPECS[role].modelPolicy;
 			const spec =
 				policy === "execution"
 					? this.settingsManager.getExecutionModel()
@@ -1237,6 +1266,11 @@ export class AgentSession {
 			}
 		}
 		return this.agent.state.model;
+	}
+
+	/** The model for the next turn — the current role's model (see `_roleModelFor`). */
+	private _roleModel(): Model<any> | undefined {
+		return this._roleModelFor(this._role);
 	}
 
 	/** The role system prompt: base prompt with only the role's tools described, plus a natural role instruction. */
@@ -1403,6 +1437,18 @@ export class AgentSession {
 
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
+				// Capture the latest cache hit rate under the role that produced this request.
+				// `_role` is still the producing role here — `_advanceRole` only runs in the next
+				// turn's prepareNextTurnWithContext. finalAnswer and non-belief-loop requests
+				// (idle/plain turns keep `_role` at the initial "propose") never update a slot.
+				const role = this._role;
+				if (this._enableBeliefSet && this._beliefSetUsable && role !== "finalAnswer") {
+					const usage = (event.message as AssistantMessage).usage;
+					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+					if (promptTokens > 0) {
+						this._roleCacheHitRate[role] = (usage.cacheRead / promptTokens) * 100;
+					}
+				}
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
@@ -4077,6 +4123,33 @@ export class AgentSession {
 	 * much leaner than the execution projection, which keeps raw tool output. Returns undefined
 	 * when the belief loop is not active.
 	 */
+	/**
+	 * Per-role model and latest cache hit rate for the three belief-loop display slots, consumed by
+	 * the footer and the `/session` panel. Models resolve per the documented fallback chain
+	 * (`pie.executionModel`/`pie.distillationModel`, defaulting to the session's main model); cache
+	 * hit rates come from the in-memory snapshot captured at message_end under the producing role.
+	 * The finalAnswer role and requests outside the belief loop never update a slot, and after a
+	 * reload all rates are undefined until the loop produces new requests. Returns undefined when
+	 * the belief loop is not usable, mirroring `getRoleContextUsage`.
+	 */
+	getRoleStatus(): RoleStatus | undefined {
+		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
+		return {
+			epistemic: {
+				model: this._roleModelFor("propose"),
+				latestCacheHitRate: this._roleCacheHitRate.propose,
+			},
+			distillation: {
+				model: this._roleModelFor("distill"),
+				latestCacheHitRate: this._roleCacheHitRate.distill,
+			},
+			execution: {
+				model: this._roleModelFor("execution"),
+				latestCacheHitRate: this._roleCacheHitRate.execution,
+			},
+		};
+	}
+
 	getRoleContextUsage(): { epistemic: ContextUsage; execution: ContextUsage } | undefined {
 		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
 		const contextWindow = this._contextWindow();

@@ -1249,3 +1249,68 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(output).not.toContain("[Skills]");
 	});
 });
+
+describe("InteractiveMode.handleSessionCommand", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	function fakeSession(roleStatus: unknown): any {
+		return {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			session: {
+				getSessionStats: () => ({
+					sessionFile: "/tmp/session.json",
+					sessionId: "sess-1",
+					totalMessages: 2,
+					userMessages: 1,
+					assistantMessages: 1,
+					toolCalls: 0,
+					toolResults: 0,
+					tokens: { input: 100, output: 10, cacheRead: 50, cacheWrite: 50, total: 160 },
+					cost: 0,
+				}),
+				modelRuntime: {},
+				getRoleStatus: () => roleStatus,
+			},
+			sessionManager: {
+				getSessionName: () => "my-session",
+				getEntries: () => [],
+			},
+		};
+	}
+
+	test("/session renders per-role models and cache rates when role status is present", () => {
+		const fakeThis = fakeSession({
+			epistemic: { model: { provider: "test", id: "main-model" }, latestCacheHitRate: 25 },
+			distillation: { model: { provider: "test", id: "distill-model" }, latestCacheHitRate: 50 },
+			execution: { model: { provider: "test", id: "exec-model" }, latestCacheHitRate: 0 },
+		});
+		(InteractiveMode as any).prototype.handleSessionCommand.call(fakeThis);
+		const rendered = renderLastLine(fakeThis.chatContainer, 220);
+		expect(rendered).toContain("Belief Loop");
+		expect(rendered).toContain("Epistemic:");
+		expect(rendered).toContain("test/main-model");
+		expect(rendered).toContain("(CH 25.0%)");
+		expect(rendered).toContain("Distillation:");
+		expect(rendered).toContain("test/distill-model");
+		expect(rendered).toContain("(CH 50.0%)");
+		expect(rendered).toContain("Execution:");
+		expect(rendered).toContain("test/exec-model");
+		expect(rendered).toContain("(CH 0.0%)");
+	});
+
+	test("/session renders empty markers when role status has no requests", () => {
+		const fakeThis = fakeSession({
+			epistemic: { model: undefined, latestCacheHitRate: undefined },
+			distillation: { model: undefined, latestCacheHitRate: undefined },
+			execution: { model: undefined, latestCacheHitRate: undefined },
+		});
+		(InteractiveMode as any).prototype.handleSessionCommand.call(fakeThis);
+		const rendered = renderLastLine(fakeThis.chatContainer, 220);
+		expect(rendered).toContain("Epistemic: — (CH —)");
+		expect(rendered).toContain("Distillation: — (CH —)");
+		expect(rendered).toContain("Execution: — (CH —)");
+	});
+});
