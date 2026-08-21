@@ -465,3 +465,207 @@ describe("route op (fast-path routing belief)", () => {
 		).toThrow("difficulty must be 'low', 'medium', or 'high'.");
 	});
 });
+
+describe("belief set capacity (MAX_BELIEFS = 200)", () => {
+	test("the 200th record is accepted and the 201st is rejected", () => {
+		const set = new BeliefSet();
+		for (let i = 0; i < 200; i++) {
+			set.apply({
+				op: "propose",
+				statement: `belief ${i}`,
+				domain: "product",
+				expectation: "probe",
+				evidenceRounds: 1,
+			});
+		}
+		expect(set.beliefs).toHaveLength(200);
+		expect(() =>
+			set.apply({
+				op: "propose",
+				statement: "overflow",
+				domain: "product",
+				expectation: "probe",
+				evidenceRounds: 1,
+			}),
+		).toThrow("Belief set capacity reached: at most 200 beliefs");
+		expect(set.beliefs).toHaveLength(200);
+	});
+
+	test("support, refute, and retract still work at capacity", () => {
+		const set = new BeliefSet();
+		for (let i = 0; i < 200; i++) {
+			set.apply({
+				op: "propose",
+				statement: `belief ${i}`,
+				domain: "product",
+				expectation: "probe",
+				evidenceRounds: 1,
+			});
+		}
+		expect(() => set.apply({ op: "support", beliefId: "belief-1", evidence: "seen" })).not.toThrow();
+		expect(() => set.apply({ op: "refute", beliefId: "belief-2", evidence: "not seen" })).not.toThrow();
+		expect(() => set.apply({ op: "retract", beliefId: "belief-3" })).not.toThrow();
+		expect(set.beliefs).toHaveLength(200);
+	});
+
+	test("refine and route still need capacity", () => {
+		const set = new BeliefSet();
+		for (let i = 0; i < 200; i++) {
+			set.apply({
+				op: "propose",
+				statement: `belief ${i}`,
+				domain: "product",
+				expectation: "probe",
+				evidenceRounds: 1,
+			});
+		}
+		expect(() =>
+			set.apply({
+				op: "refine",
+				beliefId: "belief-1",
+				statement: "refined",
+				expectation: "probe",
+				evidenceRounds: 1,
+			}),
+		).toThrow("Belief set capacity reached");
+		expect(() =>
+			set.apply({
+				op: "route",
+				statement: "route",
+				expectation: "route",
+				decision: "belief-loop",
+				suitabilityProbability: 0.5,
+				successProbability: 0.5,
+				estimatedSteps: 1,
+				difficulty: "low",
+			}),
+		).toThrow("Belief set capacity reached");
+		expect(set.beliefs).toHaveLength(200);
+	});
+});
+
+describe("pruneForNewTask (task-end cleanup)", () => {
+	test("keeps only supported product/code beliefs", () => {
+		const set = new BeliefSet();
+		const product = set.apply({
+			op: "propose",
+			statement: "cache survives logout",
+			domain: "product",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: product.id, evidence: "seen" });
+		const code = set.apply({
+			op: "propose",
+			statement: "route handles x",
+			domain: "code",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: code.id, evidence: "seen" });
+		const framing = set.apply({
+			op: "propose",
+			statement: "answer must establish y",
+			domain: "framing",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		const routing = set.apply({
+			op: "route",
+			statement: "route",
+			expectation: "route",
+			decision: "fast-path",
+			suitabilityProbability: 0.9,
+			successProbability: 0.9,
+			estimatedSteps: 1,
+			difficulty: "low",
+		});
+		const refuted = set.apply({
+			op: "propose",
+			statement: "old claim",
+			domain: "product",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "refute", beliefId: refuted.id, evidence: "not seen" });
+		const superseded = set.apply({
+			op: "propose",
+			statement: "superseded claim",
+			domain: "product",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		const refined = set.apply({
+			op: "refine",
+			beliefId: superseded.id,
+			statement: "refined claim",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		const proposed = set.apply({
+			op: "propose",
+			statement: "still open",
+			domain: "product",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+
+		expect(set.beliefs).toHaveLength(8);
+
+		const removed = set.pruneForNewTask();
+
+		// Only the two supported product/code beliefs survive.
+		expect(set.beliefs.map((b) => b.id)).toEqual([product.id, code.id]);
+		// Everything else — framing, routing, refuted, superseded, refined (proposed), proposed — was removed.
+		expect(removed.map((b) => b.id).sort()).toEqual(
+			[framing.id, routing.id, refuted.id, superseded.id, refined.id, proposed.id].sort(),
+		);
+	});
+
+	test("is idempotent on an already-pruned set", () => {
+		const set = new BeliefSet();
+		const product = set.apply({
+			op: "propose",
+			statement: "cache survives",
+			domain: "product",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: product.id, evidence: "seen" });
+		set.pruneForNewTask();
+		expect(set.pruneForNewTask()).toHaveLength(0);
+		expect(set.beliefs.map((b) => b.id)).toEqual([product.id]);
+	});
+
+	test("frees capacity for new records", () => {
+		const set = new BeliefSet();
+		for (let i = 0; i < 200; i++) {
+			set.apply({
+				op: "propose",
+				statement: `belief ${i}`,
+				domain: "product",
+				expectation: "probe",
+				evidenceRounds: 1,
+			});
+		}
+		expect(() =>
+			set.apply({
+				op: "propose",
+				statement: "overflow",
+				domain: "product",
+				expectation: "probe",
+				evidenceRounds: 1,
+			}),
+		).toThrow("Belief set capacity reached");
+		// Pruning 200 proposed records frees capacity; ids are never reused.
+		set.pruneForNewTask();
+		const fresh = set.apply({
+			op: "propose",
+			statement: "fresh",
+			domain: "product",
+			expectation: "probe",
+			evidenceRounds: 1,
+		});
+		expect(fresh.id).toBe("belief-201");
+	});
+});

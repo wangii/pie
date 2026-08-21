@@ -979,6 +979,10 @@ export class AgentSession {
 		this._reflected = false;
 		this._fastPathFailure = false;
 		this._evidenceWatermark = this.agent.state.messages.length;
+		// Drop the finished task's ephemera (framing/routing/refuted/superseded and any
+		// abnormal leftovers); only settled product/code knowledge survives as session
+		// knowledge for the next task.
+		this._beliefSet.pruneForNewTask();
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
 		// this task's own and re-enable the "deepen or conclude" steer.
 		this._beliefsAtTaskReset = this._beliefSet.beliefs.length;
@@ -2289,7 +2293,8 @@ export class AgentSession {
 			}
 			// A fresh user task after the previous loop concluded re-runs the belief loop
 			// from the epistemic role instead of staying parked in the no-tools finalAnswer
-			// role. The belief set is retained as session knowledge; only the loop resets.
+			// role. The belief set is retained as session knowledge — the task-end prune
+			// keeps only settled product/code records — and the loop resets.
 			if (this._role === "finalAnswer") {
 				this._resetLoopForNewTask();
 			}

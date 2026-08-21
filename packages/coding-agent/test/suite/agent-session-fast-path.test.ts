@@ -60,11 +60,9 @@ describe("AgentSession fast path", () => {
 
 		await harness.session.prompt("please echo hello");
 
-		// The routing belief is settled and carries the structured fields.
-		const routing = harness.session.beliefs.find((b) => b.domain === "routing");
-		expect(routing?.decision).toBe("fast-path");
-		expect(routing?.suitabilityProbability).toBe(0.9);
-		expect(routing?.estimatedSteps).toBe(1);
+		// The routing belief drove the dispatch and was pruned at the task-end reset:
+		// routing records are task ephemera, not session knowledge.
+		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(0);
 
 		// The execution answer reached the user.
 		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
@@ -249,9 +247,10 @@ describe("AgentSession fast path", () => {
 
 		await harness.session.prompt("is the cache persistent?");
 
-		// Both routing decisions are preserved in the history.
-		const routing = harness.session.beliefs.filter((b) => b.domain === "routing");
-		expect(routing.map((b) => b.decision)).toEqual(["belief-loop", "fast-path"]);
+		// The belief-loop route was consumed mid-task, and the task-end reset pruned both
+		// routing records — only the settled product belief survives as session knowledge.
+		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(0);
+		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-2"]);
 
 		// The fast-path run was distilled and its answer reached the user.
 		const custom = harness.session.messages.find(
@@ -389,5 +388,49 @@ describe("AgentSession fast path", () => {
 		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(1);
 		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
 		expect(assistantTexts).toContain("belief loop took over");
+	});
+
+	it("retains supported product/code knowledge across tasks and prunes ephemera at the next task boundary", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+
+		harness.setResponses([
+			// Task 1: belief-loop route, propose a product belief, probe, settle, conclude.
+			routeResponse("belief-loop"),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe keeps the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage("the value persisted"),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-2",
+					evidence: "the probe kept the value",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("the cache survives logout for 30s"),
+			// Task 2: routes to the fast path and answers the new request.
+			routeResponse("fast-path"),
+			fauxAssistantMessage("Done with task 2."),
+			fauxAssistantMessage("Summary: task 2 done."),
+		]);
+
+		await harness.session.prompt("is the cache persistent?");
+		// Task 1 concluded via the belief loop: ephemera are still present until the next
+		// task's reset (no prune at conclude — the finalAnswer snapshot needs them).
+		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(1);
+
+		await harness.session.prompt("please echo hi");
+		// Task 2's boundary reset pruned task 1's ephemera; only the settled product belief
+		// survives as session knowledge, and task 2's own routing record is pruned too.
+		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(0);
+		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-2"]);
 	});
 });

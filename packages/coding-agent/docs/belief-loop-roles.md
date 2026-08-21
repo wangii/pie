@@ -23,6 +23,15 @@ surfaces, model selection, and message projections cannot drift apart.
 > route, or a route evaluated while the belief set is not quiescent — keeps the four-phase
 > loop below.
 
+> **Task boundaries.** At every task-boundary reset (`_resetLoopForNewTask()` — a fast-path
+> success, or the next task arriving after a concluded one) the belief set is pruned to
+> settled product/code knowledge: framing obligations, routing decisions, refuted and
+> superseded records, and any leftover proposed entries are dropped; only `supported`
+> product/code beliefs carry over as session knowledge for the next task. A failed fast-path
+> run hands the same task back to propose without pruning. The set is capped at
+> `MAX_BELIEFS` (200) records: a 201st record (propose, refine, or route) is rejected with a
+> validation error, while support/refute/retract keep working at capacity.
+
 ## Terminology
 
 

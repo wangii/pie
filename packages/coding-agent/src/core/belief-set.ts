@@ -1,5 +1,6 @@
 /**
- * The belief set: the epistemic loop's object — immutable and append-only.
+ * The belief set: the epistemic loop's object — immutable records, append-only except for
+ * the single task-end pruning operation (`pruneForNewTask`).
  *
  * A belief is a named relational assertion about product or code, carrying a
  * falsifiable `expectation` and a structured `evidenceRounds` estimate. Any number
@@ -89,6 +90,9 @@ export class BeliefValidationError extends Error {}
 /** Upper bound on a declared evidence-round estimate (a validation cap, not a horizon). */
 export const MAX_EVIDENCE_ROUNDS = 5;
 
+/** Upper bound on belief records held at once. The 200th may be added; the 201st is rejected. */
+export const MAX_BELIEFS = 200;
+
 /** Derive a belief's status from its append-only provenance. Never stored. */
 export function statusOf(belief: Belief): BeliefStatus {
 	if (belief.supersededBy !== undefined) {
@@ -158,13 +162,15 @@ export function validateRoutingDifficulty(difficulty: RoutingDifficulty): void {
 /**
  * Mutable-internally, immutable-records belief set. `apply` is the single choke point:
  * every delta is validated and applied as an append-only update (records are replaced
- * with new immutable copies, never mutated in place).
+ * with new immutable copies, never mutated in place). The one exception is
+ * `pruneForNewTask`, the task-boundary cleanup that drops records whose provenance no
+ * longer carries meaning across tasks.
  */
 export class BeliefSet {
-	private readonly _beliefs: Belief[] = [];
+	private _beliefs: Belief[] = [];
 	private _nextId = 1;
 
-	/** All belief records, refuted/superseded negatives included — the full history. */
+	/** All belief records currently held; negatives and ephemera are removed at task end by `pruneForNewTask`. */
 	get beliefs(): readonly Belief[] {
 		return this._beliefs;
 	}
@@ -201,6 +207,7 @@ export class BeliefSet {
 		switch (delta.op) {
 			case "propose": {
 				// Any number of beliefs may be open at once; each is validated on its own.
+				this._ensureCapacity();
 				validateBelief(delta.statement, delta.domain);
 				validateExpectation(delta.expectation);
 				validateEvidenceRounds(delta.evidenceRounds);
@@ -221,6 +228,7 @@ export class BeliefSet {
 			case "refute":
 				return this._adjudicate(delta.beliefId, delta.evidence, "refuted");
 			case "refine": {
+				this._ensureCapacity();
 				const prior = this._require(delta.beliefId, ["proposed", "supported"]);
 				validateBelief(delta.statement, prior.domain);
 				validateExpectation(delta.expectation);
@@ -250,6 +258,7 @@ export class BeliefSet {
 			case "route": {
 				// A routing belief is created settled: it records this request's routing decision and
 				// never enters the dispatch frame (see `proposed()`). Its evidence is the decision.
+				this._ensureCapacity();
 				validateBelief(delta.statement, "routing");
 				validateExpectation(delta.expectation);
 				validateRoutingDecision(delta.decision);
@@ -278,6 +287,36 @@ export class BeliefSet {
 				this._beliefs.push(belief);
 				return belief;
 			}
+		}
+	}
+
+	/**
+	 * Task-end cleanup: keep only settled product/code knowledge that still means something
+	 * to the next task. Everything else — framing obligations, routing decisions, refuted
+	 * and superseded records, and any abnormally leftover proposed entries — is dropped.
+	 * Returns the removed records.
+	 *
+	 * Safe against dangling references: the only records that reference others by id are
+	 * framing supports (`beliefIds`), and framing records are exactly the ones removed, so
+	 * no surviving belief references a removed one. Removed ids are never reused.
+	 */
+	pruneForNewTask(): Belief[] {
+		const removed: Belief[] = [];
+		this._beliefs = this._beliefs.filter((b) => {
+			const keep = statusOf(b) === "supported" && (b.domain === "product" || b.domain === "code");
+			if (!keep) {
+				removed.push(b);
+			}
+			return keep;
+		});
+		return removed;
+	}
+
+	private _ensureCapacity(): void {
+		if (this._beliefs.length >= MAX_BELIEFS) {
+			throw new BeliefValidationError(
+				`Belief set capacity reached: at most ${MAX_BELIEFS} beliefs may be held; settle or complete the task to free records.`,
+			);
 		}
 	}
 
