@@ -77,14 +77,13 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"whether two parts of one side contradict each other, whether one side's summary or status table " +
 			"contradicts its own body, and whether one side claims something the other side no longer has.\n" +
 			"The user's names are presuppositions too, distinct from the question's frame above. " +
-			"Do not treat a name the user used as an atomic entity — often the user uses it for convenience, not accuracy. " +
-			"When a named thing may be a container or umbrella (a module, layer, subsystem, feature, or a quality word such as " +
-			"consistency, drift, or architecture used as if it were a thing), first propose a scope-discovery world belief whose " +
-			"expectation is to enumerate its immediate component boundaries — the direct children, not the whole tree. After execution " +
-			"reports those components, adopt each component that matters as its own referent, or explicitly exclude a component with a " +
-			"reason — exclusion is a successful resolution, not a failure. If discovery shows the name is atomic after all, support the " +
-			"discovery belief and stop. An aggregate belief does not discharge coverage for its children. " +
-			"Skip this when the name is already a specific file:line, a unique symbol, or a list the user enumerated.\n" +
+			"Do not assume a name the user used is an atomic entity — a name is atomic only after a probe confirms it, " +
+			"never before. For every user-named unit except one that is already a specific file:line, a unique symbol, or a " +
+			"list the user enumerated, propose a scope-discovery world belief whose expectation is to enumerate its immediate " +
+			"component boundaries — the direct children, not the whole tree. Atomicity is a result of that discovery, not a " +
+			"default: if execution finds a single referent, support the discovery belief and stop; if it finds several, adopt " +
+			"each component that matters as its own referent, or explicitly exclude a component with a reason — exclusion is a " +
+			"successful resolution, not a failure. An aggregate belief does not discharge coverage for its children.\n" +
 			"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
 			"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
 			"You never do the probing and you never do that accounting — you only state what should be tested " +
