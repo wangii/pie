@@ -607,6 +607,150 @@ describe("AgentSession fast path", () => {
 		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-2"]);
 	});
 
+	it("hands off with open world beliefs: fast path dispatches and leaves them un-settled", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+
+		harness.setResponses([
+			// First propose turn: belief-loop route + open framing.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "route",
+					statement: "本请求适合 fast path 执行",
+					expectation: "该请求为简单任务",
+					decision: "belief-loop",
+					suitabilityProbability: 0.2,
+					successProbability: 0.2,
+					estimatedSteps: 1,
+					difficulty: "low",
+				}),
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the final answer must establish that the cache survives logout",
+					domain: "framing",
+					expectation: "the conclusion states the cache behavior",
+					evidenceRounds: 1,
+				}),
+			]),
+			// Second propose turn: an authorized frame-open fast-path handoff AND an open world
+			// hypothesis declared in the same turn. The route is evaluated first (propose branch
+			// order), so the handoff dispatches and the world hypothesis is snapshotted, not
+			// dispatched to the belief loop.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "route",
+					statement: "本请求适合 fast path 执行",
+					expectation: "该请求为简单任务",
+					decision: "fast-path",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 1,
+					difficulty: "low",
+					handoffFromBeliefIds: ["belief-2"],
+					parentTaskId: "task-1",
+					reason: "the remaining framing is execution-only",
+				}),
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe keeps the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			// Fast execution: answer directly, no tool calls.
+			fauxAssistantMessage("Done."),
+			// Distillation summary.
+			fauxAssistantMessage("Summary: completed the request."),
+			// Distill: support the synthesized outcome belief and discharge the framing.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-5",
+					evidence: "the tool results completed without error",
+				}),
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-2",
+					evidence: "the outcome establishes the obligation",
+					evidenceBeliefIds: ["belief-5"],
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("the cache survives logout for 30s"),
+		]);
+
+		await harness.session.prompt("is the cache persistent?");
+
+		// The handoff dispatched despite the open world hypothesis: a distillation summary exists
+		// with the traceability details.
+		const custom = harness.session.messages.find(
+			(m) => m.role === "custom" && m.customType === "fast_path_distillation",
+		);
+		expect(custom).toBeDefined();
+		const details = (custom as { details?: Record<string, unknown> })?.details;
+		expect(details?.outcome).toBe("success");
+		expect(details?.parentTaskId).toBe("task-1");
+		expect(details?.handoffFromBeliefIds).toEqual(["belief-2"]);
+
+		// The open world hypothesis was NOT auto-settled by the fast path: it stays proposed so
+		// the belief loop re-adjudicates it.
+		const world = harness.session.beliefs.find((b) => b.id === "belief-4");
+		expect(world?.domain).toBe("product");
+		expect(world?.supportedBy ?? []).toHaveLength(0);
+		expect(world?.refutedBy ?? []).toHaveLength(0);
+
+		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
+		expect(assistantTexts).toContain("Done.");
+	});
+
+	it("dispatches a one-shot fast path with an open world belief when no framing is open", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+
+		harness.setResponses([
+			// First propose turn: belief-loop route, no framing.
+			routeResponse("belief-loop"),
+			// Second propose turn: a one-shot fast-path route PLUS an open world hypothesis in
+			// the same turn. The route is evaluated first, so the fast path dispatches and the
+			// world hypothesis stays open as an unverified snapshot.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "route",
+					statement: "本请求适合 fast path 执行",
+					expectation: "该请求为简单任务",
+					decision: "fast-path",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 1,
+					difficulty: "low",
+				}),
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe keeps the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			// Fast execution: answer directly.
+			fauxAssistantMessage("Done."),
+			// Distillation summary.
+			fauxAssistantMessage("Summary: completed the request."),
+		]);
+
+		await harness.session.prompt("please echo hello");
+
+		// The one-shot route dispatched despite the open world belief: a distillation summary exists.
+		const custom = harness.session.messages.find(
+			(m) => m.role === "custom" && m.customType === "fast_path_distillation",
+		);
+		expect(custom).toBeDefined();
+		expect((custom as { details?: { outcome?: string } }).details?.outcome).toBe("success");
+		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
+		expect(assistantTexts).toContain("Done.");
+	});
 	it("rotates the task id at the boundary so a stale parentTaskId is rejected in the next task", async () => {
 		const harness = await createHarness(fastHarnessOptions);
 		harnesses.push(harness);

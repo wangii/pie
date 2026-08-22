@@ -75,16 +75,19 @@ const PROPOSE_ROUTING_HEADER =
 const PROPOSE_CONTINUATION_HEADER =
 	"The task is already in the belief loop and its initial routing decision is settled. Continue the " +
 	"protocol below. Optionally, when the remaining work is simple (low side-effect risk, few steps, low " +
-	"ambiguity, high success probability) and no belief is left open for verification and no framing " +
-	"obligation is open, you may declare a one-shot fast-path handoff with declare_belief op `route` and " +
+	"ambiguity, high success probability) and no framing obligation is open, you may declare a one-shot " +
+	"fast-path handoff with declare_belief op `route` and " +
 	"decision `fast-path`: the execution role will then finish the request directly on the fast path and a " +
-	"separate distillation step will summarize it. If the remaining work is execution-only and every open " +
-	"framing obligation is still satisfiable by executing it directly, and no belief is left open for " +
-	"verification, you may declare an authorized frame-open fast-path handoff instead: declare_belief op " +
+	"separate distillation step will summarize it. Open world beliefs do not block the fast path — they " +
+	"are handed over as unverified hypotheses (the execution role sees them as assumptions, not facts) " +
+	"and the belief loop re-adjudicates any that remain after the run. If the remaining work is " +
+	"execution-only and every open " +
+	"framing obligation is still satisfiable by executing it directly, you may declare an authorized " +
+	"frame-open fast-path handoff instead: declare_belief op " +
 	"`route` with decision `fast-path` plus `handoffFromBeliefIds` naming exactly the open framing " +
 	"obligations it takes over, the current `parentTaskId`, and a `reason` for the handoff — the fast path " +
 	"will then execute the work, your distill step will adjudicate the resulting outcome belief, and the " +
-	"framing will be discharged once supported. If any belief still needs probing or any uncovered framing " +
+	"framing will be discharged once supported. If any uncovered framing " +
 	"obligation is open, continue with the protocol below instead.\n\n";
 
 /** The propose protocol body shared by the routing and continuation instructions. */

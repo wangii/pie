@@ -471,10 +471,22 @@ export class AgentSession {
 	 * hand the same task back to propose instead of resetting to the next task.
 	 */
 	private _fastPathFailure = false;
-	/** For a frame-open fast-path handoff: the route that authorized it and the framing ids it
-	 *  covers. Non-null only while a frame-open handoff is running, so a successful run can
+	/** For a frame-open fast-path handoff: the route that authorized it, the framing ids it
+	 *  covers, and a snapshot of the open world beliefs at handoff time (unverified hypotheses,
+	 *  not facts). Non-null only while a frame-open handoff is running, so a successful run can
 	 *  synthesize a handoff-outcome belief and route to distill instead of resetting to the next task. */
-	private _frameOpenHandoff: { route: Belief; framingIds: readonly string[]; outcomeBeliefId?: string } | null = null;
+	private _frameOpenHandoff: {
+		route: Belief;
+		framingIds: readonly string[];
+		outcomeBeliefId?: string;
+		openWorldBeliefs: ReadonlyArray<{
+			id: string;
+			domain: string;
+			statement: string;
+			expectation: string;
+			evidenceRounds: number;
+		}>;
+	} | null = null;
 	/** The current task's request text, captured at `prompt()`, used for the fast-path summary. */
 	private _currentTaskRequestText = "";
 	/** Monotonic counter for the current task's stable id, incremented at each task boundary. */
@@ -1072,21 +1084,14 @@ export class AgentSession {
 				if (concluded) {
 					return this._concludeTransition(state, proposed);
 				}
-				if (undispatched.length > 1) {
-					return this._dispatchToPlanner();
-				}
-				if (undispatched.length === 1) {
-					// A single open belief needs no grouping decision — dispatch it directly,
-					// keeping the cheap whole-frame path for singleton frames.
-					return this._dispatchToExecution(undispatched);
-				}
-				// The propose role's routing belief decides this task's path. Each routing belief is
-				// consumed on first evaluation (by id); only the latest unconsumed route decides, so
-				// a fresh route declared after belief updates can hand the remaining work to the fast
-				// path while the earlier decision stays in the history. The fast path dispatches only
-				// when the belief set is quiescent: no world belief pending verification and no open
-				// framing obligation (the same condition that makes an early conclude premature).
-				// A missing, rejected, or non-quiescent route falls through to the normal belief-loop
+				// The propose role's routing belief decides this task's path, and it is evaluated
+				// before open world beliefs are dispatched: a fast-path route may take over the task
+				// even while world hypotheses are still open — they are snapshotted into the
+				// fast-path context as unverified assumptions and re-adjudicated after the run.
+				// Each routing belief is consumed on first evaluation (by id); only the latest
+				// unconsumed route decides, so a fresh route declared after belief updates can hand
+				// the remaining work to the fast path while the earlier decision stays in the
+				// history. A missing or rejected route falls through to the normal belief-loop
 				// protocol instead of silently bypassing routing.
 				const routes = this._beliefSet.beliefs
 					.slice(this._beliefsAtTaskReset)
@@ -1104,6 +1109,14 @@ export class AgentSession {
 					if (route.decision === "fast-path" && this._fastPathQuiescent()) {
 						return this._dispatchToFastExecution(route);
 					}
+				}
+				if (undispatched.length > 1) {
+					return this._dispatchToPlanner();
+				}
+				if (undispatched.length === 1) {
+					// A single open belief needs no grouping decision — dispatch it directly,
+					// keeping the cheap whole-frame path for singleton frames.
+					return this._dispatchToExecution(undispatched);
 				}
 				if (proposed.length > 0) {
 					// Open (dispatched) beliefs should have been settled by the distill step; route
@@ -1417,28 +1430,27 @@ export class AgentSession {
 	}
 
 	/**
-	 * Whether the fast path may take over the current task: no world belief is pending verification
-	 * (proposed) and no framing obligation is open (proposed framing) — the same condition
-	 * `_concludeTransition` uses to reject an early conclude. Supported beliefs are settled context
-	 * for the fast-path execution, not blockers.
+	 * Whether the fast path may take over the current task with no frame-open handoff: no
+	 * framing obligation is open (proposed framing). Open world beliefs no longer block the
+	 * fast path — the execution role treats them as unverified hypotheses, and the distill step
+	 * re-adjudicates any that remain after the run.
 	 */
 	private _fastPathQuiescent(): boolean {
-		return this._beliefSet.proposed().length === 0 && this._beliefSet.framings().length === 0;
+		return this._beliefSet.framings().length === 0;
 	}
 
 	/**
-	 * Whether a frame-open fast-path handoff is authorized: no world belief is pending
-	 * verification (`proposed()`), and every open framing obligation is precisely covered by the
-	 * route's `handoffFromBeliefIds` list (same ids, regardless of order). This is the explicit
-	 * authorization gate for the mid-task handoff — it never infers coverage from framing text.
+	 * Whether a frame-open fast-path handoff is authorized: every open framing obligation is
+	 * precisely covered by the route's `handoffFromBeliefIds` list (same ids, regardless of
+	 * order). Open world beliefs do not block the handoff — the route may take over the task
+	 * while world hypotheses remain open; the fast path executes the request and the belief
+	 * loop re-adjudicates any that stay open afterwards. This is the explicit authorization
+	 * gate for the mid-task handoff — it never infers coverage from framing text.
 	 */
 	private _frameOpenHandoffAuthorized(route: Belief): boolean {
 		// The route must name the task it authorizes; a mismatched task id is rejected.
 		const routeTask = route.parentTaskId;
 		if (!routeTask || routeTask !== this.taskId) {
-			return false;
-		}
-		if (this._beliefSet.proposed().length > 0) {
 			return false;
 		}
 		const openFramings = this._beliefSet.framings();
@@ -1457,7 +1469,17 @@ export class AgentSession {
 		this._dispatchedFrameIds = new Set();
 		this._fastPathFailure = false;
 		this._frameOpenHandoff = this._frameOpenHandoffAuthorized(route)
-			? { route, framingIds: this._beliefSet.framings().map((f) => f.id) }
+			? {
+					route,
+					framingIds: this._beliefSet.framings().map((f) => f.id),
+					openWorldBeliefs: this._beliefSet.proposed().map((b) => ({
+						id: b.id,
+						domain: b.domain,
+						statement: b.statement,
+						expectation: b.expectation,
+						evidenceRounds: b.evidenceRounds,
+					})),
+				}
 			: null;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		return {
@@ -1606,11 +1628,13 @@ export class AgentSession {
 				systemPrompt:
 					"Summarize the completed fast-path execution for the epistemic context. List: " +
 					"completed actions, side effects, key observations, the final result, any remaining " +
-					"goal, and actions that must not be repeated.",
+					"goal, and actions that must not be repeated. Also report for each open world " +
+					"hypothesis handed off at the start whether the execution resolved it, left it " +
+					"open, or rendered it moot.",
 				messages: [
 					{
 						role: "user",
-						content: `Request: ${this._currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this._fastPathTranscript(turn)}`,
+						content: `Request: ${this._currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this._fastPathTranscript(turn)}\n\nOpen world hypotheses at handoff:\n${this._fastPathOpenBeliefs()}`,
 						timestamp: Date.now(),
 					},
 				],
@@ -1644,6 +1668,15 @@ export class AgentSession {
 			parts.push(`tool ${r.toolName}: ${this._messageText(r)}`);
 		}
 		return parts.join("\n");
+	}
+
+	/** The open world hypotheses snapshot captured at fast-path dispatch, for the distillation prompt. */
+	private _fastPathOpenBeliefs(): string {
+		const open = this._frameOpenHandoff?.openWorldBeliefs ?? [];
+		if (open.length === 0) {
+			return "(none)";
+		}
+		return open.map((b) => `${b.id} [${b.domain}]: ${b.statement}`).join("\n");
 	}
 
 	private _messageText(message: { content: unknown }): string {
@@ -1777,6 +1810,19 @@ export class AgentSession {
 			if (open.length > 0) {
 				prompt += `\n\nOpen beliefs:\n${open.map((b) => `${b.id}: ${b.statement}`).join("\n")}`;
 			}
+		}
+		// During a frame-open fast-path handoff the execution role inherits any open world
+		// hypotheses as *unverified assumptions*, not facts: it must not treat them as settled
+		// context, and the distill step re-adjudicates any that remain after the run.
+		if (this._role === "execution" && this._frameOpenHandoff && this._frameOpenHandoff.openWorldBeliefs.length > 0) {
+			prompt +=
+				"\n\nOpen world hypotheses (UNVERIFIED — not settled facts; execute the request without assuming them true):\n" +
+				this._frameOpenHandoff.openWorldBeliefs
+					.map(
+						(b) =>
+							`${b.id} [${b.domain}]: ${b.statement} (expectation: ${b.expectation}, evidenceRounds: ${b.evidenceRounds})`,
+					)
+					.join("\n");
 		}
 		return prompt;
 	}
