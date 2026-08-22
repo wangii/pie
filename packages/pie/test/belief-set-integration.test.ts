@@ -78,7 +78,7 @@ const conclude: FauxResponse = { toolCalls: [{ name: "conclude", args: {} }], st
 
 describe("declare_belief integration", () => {
 	test("declare_belief and view_beliefs are active when enabled", async () => {
-		const harness = await createHarness({ enableBeliefSet: true });
+		const harness = await createHarness({});
 		try {
 			expect(harness.session.getActiveToolNames()).toContain("declare_belief");
 			expect(harness.session.getAllTools().map((t) => t.name)).toContain("declare_belief");
@@ -89,20 +89,8 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("enableBeliefSet: false disables the belief tools", async () => {
-		const harness = await createHarness({ enableBeliefSet: false });
-		try {
-			expect(harness.session.getActiveToolNames()).not.toContain("declare_belief");
-			expect(harness.session.getActiveToolNames()).not.toContain("view_beliefs");
-			expect(harness.session.getAllTools().map((t) => t.name)).not.toContain("declare_belief");
-		} finally {
-			harness.cleanup();
-		}
-	});
-
 	test("declare_belief stays active when the CLI supplies a tool list without it", async () => {
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			initialActiveToolNames: ["read", "bash", "edit", "write"],
 		});
 		try {
@@ -113,7 +101,7 @@ describe("declare_belief integration", () => {
 	});
 
 	test("getRoleContextUsage returns per-role context estimates when the belief loop is active", async () => {
-		const harness = await createHarness({ enableBeliefSet: true });
+		const harness = await createHarness({});
 		try {
 			const roleUsage = harness.session.getRoleContextUsage();
 			expect(roleUsage).toBeDefined();
@@ -128,17 +116,8 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("getRoleContextUsage is undefined when the belief set is disabled", async () => {
-		const harness = await createHarness({ enableBeliefSet: false });
-		try {
-			expect(harness.session.getRoleContextUsage()).toBeUndefined();
-		} finally {
-			harness.cleanup();
-		}
-	});
-
 	test("getRoleStatus returns per-role models and cache rates when the belief loop is active", async () => {
-		const harness = await createHarness({ enableBeliefSet: true });
+		const harness = await createHarness({});
 		try {
 			const roleStatus = harness.session.getRoleStatus();
 			expect(roleStatus).toBeDefined();
@@ -154,17 +133,8 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("getRoleStatus is undefined when the belief set is disabled", async () => {
-		const harness = await createHarness({ enableBeliefSet: false });
-		try {
-			expect(harness.session.getRoleStatus()).toBeUndefined();
-		} finally {
-			harness.cleanup();
-		}
-	});
-
 	test("initial role is epistemic: only belief tools are projected", async () => {
-		const harness = await createHarness({ enableBeliefSet: true });
+		const harness = await createHarness({});
 		try {
 			// The model-facing tool list is the epistemic role's subset; the full active
 			// list (read/bash/…) is still available via `getActiveToolNames`.
@@ -179,7 +149,7 @@ describe("declare_belief integration", () => {
 	});
 
 	test("propose prompt describes the belief-action cycle and never advertises file/command tools", async () => {
-		const harness = await createHarness({ enableBeliefSet: true });
+		const harness = await createHarness({});
 		try {
 			const prompt = harness.session.agent.state.systemPrompt;
 			// The propose role has no read/bash/edit/write, so the prompt must not
@@ -205,13 +175,14 @@ describe("declare_belief integration", () => {
 			expect(prompt).not.toContain("read files");
 			expect(prompt).not.toContain("run commands");
 			expect(prompt).not.toContain("read/bash");
-			// The belief vocabulary is typed and written in Chinese: each referent is tagged by
-			// one of four kinds, and belief content is Chinese.
+			// The belief vocabulary is typed and written in the configured belief language:
+			// each referent is tagged by one of four kinds, and belief content follows
+			// `pie.beliefLang` (default English in the harness).
 			expect(prompt).toContain("[code]");
 			expect(prompt).toContain("[prod]");
 			expect(prompt).toContain("[user]");
 			expect(prompt).toContain("[convention]");
-			expect(prompt).toContain("in Chinese");
+			expect(prompt).toContain("in English");
 			// The framing obligation must also surface the question's own implicit frame — the
 			// partition its wording imposes — as a presupposition to falsify, not a given.
 			expect(prompt).toContain("implicit frame");
@@ -238,7 +209,6 @@ describe("declare_belief integration", () => {
 
 	test("belief language follows pie.beliefLang in the role prompt", async () => {
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			settings: { pie: { beliefLang: "English" } },
 		});
 		try {
@@ -264,7 +234,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose a frame.
@@ -327,7 +296,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose a frame.
@@ -396,7 +364,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose.
@@ -470,7 +437,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose TWO beliefs in one turn.
@@ -546,7 +512,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose.
@@ -630,7 +595,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose.
@@ -729,7 +693,6 @@ describe("declare_belief integration", () => {
 		});
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Frame 1: propose belief-1 → probe → distilled → settle.
@@ -835,7 +798,6 @@ describe("declare_belief integration", () => {
 		});
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				propose("the cache survives logout"),
@@ -920,7 +882,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				{
@@ -1005,7 +966,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose.
@@ -1093,7 +1053,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose a framing obligation only (no world belief).
@@ -1237,7 +1196,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose a world belief.
@@ -1310,7 +1268,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose.
@@ -1385,7 +1342,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose three beliefs so the settled set crosses the reflection
@@ -1488,7 +1444,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose a single belief.
@@ -1555,7 +1510,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				{
@@ -1617,7 +1571,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: propose and settle three beliefs so the first conclude crosses the
@@ -1737,7 +1690,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Frame 1.
@@ -1830,7 +1782,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: first action is to check its (empty) belief set.
@@ -1929,7 +1880,6 @@ describe("declare_belief integration", () => {
 		];
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				...task("belief-1", "the cache survives logout", "conclusion one"),
@@ -1969,7 +1919,6 @@ describe("declare_belief integration", () => {
 		};
 
 		const harness = await createHarness({
-			enableBeliefSet: true,
 			baseToolsOverride: { echo: echoTool },
 			responses: [
 				// Epistemic: emits `bash`, which is not in its tool list (it imitated a prior

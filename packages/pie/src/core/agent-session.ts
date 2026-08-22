@@ -234,8 +234,6 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** When true, register the `declare_belief` tool and maintain the live belief set. Default true. */
-	enableBeliefSet?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -490,7 +488,6 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
-	private readonly _enableBeliefSet: boolean;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -527,7 +524,6 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
-		this._enableBeliefSet = config.enableBeliefSet ?? true;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -729,7 +725,7 @@ export class AgentSession {
 	 * - finalAnswer: raw operational detail is discarded; the settled beliefs remain.
 	 */
 	private _projectContextMessages(): AgentMessage[] {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) {
+		if (!this._beliefSetUsable) {
 			return this.agent.state.messages.slice();
 		}
 		return this._projectMessagesFor(this._role);
@@ -998,7 +994,7 @@ export class AgentSession {
 
 	/** Advance the role from the just-completed turn and project the next role's surface. */
 	private async _advanceRole(turn: PrepareNextTurnContext): Promise<void> {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) {
+		if (!this._beliefSetUsable) {
 			this._applyRoleSurface();
 			return;
 		}
@@ -1579,7 +1575,7 @@ export class AgentSession {
 	 * untouched so footer/compaction/context-window keep the main model as their baseline.
 	 */
 	private _roleModelFor(role: "propose" | "distill" | "execution" | "finalAnswer"): Model<any> | undefined {
-		if (this._enableBeliefSet && this._beliefSetUsable) {
+		if (this._beliefSetUsable) {
 			// The model policy per role is declared in ROLE_SPECS; only execution and distill
 			// may run on separately configured models from settings. The fast path runs the
 			// execution role on `pie.fastPathModel`; the first propose turn of a task (its
@@ -1661,7 +1657,7 @@ export class AgentSession {
 
 	/** Project the current role's tool subset and system prompt onto the agent state. */
 	private _applyRoleSurface(): void {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) {
+		if (!this._beliefSetUsable) {
 			this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
 			return;
 		}
@@ -1792,7 +1788,7 @@ export class AgentSession {
 				// turn's prepareNextTurnWithContext. finalAnswer and non-belief-loop requests
 				// (idle/plain turns keep `_role` at the initial "propose") never update a slot.
 				const role = this._role;
-				if (this._enableBeliefSet && this._beliefSetUsable && role !== "finalAnswer") {
+				if (this._beliefSetUsable && role !== "finalAnswer") {
 					const usage = (event.message as AssistantMessage).usage;
 					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 					if (promptTokens > 0) {
@@ -3851,17 +3847,15 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
-		if (this._enableBeliefSet) {
-			this._baseToolDefinitions.set(
-				"declare_belief",
-				createDeclareBeliefToolDefinition(this._beliefSet) as ToolDefinition,
-			);
-			this._baseToolDefinitions.set(
-				"view_beliefs",
-				createViewBeliefsToolDefinition(this._beliefSet, () => this._role) as ToolDefinition,
-			);
-			this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
-		}
+		this._baseToolDefinitions.set(
+			"declare_belief",
+			createDeclareBeliefToolDefinition(this._beliefSet) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"view_beliefs",
+			createViewBeliefsToolDefinition(this._beliefSet, () => this._role) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -3885,9 +3879,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: this._enableBeliefSet
-				? ["read", "bash", "edit", "write", "declare_belief", "view_beliefs", "conclude"]
-				: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", "declare_belief", "view_beliefs", "conclude"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		// The belief set is on by default, so its tools must be active even when the
 		// caller supplied its own `activeToolNames` (the CLI passes a settings default
@@ -3896,7 +3888,7 @@ export class AgentSession {
 		// back out via `allowedToolNames`.
 		const beliefToolNames = ["declare_belief", "view_beliefs", "conclude"];
 		const activeToolNames =
-			this._enableBeliefSet && baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
+			baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
 				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]
 				: baseActiveToolNames;
 		this._refreshToolRegistry({
@@ -4491,7 +4483,7 @@ export class AgentSession {
 	 * the belief loop is not usable, mirroring `getRoleContextUsage`.
 	 */
 	getRoleStatus(): RoleStatus | undefined {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
+		if (!this._beliefSetUsable) return undefined;
 		return {
 			epistemic: {
 				model: this._roleModelFor("propose"),
@@ -4509,7 +4501,7 @@ export class AgentSession {
 	}
 
 	getRoleContextUsage(): { epistemic: ContextUsage; execution: ContextUsage } | undefined {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
+		if (!this._beliefSetUsable) return undefined;
 		const contextWindow = this._contextWindow();
 		if (contextWindow === undefined) return undefined;
 		return {

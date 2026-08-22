@@ -10,7 +10,7 @@ There are two general options. You can either
 
 | Pattern | What is isolated | Best for | Notes |
 | --- | --- | --- | --- |
-| Gondolin extension | Built-in tools and `!` commands | Local micro-VM isolation while keeping auth on host | See [`examples/extensions/gondolin/`](../examples/extensions/gondolin/). |
+| Gondolin extension | Built-in tools and `!` commands | Local micro-VM isolation while keeping auth on host | |
 | Plain Docker | Whole `pi` process in a local container | Simple local isolation | Provider API keys enter the container. |
 | OpenShell | Whole `pi` process in a policy-controlled sandbox | Local or remote managed sandbox | Requires an OpenShell gateway |
 
@@ -19,15 +19,7 @@ Extensions run wherever the `pi` process runs. If you run host `pi` with a tool-
 ## Gondolin
 
 [Gondolin](https://github.com/earendil-works/gondolin) is a local Linux micro-VM.
-Use the [example extension](../examples/extensions/gondolin) when you want `pi` on the host but all built-in tools routed into the VM.
-
-Setup:
-
-```bash
-cp -R packages/pie/examples/extensions/gondolin ~/.pi/agent/extensions/gondolin
-cd ~/.pi/agent/extensions/gondolin
-npm install --ignore-scripts
-```
+It routes all built-in tools into the VM while keeping auth on the host.
 
 Run from the project you want mounted:
 

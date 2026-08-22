@@ -35,7 +35,6 @@ describe("AgentSession fast path", () => {
 		]);
 
 	const fastHarnessOptions = {
-		enableBeliefSet: true,
 		models: [{ id: "default" }, { id: "fast" }, { id: "distill" }],
 		settings: {
 			defaultModel: "faux/default",

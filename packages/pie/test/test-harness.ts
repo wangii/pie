@@ -339,8 +339,6 @@ export interface HarnessOptions {
 	tools?: AgentTool[];
 	/** Base tools override (replaces built-in read/bash/edit/write). */
 	baseToolsOverride?: Record<string, AgentTool>;
-	/** Enable the `declare_belief` tool and live belief set. */
-	enableBeliefSet?: boolean;
 	/** Initial active tool names (mirrors the CLI's `initialActiveToolNames`). */
 	initialActiveToolNames?: string[];
 	/** Optional resource loader override. */
@@ -429,10 +427,6 @@ async function createHarnessWithResourceLoader(
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
-		// The belief set (and its hard entry/exit gates) is opt-in per test. Production
-		// defaults it on, but the harness defaults it off so non-belief tests do not
-		// unexpectedly run through the epistemic gates.
-		enableBeliefSet: options.enableBeliefSet ?? false,
 		initialActiveToolNames: options.initialActiveToolNames,
 	});
 

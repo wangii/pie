@@ -5,8 +5,7 @@ set -euo pipefail
 #
 # Runs pi's CLI with the belief set enabled: the `declare_belief` tool is in the
 # active tool set and the live beliefs are appended to the system prompt as a
-# [CURRENT BELIEFS] block each turn. The belief set is on by default on this
-# branch (`AgentSessionConfig.enableBeliefSet` defaults to true), so no flag is
+# [CURRENT BELIEFS] block each turn. The belief set is always on, so no flag is
 # needed to experience it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

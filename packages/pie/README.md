@@ -6,7 +6,7 @@ Pie 是一个以四阶段信念循环为核心、默认启用的可自我扩展�
 Pie is a self-extensible coding agent whose core is a default-enabled four-phase belief loop; the other workspaces only provide generic support.
 
 
-- **四阶段信念循环（Four-phase belief loop）**：propose → execution → distill → finalAnswer，由 ROLE_SPECS/TRANSITION_STEERS 单一权威源驱动，默认启用（`enableBeliefSet` 默认为 true）。The four phases are driven by the single source of truth ROLE_SPECS/TRANSITION_STEERS and are enabled by default (`enableBeliefSet` defaults to true).
+- **四阶段信念循环（Four-phase belief loop）**：propose → execution → distill → finalAnswer，由 ROLE_SPECS/TRANSITION_STEERS 单一权威源驱动，默认启用。The four phases are driven by the single source of truth ROLE_SPECS/TRANSITION_STEERS and are enabled by default.
 - **角色级隔离（Role-level isolation）**：每阶段的指令、工具面、模型选择与消息投影互相隔离，越权工具调用会被纠正。Each phase keeps its instruction, tool surface, model choice, and message projection isolated; out-of-surface tool calls are steered back.
 - **证据水位线（Evidence watermark）**：原始证据只向蒸馏角色展示一次，随后被掩码，抑制上下文污染。Raw evidence is shown to the distill role exactly once, then masked, curbing context pollution.
 - **执行租约（Execution lease）**：探测帧有工具轮次上限（ceil(Σ证据轮数×1.3)），先提醒后强制返回。Each probe frame has a tool-call budget (ceil(Σ evidence rounds × 1.3)); it nudges once, then forces the return.
@@ -29,7 +29,7 @@ Built on top of Pi: https://pi.dev
 
 ## 项目思想：四阶段信念循环（The project idea: the four-phase belief loop）
 
-Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 pie 包（`packages/pie`）实现并默认启用（`enableBeliefSet` 默认为 true，`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。四个阶段由 `packages/pie/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
+Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 pie 包（`packages/pie`）实现并默认启用（`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。四个阶段由 `packages/pie/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
 
 | 阶段 | 职责 |
 |------|------|
@@ -40,7 +40,7 @@ Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显�
 
 信念按指称类型打标签：`[code]`（实现）、`[prod]`（产品行为或文档声明）、`[user]`（用户意图/需求）、`[convention]`（仓库惯例）。信念本身用 `pie.beliefLang` 指定的语言书写（默认 `English`）。`/bs` 命令可查看当前信念集，`/thinking` 可设置思考级别。详见 [belief-loop-roles.md](packages/pie/docs/belief-loop-roles.md)。
 
-The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the pie package (`packages/pie`) — `enableBeliefSet` defaults to true and `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four phases are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/pie/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
+The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the pie package (`packages/pie`) — `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four phases are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/pie/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
 
 | Phase | Job |
 |-------|-----|
@@ -54,7 +54,7 @@ Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (pro
 
 ### 角色模型配置（Role model configuration）
 
-信念循环允许为两个角色单独配置模型（仅在信念集启用时生效，`enableBeliefSet` 默认开启）：
+信念循环允许为两个角色单独配置模型（仅在信念集启用时生效）：
 
 - `pie.executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
 - `pie.distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
@@ -79,7 +79,7 @@ propose 与 finalAnswer 始终使用会话主模型（`defaultModel`）。模型
 
 回退链：`pie.executionModel` 未配置或解析失败时，execution 回退到会话主模型；`pie.distillationModel` 未配置时先回退 `defaultModel`，仍未解析再回退会话主模型——模型名解析失败时两者最终都使用会话主模型。`pie.fastPathModel` 未配置或解析失败时，fast path 沿用会话主模型；fast-path 蒸馏始终使用 `pie.distillationModel`（未配置则 `defaultModel`，再否则会话主模型）。
 
-The belief loop lets two roles run on separately configured models (only while the belief set is enabled — `enableBeliefSet` defaults to true):
+The belief loop lets two roles run on separately configured models (only while the belief set is enabled):
 
 - `pie.executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
 - `pie.distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.

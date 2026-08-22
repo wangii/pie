@@ -305,7 +305,6 @@ describe("AgentSession retry", () => {
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
 			baseToolsOverride: { echo: echoTool },
-			enableBeliefSet: false,
 		});
 
 		await session.prompt("Test");

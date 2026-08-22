@@ -114,7 +114,7 @@ function getPiDocsClassification(absolutePath: string): CompactReadClassificatio
 	}
 
 	const label = toPosixPath(relativePath);
-	if (label === "README.md" || label.startsWith("docs/") || label.startsWith("examples/")) {
+	if (label === "README.md" || label.startsWith("docs/")) {
 		return { kind: "docs", label };
 	}
 	return undefined;

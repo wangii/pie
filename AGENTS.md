@@ -59,6 +59,7 @@ Committing:
 - Before committing, run `git status` and verify you are only staging your files.
 - `packages/ai/src/models.generated.ts` may always be included alongside your files.
 - Message format: `{feat,fix,docs}[(ai,tui,agent,coding-agent)]: <commit message> (optionally multiple lines)`. Message is informative and concise.
+- When creating a Git commit, append the following trailer after a blank line: `Co-authored-by: Pie <pie@vorail.com>`.
 
 Never run (destroys other agents' work or bypasses checks):
 

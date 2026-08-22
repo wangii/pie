@@ -9,10 +9,7 @@ Extensions can register custom model providers via `pi.registerProvider()`. This
 
 ## Example Extensions
 
-See these complete provider examples:
-
-- [`examples/extensions/custom-provider-anthropic/`](../examples/extensions/custom-provider-anthropic/)
-- [`examples/extensions/custom-provider-gitlab-duo/`](../examples/extensions/custom-provider-gitlab-duo/)
+See [custom-provider.md](custom-provider.md) for how to register a provider extension.
 
 ## Table of Contents
 
