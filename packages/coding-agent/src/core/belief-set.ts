@@ -59,6 +59,13 @@ export interface Belief {
 	readonly successProbability?: number;
 	readonly estimatedSteps?: number;
 	readonly difficulty?: RoutingDifficulty;
+	/** For a mid-task fast-path handoff: the open framing obligations this route authorizes the
+	 *  fast path to take over. Only present on a frame-open handoff route (domain "routing"). */
+	readonly handoffFromBeliefIds?: readonly string[];
+	/** Stable id of the task this frame-open handoff belongs to, for traceability. */
+	readonly parentTaskId?: string;
+	/** Why the route authorizes a handoff (e.g. the remaining framing is execution-only). */
+	readonly reason?: string;
 }
 
 /** Sentinel `supersededBy` value for a withdrawn (retracted) belief. */
@@ -98,6 +105,9 @@ export type BeliefDelta =
 			successProbability: number;
 			estimatedSteps: number;
 			difficulty: RoutingDifficulty;
+			handoffFromBeliefIds?: readonly string[];
+			parentTaskId?: string;
+			reason?: string;
 	  };
 
 /** Thrown when a delta names an invalid statement or an illegal transition. */
@@ -301,6 +311,9 @@ export class BeliefSet {
 					successProbability: delta.successProbability,
 					estimatedSteps: delta.estimatedSteps,
 					difficulty: delta.difficulty,
+					handoffFromBeliefIds: delta.handoffFromBeliefIds,
+					parentTaskId: delta.parentTaskId,
+					reason: delta.reason,
 				};
 				this._beliefs.push(belief);
 				return belief;

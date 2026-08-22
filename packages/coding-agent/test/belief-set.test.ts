@@ -439,6 +439,28 @@ describe("route op (fast-path routing belief)", () => {
 		expect(set.open()).toContain(belief);
 	});
 
+	test("route persists optional handoff traceability fields", () => {
+		const set = new BeliefSet();
+		const belief = set.apply({
+			op: "route",
+			statement: "本请求可把剩余执行交给 fast path",
+			expectation: "该请求为简单任务",
+			decision: "fast-path",
+			suitabilityProbability: 0.9,
+			successProbability: 0.85,
+			estimatedSteps: 2,
+			difficulty: "low",
+			handoffFromBeliefIds: ["belief-2"],
+			parentTaskId: "task-7",
+			reason: "the remaining framing is execution-only",
+		});
+
+		expect(belief.domain).toBe("routing");
+		expect(belief.handoffFromBeliefIds).toEqual(["belief-2"]);
+		expect(belief.parentTaskId).toBe("task-7");
+		expect(belief.reason).toBe("the remaining framing is execution-only");
+	});
+
 	test("rejects an invalid routing decision", () => {
 		const set = new BeliefSet();
 		expect(() =>

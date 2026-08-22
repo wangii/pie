@@ -77,7 +77,13 @@ const PROPOSE_CONTINUATION_HEADER =
 	"ambiguity, high success probability) and no belief is left open for verification and no framing " +
 	"obligation is open, you may declare a one-shot fast-path handoff with declare_belief op `route` and " +
 	"decision `fast-path`: the execution role will then finish the request directly on the fast path and a " +
-	"separate distillation step will summarize it. If any belief still needs probing or any framing " +
+	"separate distillation step will summarize it. If the remaining work is execution-only and every open " +
+	"framing obligation is still satisfiable by executing it directly, and no belief is left open for " +
+	"verification, you may declare an authorized frame-open fast-path handoff instead: declare_belief op " +
+	"`route` with decision `fast-path` plus `handoffFromBeliefIds` naming exactly the open framing " +
+	"obligations it takes over, the current `parentTaskId`, and a `reason` for the handoff — the fast path " +
+	"will then execute the work, your distill step will adjudicate the resulting outcome belief, and the " +
+	"framing will be discharged once supported. If any belief still needs probing or any uncovered framing " +
 	"obligation is open, continue with the protocol below instead.\n\n";
 
 /** The propose protocol body shared by the routing and continuation instructions. */
@@ -225,6 +231,12 @@ export const TRANSITION_STEERS = {
 	fastPathHandoff:
 		"Fast path could not complete the task. Continue the same task with the belief protocol; the fast-path " +
 		"execution summary is in the conversation. Do not repeat actions already performed.",
+	/** execution → distill after a successful frame-open fast-path handoff: adjudicate the outcome
+	 *  and discharge the authorized framing per the evidenceBeliefIds rule. */
+	fastPathDischarge:
+		"The fast path executed the authorized handoff. Adjudicate the handoff-outcome belief from the " +
+		"tool results, then discharge the framing obligation(s) it covered by supporting them with the " +
+		"settled outcome via `evidenceBeliefIds`, or refute the outcome if the results do not support it.",
 	/** propose → distill / distill stay: some open beliefs were not updated. */
 	openBeliefs: (statements: string) =>
 		`Some beliefs are still open (${statements}). Update them — support, refute, or refine each from the observations you received.`,

@@ -32,6 +32,20 @@ surfaces, model selection, and message projections cannot drift apart.
 > `MAX_BELIEFS` (200) records: a 201st record (propose, refine, or route) is rejected with a
 > validation error, while support/refute/retract keep working at capacity.
 
+> **Mid-task frame-open handoff.** A later propose turn may hand the remaining work to the
+> fast path even while a framing obligation is still open, but only with explicit
+> authorization. Declare a `route` belief with decision `fast-path` plus `handoffFromBeliefIds`
+> naming **exactly** the open framing obligations it takes over, the current `parentTaskId`
+> (the session's stable task id), and a `reason`. The gate (`_frameOpenHandoffAuthorized`)
+> requires no proposed world belief, that every open framing is covered exactly, and that the
+> `parentTaskId` matches the current task id; otherwise the route is rejected and the belief
+> loop continues. On success the harness synthesizes a `proposed` product/code outcome belief,
+> marks it dispatched, and routes to distill via `fastPathDischarge`; the distill step then
+> supports/refutes the outcome and, once supported, discharges the authorized framing per the
+> `evidenceBeliefIds` rule. The `fast_path_distillation` summary carries the traceability
+> fields (`parentTaskId`, `handoffFromBeliefIds`, `reason`, `outcomeBeliefId`). A tool failure
+> hands the same task back to propose (`fastPathHandoff`) without pruning.
+
 ## Terminology
 
 

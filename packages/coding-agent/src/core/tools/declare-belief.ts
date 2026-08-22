@@ -97,6 +97,24 @@ const declareBeliefSchema = Type.Object({
 			description: "Estimated difficulty of the request. Required for op `route`.",
 		}),
 	),
+	handoffFromBeliefIds: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): the open framing obligations this route authorizes the fast path to take over. Optional.",
+		}),
+	),
+	parentTaskId: Type.Optional(
+		Type.String({
+			description:
+				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): the stable id of the task this handoff belongs to, for traceability. Optional.",
+		}),
+	),
+	reason: Type.Optional(
+		Type.String({
+			description:
+				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): why the route authorizes a handoff (e.g. the remaining framing is execution-only). Optional.",
+		}),
+	),
 });
 
 export type DeclareBeliefInput = Static<typeof declareBeliefSchema>;
@@ -204,6 +222,9 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 				successProbability,
 				estimatedSteps,
 				difficulty,
+				...(input.handoffFromBeliefIds ? { handoffFromBeliefIds: input.handoffFromBeliefIds } : {}),
+				...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
+				...(input.reason ? { reason: input.reason } : {}),
 			};
 		}
 		case "refine":

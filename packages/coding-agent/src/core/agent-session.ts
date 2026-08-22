@@ -471,8 +471,14 @@ export class AgentSession {
 	 * hand the same task back to propose instead of resetting to the next task.
 	 */
 	private _fastPathFailure = false;
+	/** For a frame-open fast-path handoff: the route that authorized it and the framing ids it
+	 *  covers. Non-null only while a frame-open handoff is running, so a successful run can
+	 *  synthesize a handoff-outcome belief and route to distill instead of resetting to the next task. */
+	private _frameOpenHandoff: { route: Belief; framingIds: readonly string[]; outcomeBeliefId?: string } | null = null;
 	/** The current task's request text, captured at `prompt()`, used for the fast-path summary. */
 	private _currentTaskRequestText = "";
+	/** Monotonic counter for the current task's stable id, incremented at each task boundary. */
+	private _taskId = 1;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -978,6 +984,8 @@ export class AgentSession {
 		this._consumedRouteIds = new Set();
 		this._reflected = false;
 		this._fastPathFailure = false;
+		this._frameOpenHandoff = null;
+		this._taskId += 1;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		// Drop the finished task's ephemera (framing/routing/refuted/superseded and any
 		// abnormal leftovers); only settled product/code knowledge survives as session
@@ -1065,6 +1073,13 @@ export class AgentSession {
 				const route = routes[routes.length - 1];
 				if (route) {
 					this._consumedRouteIds.add(route.id);
+					// A frame-open handoff requires explicit authorization: the route names exactly the
+					// open framing obligations it takes over. This must be checked before the strict
+					// `_fastPathQuiescent` gate, which rejects any open framing outright and would
+					// otherwise send the (already consumed) route to deepen/conclude instead.
+					if (route.decision === "fast-path" && this._frameOpenHandoffAuthorized(route)) {
+						return this._dispatchToFastExecution(route);
+					}
 					if (route.decision === "fast-path" && this._fastPathQuiescent()) {
 						return this._dispatchToFastExecution(route);
 					}
@@ -1139,6 +1154,15 @@ export class AgentSession {
 					// distill a summary, then either reset to the next task's propose (success) or
 					// hand the same task back to propose (failure).
 					if (!ranTools) {
+						if (this._frameOpenHandoff) {
+							const next = this._finishFrameOpenHandoff(turn);
+							await this._settleFastPath(turn);
+							this._frameOpenHandoff = null;
+							if (this._fastPathFailure) {
+								return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
+							}
+							return next;
+						}
 						await this._settleFastPath(turn);
 						if (this._fastPathFailure) {
 							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
@@ -1153,6 +1177,15 @@ export class AgentSession {
 						};
 					}
 					if (frameHorizon <= 0) {
+						if (this._frameOpenHandoff) {
+							const next = this._finishFrameOpenHandoff(turn);
+							await this._settleFastPath(turn);
+							this._frameOpenHandoff = null;
+							if (this._fastPathFailure) {
+								return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
+							}
+							return next;
+						}
 						await this._settleFastPath(turn);
 						if (this._fastPathFailure) {
 							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
@@ -1301,10 +1334,39 @@ export class AgentSession {
 		return this._beliefSet.proposed().length === 0 && this._beliefSet.framings().length === 0;
 	}
 
+	/**
+	 * Whether a frame-open fast-path handoff is authorized: no world belief is pending
+	 * verification (`proposed()`), and every open framing obligation is precisely covered by the
+	 * route's `handoffFromBeliefIds` list (same ids, regardless of order). This is the explicit
+	 * authorization gate for the mid-task handoff — it never infers coverage from framing text.
+	 */
+	private _frameOpenHandoffAuthorized(route: Belief): boolean {
+		// The route must name the task it authorizes; a mismatched task id is rejected.
+		const routeTask = route.parentTaskId;
+		if (!routeTask || routeTask !== this.taskId) {
+			return false;
+		}
+		if (this._beliefSet.proposed().length > 0) {
+			return false;
+		}
+		const openFramings = this._beliefSet.framings();
+		if (openFramings.length === 0) {
+			return false;
+		}
+		const authorized = new Set(route.handoffFromBeliefIds ?? []);
+		if (authorized.size !== openFramings.length) {
+			return false;
+		}
+		return openFramings.every((f) => authorized.has(f.id));
+	}
+
 	/** Dispatch the execution role on the fast path: execute the user's request directly and answer. */
 	private _dispatchToFastExecution(route: Belief): { state: LoopState; steer: string } {
 		this._dispatchedFrameIds = new Set();
 		this._fastPathFailure = false;
+		this._frameOpenHandoff = this._frameOpenHandoffAuthorized(route)
+			? { route, framingIds: this._beliefSet.framings().map((f) => f.id) }
+			: null;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		return {
 			state: {
@@ -1318,16 +1380,50 @@ export class AgentSession {
 	}
 
 	/**
+	 * Finish a successful frame-open fast-path handoff: synthesize a `proposed` product/code
+	 * outcome belief stating that the authorized framing's tool execution completed without
+	 * error, mark it dispatched so the distill step adjudicates it rather than re-dispatching it
+	 * to execution, keep the framed obligation open, and route to distill via `fastPathDischarge`.
+	 * The distill role then supports/refutes the outcome and discharges the framing per the
+	 * existing `evidenceBeliefIds` rule.
+	 */
+	private _finishFrameOpenHandoff(_turn: PrepareNextTurnContext): { state: LoopState; steer: string } {
+		const handoff = this._frameOpenHandoff;
+		if (!handoff) {
+			throw new Error("_finishFrameOpenHandoff called without a frame-open handoff.");
+		}
+		const outcome = this._beliefSet.apply({
+			op: "propose",
+			statement: `fast path executed the authorized handoff for framing(s) ${handoff.framingIds.join(", ")} without error`,
+			domain: "product",
+			expectation: "the tool results for the authorized handoff contain no error",
+			evidenceRounds: this._beliefSet.framings().length || 1,
+		});
+		// Record the outcome id so the settle log can write it as traceability.
+		if (this._frameOpenHandoff) {
+			this._frameOpenHandoff.outcomeBeliefId = outcome.id;
+		}
+		// The outcome is a synthetic harness claim; mark it dispatched so the distill step
+		// adjudicates it instead of the undispatched guard re-dispatching it to execution.
+		this._dispatchedFrameIds = new Set([...this._dispatchedFrameIds, outcome.id]);
+		this._fastPathFailure = false;
+		// Keep framing open; do NOT reset the loop. Route to distill so the model decides, on
+		// the structured tool results, whether to support the outcome and discharge the framing.
+		return { state: { role: "distill" }, steer: TRANSITION_STEERS.fastPathDischarge };
+	}
+
+	/**
 	 * Settle a completed fast-path run: distill the execution context into a structured summary
 	 * with the distillation model, persist it as a `fast_path_distillation` custom message, and
 	 * record whether the run failed (any tool error) for the handoff decision. Never throws into
 	 * the loop: a failed distillation falls back to a deterministic minimal summary.
 	 */
-	private async _settleFastPath(turn: PrepareNextTurnContext): Promise<void> {
+	private async _settleFastPath(turn: PrepareNextTurnContext, outcomeBeliefId?: string): Promise<void> {
 		if (turn.toolResults.some((r) => r.isError)) {
 			this._fastPathFailure = true;
 		}
 		const summary = await this._distillFastPath(turn);
+		const handoff = this._frameOpenHandoff;
 		try {
 			await this.sendCustomMessage(
 				{
@@ -1338,6 +1434,7 @@ export class AgentSession {
 						runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 						outcome: this._fastPathFailure ? "failure" : "success",
 						request: this._currentTaskRequestText,
+						...this._fastPathTraceability(handoff, outcomeBeliefId),
 					},
 				},
 				{ triggerTurn: false },
@@ -1345,6 +1442,22 @@ export class AgentSession {
 		} catch {
 			// Persisting the summary must not block the state transition.
 		}
+	}
+
+	/** Build the traceability details for a frame-open fast-path handoff. */
+	private _fastPathTraceability(
+		handoff: { route: Belief; framingIds: readonly string[]; outcomeBeliefId?: string } | null,
+		outcomeBeliefId?: string,
+	): Record<string, unknown> {
+		if (!handoff) {
+			return {};
+		}
+		return {
+			parentTaskId: handoff.route.parentTaskId ?? this.taskId,
+			handoffFromBeliefIds: [...handoff.framingIds],
+			reason: handoff.route.reason,
+			outcomeBeliefId: outcomeBeliefId ?? handoff.outcomeBeliefId,
+		};
 	}
 
 	/** The model for the fast-path distillation summary: `pie.distillationModel`, else the session model. */
@@ -2004,6 +2117,11 @@ export class AgentSession {
 	/** Current session ID */
 	get sessionId(): string {
 		return this.sessionManager.getSessionId();
+	}
+
+	/** Current task id (stable, monotonic per task). */
+	get taskId(): string {
+		return `task-${this._taskId}`;
 	}
 
 	/** Current session display name, if set */
