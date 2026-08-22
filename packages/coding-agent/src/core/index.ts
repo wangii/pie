@@ -68,7 +68,6 @@ export {
 	type SessionShutdownEvent,
 	type SessionStartEvent,
 	type SessionTreeEvent,
-	type SystemPromptRole,
 	type ToolCallEvent,
 	type ToolCallEventResult,
 	type ToolDefinition,

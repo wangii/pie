@@ -99,7 +99,6 @@ describe("AgentSessionRuntime characterization", () => {
 					sessionStartEvent,
 					model: runtimeOptions.model,
 					thinkingLevel: runtimeOptions.thinkingLevel,
-					enableBeliefSet: false,
 				})),
 				services,
 				diagnostics: services.diagnostics,

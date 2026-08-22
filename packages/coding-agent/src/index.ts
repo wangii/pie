@@ -130,7 +130,6 @@ export type {
 	SlashCommandInfo,
 	SlashCommandSource,
 	SourceInfo,
-	SystemPromptRole,
 	TerminalInputHandler,
 	ToolCallEvent,
 	ToolCallEventResult,

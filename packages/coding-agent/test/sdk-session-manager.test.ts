@@ -75,7 +75,6 @@ describe("createAgentSession session manager defaults", () => {
 			agentDir,
 			model: model!,
 			sessionManager,
-			enableBeliefSet: false,
 		});
 
 		expect(session.sessionManager).toBe(sessionManager);
@@ -103,7 +102,6 @@ describe("createAgentSession session manager defaults", () => {
 			agentDir,
 			model: model!,
 			thinkingLevel: "high",
-			enableBeliefSet: false,
 		});
 		expect(session.sessionFile).toBeTruthy();
 		expect(session.systemPrompt).toContain(

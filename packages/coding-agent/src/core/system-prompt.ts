@@ -3,18 +3,7 @@
  */
 
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
-import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "./skills.ts";
-
-/**
- * The operating role the prompt is assembled for. The default `"coding"` role renders
- * the file/command-agent preamble plus the pi-docs index and file-path guideline. The
- * belief-loop roles render a narrower scientific preamble and omit the pi-docs block:
- * `"propose"`, `"distill"`, and `"finalAnswer"` have no `read`/`bash`/`edit`/`write`
- * (advertising them would only mislead the model), while `"execution"` holds those probe
- * tools but must not be distracted by the pi-docs block, which is unrelated to the belief
- * it is probing.
- */
-export type SystemPromptRole = "coding" | "propose" | "distill" | "execution" | "finalAnswer";
+import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -33,8 +22,6 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
-	/** Operating role for this prompt. Defaults to `"coding"`. */
-	role?: SystemPromptRole;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -48,7 +35,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		cwd,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
-		role = "coding",
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 
@@ -64,9 +50,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += appendSection;
 		}
 
-		// Append project context files (only if read tool is available)
-		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
-		if (customPromptHasRead && contextFiles.length > 0) {
+		// Append project context files
+		if (contextFiles.length > 0) {
 			prompt += "\n\n<project_context>\n\n";
 			prompt += "Project-specific instructions and guidelines:\n\n";
 			for (const { path: filePath, content } of contextFiles) {
@@ -76,14 +61,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 
 		// Append skills section (only if read tool is available)
+		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
 		if (customPromptHasRead && skills.length > 0) {
 			prompt += formatSkillsForPrompt(skills);
-		}
-
-		// The propose role has no `read`, so the full skills block is not rendered above, but it
-		// still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
-		if (role === "propose" && !customPromptHasRead && skills.length > 0) {
-			prompt += formatSkillCatalogForPrompt(skills);
 		}
 
 		prompt += `\nCurrent working directory: ${promptCwd}\n`;
@@ -134,39 +114,20 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Always include these
 	addGuideline("Be concise in your responses");
-	if (role === "coding") {
-		addGuideline("Show file paths clearly when working with files");
-	}
+	addGuideline("Show file paths clearly when working with files");
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	const preamble =
-		role === "propose" || role === "distill"
-			? "You are a scientific mind investigating a task by forming and testing beliefs about the product and code."
-			: role === "execution"
-				? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."
-				: role === "finalAnswer"
-					? "You are a scientific mind concluding an investigation and answering the user's task."
-					: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
-
-	let prompt = `${preamble}
+	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 ${toolsList}
-`;
 
-	if (role === "coding") {
-		prompt +=
-			"\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n";
-	}
+In addition to the tools above, you may have access to other custom tools depending on the project.
 
-	prompt += `
 Guidelines:
 ${guidelines}
-`;
 
-	if (role === "coding") {
-		prompt += `
 Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${readmePath}
 - Additional docs: ${docsPath}
@@ -175,16 +136,13 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
 - When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
 - Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
-	}
 
 	if (appendSection) {
 		prompt += appendSection;
 	}
 
-	// Append project context files (only if read tool is available — a role that cannot
-	// read files should not be handed project instructions like "read files in full",
-	// which would only mislead it; same gate as the skills block below).
-	if (hasRead && contextFiles.length > 0) {
+	// Append project context files
+	if (contextFiles.length > 0) {
 		prompt += "\n\n<project_context>\n\n";
 		prompt += "Project-specific instructions and guidelines:\n\n";
 		for (const { path: filePath, content } of contextFiles) {
@@ -196,12 +154,6 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {
 		prompt += formatSkillsForPrompt(skills);
-	}
-
-	// The propose role has no `read`, so the full skills block is not rendered above, but it
-	// still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
-	if (role === "propose" && !hasRead && skills.length > 0) {
-		prompt += formatSkillCatalogForPrompt(skills);
 	}
 
 	prompt += `\nCurrent working directory: ${promptCwd}`;

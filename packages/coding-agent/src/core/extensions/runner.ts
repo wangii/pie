@@ -79,7 +79,6 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"app.model.select",
 	"app.tools.expand",
 	"app.thinking.toggle",
-	"app.beliefSet.toggle",
 	"app.editor.external",
 	"app.message.copy",
 	"app.message.followUp",

@@ -116,7 +116,6 @@ import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
-import { BeliefSetPanel } from "./components/belief-set-panel.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
@@ -271,20 +270,6 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 
 function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
 	return providerId in defaultModelPerProvider;
-}
-
-/**
- * One role's line in the /session panel: model (CH rate), with "—" when the model or rate is
- * missing (role has not produced a request yet, or session reloaded after the in-memory snapshot).
- */
-function formatRoleSlotLine(
-	dim: (text: string) => string,
-	label: string,
-	slot: { model?: { provider: string; id: string } | undefined; latestCacheHitRate?: number | undefined },
-): string {
-	const model = slot.model ? `${slot.model.provider}/${slot.model.id}` : "—";
-	const ch = slot.latestCacheHitRate !== undefined ? `${slot.latestCacheHitRate.toFixed(1)}%` : "—";
-	return `  ${dim(`${label}:`)} ${model} ${dim(`(CH ${ch})`)}`;
 }
 
 function llamaCppPostLoginGuidance(actionLabel: string, loadedModelCount: number): string {
@@ -544,9 +529,6 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
-	private beliefPanelContainer!: Container;
-	private beliefPanel!: BeliefSetPanel;
-	private beliefPanelVisible = true;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -613,8 +595,6 @@ export class InteractiveMode {
 		this.statusContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
-		this.beliefPanelContainer = new Container();
-
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -942,34 +922,21 @@ export class InteractiveMode {
 			scrollbar: this.settingsManager.getFullscreenScrollbar(),
 			scrollbarStyle: (text) => theme.bg("scrollbarThumb", text),
 		});
-		this.beliefPanel = new BeliefSetPanel(() => this.session.beliefs);
-		this.beliefPanelContainer.addChild(this.beliefPanel);
-
 		const dock = new TuiLayouts.VStack([
 			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
-			{
-				component: this.beliefPanelContainer,
-				shrink: 1,
-				minSize: 0,
-				visible: () => this.beliefPanelVisible,
-			},
 			{ component: this.statusContainer, shrink: 1, minSize: 0 },
 			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 3 },
 			{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
 			{ component: this.footerContainer, shrink: 1, minSize: 1 },
 		]);
-		const main = new TuiLayouts.VStack([
+		this.fullscreenLayoutRoot = new TuiLayouts.VStack([
 			{ component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-		]);
-		this.fullscreenLayoutRoot = new TuiLayouts.HStack([
-			{ component: main, basis: 0, grow: 2, shrink: 1, minSize: 1 },
 		]);
 		this.mountInteractiveTui(this.renderer, [
 			this.documentContainer,
 			this.pendingMessagesContainer,
-			this.beliefPanelContainer,
 			this.statusContainer,
 			this.widgetContainerAbove,
 			this.editorContainer,
@@ -2917,7 +2884,6 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
-		this.defaultEditor.onAction("app.beliefSet.toggle", () => this.handleBeliefSetCommand());
 		this.defaultEditor.onAction("app.editor.external", () => void this.handleOpenExternalEditor());
 		this.defaultEditor.onAction("app.message.copy", () => void this.handleCopyCommand({ flashConfirmation: true }));
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
@@ -3041,11 +3007,6 @@ export class InteractiveMode {
 			}
 			if (text === "/session") {
 				this.handleSessionCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/bs") {
-				this.handleBeliefSetCommand();
 				this.editor.setText("");
 				return;
 			}
@@ -6381,15 +6342,6 @@ export class InteractiveMode {
 		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-		// Belief loop: show each role's resolved model and its latest cache hit rate separately.
-		const roleStatus = this.session.getRoleStatus();
-		if (roleStatus) {
-			info += `\n${theme.bold("Belief Loop")}\n`;
-			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Epistemic", roleStatus.epistemic)}\n`;
-			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Distillation", roleStatus.distillation)}\n`;
-			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Execution", roleStatus.execution)}\n`;
-		}
-
 		if (stats.cost > 0 || cacheWaste.missedTokens > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
 			info += `${theme.fg("dim", "Total:")} $${stats.cost.toFixed(3)}`;
@@ -6411,13 +6363,6 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
-	}
-
-	private handleBeliefSetCommand(): void {
-		this.beliefPanelVisible = !this.beliefPanelVisible;
-		this.beliefPanel.setVisible(this.beliefPanelVisible);
-		this.ui.requestRender();
-		this.showStatus(this.beliefPanelVisible ? "Belief panel shown" : "Belief panel hidden");
 	}
 
 	private handleChangelogCommand(): void {
@@ -6492,7 +6437,6 @@ export class InteractiveMode {
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
-		const toggleBeliefSet = this.getAppKeyDisplay("app.beliefSet.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const cycleModelBackward = this.getAppKeyDisplay("app.model.cycleBackward");
 		const copyMessage = this.getAppKeyDisplay("app.message.copy");
@@ -6538,7 +6482,6 @@ export class InteractiveMode {
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
-| \`${toggleBeliefSet}\` | Toggle belief set panel |
 | \`${externalEditor}\` | Edit message in external editor |
 | \`${copyMessage}\` | Copy last assistant message |
 | \`${followUp}\` | Queue follow-up message |

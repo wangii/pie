@@ -44,19 +44,6 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 /**
- * One role's merged stats+model unit in the footer: `epi 25.0% main-model`. The cache hit rate is
- * `-` when the role has no request yet; the model is `—` when it could not be resolved.
- */
-function formatRoleUnit(
-	label: string,
-	slot: { model: { id: string } | undefined; latestCacheHitRate: number | undefined },
-): string {
-	const ch = slot.latestCacheHitRate !== undefined ? `${slot.latestCacheHitRate.toFixed(1)}%` : "-";
-	const model = slot.model ? slot.model.id : "—";
-	return `${label} ${ch} ${model}`;
-}
-
-/**
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
  */
@@ -96,10 +83,6 @@ export class FooterComponent implements Component {
 
 	render(width: number): string[] {
 		const state = this.session.state;
-		// In a belief loop, show each role's model and latest cache hit rate separately instead
-		// of the single session model and aggregate CH. Undefined when the loop is not usable,
-		// in which case the footer keeps the classic single-model/CH display.
-		const roleStatus = this.session.getRoleStatus();
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
 		const usageTotals = createUsageTotals();
@@ -124,6 +107,8 @@ export class FooterComponent implements Component {
 		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+		const contextPercentValue = contextUsage?.percent ?? 0;
+		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		// Replace home directory with ~
 		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
@@ -146,11 +131,7 @@ export class FooterComponent implements Component {
 		if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
 		if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
 		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
-		if (
-			!roleStatus &&
-			(usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) &&
-			latestCacheHitRate !== undefined
-		) {
+		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
 			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 		}
 
@@ -163,39 +144,19 @@ export class FooterComponent implements Component {
 			statsParts.push(costStr);
 		}
 
-		// Colorize context usage based on how close the largest projection is to the window.
+		// Colorize context percentage based on usage
 		let contextPercentStr: string;
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const roleUsage = this.session.getRoleContextUsage();
-		if (roleUsage) {
-			// Belief loop active: show the epistemic and execution contexts separately. The two
-			// roles see different projections (the epistemic role masks raw operational detail), so
-			// a single number hides how much leaner the epistemic role's view is.
-			const epiTokens = formatTokens(roleUsage.epistemic.tokens ?? 0);
-			const execTokens = formatTokens(roleUsage.execution.tokens ?? 0);
-			const maxPercent = Math.max(roleUsage.epistemic.percent ?? 0, roleUsage.execution.percent ?? 0);
-			const contextDisplay = `epi ${epiTokens} · exec ${execTokens} / ${formatTokens(contextWindow)}${autoIndicator}`;
-			if (maxPercent > 90) {
-				contextPercentStr = theme.fg("error", contextDisplay);
-			} else if (maxPercent > 70) {
-				contextPercentStr = theme.fg("warning", contextDisplay);
-			} else {
-				contextPercentStr = contextDisplay;
-			}
+		const contextPercentDisplay =
+			contextPercent === "?"
+				? `?/${formatTokens(contextWindow)}${autoIndicator}`
+				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+		if (contextPercentValue > 90) {
+			contextPercentStr = theme.fg("error", contextPercentDisplay);
+		} else if (contextPercentValue > 70) {
+			contextPercentStr = theme.fg("warning", contextPercentDisplay);
 		} else {
-			const contextPercentValue = contextUsage?.percent ?? 0;
-			const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
-			const contextPercentDisplay =
-				contextPercent === "?"
-					? `?/${formatTokens(contextWindow)}${autoIndicator}`
-					: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-			if (contextPercentValue > 90) {
-				contextPercentStr = theme.fg("error", contextPercentDisplay);
-			} else if (contextPercentValue > 70) {
-				contextPercentStr = theme.fg("warning", contextPercentDisplay);
-			} else {
-				contextPercentStr = contextPercentDisplay;
-			}
+			contextPercentStr = contextPercentDisplay;
 		}
 		statsParts.push(contextPercentStr);
 		if (areExperimentalFeaturesEnabled()) {
@@ -203,6 +164,9 @@ export class FooterComponent implements Component {
 		}
 
 		let statsLeft = statsParts.join(" ");
+
+		// Add model name on the right side, plus thinking level if model supports it
+		const modelName = state.model?.id || "no-model";
 
 		let statsLeftWidth = visibleWidth(statsLeft);
 
@@ -215,27 +179,23 @@ export class FooterComponent implements Component {
 		// Calculate available space for padding (minimum 2 spaces between stats and model)
 		const minPadding = 2;
 
-		// Add model names on the right side. In a belief loop, merge each role's cache hit rate
-		// with its model into one unit; otherwise the single session model, plus thinking level
-		// if it supports reasoning.
-		const modelName = state.model?.id || "no-model";
-		let rightSideWithoutProvider: string;
-		if (roleStatus) {
-			rightSideWithoutProvider = `${formatRoleUnit("epi", roleStatus.epistemic)} · ${formatRoleUnit("dist", roleStatus.distillation)} · ${formatRoleUnit("exec", roleStatus.execution)}`;
-			if (state.model?.reasoning) {
-				const thinkingLevel = state.thinkingLevel || "off";
-				rightSideWithoutProvider += ` • ${thinkingLevel === "off" ? "thinking off" : thinkingLevel}`;
-			}
-		} else {
-			rightSideWithoutProvider = modelName;
-			if (state.model?.reasoning) {
-				const thinkingLevel = state.thinkingLevel || "off";
-				rightSideWithoutProvider =
-					thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
-			}
+		// Add thinking level indicator if model supports reasoning
+		let rightSideWithoutProvider = modelName;
+		if (state.model?.reasoning) {
+			const thinkingLevel = state.thinkingLevel || "off";
+			rightSideWithoutProvider =
+				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
 		}
 
-		const rightSide = rightSideWithoutProvider;
+		// Prepend the provider in parentheses if there are multiple providers and there's enough room
+		let rightSide = rightSideWithoutProvider;
+		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
+			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
+			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
+				// Too wide, fall back
+				rightSide = rightSideWithoutProvider;
+			}
+		}
 
 		const rightSideWidth = visibleWidth(rightSide);
 		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;

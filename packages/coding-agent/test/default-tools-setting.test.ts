@@ -63,8 +63,8 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "conclude", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["grep", "find", "declare_belief", "view_beliefs", "conclude"]);
+		).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
+		expect(session.getActiveToolNames()).toEqual(["grep", "find"]);
 		expect(session.systemPrompt).toContain("- grep:");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
@@ -107,15 +107,7 @@ describe("defaultTools setting", () => {
 		);
 		await session.bindExtensions({});
 
-		expect(session.getActiveToolNames().sort()).toEqual([
-			"conclude",
-			"declare_belief",
-			"dynamic_tool",
-			"grep",
-			"sdk_tool",
-			"static_tool",
-			"view_beliefs",
-		]);
+		expect(session.getActiveToolNames().sort()).toEqual(["dynamic_tool", "grep", "sdk_tool", "static_tool"]);
 		expect(session.getAllTools().map((tool) => tool.name)).toEqual(
 			expect.arrayContaining(["read", "dynamic_tool", "sdk_tool", "static_tool"]),
 		);
@@ -128,7 +120,7 @@ describe("defaultTools setting", () => {
 		allowlistedSession.dispose();
 
 		const excludedSession = await createSession(["read", "grep"], { excludeTools: ["read"] });
-		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "declare_belief", "view_beliefs", "conclude"]);
+		expect(excludedSession.getActiveToolNames()).toEqual(["grep"]);
 		excludedSession.dispose();
 
 		const toolLessSession = await createSession(["read"], { noTools: "all" });
@@ -151,8 +143,8 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "conclude", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["ls", "declare_belief", "view_beliefs", "conclude"]);
+		).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
+		expect(session.getActiveToolNames()).toEqual(["ls"]);
 		session.dispose();
 	});
 });

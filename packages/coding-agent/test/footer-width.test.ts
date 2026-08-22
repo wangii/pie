@@ -14,17 +14,6 @@ type AssistantUsage = {
 	cost: { total: number };
 };
 
-type RoleStatusSlot = {
-	model?: { provider: string; id: string } | undefined;
-	latestCacheHitRate?: number | undefined;
-};
-
-type RoleStatus = {
-	epistemic: RoleStatusSlot;
-	distillation: RoleStatusSlot;
-	execution: RoleStatusSlot;
-};
-
 function createSession(options: {
 	sessionName: string;
 	modelId?: string;
@@ -36,7 +25,6 @@ function createSession(options: {
 	compactionUsage?: AssistantUsage;
 	toolUsage?: AssistantUsage;
 	usingSubscription?: boolean;
-	roleStatus?: RoleStatus;
 }): AgentSession {
 	const usage = options.usage;
 	const entries: Array<Record<string, unknown>> = [];
@@ -91,8 +79,6 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
-		getRoleContextUsage: () => undefined,
-		getRoleStatus: () => options.roleStatus,
 		modelRuntime: {
 			isUsingSubscription: () => options.usingSubscription ?? false,
 		},
@@ -202,47 +188,6 @@ describe("FooterComponent width handling", () => {
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
 		expect(statsLine).toContain("$1.250");
-	});
-
-	it("merges per-role cache hit rates and role models when role status is present", () => {
-		const session = createSession({
-			sessionName: "",
-			usage: {
-				input: 100,
-				output: 10,
-				cacheRead: 50,
-				cacheWrite: 50,
-				cost: { total: 0.001 },
-			},
-			roleStatus: {
-				epistemic: { model: { provider: "test", id: "main-model" }, latestCacheHitRate: 25 },
-				distillation: { model: { provider: "test", id: "distill-model" }, latestCacheHitRate: 50 },
-				execution: { model: { provider: "test", id: "exec-model" }, latestCacheHitRate: 0 },
-			},
-		});
-		const footer = new FooterComponent(session, createFooterData(1));
-
-		const statsLine = stripAnsi(footer.render(200)[1]);
-		expect(statsLine).toContain("epi 25.0% main-model");
-		expect(statsLine).toContain("dist 50.0% distill-model");
-		expect(statsLine).toContain("exec 0.0% exec-model");
-	});
-
-	it("renders explicit empty markers for roles without requests", () => {
-		const session = createSession({
-			sessionName: "",
-			roleStatus: {
-				epistemic: { model: undefined, latestCacheHitRate: undefined },
-				distillation: { model: undefined, latestCacheHitRate: undefined },
-				execution: { model: { provider: "test", id: "exec-model" }, latestCacheHitRate: undefined },
-			},
-		});
-		const footer = new FooterComponent(session, createFooterData(1));
-
-		const statsLine = stripAnsi(footer.render(200)[1]);
-		expect(statsLine).toContain("epi - —");
-		expect(statsLine).toContain("dist - —");
-		expect(statsLine).toContain("exec - exec-model");
 	});
 
 	it("shows the latest cache hit rate when cache usage is present", () => {

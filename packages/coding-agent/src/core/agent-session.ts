@@ -28,7 +28,6 @@ import { contentText } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
-	Context,
 	ImageContent,
 	Model,
 	ProviderHeaders,
@@ -54,7 +53,6 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { type Belief, BeliefSet, statusOf } from "./belief-set.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -100,11 +98,9 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { resolveCliModel } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import { ROLE_SPECS, TRANSITION_STEERS } from "./role-specs.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -112,11 +108,8 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createConcludeToolDefinition } from "./tools/conclude.ts";
-import { createDeclareBeliefToolDefinition } from "./tools/declare-belief.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-import { createViewBeliefsToolDefinition } from "./tools/view-beliefs.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
 // ============================================================================
@@ -234,8 +227,6 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** When true, register the `declare_belief` tool and maintain the live belief set. Default true. */
-	enableBeliefSet?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -312,63 +303,6 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // Constants
 // ============================================================================
 
-/**
- * Headroom applied to a frame's evidence-round total when sizing the execution lease
- * (`frameHorizon` in the execution phase). Evidence rounds are the model's estimate of how many tool results
- * a probe needs; the 1.3 factor (30% headroom) absorbs under-estimates — a locate-then-read
- * pair costs two results, not one — without letting raw evidence pile up inert in the
- * execution role's context.
- */
-const FRAME_HORIZON_HEADROOM = 1.3;
-
-/**
- * The minimum number of settled beliefs this task must produce before the conclusion path
- * runs the one-round whole-set reflection. Below this the set is too small for the
- * reflection's coverage/composition/completeness checks to be meaningful — each would
- * trivially pass — so the reflection round would be pure ceremony (a round-trip that
- * proposes nothing and re-concludes).
- */
-const REFLECTION_MIN_SETTLED_BELIEFS = 3;
-
-/**
- * The belief loop's phase, as a discriminated union. Each variant carries only the
- * transient state meaningful to that phase — the execution phase owns its probe lease
- * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while propose,
- * distill, or finalAnswer. The old single `epistemic` role is split into two steps that
- * run on different models: `propose` decides what to test and whether to conclude, and
- * `distill` turns each probe's report into belief updates. Task-scoped bookkeeping
- * (`_reflected`, `_dispatchedFrameIds`, `_evidenceWatermark`, `_beliefsAtTaskReset`)
- * stays outside the union because it must survive a phase change (e.g. a
- * reflection-dispatched probe must come back to distill with `_reflected` still latched).
- */
-type LoopState =
-	| { role: "propose" }
-	| { role: "distill" }
-	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
-	| { role: "finalAnswer" };
-
-/**
- * One belief-loop status slot: the model the role runs on and the cache hit rate of its most
- * recent assistant request. `model` is undefined when nothing could be resolved;
- * `latestCacheHitRate` is undefined when the role has not produced a request yet (fresh session,
- * or a reload — the snapshot is in-memory only and session entries carry no role).
- */
-export interface RoleStatusSlot {
-	model: Model<any> | undefined;
-	latestCacheHitRate: number | undefined;
-}
-
-/**
- * The three belief-loop status slots. `epistemic` covers the propose role only; the distillation
- * and execution slots map to the distill and execution roles. The finalAnswer role and requests
- * outside the belief loop never update a slot (see `getRoleStatus`).
- */
-export interface RoleStatus {
-	epistemic: RoleStatusSlot;
-	distillation: RoleStatusSlot;
-	execution: RoleStatusSlot;
-}
-
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -417,80 +351,12 @@ export class AgentSession {
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
-	private readonly _beliefSet = new BeliefSet();
-	/** The belief loop's current phase; see the `LoopState` type. */
-	private _loopState: LoopState = { role: "propose" };
-	/** The belief ids already dispatched to execution — distinguishes fresh beliefs from dispatched-but-unsettled ones. */
-	private _dispatchedFrameIds: Set<string> = new Set();
-	/** Routing beliefs already evaluated for the current task (consumed by belief id). */
-	private _consumedRouteIds: Set<string> = new Set();
-	/** True once the pre-conclusion reflection steer has fired for the current task (one round only). */
-	private _reflected = false;
-	/**
-	 * Latest cache hit rate per belief-loop role, captured at message_end while the producing role
-	 * is still current. Only propose/distill/execution are kept — the finalAnswer role and requests
-	 * outside the belief loop never update a slot. In-memory only: session entries carry no role, so
-	 * after a reload every slot is empty until the loop produces new assistant messages.
-	 */
-	private _roleCacheHitRate: Partial<Record<"propose" | "distill" | "execution", number>> = {};
-
-	/** The current role — the phase discriminator of `_loopState`. */
-	private get _role(): LoopState["role"] {
-		return this._loopState.role;
-	}
-	/** The full active tool names, independent of the current role's projected subset. */
-	private _fullActiveToolNames: string[] = [];
-	/**
-	 * Index into `agent.state.messages` below which operational detail (raw tool results and
-	 * bash output) has already been shown to the distill role. The distill role sees each
-	 * execution episode's raw evidence exactly once — the turn after execution produces it — then
-	 * that detail is masked so its context does not accumulate stale raw output. The propose and
-	 * finalAnswer roles mask operational detail unconditionally (their projections are append-only
-	 * and cacheable); only the distill role consults this marker. Advances when the frame is
-	 * dispatched (moves on to the next episode).
-	 */
-	private _evidenceWatermark = 0;
-	/**
-	 * Set when a follow-up user message is queued while the previous loop is concluding
-	 * (`_role === "finalAnswer"`). Consumed on delivery in `_advanceRole` to reset the loop
-	 * for the new task; the idle path resets inline in `prompt()` instead.
-	 */
-	private _pendingNewTask = false;
-	/**
-	 * Belief-set size at the moment the loop was (re)started for the current task. The belief
-	 * set is retained across tasks, so `beliefs.length > this._beliefsAtTaskReset` distinguishes
-	 * beliefs produced by *this* task from retained ones. A direct text answer (no belief ops)
-	 * on a task that produced no beliefs is accepted as the conclusion rather than being steered
-	 * to "propose the next belief" — this is what keeps a follow-up answered after a conclusion
-	 * from re-running a redundant investigation loop.
-	 */
-	private _beliefsAtTaskReset = 0;
-
-	/**
-	 * Set when a fast-path run's execution turn reported a tool error: the run failed and must
-	 * hand the same task back to propose instead of resetting to the next task.
-	 */
-	private _fastPathFailure = false;
-	/** For a frame-open fast-path handoff: the route that authorized it and the framing ids it
-	 *  covers. Non-null only while a frame-open handoff is running, so a successful run can
-	 *  synthesize a handoff-outcome belief and route to distill instead of resetting to the next task. */
-	private _frameOpenHandoff: { route: Belief; framingIds: readonly string[]; outcomeBeliefId?: string } | null = null;
-	/** The current task's request text, captured at `prompt()`, used for the fast-path summary. */
-	private _currentTaskRequestText = "";
-	/** Monotonic counter for the current task's stable id, incremented at each task boundary. */
-	private _taskId = 1;
-
-	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
-	private get _beliefSetUsable(): boolean {
-		return this._fullActiveToolNames.includes("declare_belief");
-	}
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
-	private readonly _enableBeliefSet: boolean;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -527,7 +393,6 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
-		this._enableBeliefSet = config.enableBeliefSet ?? true;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -540,8 +405,6 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		// Apply the initial propose role surface (belief tools only).
-		this._applyRoleSurface();
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -674,15 +537,6 @@ export class AgentSession {
 		};
 	}
 
-	/**
-	 * Install the belief loop (propose/distill vs execution). The role is advanced in
-	 * `prepareNextTurnWithContext`, which also projects the next role's surface
-	 * (tool subset + system prompt). Separation is structural: the belief-side roles
-	 * (propose + distill) have only `declare_belief`/`view_beliefs`/`conclude` in their
-	 * tool list, so they cannot reach `read`/`bash`; the execution role has no belief
-	 * mutation tools. No constraint is preached in the prompt — it is enforced by what
-	 * is simply absent.
-	 */
 	private _installAgentNextTurnRefresh(): void {
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
@@ -693,988 +547,17 @@ export class AgentSession {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
 
-			await this._advanceRole(turn);
-
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					systemPrompt: this.agent.state.systemPrompt,
+					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
-					messages: this._projectContextMessages(),
 				},
-				model: this._roleModel(),
-				thinkingLevel:
-					this._role === "distill"
-						? this.settingsManager.getDistillationThinkingLevel()
-						: this.agent.state.thinkingLevel,
+				model: this.agent.state.model,
+				thinkingLevel: this.agent.state.thinkingLevel,
 			};
 		};
-	}
-
-	/**
-	 * The transcript for the next role's turn, projected from the authoritative
-	 * `agent.state.messages` (never `turn.context.messages`, which may already be a prior
-	 * projection and would silently accumulate).
-	 *
-	 * Each role sees a different projection:
-	 * - propose: the belief bookkeeping (declare_belief / view_beliefs results) is always visible
-	 *   — it is the operated-on object — while raw operational detail is always masked so the
-	 *   projected transcript stays append-only and cacheable.
-	 * - distill: like propose, but the current execution episode's raw evidence is shown exactly
-	 *   once (above the evidence watermark) so it can update beliefs on it.
-	 * - execution: the belief *mutation* echo (declare_belief) is masked so the probe role is
-	 *   not tempted to propose/update beliefs, but the read-only `view_beliefs` stays visible so
-	 *   it can recall the belief it is testing; raw operational detail stays.
-	 * - finalAnswer: raw operational detail is discarded; the settled beliefs remain.
-	 */
-	private _projectContextMessages(): AgentMessage[] {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) {
-			return this.agent.state.messages.slice();
-		}
-		return this._projectMessagesFor(this._role);
-	}
-
-	/** Project the full transcript for an explicit role (used to size each role's context). */
-	private _projectMessagesFor(role: "propose" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
-		const elidedProbeToolCalls = this._elidedProbeToolCallIds();
-		return this.agent.state.messages
-			.map((message, index) => this._projectMessage(message, index, role, elidedProbeToolCalls))
-			.filter((message): message is AgentMessage => message !== undefined);
-	}
-
-	/** Project one message for a role. Returns undefined when the projection reduces the message
-	 *  to nothing (e.g. a probe turn whose tool calls and thinking are all elided). */
-	private _projectMessage(
-		message: AgentMessage,
-		index: number,
-		role: "propose" | "distill" | "execution" | "finalAnswer",
-		elidedProbeToolCalls: Set<string>,
-	): AgentMessage | undefined {
-		// The projection per role is declared in ROLE_SPECS; the masking helpers below implement
-		// each kind. The propose role masks raw operational detail unconditionally so its projected
-		// transcript is append-only and its prefix stays cacheable across turns; it reads beliefs
-		// through `view_beliefs`, not raw probe output. The distill role sees the current execution
-		// episode's raw evidence exactly once (above the watermark) to update beliefs on it, then
-		// that detail is masked below the watermark. The probe's tool calls and reasoning are always
-		// elided from both — that is the imitation trigger regardless of age.
-		switch (ROLE_SPECS[role].projection) {
-			case "belief":
-				return this._maskOperationalDetail(message, true, elidedProbeToolCalls);
-			case "distill":
-				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls);
-			case "execution":
-				return this._maskBeliefBookkeeping(message);
-			case "finalAnswer": {
-				// Raw operational detail is discarded, and the belief tools' echoes are masked too:
-				// the finalAnswer role reads the explicit final-answer context injected at the
-				// handoff instead of whatever declare_belief/view_beliefs results happen to survive.
-				const masked = this._maskOperationalDetail(message, true, elidedProbeToolCalls);
-				if (masked === undefined) return undefined;
-				// Epistemic assistant turns are distilled too (thinking + every belief tool call
-				// dropped, text kept): finalAnswer has no tools and grounds on the snapshot, so the
-				// propose/distill bookkeeping — including a read-only `view_beliefs` call whose result
-				// `_maskBeliefEchoes` masks — must not survive as a dangling tool call.
-				const stripped = masked.role === "assistant" ? this._maskEpistemicAssistant(masked, false) : masked;
-				return stripped === undefined ? undefined : this._maskBeliefEchoes(stripped);
-			}
-		}
-	}
-
-	/**
-	 * Tool-call ids elided from the belief-side view: every tool call in a probe (execution) turn.
-	 * `_maskProbeAssistant` drops them all, so any `toolResult` carrying one of these ids has no
-	 * surviving call and must be folded rather than left as an orphaned `tool` message (which strict
-	 * providers reject with "tool must be a response to tool_calls"). This mirrors the elision in
-	 * `_maskProbeAssistant`; a *belief* tool (e.g. `view_beliefs`) called *inside* a probe turn is
-	 * caught here even though its name is not a probe tool, because the call id — not the name — is
-	 * what links a result to its (elided) call.
-	 */
-	private _elidedProbeToolCallIds(): Set<string> {
-		const elided = new Set<string>();
-		for (const message of this.agent.state.messages) {
-			if (message.role !== "assistant" || !this._isProbeAssistant(message)) {
-				continue;
-			}
-			for (const block of message.content) {
-				if (block.type === "toolCall") {
-					elided.add(block.id);
-				}
-			}
-		}
-		return elided;
-	}
-
-	/**
-	 * Redact raw operational detail from one message, preserving the belief bookkeeping. Two
-	 * independent layers:
-	 * - the probe-role assistant turn is always elided (thinking dropped, tool calls removed) —
-	 *   seeing the probe call `bash`/`read` is what drives a role to imitate it, so this is
-	 *   age-independent;
-	 * - a tool result whose call was elided (a probe tool, or a belief tool called inside a probe
-	 *   turn) is folded into a plain text note — masked to a placeholder only when `maskResult` is
-	 *   true. The propose/finalAnswer roles pass `true` unconditionally (append-only, cacheable);
-	 *   the distill role passes `index < watermark` so it sees the current episode's raw evidence
-	 *   once, then it is masked.
-	 */
-	private _maskOperationalDetail(
-		message: AgentMessage,
-		maskResult: boolean,
-		elidedProbeToolCalls: Set<string>,
-	): AgentMessage | undefined {
-		switch (message.role) {
-			case "toolResult":
-				// Fold any result whose tool call is elided from this role's view: a probe tool's
-				// call is always elided, and a belief tool (e.g. `view_beliefs`) called *inside* a
-				// probe turn is elided along with it. Either way the result has no matching call, so
-				// it must become a plain note — never a `tool` result whose id would orphan, and
-				// never a tool-call name the role could imitate.
-				if (this._isProbeTool(message.toolName) || elidedProbeToolCalls.has(message.toolCallId)) {
-					if (maskResult) {
-						return {
-							role: "user",
-							content: [{ type: "text", text: "[operational detail omitted]" }],
-							timestamp: message.timestamp,
-						};
-					}
-					return { role: "user", content: message.content, timestamp: message.timestamp };
-				}
-				return message;
-			case "bashExecution":
-				return maskResult ? { ...message, output: "[output omitted]" } : message;
-			case "assistant":
-				// The probe (execution) role's assistant turns carry raw operational detail the
-				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
-				// (thinking) and its tool calls. Drop those, but keep the textual report — that is
-				// the distilled uplink the epistemic role updates on.
-				return this._isProbeAssistant(message) ? this._maskProbeAssistant(message) : message;
-			default:
-				return message;
-		}
-	}
-
-	/** A probe (execution) tool is anything outside the belief surface: `declare_belief` /
-	 *  `view_beliefs` / `conclude` mark the epistemic role; anything else (read/bash/grep/…)
-	 *  marks the probe role. */
-	private _isProbeTool(name: string): boolean {
-		return name !== "declare_belief" && name !== "view_beliefs" && name !== "conclude";
-	}
-
-	/** Whether an assistant turn belongs to the probe role, i.e. it invoked a non-belief tool. */
-	private _isProbeAssistant(message: AssistantMessage): boolean {
-		return message.content.some((block) => block.type === "toolCall" && this._isProbeTool(block.name));
-	}
-
-	/** Distill a probe-role assistant turn for the epistemic/finalAnswer view: drop its
-	 *  thinking blocks and its tool calls entirely, keeping only the textual report. Eliding the
-	 *  call (rather than renaming it) is what stops a role from imitating the probe — and what
-	 *  keeps the transcript free of tool-call names the provider may reject. */
-	private _maskProbeAssistant(message: AssistantMessage): AssistantMessage | undefined {
-		const content: AssistantMessage["content"] = [];
-		for (const block of message.content) {
-			if (block.type === "thinking" || block.type === "toolCall") {
-				continue;
-			}
-			content.push(block);
-		}
-		return content.length > 0 ? { ...message, content } : undefined;
-	}
-
-	/**
-	 * Redact the belief *mutation* surface (declare_belief / conclude) from one message, for the
-	 * execution role. The execution role probes and reports; belief updates and concluding happen
-	 * in the epistemic role, so exposing the mutation echo — both its "Applied propose/support/
-	 * refute" results and its tool-call blocks on the epistemic role's assistant turns — only
-	 * invites the probe role to step out of its lane instead of reporting a plain observation.
-	 * The read-only `view_beliefs` result is left intact — the execution role needs it to recall
-	 * the belief it is testing.
-	 */
-	private _maskBeliefBookkeeping(message: AgentMessage): AgentMessage | undefined {
-		switch (message.role) {
-			case "toolResult":
-				if (message.toolName === "declare_belief") {
-					return {
-						role: "user",
-						content: [{ type: "text", text: "[belief update omitted]" }],
-						timestamp: message.timestamp,
-					};
-				}
-				if (message.toolName === "conclude") {
-					return {
-						role: "user",
-						content: [{ type: "text", text: "[investigation concluded]" }],
-						timestamp: message.timestamp,
-					};
-				}
-				return message;
-			case "assistant":
-				return this._isEpistemicMutation(message) ? this._maskEpistemicAssistant(message) : message;
-			default:
-				return message;
-		}
-	}
-
-	/** Whether an assistant turn carries a belief *mutation* tool call (`declare_belief` /
-	 *  `conclude`) — the epistemic role's exclusive surface, which the execution role must not
-	 *  imitate. `view_beliefs` is deliberately excluded: it is read-only and shared with the
-	 *  execution role. */
-	private _isEpistemicMutation(message: AssistantMessage): boolean {
-		return message.content.some(
-			(block) => block.type === "toolCall" && (block.name === "declare_belief" || block.name === "conclude"),
-		);
-	}
-
-	/** Distill an epistemic-role assistant turn for a role that must not see the belief
-	 *  bookkeeping: drop its thinking and its belief tool calls, keeping only its text. Eliding
-	 *  the call (rather than renaming it) is what stops the role from imitating the bookkeeping —
-	 *  and what keeps the transcript free of tool-call names the provider may reject. The
-	 *  read-only `view_beliefs` call is kept for the execution role (`keepViewBeliefs`, the
-	 *  default), which needs it to recall the frame it is probing; finalAnswer drops it too,
-	 *  since it has no tools and its `view_beliefs` result is masked to a note. */
-	private _maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = true): AssistantMessage | undefined {
-		const content: AssistantMessage["content"] = [];
-		for (const block of message.content) {
-			if (block.type === "thinking") {
-				continue;
-			}
-			if (block.type === "toolCall") {
-				const isMutation = block.name === "declare_belief" || block.name === "conclude";
-				const isReadOnly = block.name === "view_beliefs";
-				if (isMutation || (isReadOnly && !keepViewBeliefs)) {
-					continue;
-				}
-			}
-			content.push(block);
-		}
-		return content.length > 0 ? { ...message, content } : undefined;
-	}
-
-	/** Mask the belief tools' echo from a finalAnswer message: the explicit final-answer context
-	 *  injected at the handoff replaces incidental `declare_belief`/`view_beliefs`/`conclude`
-	 *  results, which may be stale or partial, so they are dropped here rather than left to be read
-	 *  as facts. `conclude` is included so its "Investigation concluded." result does not orphan
-	 *  once `_maskEpistemicAssistant` elides the call. */
-	private _maskBeliefEchoes(message: AgentMessage): AgentMessage | undefined {
-		if (
-			message.role === "toolResult" &&
-			(message.toolName === "declare_belief" ||
-				message.toolName === "view_beliefs" ||
-				message.toolName === "conclude")
-		) {
-			return {
-				role: "user",
-				content: [{ type: "text", text: "[belief bookkeeping omitted]" }],
-				timestamp: message.timestamp,
-			};
-		}
-		return message;
-	}
-
-	/**
-	 * Reset the loop's transient bookkeeping for a new task, without touching the belief
-	 * set. The belief set is the session's accumulated knowledge — the settled beliefs from
-	 * prior tasks that the next epistemic role builds on — so it is deliberately retained.
-	 * Only the per-task state resets: the role returns to epistemic, the dispatch ledger
-	 * empties, no execution lease remains, and the prior task's raw operational detail is
-	 * masked from the fresh epistemic role.
-	 */
-	private _resetLoopForNewTask(): void {
-		this._loopState = { role: "propose" };
-		this._dispatchedFrameIds = new Set();
-		this._consumedRouteIds = new Set();
-		this._reflected = false;
-		this._fastPathFailure = false;
-		this._frameOpenHandoff = null;
-		this._taskId += 1;
-		this._evidenceWatermark = this.agent.state.messages.length;
-		// Drop the finished task's ephemera (framing/routing/refuted/superseded and any
-		// abnormal leftovers); only settled product/code knowledge survives as session
-		// knowledge for the next task.
-		this._beliefSet.pruneForNewTask();
-		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
-		// this task's own and re-enable the "deepen or conclude" steer.
-		this._beliefsAtTaskReset = this._beliefSet.beliefs.length;
-	}
-
-	/** Advance the role from the just-completed turn and project the next role's surface. */
-	private async _advanceRole(turn: PrepareNextTurnContext): Promise<void> {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) {
-			this._applyRoleSurface();
-			return;
-		}
-		// A follow-up queued while the previous loop was concluding is delivered on the next
-		// turn: reset the loop for the new task before projecting a surface for it. (The idle
-		// path resets inline in `prompt()` instead, since `_advanceRole` does not run until
-		// after that path's first turn.)
-		if (this._pendingNewTask) {
-			this._pendingNewTask = false;
-			this._resetLoopForNewTask();
-			this._applyRoleSurface();
-			return;
-		}
-		// A role that emitted a tool outside its own surface — the model imitating a
-		// prior turn's tool call (e.g. the epistemic role copying a `bash` call it saw the
-		// execution role make) — is rejected by the dispatch layer with a dead-end
-		// "Tool <name> not found". Steer the role back to its own tools instead of letting
-		// that error vanish into the transcript unaddressed.
-		const strayTools = this._strayToolNames(turn.message);
-		if (strayTools.length > 0) {
-			this._steerStrayToolCall(strayTools);
-			this._applyRoleSurface();
-			return;
-		}
-		const next = await this._transition(this._loopState, turn);
-		this._loopState = next.state;
-		if (next.steer !== undefined) {
-			this.agent.steer({
-				role: "user",
-				content: [{ type: "text", text: next.steer }],
-				timestamp: Date.now(),
-			});
-		}
-		this._applyRoleSurface();
-	}
-
-	/**
-	 * The belief loop's transition function — the state machine as explicit rows. Given the
-	 * current phase and the just-finished turn, it returns the next phase and the steer to
-	 * deliver with it (`steer` is `undefined` to stay silent). Each branch is one transition:
-	 * its guard, its next state, and its effect. Two side effects stay inline where they are
-	 * tightly coupled to their transition — advancing `_dispatchedFrameIds`/`_evidenceWatermark`
-	 * on dispatch, and latching `_reflected` on the one-round reflection.
-	 */
-	private async _transition(
-		state: LoopState,
-		turn: PrepareNextTurnContext,
-	): Promise<{ state: LoopState; steer?: string }> {
-		const ranTools = turn.toolResults.length > 0;
-		switch (state.role) {
-			case "propose": {
-				const proposed = this._beliefSet.proposed();
-				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
-				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
-				if (concluded) {
-					return this._concludeTransition(state, proposed);
-				}
-				if (undispatched.length > 0) {
-					return this._dispatchToExecution(proposed);
-				}
-				// The propose role's routing belief decides this task's path. Each routing belief is
-				// consumed on first evaluation (by id); only the latest unconsumed route decides, so
-				// a fresh route declared after belief updates can hand the remaining work to the fast
-				// path while the earlier decision stays in the history. The fast path dispatches only
-				// when the belief set is quiescent: no world belief pending verification and no open
-				// framing obligation (the same condition that makes an early conclude premature).
-				// A missing, rejected, or non-quiescent route falls through to the normal belief-loop
-				// protocol instead of silently bypassing routing.
-				const routes = this._beliefSet.beliefs
-					.slice(this._beliefsAtTaskReset)
-					.filter((b) => b.domain === "routing" && !this._consumedRouteIds.has(b.id));
-				const route = routes[routes.length - 1];
-				if (route) {
-					this._consumedRouteIds.add(route.id);
-					// A frame-open handoff requires explicit authorization: the route names exactly the
-					// open framing obligations it takes over. This must be checked before the strict
-					// `_fastPathQuiescent` gate, which rejects any open framing outright and would
-					// otherwise send the (already consumed) route to deepen/conclude instead.
-					if (route.decision === "fast-path" && this._frameOpenHandoffAuthorized(route)) {
-						return this._dispatchToFastExecution(route);
-					}
-					if (route.decision === "fast-path" && this._fastPathQuiescent()) {
-						return this._dispatchToFastExecution(route);
-					}
-				}
-				if (proposed.length > 0) {
-					// Open (dispatched) beliefs should have been settled by the distill step; route
-					// them back there rather than letting the propose step stall.
-					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
-					return {
-						state: { role: "distill" },
-						steer: TRANSITION_STEERS.openBeliefs(statements),
-					};
-				}
-				if (this._beliefSet.beliefs.length > this._beliefsAtTaskReset) {
-					// No open beliefs, and *this* task produced settled beliefs: settling is not
-					// concluding — prompt it to deepen or conclude.
-					return {
-						state,
-						steer: TRANSITION_STEERS.deepenOrConclude,
-					};
-				}
-				if (!ranTools) {
-					// Accept a direct answer without steering — unlike the `conclude` path, the
-					// answer already exists, so "Write your conclusion." would be redundant.
-					return { state: { role: "finalAnswer" } };
-				}
-				// No beliefs yet, but the model just acted (e.g. `view_beliefs` on an empty set):
-				// stay propose — it is bootstrapping, not concluding.
-				return { state };
-			}
-			case "distill": {
-				const proposed = this._beliefSet.proposed();
-				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
-				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
-				if (concluded) {
-					return this._concludeTransition(state, proposed);
-				}
-				if (undispatched.length > 0) {
-					// A refine (or an opportunistic propose) during distillation re-opens the frame —
-					// dispatch those fresh beliefs to be probed before returning to propose.
-					return this._dispatchToExecution(proposed);
-				}
-				if (proposed.length > 0 && !ranTools) {
-					// Open beliefs, and the model stopped instead of updating them — nudge it in its
-					// own terms, not the harness machinery.
-					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
-					return {
-						state,
-						steer: TRANSITION_STEERS.openBeliefs(statements),
-					};
-				}
-				if (proposed.length > 0) {
-					// Settled some but not all — keep distilling until every open belief is updated.
-					return { state };
-				}
-				// Every open belief is settled — hand back to the propose step to deepen or conclude.
-				return {
-					state: { role: "propose" },
-					steer: TRANSITION_STEERS.deepenOrConclude,
-				};
-			}
-			case "execution": {
-				const frameHorizon = state.frameHorizon - turn.toolResults.length;
-				if (state.fastPath) {
-					// Accumulate tool failures across the fast-path episode: the settle step only sees
-					// the final turn, whose tool results may not include the failing call.
-					if (turn.toolResults.some((r) => r.isError)) {
-						this._fastPathFailure = true;
-					}
-					// Fast path: the execution role answers the user directly. When its final
-					// observation is in (no tool results) or its lease is exhausted, settle the run:
-					// distill a summary, then either reset to the next task's propose (success) or
-					// hand the same task back to propose (failure).
-					if (!ranTools) {
-						if (this._frameOpenHandoff) {
-							const next = this._finishFrameOpenHandoff(turn);
-							await this._settleFastPath(turn);
-							this._frameOpenHandoff = null;
-							if (this._fastPathFailure) {
-								return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-							}
-							return next;
-						}
-						await this._settleFastPath(turn);
-						if (this._fastPathFailure) {
-							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-						}
-						this._resetLoopForNewTask();
-						return { state: { role: "propose" } };
-					}
-					if (frameHorizon <= 0 && !state.leaseReportNudged) {
-						return {
-							state: { role: "execution", frameHorizon, leaseReportNudged: true, fastPath: true },
-							steer: TRANSITION_STEERS.leaseNudge,
-						};
-					}
-					if (frameHorizon <= 0) {
-						if (this._frameOpenHandoff) {
-							const next = this._finishFrameOpenHandoff(turn);
-							await this._settleFastPath(turn);
-							this._frameOpenHandoff = null;
-							if (this._fastPathFailure) {
-								return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-							}
-							return next;
-						}
-						await this._settleFastPath(turn);
-						if (this._fastPathFailure) {
-							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-						}
-						this._resetLoopForNewTask();
-						return { state: { role: "propose" } };
-					}
-					return {
-						state: {
-							role: "execution",
-							frameHorizon,
-							leaseReportNudged: state.leaseReportNudged,
-							fastPath: true,
-						},
-					};
-				}
-				if (!ranTools) {
-					// The experiment's observation is in — return to distill to update.
-					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
-				}
-				if (frameHorizon <= 0 && !state.leaseReportNudged) {
-					// Lease exhausted while still probing — nudge once to report; force the return
-					// only if it keeps probing (the distill role needs the distilled observation).
-					return {
-						state: { role: "execution", frameHorizon, leaseReportNudged: true },
-						steer: TRANSITION_STEERS.leaseNudge,
-					};
-				}
-				if (frameHorizon <= 0) {
-					// Already nudged once and still probing — force the return.
-					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
-				}
-				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
-			}
-			case "finalAnswer":
-				return { state };
-		}
-	}
-
-	/** The conclude handling shared by the two belief-side roles (propose and distill). */
-	private _concludeTransition(state: LoopState, proposed: Belief[]): { state: LoopState; steer?: string } {
-		// Completion is the model's explicit call, never inferred from the open-belief count: a
-		// settled belief does not mean the task is answered. Concluding is premature while an open
-		// framing obligation or an open world belief remains.
-		const openFramings = this._beliefSet.framings();
-		if (openFramings.length > 0 || proposed.length > 0) {
-			const reasons: string[] = [];
-			if (openFramings.length > 0) {
-				reasons.push(
-					`these obligations for what the answer must establish are still open (${openFramings.map((b) => `"${b.statement}"`).join(", ")})`,
-				);
-			}
-			if (proposed.length > 0) {
-				reasons.push(`these beliefs are still unresolved (${proposed.map((b) => `"${b.statement}"`).join(", ")})`);
-			}
-			return {
-				state,
-				steer: TRANSITION_STEERS.concludePremature(reasons.join(" and ")),
-			};
-		}
-		const settledThisTask = this._beliefSet.beliefs
-			.slice(this._beliefsAtTaskReset)
-			.filter((b) => statusOf(b) === "supported").length;
-		if (settledThisTask >= REFLECTION_MIN_SETTLED_BELIEFS && !this._reflected) {
-			// Everything is settled, and this task settled enough beliefs for the whole-set
-			// reflection to be worth a round-trip. Fire the one-round reflection and stay put so
-			// any belief it proposes is probed normally; a second conclude passes. Below the
-			// threshold the reflection's checks are vacuous, so the conclude goes straight to the
-			// terminal handoff instead.
-			this._reflected = true;
-			return { state, steer: TRANSITION_STEERS.reflection };
-		}
-		// The terminal handoff: the finalAnswer role has no tools and the belief set is never
-		// injected into the system prompt, so it must receive an explicit, current snapshot of
-		// what it is to ground the conclusion on — instead of whatever declare_belief/view_beliefs
-		// echoes happen to survive in the masked transcript.
-		return {
-			state: { role: "finalAnswer" },
-			steer: `${TRANSITION_STEERS.writeConclusion}\n\n${this._formatFinalAnswerContext()}`,
-		};
-	}
-
-	/** Render the explicit final-answer context: the settled world beliefs (with their evidence),
-	 *  the framing outcomes, and the refuted beliefs the answer must not treat as facts. */
-	private _formatFinalAnswerContext(): string {
-		const beliefs = this._beliefSet.beliefs;
-		const settledWorld = beliefs.filter((b) => statusOf(b) === "supported" && b.domain !== "framing");
-		const framingOutcomes = beliefs.filter((b) => b.domain === "framing" && statusOf(b) !== "proposed");
-		const refuted = beliefs.filter((b) => statusOf(b) === "refuted");
-		const lines: string[] = ["<final_answer_context>"];
-		if (settledWorld.length > 0) {
-			lines.push("Settled world beliefs:");
-			for (const b of settledWorld) {
-				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
-				lines.push(`  expectation: ${b.expectation}`);
-				if (b.skillRefs && b.skillRefs.length > 0) {
-					lines.push(`  skill refs: ${b.skillRefs.join(", ")}`);
-				}
-				for (const e of b.supportedBy) {
-					lines.push(`  evidence: ${e.evidence}`);
-				}
-			}
-		}
-		if (framingOutcomes.length > 0) {
-			lines.push("Framing outcomes:");
-			for (const b of framingOutcomes) {
-				lines.push(`- ${b.id} [${b.domain}] ${b.statement} (${statusOf(b)})`);
-				for (const e of b.supportedBy) {
-					lines.push(`  evidence: ${e.evidence}`);
-				}
-			}
-		}
-		if (refuted.length > 0) {
-			lines.push("Refuted beliefs (not part of the answer):");
-			for (const b of refuted) {
-				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
-			}
-		}
-		lines.push("</final_answer_context>");
-		return lines.join("\n");
-	}
-
-	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
-	private _dispatchToExecution(proposed: Belief[]): { state: LoopState; steer: string } {
-		this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
-		this._evidenceWatermark = this.agent.state.messages.length;
-		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
-		const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
-		return {
-			state: {
-				role: "execution",
-				frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
-				leaseReportNudged: false,
-			},
-			steer: TRANSITION_STEERS.dispatch(statements),
-		};
-	}
-
-	/**
-	 * Whether the fast path may take over the current task: no world belief is pending verification
-	 * (proposed) and no framing obligation is open (proposed framing) — the same condition
-	 * `_concludeTransition` uses to reject an early conclude. Supported beliefs are settled context
-	 * for the fast-path execution, not blockers.
-	 */
-	private _fastPathQuiescent(): boolean {
-		return this._beliefSet.proposed().length === 0 && this._beliefSet.framings().length === 0;
-	}
-
-	/**
-	 * Whether a frame-open fast-path handoff is authorized: no world belief is pending
-	 * verification (`proposed()`), and every open framing obligation is precisely covered by the
-	 * route's `handoffFromBeliefIds` list (same ids, regardless of order). This is the explicit
-	 * authorization gate for the mid-task handoff — it never infers coverage from framing text.
-	 */
-	private _frameOpenHandoffAuthorized(route: Belief): boolean {
-		// The route must name the task it authorizes; a mismatched task id is rejected.
-		const routeTask = route.parentTaskId;
-		if (!routeTask || routeTask !== this.taskId) {
-			return false;
-		}
-		if (this._beliefSet.proposed().length > 0) {
-			return false;
-		}
-		const openFramings = this._beliefSet.framings();
-		if (openFramings.length === 0) {
-			return false;
-		}
-		const authorized = new Set(route.handoffFromBeliefIds ?? []);
-		if (authorized.size !== openFramings.length) {
-			return false;
-		}
-		return openFramings.every((f) => authorized.has(f.id));
-	}
-
-	/** Dispatch the execution role on the fast path: execute the user's request directly and answer. */
-	private _dispatchToFastExecution(route: Belief): { state: LoopState; steer: string } {
-		this._dispatchedFrameIds = new Set();
-		this._fastPathFailure = false;
-		this._frameOpenHandoff = this._frameOpenHandoffAuthorized(route)
-			? { route, framingIds: this._beliefSet.framings().map((f) => f.id) }
-			: null;
-		this._evidenceWatermark = this.agent.state.messages.length;
-		return {
-			state: {
-				role: "execution",
-				frameHorizon: Math.max(1, Math.ceil(((route.estimatedSteps ?? 1) + 1) * FRAME_HORIZON_HEADROOM)),
-				leaseReportNudged: false,
-				fastPath: true,
-			},
-			steer: TRANSITION_STEERS.fastPathDispatch,
-		};
-	}
-
-	/**
-	 * Finish a successful frame-open fast-path handoff: synthesize a `proposed` product/code
-	 * outcome belief stating that the authorized framing's tool execution completed without
-	 * error, mark it dispatched so the distill step adjudicates it rather than re-dispatching it
-	 * to execution, keep the framed obligation open, and route to distill via `fastPathDischarge`.
-	 * The distill role then supports/refutes the outcome and discharges the framing per the
-	 * existing `evidenceBeliefIds` rule.
-	 */
-	private _finishFrameOpenHandoff(_turn: PrepareNextTurnContext): { state: LoopState; steer: string } {
-		const handoff = this._frameOpenHandoff;
-		if (!handoff) {
-			throw new Error("_finishFrameOpenHandoff called without a frame-open handoff.");
-		}
-		const outcome = this._beliefSet.apply({
-			op: "propose",
-			statement: `fast path executed the authorized handoff for framing(s) ${handoff.framingIds.join(", ")} without error`,
-			domain: "product",
-			expectation: "the tool results for the authorized handoff contain no error",
-			evidenceRounds: this._beliefSet.framings().length || 1,
-		});
-		// Record the outcome id so the settle log can write it as traceability.
-		if (this._frameOpenHandoff) {
-			this._frameOpenHandoff.outcomeBeliefId = outcome.id;
-		}
-		// The outcome is a synthetic harness claim; mark it dispatched so the distill step
-		// adjudicates it instead of the undispatched guard re-dispatching it to execution.
-		this._dispatchedFrameIds = new Set([...this._dispatchedFrameIds, outcome.id]);
-		this._fastPathFailure = false;
-		// Keep framing open; do NOT reset the loop. Route to distill so the model decides, on
-		// the structured tool results, whether to support the outcome and discharge the framing.
-		return { state: { role: "distill" }, steer: TRANSITION_STEERS.fastPathDischarge };
-	}
-
-	/**
-	 * Settle a completed fast-path run: distill the execution context into a structured summary
-	 * with the distillation model, persist it as a `fast_path_distillation` custom message, and
-	 * record whether the run failed (any tool error) for the handoff decision. Never throws into
-	 * the loop: a failed distillation falls back to a deterministic minimal summary.
-	 */
-	private async _settleFastPath(turn: PrepareNextTurnContext, outcomeBeliefId?: string): Promise<void> {
-		if (turn.toolResults.some((r) => r.isError)) {
-			this._fastPathFailure = true;
-		}
-		const summary = await this._distillFastPath(turn);
-		const handoff = this._frameOpenHandoff;
-		try {
-			await this.sendCustomMessage(
-				{
-					customType: "fast_path_distillation",
-					content: summary,
-					display: false,
-					details: {
-						runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
-						outcome: this._fastPathFailure ? "failure" : "success",
-						request: this._currentTaskRequestText,
-						...this._fastPathTraceability(handoff, outcomeBeliefId),
-					},
-				},
-				{ triggerTurn: false },
-			);
-		} catch {
-			// Persisting the summary must not block the state transition.
-		}
-	}
-
-	/** Build the traceability details for a frame-open fast-path handoff. */
-	private _fastPathTraceability(
-		handoff: { route: Belief; framingIds: readonly string[]; outcomeBeliefId?: string } | null,
-		outcomeBeliefId?: string,
-	): Record<string, unknown> {
-		if (!handoff) {
-			return {};
-		}
-		return {
-			parentTaskId: handoff.route.parentTaskId ?? this.taskId,
-			handoffFromBeliefIds: [...handoff.framingIds],
-			reason: handoff.route.reason,
-			outcomeBeliefId: outcomeBeliefId ?? handoff.outcomeBeliefId,
-		};
-	}
-
-	/** The model for the fast-path distillation summary: `pie.distillationModel`, else the session model. */
-	private _resolveDistillationModel(): Model<any> | undefined {
-		const spec = this.settingsManager.getDistillationModel();
-		if (spec) {
-			const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
-			if (resolved.model) {
-				return resolved.model;
-			}
-		}
-		return this.agent.state.model;
-	}
-
-	/** Distill the fast-path execution context into a summary with the distillation model. */
-	private async _distillFastPath(turn: PrepareNextTurnContext): Promise<string> {
-		const model = this._resolveDistillationModel();
-		if (!model) {
-			return this._fallbackFastPathSummary(turn);
-		}
-		try {
-			const context: Context = {
-				systemPrompt:
-					"Summarize the completed fast-path execution for the epistemic context. List: " +
-					"completed actions, side effects, key observations, the final result, any remaining " +
-					"goal, and actions that must not be repeated.",
-				messages: [
-					{
-						role: "user",
-						content: `Request: ${this._currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this._fastPathTranscript(turn)}`,
-						timestamp: Date.now(),
-					},
-				],
-			};
-			const result = await this._modelRuntime.completeSimple(model, context, {
-				toolChoice: "none",
-				cacheRetention: "none",
-				sessionId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
-			});
-			const text = contentText(result.content).trim();
-			return text || this._fallbackFastPathSummary(turn);
-		} catch {
-			return this._fallbackFastPathSummary(turn);
-		}
-	}
-
-	/** Deterministic minimal summary for when the distillation model call fails. */
-	private _fallbackFastPathSummary(turn: PrepareNextTurnContext): string {
-		const lines = [
-			this._fastPathFailure ? "Fast-path run failed." : "Fast-path run completed.",
-			`Request: ${this._currentTaskRequestText || "(unknown)"}`,
-			...turn.toolResults.map((r) => `tool ${r.toolName}: ${r.isError ? "error" : "ok"}`),
-		];
-		return lines.join("\n");
-	}
-
-	/** The fast-path execution turn's text, for the distillation prompt. */
-	private _fastPathTranscript(turn: PrepareNextTurnContext): string {
-		const parts: string[] = [`assistant: ${this._messageText(turn.message)}`];
-		for (const r of turn.toolResults) {
-			parts.push(`tool ${r.toolName}: ${this._messageText(r)}`);
-		}
-		return parts.join("\n");
-	}
-
-	private _messageText(message: { content: unknown }): string {
-		const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
-		if (typeof content === "string") {
-			return content;
-		}
-		if (Array.isArray(content)) {
-			return content
-				.filter((p): p is { type: "text"; text: string } => p.type === "text")
-				.map((p) => p.text)
-				.join("\n");
-		}
-		return "";
-	}
-
-	/** Tool-call names in the just-finished turn that the current role was not offered. */
-	private _strayToolNames(message: AssistantMessage): string[] {
-		const allowed = new Set(this._roleToolNames());
-		const stray = new Set<string>();
-		for (const block of message.content) {
-			if (block.type === "toolCall" && !allowed.has(block.name)) {
-				stray.add(block.name);
-			}
-		}
-		return [...stray];
-	}
-
-	/** Steer the current role back to its own tools after it emitted a tool outside its surface. */
-	private _steerStrayToolCall(strayTools: string[]): void {
-		const names = strayTools.map((name) => `"${name}"`).join(", ");
-		const text = ROLE_SPECS[this._role].strayToolSteer(names);
-		this.agent.steer({
-			role: "user",
-			content: [{ type: "text", text }],
-			timestamp: Date.now(),
-		});
-	}
-
-	/** The active tool names available to the current role, declared in ROLE_SPECS. */
-	private _roleToolNames(): string[] {
-		const tools = ROLE_SPECS[this._role].tools;
-		if (typeof tools === "function") {
-			return tools({ fullActiveToolNames: this._fullActiveToolNames });
-		}
-		return [...tools];
-	}
-
-	/**
-	 * The model for the next turn. Two belief-loop roles may run on separately configured
-	 * models from settings: the execution (probe) role on `pie.executionModel`, and the distill
-	 * (prediction-error) role on `pie.distillationModel` (defaulting to `defaultModel`, so the
-	 * distillation stays on the strong default model even when the probe runs on a cheaper one).
-	 * The propose role — and any turn outside the belief loop — uses the session's main model
-	 * (`defaultModel`). Only the next request's model is overridden — `state.model` is left
-	 * untouched so footer/compaction/context-window keep the main model as their baseline.
-	 */
-	private _roleModelFor(role: "propose" | "distill" | "execution" | "finalAnswer"): Model<any> | undefined {
-		if (this._enableBeliefSet && this._beliefSetUsable) {
-			// The model policy per role is declared in ROLE_SPECS; only execution and distill
-			// may run on separately configured models from settings. The fast path runs the
-			// execution role on `pie.fastPathModel`; the first propose turn of a task (its
-			// routing turn) runs on the configured `defaultModel` rather than the session model.
-			const policy = ROLE_SPECS[role].modelPolicy;
-			let spec: string | undefined;
-			if (policy === "execution") {
-				spec =
-					this._loopState.role === "execution" && this._loopState.fastPath
-						? this.settingsManager.getFastPathModel()
-						: this.settingsManager.getExecutionModel();
-			} else if (policy === "distillation") {
-				spec = this.settingsManager.getDistillationModel();
-			} else if (role === "propose" && this._beliefSet.beliefs.length === this._beliefsAtTaskReset) {
-				// The routing turn of a fresh task judges on the configured default model.
-				spec = this.settingsManager.getDefaultModel();
-			}
-			if (spec) {
-				const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
-				if (resolved.model) {
-					return resolved.model;
-				}
-			}
-		}
-		return this.agent.state.model;
-	}
-
-	/** The model for the next turn — the current role's model (see `_roleModelFor`). */
-	private _roleModel(): Model<any> | undefined {
-		return this._roleModelFor(this._role);
-	}
-
-	/** The role system prompt: base prompt with only the role's tools described, plus a natural role instruction. */
-	private _roleSystemPrompt(): string {
-		const toolNames = this._roleToolNames();
-		const snippets: Record<string, string> = {};
-		const guidelines: string[] = [];
-		for (const name of toolNames) {
-			const snippet = this._toolPromptSnippets.get(name);
-			if (snippet) {
-				snippets[name] = snippet;
-			}
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) {
-				guidelines.push(...toolGuidelines.map((g) => this._beliefLangPrompt(g)));
-			}
-		}
-		const base =
-			this._systemPromptOverride ??
-			buildSystemPrompt({
-				...this._baseSystemPromptOptions,
-				role: this._role,
-				selectedTools: toolNames,
-				toolSnippets: snippets,
-				promptGuidelines: guidelines,
-			});
-		return base + this._roleInstruction();
-	}
-
-	/** Substitute the configured belief language into prompt text placeholders. */
-	private _beliefLangPrompt(text: string): string {
-		return text.replaceAll("{beliefLang}", this.settingsManager.getBeliefLang());
-	}
-
-	private _roleInstruction(): string {
-		// The first propose turn of a task is its routing turn (route-first instruction). Later
-		// propose turns get the continuation instruction: the initial route is settled, and a
-		// fast-path handoff is one optional, gated output among deepening and concluding.
-		const spec = ROLE_SPECS[this._role];
-		if (
-			this._role === "propose" &&
-			this._beliefSet.beliefs.length > this._beliefsAtTaskReset &&
-			spec.continuationInstruction !== undefined
-		) {
-			return this._beliefLangPrompt(spec.continuationInstruction);
-		}
-		return this._beliefLangPrompt(spec.instruction);
-	}
-
-	/** Project the current role's tool subset and system prompt onto the agent state. */
-	private _applyRoleSurface(): void {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) {
-			this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
-			return;
-		}
-		const toolNames = this._roleToolNames();
-		this.agent.state.tools = toolNames
-			.map((name) => this._toolRegistry.get(name))
-			.filter((tool): tool is AgentTool => tool !== undefined);
-		this.agent.state.systemPrompt = this._roleSystemPrompt();
-	}
-
-	/** The live belief set, read-only. Exposed for `/bs` and diagnostics. */
-	get beliefs(): readonly Belief[] {
-		return this._beliefSet.beliefs;
 	}
 
 	// =========================================================================
@@ -1787,18 +670,6 @@ export class AgentSession {
 
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
-				// Capture the latest cache hit rate under the role that produced this request.
-				// `_role` is still the producing role here — `_advanceRole` only runs in the next
-				// turn's prepareNextTurnWithContext. finalAnswer and non-belief-loop requests
-				// (idle/plain turns keep `_role` at the initial "propose") never update a slot.
-				const role = this._role;
-				if (this._enableBeliefSet && this._beliefSetUsable && role !== "finalAnswer") {
-					const usage = (event.message as AssistantMessage).usage;
-					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-					if (promptTokens > 0) {
-						this._roleCacheHitRate[role] = (usage.cacheRead / promptTokens) * 100;
-					}
-				}
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
@@ -2025,9 +896,8 @@ export class AgentSession {
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
-	/** The full base system prompt (without the per-role projection). */
 	get systemPrompt(): string {
-		return this._systemPromptOverride ?? this._baseSystemPrompt;
+		return this.agent.state.systemPrompt;
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -2040,7 +910,7 @@ export class AgentSession {
 	 * Returns the names of tools currently set on the agent.
 	 */
 	getActiveToolNames(): string[] {
-		return this._fullActiveToolNames;
+		return this.agent.state.tools.map((t) => t.name);
 	}
 
 	/**
@@ -2077,12 +947,10 @@ export class AgentSession {
 			}
 		}
 		this.agent.state.tools = tools;
-		this._fullActiveToolNames = validToolNames;
 
-		// Rebuild the base prompt with the new tool set, then project the current
-		// role's surface (tool subset + system prompt) onto the agent.
+		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this._applyRoleSurface();
+		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -2117,11 +985,6 @@ export class AgentSession {
 	/** Current session ID */
 	get sessionId(): string {
 		return this.sessionManager.getSessionId();
-	}
-
-	/** Current task id (stable, monotonic per task). */
-	get taskId(): string {
-		return `task-${this._taskId}`;
 	}
 
 	/** Current session display name, if set */
@@ -2180,7 +1043,7 @@ export class AgentSession {
 
 			const toolGuidelines = this._toolPromptGuidelines.get(name);
 			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines.map((g) => this._beliefLangPrompt(g)));
+				promptGuidelines.push(...toolGuidelines);
 			}
 		}
 
@@ -2310,16 +1173,9 @@ export class AgentSession {
 				expandedText = this._expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
-			// Capture the request text for the fast-path distillation summary.
-			this._currentTaskRequestText = expandedText;
 
-			// If streaming, queue via steer() or followUp() based on option. A follow-up typed
-			// while the previous loop is concluding must reset the loop when it is delivered, so
-			// mark it here; `_advanceRole` consumes the flag on delivery.
+			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
-				if (this._role === "finalAnswer") {
-					this._pendingNewTask = true;
-				}
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -2408,18 +1264,12 @@ export class AgentSession {
 			// Apply extension-modified system prompt, or reset to base
 			if (result?.systemPrompt !== undefined) {
 				this._systemPromptOverride = result.systemPrompt;
+				this.agent.state.systemPrompt = result.systemPrompt;
 			} else {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this._systemPromptOverride = undefined;
+				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
-			// A fresh user task after the previous loop concluded re-runs the belief loop
-			// from the epistemic role instead of staying parked in the no-tools finalAnswer
-			// role. The belief set is retained as session knowledge — the task-end prune
-			// keeps only settled product/code records — and the loop resets.
-			if (this._role === "finalAnswer") {
-				this._resetLoopForNewTask();
-			}
-			this._applyRoleSurface();
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -3556,7 +2406,7 @@ export class AgentSession {
 
 		this._resourceLoader.extendResources(extensionPaths);
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this._applyRoleSurface();
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
@@ -3851,17 +2701,6 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
-		if (this._enableBeliefSet) {
-			this._baseToolDefinitions.set(
-				"declare_belief",
-				createDeclareBeliefToolDefinition(this._beliefSet) as ToolDefinition,
-			);
-			this._baseToolDefinitions.set(
-				"view_beliefs",
-				createViewBeliefsToolDefinition(this._beliefSet, () => this._role) as ToolDefinition,
-			);
-			this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
-		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -3885,22 +2724,10 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: this._enableBeliefSet
-				? ["read", "bash", "edit", "write", "declare_belief", "view_beliefs", "conclude"]
-				: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
-		// The belief set is on by default, so its tools must be active even when the
-		// caller supplied its own `activeToolNames` (the CLI passes a settings default
-		// of `["read", "bash", "edit", "write"]` that would otherwise drop them). An
-		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
-		// back out via `allowedToolNames`.
-		const beliefToolNames = ["declare_belief", "view_beliefs", "conclude"];
-		const activeToolNames =
-			this._enableBeliefSet && baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
-				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]
-				: baseActiveToolNames;
 		this._refreshToolRegistry({
-			activeToolNames,
+			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
 	}
@@ -4470,66 +3297,12 @@ export class AgentSession {
 	}
 
 	getContextUsage(): ContextUsage | undefined {
-		const contextWindow = this._contextWindow();
-		if (contextWindow === undefined) return undefined;
-		return this._estimateContextUsage(this.messages, contextWindow);
-	}
-
-	/**
-	 * Per-role context usage for the belief loop: the epistemic role's projected context vs the
-	 * execution role's. The epistemic projection masks raw operational detail, so it is typically
-	 * much leaner than the execution projection, which keeps raw tool output. Returns undefined
-	 * when the belief loop is not active.
-	 */
-	/**
-	 * Per-role model and latest cache hit rate for the three belief-loop display slots, consumed by
-	 * the footer and the `/session` panel. Models resolve per the documented fallback chain
-	 * (`pie.executionModel`/`pie.distillationModel`, defaulting to the session's main model); cache
-	 * hit rates come from the in-memory snapshot captured at message_end under the producing role.
-	 * The finalAnswer role and requests outside the belief loop never update a slot, and after a
-	 * reload all rates are undefined until the loop produces new requests. Returns undefined when
-	 * the belief loop is not usable, mirroring `getRoleContextUsage`.
-	 */
-	getRoleStatus(): RoleStatus | undefined {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
-		return {
-			epistemic: {
-				model: this._roleModelFor("propose"),
-				latestCacheHitRate: this._roleCacheHitRate.propose,
-			},
-			distillation: {
-				model: this._roleModelFor("distill"),
-				latestCacheHitRate: this._roleCacheHitRate.distill,
-			},
-			execution: {
-				model: this._roleModelFor("execution"),
-				latestCacheHitRate: this._roleCacheHitRate.execution,
-			},
-		};
-	}
-
-	getRoleContextUsage(): { epistemic: ContextUsage; execution: ContextUsage } | undefined {
-		if (!this._enableBeliefSet || !this._beliefSetUsable) return undefined;
-		const contextWindow = this._contextWindow();
-		if (contextWindow === undefined) return undefined;
-		return {
-			// The propose and distill roles share one (belief-side) projection; `epistemic` here
-			// is the retained public label for that shared projection.
-			epistemic: this._estimateContextUsage(this._projectMessagesFor("propose"), contextWindow),
-			execution: this._estimateContextUsage(this._projectMessagesFor("execution"), contextWindow),
-		};
-	}
-
-	/** The model's context window, or undefined when there is no model or a non-positive window. */
-	private _contextWindow(): number | undefined {
 		const model = this.model;
 		if (!model) return undefined;
-		const contextWindow = model.contextWindow ?? 0;
-		return contextWindow > 0 ? contextWindow : undefined;
-	}
 
-	/** Estimate context usage for a message list, honoring the post-compaction uncertainty gate. */
-	private _estimateContextUsage(messages: AgentMessage[], contextWindow: number): ContextUsage {
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow <= 0) return undefined;
+
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
@@ -4559,7 +3332,7 @@ export class AgentSession {
 			}
 		}
 
-		const estimate = estimateContextTokens(messages);
+		const estimate = estimateContextTokens(this.messages);
 		const percent = (estimate.tokens / contextWindow) * 100;
 
 		return {

@@ -88,32 +88,10 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
-/** Settings scoped to the belief-loop ("pie") subsystem. */
-export interface PieSettings {
-	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
-	executionModel?: string;
-	/**
-	 * Model for the belief loop's distillation (prediction-error) step — the epistemic role's
-	 * residual accounting that turns the probe's raw observations into what the belief set must
-	 * update on. Defaults to `defaultModel` so the distillation stays on the strong default model
-	 * even when the probe role is on a cheaper `executionModel`. */
-	distillationModel?: string;
-	/** Thinking level for the belief loop's distillation (prediction-error) role. Defaults to "low". */
-	distillationThinkingLevel?: ThinkingLevel;
-	/** The language belief-set prompts must write in. Defaults to "English". */
-	beliefLang?: string;
-	/**
-	 * Model for fast-path execution: a request routed to the fast path runs its execution on this
-	 * model instead of `executionModel`/the session model. Unset means "use the session model". */
-	fastPathModel?: string;
-}
-
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
-	/** Settings for the belief-loop ("pie") subsystem. */
-	pie?: PieSettings;
 	defaultThinkingLevel?: ThinkingLevel;
 	modelThinkingLevels?: Record<string, ThinkingLevel>; // per-model default thinking level overrides keyed by "provider/modelId"
 	transport?: TransportSetting; // default: "auto"
@@ -738,26 +716,6 @@ export class SettingsManager {
 
 	getDefaultModel(): string | undefined {
 		return this.settings.defaultModel;
-	}
-
-	getExecutionModel(): string | undefined {
-		return this.settings.pie?.executionModel;
-	}
-
-	getFastPathModel(): string | undefined {
-		return this.settings.pie?.fastPathModel;
-	}
-
-	getDistillationModel(): string | undefined {
-		return this.settings.pie?.distillationModel ?? this.settings.defaultModel;
-	}
-
-	getDistillationThinkingLevel(): ThinkingLevel {
-		return this.settings.pie?.distillationThinkingLevel ?? "low";
-	}
-
-	getBeliefLang(): string {
-		return this.settings.pie?.beliefLang ?? "English";
 	}
 
 	setDefaultProvider(provider: string): void {
