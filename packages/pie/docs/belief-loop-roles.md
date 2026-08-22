@@ -66,7 +66,7 @@ apart.
 | job | decide what to test; open/close framing obligations | group the open beliefs into the next execution batch (one batch per turn) | probe the belief's referent; intervene minimally when the intended outcome requires an actual change | turn the observation into belief updates | write the conclusion |
 | tools | `declare_belief` `view_beliefs` `conclude` | none (open beliefs injected directly) | all active tools except `declare_belief`/`conclude` + `view_beliefs` | `declare_belief` `view_beliefs` `conclude` | none |
 | `view_beliefs` scope | `all` | n/a | `frame` | `all` | n/a |
-| model | session default | `pie.plannerModel` (settings) | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | session default |
+| model | session default | `pie.plannerModel` (settings) | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | `pie.fastPathModel` (settings) |
 | thinking | session default | session default | `pie.distillationThinkingLevel` (settings, default `low`) | session default |
 | projection | operational detail masked unconditionally; probe calls and epistemic thinking elided | belief bookkeeping masked (`declare_belief`/`conclude`) | like `propose`, except the current episode's raw evidence is shown exactly once above the watermark, then masked; epistemic thinking elided | all operational detail, belief-tool echoes, and thinking masked |
 | output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation of the probe or intervention result | `support`/`refute`/`refine`/`retract` | the conclusion text |

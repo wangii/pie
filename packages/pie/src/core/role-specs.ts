@@ -19,8 +19,8 @@
 export type LoopRole = "propose" | "planner" | "distill" | "execution" | "finalAnswer";
 
 /** Which model the role runs on: the session's main model, the configured execution model, the
- *  configured planner model, or the distillation model. */
-export type ModelPolicy = "default" | "execution" | "distillation" | "planner";
+ *  configured planner model, the fast-path model, or the distillation model. */
+export type ModelPolicy = "default" | "execution" | "distillation" | "planner" | "fastPath";
 
 /** Which message projection the role's context uses (see `_projectMessage`). */
 export type ProjectionKind = "belief" | "distill" | "execution" | "finalAnswer";
@@ -235,7 +235,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"concisely, grounded in the beliefs you have settled.",
 		tools: [],
 		beliefScope: "all",
-		modelPolicy: "default",
+		modelPolicy: "fastPath",
 		projection: "finalAnswer",
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, but the finalAnswer role has no tools. Write your conclusion in plain text.`,

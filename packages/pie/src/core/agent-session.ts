@@ -1693,21 +1693,23 @@ export class AgentSession {
 	}
 
 	/**
-	 * The model for the next turn. Two belief-loop roles may run on separately configured
-	 * models from settings: the execution (probe) role on `pie.executionModel`, and the distill
+	 * The model for the next turn. Four belief-loop roles may run on separately configured
+	 * models from settings: the execution (probe) role on `pie.executionModel`, the distill
 	 * (prediction-error) role on `pie.distillationModel` (defaulting to `defaultModel`, so the
-	 * distillation stays on the strong default model even when the probe runs on a cheaper one).
-	 * The propose role — and any turn outside the belief loop — uses the session's main model
-	 * (`defaultModel`). Only the next request's model is overridden — `state.model` is left
-	 * untouched so footer/compaction/context-window keep the main model as their baseline.
+	 * distillation stays on the strong default model even when the probe runs on a cheaper one),
+	 * the planner on `pie.plannerModel`, and the finalAnswer (conclusion) role on
+	 * `pie.fastPathModel`. The propose role — and any turn outside the belief loop — uses the
+	 * session's main model (`defaultModel`). Only the next request's model is overridden —
+	 * `state.model` is left untouched so footer/compaction/context-window keep the main model
+	 * as their baseline.
 	 */
 	private _roleModelFor(
 		role: "propose" | "planner" | "distill" | "execution" | "finalAnswer",
 	): Model<any> | undefined {
 		if (this._beliefSetUsable) {
-			// The model policy per role is declared in ROLE_SPECS; only execution, distill, and the
-			// planner may run on separately configured models from settings. The fast path runs the
-			// execution role on `pie.fastPathModel`; the first propose turn of a task (its
+			// The model policy per role is declared in ROLE_SPECS; execution, distill, the planner,
+			// and finalAnswer may run on separately configured models from settings. The fast path
+			// runs the execution role on `pie.fastPathModel`; the first propose turn of a task (its
 			// routing turn) runs on the configured `defaultModel` rather than the session model.
 			const policy = ROLE_SPECS[role].modelPolicy;
 			let spec: string | undefined;
@@ -1720,6 +1722,8 @@ export class AgentSession {
 				spec = this.settingsManager.getDistillationModel();
 			} else if (policy === "planner") {
 				spec = this.settingsManager.getPlannerModel();
+			} else if (policy === "fastPath") {
+				spec = this.settingsManager.getFastPathModel();
 			} else if (role === "propose" && this._beliefSet.beliefs.length === this._beliefsAtTaskReset) {
 				// The routing turn of a fresh task judges on the configured default model.
 				spec = this.settingsManager.getDefaultModel();
