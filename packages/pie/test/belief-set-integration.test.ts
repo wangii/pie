@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { describe, expect, test } from "vitest";
 import { BeliefSet, statusOf } from "../src/core/belief-set.ts";
+import type { CustomMessage } from "../src/core/messages.ts";
 import { createHarness, type FauxResponse, type FauxResponseInput } from "./test-harness.ts";
 
 function messageText(message: { content: unknown }): string {
@@ -419,6 +420,236 @@ describe("declare_belief integration", () => {
 			expect(distillContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
 			expect(distillContexts.some((c) => contextText(c).includes("the value persisted"))).toBe(true);
 			expect(proposeContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("propose and distill contexts strip epistemic thinking but keep the belief bookkeeping", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "RAW_SENSITIVE_OUTPUT" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose, with plaintext thinking.
+				{
+					thinking: "EPISTEMIC_PROPOSE_THINKING",
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: probe produces raw output.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Epistemic: distill settles the belief, also with plaintext thinking.
+				{
+					thinking: "EPISTEMIC_DISTILL_THINKING",
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			const beliefContexts = harness.faux.contexts.filter((c) => contextToolNames(c).includes("declare_belief"));
+			const distillContexts = beliefContexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the distill role"),
+			);
+			const proposeContexts = beliefContexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the propose role"),
+			);
+			expect(distillContexts.length).toBeGreaterThan(0);
+			expect(proposeContexts.length).toBeGreaterThan(0);
+
+			// Neither role's view may contain any plaintext thinking — not the probe's, and not
+			// the epistemic roles' own reasoning either.
+			for (const c of [...proposeContexts, ...distillContexts]) {
+				expect(contextThinking(c)).not.toContain("EPISTEMIC_PROPOSE_THINKING");
+				expect(contextThinking(c)).not.toContain("EPISTEMIC_DISTILL_THINKING");
+				expect(contextThinking(c)).toBe("");
+			}
+
+			// The belief bookkeeping survives: both views keep the declare_belief calls, and the
+			// distill view still sees the raw evidence and the probe's report.
+			expect(proposeContexts.some((c) => contextToolCalls(c).some((t) => t.name === "declare_belief"))).toBe(true);
+			expect(distillContexts.some((c) => contextToolCalls(c).some((t) => t.name === "declare_belief"))).toBe(true);
+			expect(distillContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
+			expect(distillContexts.some((c) => contextText(c).includes("the value persisted"))).toBe(true);
+
+			// finalAnswer semantics are unchanged: no thinking and no belief tool calls.
+			const finalAnswerContexts = harness.faux.contexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("writing the conclusion"),
+			);
+			expect(finalAnswerContexts.length).toBeGreaterThan(0);
+			for (const c of finalAnswerContexts) {
+				expect(contextThinking(c)).toBe("");
+				expect(contextToolCalls(c).some((t) => t.name === "declare_belief")).toBe(false);
+			}
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("distill turns emit a displayable belief_distillation block", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "RAW_SENSITIVE_OUTPUT" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The distill turn that applied the support update emits a displayable custom block.
+			const blocks = harness
+				.eventsOfType("message_start")
+				.map((e) => e.message)
+				.filter((m): m is CustomMessage => m.role === "custom" && m.customType === "belief_distillation");
+			expect(blocks.length).toBeGreaterThan(0);
+			for (const block of blocks) {
+				expect(block.display).toBe(true);
+				expect(messageText(block)).toContain("Applied support: belief-1");
+			}
+
+			// The block also enters the transcript (same side effect as fast_path_distillation):
+			// the following propose turn's context carries the Applied line as user text.
+			const proposeContexts = harness.faux.contexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the propose role"),
+			);
+			expect(proposeContexts.some((c) => contextText(c).includes("Applied support: belief-1"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("distill turns without declare_belief updates emit no belief_distillation block", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "RAW_SENSITIVE_OUTPUT" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				// Distill runs a read-only turn (no declare_belief) — must emit no block.
+				{ toolCalls: [{ name: "view_beliefs", args: {} }], stopReason: "toolUse" },
+				// Distill then applies the support update — emits exactly one block.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			const blocks = harness
+				.eventsOfType("message_start")
+				.map((e) => e.message)
+				.filter((m): m is CustomMessage => m.role === "custom" && m.customType === "belief_distillation");
+			// The view_beliefs-only distill turn must not produce a block; only the support turn does.
+			expect(blocks.length).toBe(1);
+			expect(messageText(blocks[0])).toContain("Applied support: belief-1");
 		} finally {
 			harness.cleanup();
 		}

@@ -753,12 +753,14 @@ export class AgentSession {
 		// through `view_beliefs`, not raw probe output. The distill role sees the current execution
 		// episode's raw evidence exactly once (above the watermark) to update beliefs on it, then
 		// that detail is masked below the watermark. The probe's tool calls and reasoning are always
-		// elided from both — that is the imitation trigger regardless of age.
+		// elided from both — that is the imitation trigger regardless of age. The epistemic roles'
+		// own plaintext thinking is stripped from both too (the belief bookkeeping is the operated-on
+		// object, not the model's reasoning), so neither view ever receives a `ThinkingContent` block.
 		switch (ROLE_SPECS[role].projection) {
 			case "belief":
-				return this._maskOperationalDetail(message, true, elidedProbeToolCalls);
+				return this._maskOperationalDetail(message, true, elidedProbeToolCalls, true);
 			case "distill":
-				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls);
+				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls, true);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
 			case "finalAnswer": {
@@ -817,6 +819,7 @@ export class AgentSession {
 		message: AgentMessage,
 		maskResult: boolean,
 		elidedProbeToolCalls: Set<string>,
+		stripEpistemicThinking = false,
 	): AgentMessage | undefined {
 		switch (message.role) {
 			case "toolResult":
@@ -842,8 +845,14 @@ export class AgentSession {
 				// The probe (execution) role's assistant turns carry raw operational detail the
 				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
 				// (thinking) and its tool calls. Drop those, but keep the textual report — that is
-				// the distilled uplink the epistemic role updates on.
-				return this._isProbeAssistant(message) ? this._maskProbeAssistant(message) : message;
+				// the distilled uplink the epistemic role updates on. The propose/distill views
+				// additionally strip the epistemic roles' own plaintext thinking (their belief
+				// bookkeeping is what they operate on, not their reasoning), keeping text and every
+				// belief tool call.
+				if (this._isProbeAssistant(message)) {
+					return this._maskProbeAssistant(message);
+				}
+				return stripEpistemicThinking ? this._maskEpistemicThinking(message) : message;
 			default:
 				return message;
 		}
@@ -918,6 +927,15 @@ export class AgentSession {
 		return message.content.some(
 			(block) => block.type === "toolCall" && (block.name === "declare_belief" || block.name === "conclude"),
 		);
+	}
+
+	/** Strip the plaintext thinking blocks from an epistemic-role assistant turn, keeping its
+	 *  text and every tool call (the belief bookkeeping the propose/distill roles operate on).
+	 *  Unlike `_maskEpistemicAssistant`, no belief tool call is dropped — only the `thinking`
+	 *  blocks. Returns undefined when nothing but thinking survives. */
+	private _maskEpistemicThinking(message: AssistantMessage): AssistantMessage | undefined {
+		const content = message.content.filter((block) => block.type !== "thinking");
+		return content.length > 0 ? { ...message, content } : undefined;
 	}
 
 	/** Distill an epistemic-role assistant turn for a role that must not see the belief
@@ -1107,6 +1125,10 @@ export class AgentSession {
 				return { state };
 			}
 			case "distill": {
+				// Surface this distill turn's belief updates as a displayable block in the main UI
+				// (the distill role's own turns carry no plaintext text — thinking is stripped and
+				// updates go through declare_belief), then continue the state machine.
+				await this._emitDistillationBlock(turn);
 				const proposed = this._beliefSet.proposed();
 				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
 				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
@@ -1406,6 +1428,37 @@ export class AgentSession {
 		// Keep framing open; do NOT reset the loop. Route to distill so the model decides, on
 		// the structured tool results, whether to support the outcome and discharge the framing.
 		return { state: { role: "distill" }, steer: TRANSITION_STEERS.fastPathDischarge };
+	}
+
+	/**
+	 * Emit a displayable distillation block for the belief updates the just-finished distill
+	 * turn applied. The distill role's turns carry no plaintext text — its thinking is stripped
+	 * and its updates go through declare_belief — so the main UI gets a block assembled from the
+	 * Applied/Rejected status lines instead. Persisted exactly like `fast_path_distillation` (a
+	 * custom message that also enters the transcript, so later propose/distill projections see it
+	 * as user text), but `display: true` so the chat renders it as a block. No-op when the turn
+	 * applied no belief updates.
+	 */
+	private async _emitDistillationBlock(turn: PrepareNextTurnContext): Promise<void> {
+		const lines: string[] = [];
+		for (const result of turn.toolResults) {
+			if (result.toolName !== "declare_belief") continue;
+			for (const block of result.content) {
+				if (block.type === "text" && block.text.trim().length > 0) {
+					lines.push(block.text);
+				}
+			}
+		}
+		if (lines.length === 0) return;
+		await this.sendCustomMessage(
+			{
+				customType: "belief_distillation",
+				content: lines.map((text) => ({ type: "text", text })),
+				display: true,
+				details: {},
+			},
+			{ triggerTurn: false },
+		);
 	}
 
 	/**

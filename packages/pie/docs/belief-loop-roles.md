@@ -65,12 +65,19 @@ surfaces, model selection, and message projections cannot drift apart.
 | `view_beliefs` scope | `all` | `frame` | `all` | n/a |
 | model | session default | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | session default |
 | thinking | session default | session default | `pie.distillationThinkingLevel` (settings, default `low`) | session default |
-| projection | operational detail masked by watermark; probe calls elided | belief bookkeeping masked (`declare_belief`/`conclude`) | same as `propose` | all operational detail and belief-tool echoes masked |
+| projection | operational detail masked unconditionally; probe calls and epistemic thinking elided | belief bookkeeping masked (`declare_belief`/`conclude`) | like `propose`, except the current episode's raw evidence is shown exactly once above the watermark, then masked; epistemic thinking elided | all operational detail, belief-tool echoes, and thinking masked |
 | output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation of the probe or intervention result | `support`/`refute`/`refine`/`retract` | the conclusion text |
 
 Each row is a `RoleSpec` in `role-specs.ts` (`instruction`, `tools`, `beliefScope`,
 `modelPolicy`, `projection`, `strayToolSteer`). The execution tool list is derived from the
 full active set minus the belief-mutation tools, so custom tools stay available to it.
+
+The propose and distill projections strip plaintext `thinking` from every assistant turn —
+probe reasoning via `_maskProbeAssistant` (with its tool calls), and the epistemic roles' own
+reasoning via `_maskEpistemicThinking` (keeping text and every belief tool call) — so neither
+view ever receives a `ThinkingContent` block. A distill turn that applies belief updates also
+emits a displayable `belief_distillation` custom message (the `Applied`/`Rejected` status
+lines, `display: true`), the in-loop analog of the fast path's `fast_path_distillation` block.
 
 Beliefs must be written in the language configured by `pie.beliefLang` in settings
 (default `English`); the role instructions and belief-tool guidelines substitute it at
