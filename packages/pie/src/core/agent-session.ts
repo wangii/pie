@@ -341,6 +341,7 @@ const REFLECTION_MIN_SETTLED_BELIEFS = 3;
  */
 type LoopState =
 	| { role: "propose" }
+	| { role: "planner" }
 	| { role: "distill" }
 	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
 	| { role: "finalAnswer" };
@@ -357,12 +358,13 @@ export interface RoleStatusSlot {
 }
 
 /**
- * The three belief-loop status slots. `epistemic` covers the propose role only; the distillation
- * and execution slots map to the distill and execution roles. The finalAnswer role and requests
- * outside the belief loop never update a slot (see `getRoleStatus`).
+ * The belief-loop status slots. `epistemic` covers the propose role only; the planner,
+ * distillation, and execution slots map to the planner, distill, and execution roles. The
+ * finalAnswer role and requests outside the belief loop never update a slot (see `getRoleStatus`).
  */
 export interface RoleStatus {
 	epistemic: RoleStatusSlot;
+	planner: RoleStatusSlot;
 	distillation: RoleStatusSlot;
 	execution: RoleStatusSlot;
 }
@@ -430,7 +432,7 @@ export class AgentSession {
 	 * outside the belief loop never update a slot. In-memory only: session entries carry no role, so
 	 * after a reload every slot is empty until the loop produces new assistant messages.
 	 */
-	private _roleCacheHitRate: Partial<Record<"propose" | "distill" | "execution", number>> = {};
+	private _roleCacheHitRate: Partial<Record<"propose" | "planner" | "distill" | "execution", number>> = {};
 
 	/** The current role — the phase discriminator of `_loopState`. */
 	private get _role(): LoopState["role"] {
@@ -732,7 +734,7 @@ export class AgentSession {
 	}
 
 	/** Project the full transcript for an explicit role (used to size each role's context). */
-	private _projectMessagesFor(role: "propose" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
+	private _projectMessagesFor(role: "propose" | "planner" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
 		const elidedProbeToolCalls = this._elidedProbeToolCallIds();
 		return this.agent.state.messages
 			.map((message, index) => this._projectMessage(message, index, role, elidedProbeToolCalls))
@@ -744,7 +746,7 @@ export class AgentSession {
 	private _projectMessage(
 		message: AgentMessage,
 		index: number,
-		role: "propose" | "distill" | "execution" | "finalAnswer",
+		role: "propose" | "planner" | "distill" | "execution" | "finalAnswer",
 		elidedProbeToolCalls: Set<string>,
 	): AgentMessage | undefined {
 		// The projection per role is declared in ROLE_SPECS; the masking helpers below implement
@@ -859,8 +861,8 @@ export class AgentSession {
 	}
 
 	/** A probe (execution) tool is anything outside the belief surface: `declare_belief` /
-	 *  `view_beliefs` / `conclude` mark the epistemic role; anything else (read/bash/grep/…)
-	 *  marks the probe role. */
+	 *  `view_beliefs` / `conclude` mark the belief-side (epistemic) roles; anything else
+	 *  (read/bash/grep/…) marks the probe role. */
 	private _isProbeTool(name: string): boolean {
 		return name !== "declare_belief" && name !== "view_beliefs" && name !== "conclude";
 	}
@@ -1070,8 +1072,13 @@ export class AgentSession {
 				if (concluded) {
 					return this._concludeTransition(state, proposed);
 				}
-				if (undispatched.length > 0) {
-					return this._dispatchToExecution(proposed);
+				if (undispatched.length > 1) {
+					return this._dispatchToPlanner();
+				}
+				if (undispatched.length === 1) {
+					// A single open belief needs no grouping decision — dispatch it directly,
+					// keeping the cheap whole-frame path for singleton frames.
+					return this._dispatchToExecution(undispatched);
 				}
 				// The propose role's routing belief decides this task's path. Each routing belief is
 				// consumed on first evaluation (by id); only the latest unconsumed route decides, so
@@ -1135,10 +1142,14 @@ export class AgentSession {
 				if (concluded) {
 					return this._concludeTransition(state, proposed);
 				}
-				if (undispatched.length > 0) {
+				if (undispatched.length > 1) {
 					// A refine (or an opportunistic propose) during distillation re-opens the frame —
-					// dispatch those fresh beliefs to be probed before returning to propose.
-					return this._dispatchToExecution(proposed);
+					// plan the next batch from the fresh beliefs before returning to propose.
+					return this._dispatchToPlanner();
+				}
+				if (undispatched.length === 1) {
+					// A single remaining open belief needs no grouping decision — dispatch it directly.
+					return this._dispatchToExecution(undispatched);
 				}
 				if (proposed.length > 0 && !ranTools) {
 					// Open beliefs, and the model stopped instead of updating them — nudge it in its
@@ -1158,6 +1169,25 @@ export class AgentSession {
 					state: { role: "propose" },
 					steer: TRANSITION_STEERS.deepenOrConclude,
 				};
+			}
+			case "planner": {
+				// The planner's direct `Batch:` output names the next batch. Validate against the
+				// current open set and the dispatch ledger: only open, not-yet-dispatched beliefs
+				// may be dispatched; anything else (no Batch line, an empty or stale selection)
+				// falls back to the whole-frame dispatch. The selection is surfaced to the main UI
+				// as a `batchSelection` block (custom message pipeline).
+				const proposed = this._beliefSet.proposed();
+				const undispatched = proposed.filter((b) => !this._dispatchedFrameIds.has(b.id));
+				const selected = this._readBatchSelection(turn);
+				if (selected) {
+					const selectedSet = new Set(selected);
+					const batch = undispatched.filter((b) => selectedSet.has(b.id));
+					if (batch.length > 0) {
+						this._emitBatchSelectionBlock(batch);
+						return this._dispatchToExecution(batch);
+					}
+				}
+				return this._dispatchToExecution(proposed);
 			}
 			case "execution": {
 				const frameHorizon = state.frameHorizon - turn.toolResults.length;
@@ -1324,6 +1354,50 @@ export class AgentSession {
 		}
 		lines.push("</final_answer_context>");
 		return lines.join("\n");
+	}
+
+	/** Route the remaining open beliefs to the planner role, which selects the next batch. */
+	private _dispatchToPlanner(): { state: LoopState; steer: string } {
+		return {
+			state: { role: "planner" },
+			steer: TRANSITION_STEERS.planBatch(),
+		};
+	}
+
+	/** Read the planner's direct output: the belief ids named on its `Batch:` line, or undefined
+	 *  when the turn made no parseable selection. */
+	private _readBatchSelection(turn: PrepareNextTurnContext): string[] | undefined {
+		const text = (turn.message.content ?? []).map((block) => (block.type === "text" ? block.text : "")).join(" ");
+		const match = text.match(/Batch:\s*([^\n]+)/);
+		if (!match) return undefined;
+		const ids = match[1]
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean);
+		return ids.length > 0 ? ids : undefined;
+	}
+
+	/** Surface the accepted batch to the main UI as a `batchSelection` block via the custom message
+	 *  pipeline: persist the entry (survives session reload) and emit start/end so the UI renders it
+	 *  once. The planner role has no tools, so its plain `Batch:` line is the only selection record; */
+	private _emitBatchSelectionBlock(batch: Belief[]): void {
+		const ids = batch.map((b) => b.id);
+		const message: CustomMessage<{ beliefIds: string[] }> = {
+			role: "custom",
+			customType: "batchSelection",
+			content: `Selected batch: ${ids.join(", ")}`,
+			display: true,
+			details: { beliefIds: ids },
+			timestamp: Date.now(),
+		};
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+		);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
 	}
 
 	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
@@ -1627,10 +1701,12 @@ export class AgentSession {
 	 * (`defaultModel`). Only the next request's model is overridden — `state.model` is left
 	 * untouched so footer/compaction/context-window keep the main model as their baseline.
 	 */
-	private _roleModelFor(role: "propose" | "distill" | "execution" | "finalAnswer"): Model<any> | undefined {
+	private _roleModelFor(
+		role: "propose" | "planner" | "distill" | "execution" | "finalAnswer",
+	): Model<any> | undefined {
 		if (this._beliefSetUsable) {
-			// The model policy per role is declared in ROLE_SPECS; only execution and distill
-			// may run on separately configured models from settings. The fast path runs the
+			// The model policy per role is declared in ROLE_SPECS; only execution, distill, and the
+			// planner may run on separately configured models from settings. The fast path runs the
 			// execution role on `pie.fastPathModel`; the first propose turn of a task (its
 			// routing turn) runs on the configured `defaultModel` rather than the session model.
 			const policy = ROLE_SPECS[role].modelPolicy;
@@ -1642,6 +1718,8 @@ export class AgentSession {
 						: this.settingsManager.getExecutionModel();
 			} else if (policy === "distillation") {
 				spec = this.settingsManager.getDistillationModel();
+			} else if (policy === "planner") {
+				spec = this.settingsManager.getPlannerModel();
 			} else if (role === "propose" && this._beliefSet.beliefs.length === this._beliefsAtTaskReset) {
 				// The routing turn of a fresh task judges on the configured default model.
 				spec = this.settingsManager.getDefaultModel();
@@ -1685,7 +1763,18 @@ export class AgentSession {
 				toolSnippets: snippets,
 				promptGuidelines: guidelines,
 			});
-		return base + this._roleInstruction();
+		let prompt = base + this._roleInstruction();
+		// The planner has no tools, so the open beliefs cannot be handed to it through
+		// `view_beliefs`. They are injected here, scoped to the planner's own system prompt:
+		// putting them in the shared steer would leak every open statement into the execution
+		// episode's transcript (the dispatch steer already names the batch).
+		if (this._role === "planner") {
+			const open = this._beliefSet.proposed().filter((b) => !this._dispatchedFrameIds.has(b.id));
+			if (open.length > 0) {
+				prompt += `\n\nOpen beliefs:\n${open.map((b) => `${b.id}: ${b.statement}`).join("\n")}`;
+			}
+		}
+		return prompt;
 	}
 
 	/** Substitute the configured belief language into prompt text placeholders. */
@@ -1783,6 +1872,28 @@ export class AgentSession {
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
+	/** The event as surfaced to the UI and extensions: the planner role's raw selection text is
+	 *  withheld because the accepted batch is displayed as a dedicated `batchSelection` block
+	 *  (`_emitBatchSelectionBlock`); showing both would duplicate the selection in the chat. The
+	 *  transcript itself keeps the full text (the next `_advanceRole` parses the `Batch:` line from
+	 *  it), so only the forwarded copies are filtered. */
+	private _displayEvent(event: AgentEvent): AgentEvent {
+		if (
+			this._role === "planner" &&
+			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+			event.message.role === "assistant"
+		) {
+			return {
+				...event,
+				message: {
+					...event.message,
+					content: event.message.content.filter((block) => block.type === "toolCall"),
+				},
+			};
+		}
+		return event;
+	}
+
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
@@ -1808,10 +1919,15 @@ export class AgentSession {
 		}
 
 		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		const displayEvent = this._displayEvent(event);
+		await this._emitExtensionEvent(displayEvent);
 
 		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		this._emit(
+			displayEvent.type === "agent_end"
+				? { ...displayEvent, willRetry: this._willRetryAfterAgentEnd(displayEvent) }
+				: displayEvent,
+		);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -4541,6 +4657,10 @@ export class AgentSession {
 			epistemic: {
 				model: this._roleModelFor("propose"),
 				latestCacheHitRate: this._roleCacheHitRate.propose,
+			},
+			planner: {
+				model: this._roleModelFor("planner"),
+				latestCacheHitRate: this._roleCacheHitRate.planner,
 			},
 			distillation: {
 				model: this._roleModelFor("distill"),

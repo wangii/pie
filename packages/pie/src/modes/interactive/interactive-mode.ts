@@ -6386,6 +6386,7 @@ export class InteractiveMode {
 		if (roleStatus) {
 			info += `\n${theme.bold("Belief Loop")}\n`;
 			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Epistemic", roleStatus.epistemic)}\n`;
+			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Planner", roleStatus.planner)}\n`;
 			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Distillation", roleStatus.distillation)}\n`;
 			info += `${formatRoleSlotLine((t) => theme.fg("dim", t), "Execution", roleStatus.execution)}\n`;
 		}

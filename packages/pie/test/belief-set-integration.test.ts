@@ -1,12 +1,16 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, test } from "vitest";
 import { BeliefSet, statusOf } from "../src/core/belief-set.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
-import { createHarness, type FauxResponse, type FauxResponseInput } from "./test-harness.ts";
+import { createHarness, type FauxResponse, type FauxResponseInput, fauxModel } from "./test-harness.ts";
 
-function messageText(message: { content: unknown }): string {
-	const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
+function messageText(message: unknown): string {
+	const content = (message as { content?: string | Array<{ type: string; text?: string }> }).content;
+	if (content === undefined) {
+		return "";
+	}
 	if (typeof content === "string") {
 		return content;
 	}
@@ -123,10 +127,12 @@ describe("declare_belief integration", () => {
 			const roleStatus = harness.session.getRoleStatus();
 			expect(roleStatus).toBeDefined();
 			expect(roleStatus!.epistemic.model).toBeDefined();
+			expect(roleStatus!.planner.model).toBeDefined();
 			expect(roleStatus!.distillation.model).toBeDefined();
 			expect(roleStatus!.execution.model).toBeDefined();
 			// No requests have completed yet, so no role has a cache hit rate.
 			expect(roleStatus!.epistemic.latestCacheHitRate).toBeUndefined();
+			expect(roleStatus!.planner.latestCacheHitRate).toBeUndefined();
 			expect(roleStatus!.distillation.latestCacheHitRate).toBeUndefined();
 			expect(roleStatus!.execution.latestCacheHitRate).toBeUndefined();
 		} finally {
@@ -696,6 +702,8 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
+				// Planner: one batch for this turn.
+				"Batch: belief-1, belief-2",
 				// Execution: probe.
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				// Execution: distilled sentence.
@@ -725,6 +733,407 @@ describe("declare_belief integration", () => {
 
 			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
 			expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("planner splits a frame into sequential batches; each execution episode sees only its batch", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose THREE beliefs in one turn.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "logout clears the token",
+								domain: "product",
+								expectation: "the token is gone",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Planner round 1: batch = belief-1 only.
+				"Batch: belief-1",
+				// Execution: probe belief-1.
+				{ toolCalls: [{ name: "echo", args: { text: "probe one" } }], stopReason: "toolUse" },
+				"the value persisted",
+				// Epistemic: settle belief-1 only.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Planner round 2: re-planned from the latest open set — batch = belief-2 only.
+				"Batch: belief-2",
+				// Execution: probe belief-2.
+				{ toolCalls: [{ name: "echo", args: { text: "probe two" } }], stopReason: "toolUse" },
+				"no session reuse observed",
+				// Epistemic: settle belief-2.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// A single remaining open belief (belief-3) needs no grouping decision: it is
+				// dispatched directly, skipping the planner.
+				{ toolCalls: [{ name: "echo", args: { text: "probe three" } }], stopReason: "toolUse" },
+				"the token was cleared",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-3", evidence: "the token was cleared" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+			expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
+			expect(harness.session.beliefs.find((b) => b.id === "belief-3")?.supportedBy).toHaveLength(1);
+
+			// Exactly two planner turns (round 1 and round 2); the singleton belief-3 skipped it.
+			const plannerContexts = harness.faux.contexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are the planner role"),
+			);
+			expect(plannerContexts).toHaveLength(2);
+			// The open beliefs (id + statement) are injected into the planner's system prompt —
+			// round 1 lists all three open beliefs; round 2 is re-planned from the latest open set
+			// (belief-2 and belief-3 — belief-1 is settled).
+			const plannerText = (c: { systemPrompt?: string; messages: Array<{ content: unknown }> }) =>
+				(c.systemPrompt ?? "") + contextText(c);
+			expect(plannerText(plannerContexts[0])).toContain("belief-1");
+			expect(plannerText(plannerContexts[0])).toContain("belief-2");
+			expect(plannerText(plannerContexts[0])).toContain("belief-3");
+			expect(plannerText(plannerContexts[1])).toContain("belief-2");
+			expect(plannerText(plannerContexts[1])).toContain("belief-3");
+
+			// Each execution episode has two turns (probe + report); the dispatch steer per
+			// episode names only that batch's statement.
+			const executionContexts = harness.faux.contexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are a scientific mind running an experiment"),
+			);
+			expect(executionContexts).toHaveLength(6);
+			expect(contextText(executionContexts[0])).toContain("the cache survives logout");
+			expect(contextText(executionContexts[0])).not.toContain("login is stateless");
+			expect(contextText(executionContexts[0])).not.toContain("logout clears the token");
+			expect(contextText(executionContexts[2])).toContain("login is stateless");
+			expect(contextText(executionContexts[4])).toContain("logout clears the token");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("planner with no parseable Batch line falls back to the whole-frame dispatch", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose TWO beliefs in one turn.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Planner: no Batch line — answers in plain text instead.
+				"I'll probe them together.",
+				// Execution: whole-frame fallback probes both beliefs.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				// Epistemic: settle both beliefs.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
+			expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
+
+			// The planner turn named no batch, so the whole frame was dispatched: the
+			// execution steer names both beliefs. (Each episode has a probe turn and a report
+			// turn, hence two execution contexts.)
+			const executionContexts = harness.faux.contexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("You are a scientific mind running an experiment"),
+			);
+			expect(executionContexts).toHaveLength(2);
+			expect(contextText(executionContexts[0])).toContain("the cache survives logout");
+			expect(contextText(executionContexts[0])).toContain("login is stateless");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("batch selection surfaces once as a batchSelection block; the planner's raw text is withheld", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Epistemic: propose TWO beliefs in one turn.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Planner: one batch for this turn.
+				"Batch: belief-1, belief-2",
+				// Execution: probe.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				// Epistemic: settle both beliefs.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				// finalAnswer.
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// Exactly one batchSelection block per planner selection, carrying the chosen ids.
+			const batchBlocks = harness
+				.eventsOfType("message_start")
+				.filter((e) => e.message.role === "custom" && (e.message as CustomMessage).customType === "batchSelection");
+			expect(batchBlocks).toHaveLength(1);
+			expect(messageText(batchBlocks[0].message)).toContain("belief-1");
+			expect(messageText(batchBlocks[0].message)).toContain("belief-2");
+
+			// The planner's raw `Batch:` line is withheld from the chat (it is surfaced only as
+			// the block above): no assistant message event carries it.
+			const assistantText = harness
+				.eventsOfType("message_start")
+				.filter((e) => e.message.role === "assistant")
+				.map((e) => messageText(e.message))
+				.join("\n");
+			expect(assistantText).not.toContain("Batch:");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("planner batch selection runs on pie.plannerModel when configured", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+		// A second model under the same faux provider; `pie.plannerModel` points at it so the
+		// planner turn's request is distinguishable from the session model.
+		const plannerModel: Model<any> = { ...fauxModel, id: "faux-planner" };
+
+		const harness = await createHarness({
+			baseToolsOverride: { echo: echoTool },
+			extraModels: [plannerModel],
+			settings: { pie: { plannerModel: "faux/faux-planner" } },
+			responses: [
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "login is stateless",
+								domain: "product",
+								expectation: "no session reuse",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				"Batch: belief-1, belief-2",
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				"the value persisted",
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-2", evidence: "no session reuse observed" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				"done",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			// The planner turn's request carries the configured model; execution keeps the session model.
+			const plannerIdx = harness.faux.contexts.findIndex((c) =>
+				(c.systemPrompt ?? "").includes("You are the planner role"),
+			);
+			expect(plannerIdx).toBeGreaterThanOrEqual(0);
+			expect(harness.faux.models[plannerIdx]).toBe("faux-planner");
+
+			const executionIdx = harness.faux.contexts.findIndex((c) =>
+				(c.systemPrompt ?? "").includes("You are a scientific mind running an experiment"),
+			);
+			expect(executionIdx).toBeGreaterThanOrEqual(0);
+			expect(harness.faux.models[executionIdx]).toBe("faux-1");
 		} finally {
 			harness.cleanup();
 		}
@@ -1612,6 +2021,8 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
+				// Planner: one batch for this turn.
+				"Batch: belief-1, belief-2, belief-3",
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				"the value persisted",
 				// Epistemic: settle all three beliefs.
@@ -1645,7 +2056,7 @@ describe("declare_belief integration", () => {
 
 			// The turn after the first conclude is still epistemic (declare_belief present) and
 			// carries the reflection steer, which treats the belief set as the object.
-			const reflectionContext = harness.faux.contexts[5];
+			const reflectionContext = harness.faux.contexts[6];
 			expect(contextToolNames(reflectionContext)).toContain("declare_belief");
 			expect(contextText(reflectionContext)).toContain("reflect on the belief set");
 			expect(contextText(reflectionContext)).toContain("Coverage");
@@ -1841,6 +2252,8 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
+				// Planner: one batch for this turn.
+				"Batch: belief-1, belief-2, belief-3",
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				"the value persisted",
 				{

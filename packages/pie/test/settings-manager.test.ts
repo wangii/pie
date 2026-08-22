@@ -241,6 +241,24 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("plannerModel", () => {
+		it("returns the configured planner model", () => {
+			expect(SettingsManager.inMemory({ pie: { plannerModel: "claude-haiku-4-5" } }).getPlannerModel()).toBe(
+				"claude-haiku-4-5",
+			);
+		});
+
+		it("defaults to defaultModel when not configured", () => {
+			expect(SettingsManager.inMemory({ defaultModel: "deepseek-v4-pro" }).getPlannerModel()).toBe(
+				"deepseek-v4-pro",
+			);
+		});
+
+		it("is undefined when neither plannerModel nor defaultModel is configured", () => {
+			expect(SettingsManager.inMemory().getPlannerModel()).toBeUndefined();
+		});
+	});
+
 	describe("distillationThinkingLevel", () => {
 		it("defaults to low when not configured", () => {
 			expect(SettingsManager.inMemory().getDistillationThinkingLevel()).toBe("low");

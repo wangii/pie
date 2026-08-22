@@ -221,7 +221,7 @@ export class FooterComponent implements Component {
 		const modelName = state.model?.id || "no-model";
 		let rightSideWithoutProvider: string;
 		if (roleStatus) {
-			rightSideWithoutProvider = `${formatRoleUnit("epi", roleStatus.epistemic)} · ${formatRoleUnit("dist", roleStatus.distillation)} · ${formatRoleUnit("exec", roleStatus.execution)}`;
+			rightSideWithoutProvider = `${formatRoleUnit("epi", roleStatus.epistemic)} · ${formatRoleUnit("plan", roleStatus.planner)} · ${formatRoleUnit("dist", roleStatus.distillation)} · ${formatRoleUnit("exec", roleStatus.execution)}`;
 			if (state.model?.reasoning) {
 				const thinkingLevel = state.thinkingLevel || "off";
 				rightSideWithoutProvider += ` • ${thinkingLevel === "off" ? "thinking off" : thinkingLevel}`;

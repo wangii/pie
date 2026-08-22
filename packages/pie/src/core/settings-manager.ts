@@ -103,6 +103,11 @@ export interface PieSettings {
 	/** The language belief-set prompts must write in. Defaults to "English". */
 	beliefLang?: string;
 	/**
+	 * Model for the belief loop's planner step (batch selection). Defaults to `defaultModel`.
+	 * The planner groups the open beliefs into the next execution batch; this setting picks the
+	 * model that call runs on. */
+	plannerModel?: string;
+	/**
 	 * Model for fast-path execution: a request routed to the fast path runs its execution on this
 	 * model instead of `executionModel`/the session model. Unset means "use the session model". */
 	fastPathModel?: string;
@@ -750,6 +755,10 @@ export class SettingsManager {
 
 	getDistillationModel(): string | undefined {
 		return this.settings.pie?.distillationModel ?? this.settings.defaultModel;
+	}
+
+	getPlannerModel(): string | undefined {
+		return this.settings.pie?.plannerModel ?? this.settings.defaultModel;
 	}
 
 	getDistillationThinkingLevel(): ThinkingLevel {

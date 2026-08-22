@@ -6,7 +6,8 @@ Pie 是一个以四阶段信念循环为核心、默认启用的可自我扩展�
 Pie is a self-extensible coding agent whose core is a default-enabled four-phase belief loop; the other workspaces only provide generic support.
 
 
-- **四阶段信念循环（Four-phase belief loop）**：propose → execution → distill → finalAnswer，由 ROLE_SPECS/TRANSITION_STEERS 单一权威源驱动，默认启用。The four phases are driven by the single source of truth ROLE_SPECS/TRANSITION_STEERS and are enabled by default.
+- **四阶段信念循环（Four-phase belief loop）**：propose → planner → execution → distill → finalAnswer，由 ROLE_SPECS/TRANSITION_STEERS 单一权威源驱动，默认启用。The phases are driven by the single source of truth ROLE_SPECS/TRANSITION_STEERS and are enabled by default.
+- **批次规划器（Batch planner）**：open beliefs 由 planner 角色按相关性（共享探测目标、工具/skill、依赖、副作用、相近 evidence rounds）合并为一次一个 execution batch，批次选择运行在 `pie.plannerModel`（默认 `defaultModel`）；planner 无工具，open beliefs 直接注入、以一行 `Batch:` 输出选择；单 belief 或无有效选择时回退整帧直通。The planner role groups the open beliefs into one execution batch per turn on `pie.plannerModel` (default `defaultModel`); it has no tools — the open beliefs are injected directly and it replies with one `Batch:` line; a single open belief or a failed selection falls back to the whole-frame dispatch.
 - **角色级隔离（Role-level isolation）**：每阶段的指令、工具面、模型选择与消息投影互相隔离，越权工具调用会被纠正。Each phase keeps its instruction, tool surface, model choice, and message projection isolated; out-of-surface tool calls are steered back.
 - **证据水位线（Evidence watermark）**：原始证据只向蒸馏角色展示一次，随后被掩码，抑制上下文污染。Raw evidence is shown to the distill role exactly once, then masked, curbing context pollution.
 - **执行租约（Execution lease）**：探测帧有工具轮次上限（ceil(Σ证据轮数×1.3)），先提醒后强制返回。Each probe frame has a tool-call budget (ceil(Σ evidence rounds × 1.3)); it nudges once, then forces the return.
@@ -29,22 +30,24 @@ Built on top of Pi: https://pi.dev
 
 ## 项目思想：四阶段信念循环（The project idea: the four-phase belief loop）
 
-Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 pie 包（`packages/pie`）实现并默认启用（`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。四个阶段由 `packages/pie/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
+Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 pie 包（`packages/pie`）实现并默认启用（`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。五个阶段由 `packages/pie/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
 
 | 阶段 | 职责 |
 |------|------|
 | `propose`（提议） | 决定测试什么；提出信念（statement/expectation/evidence）与框架义务（framing obligation） |
+| `planner`（规划） | 把 open beliefs 合并为下一个 execution batch（一次一个 batch；无有效选择时整帧回退） |
 | `execution`（执行） | 先观察探测；当用户意图要求实际修改时，以最小编辑作为检验信念的干预实验并验证，再报告一句原始观察 |
 | `distill`（蒸馏） | 做预测误差蒸馏（prediction-error distillation）：先用既有信念解释观察，再只对残差更新信念 |
 | `finalAnswer`（终答） | 依据注入的信念快照写出结论，无工具 |
 
 信念按指称类型打标签：`[code]`（实现）、`[prod]`（产品行为或文档声明）、`[user]`（用户意图/需求）、`[convention]`（仓库惯例）。信念本身用 `pie.beliefLang` 指定的语言书写（默认 `English`）。`/bs` 命令可查看当前信念集，`/thinking` 可设置思考级别。详见 [belief-loop-roles.md](packages/pie/docs/belief-loop-roles.md)。
 
-The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the pie package (`packages/pie`) — `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four phases are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/pie/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
+The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the pie package (`packages/pie`) — `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four belief phases plus the batching planner step are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/pie/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
 
 | Phase | Job |
 |-------|-----|
 | `propose` | Decides what to test; proposes beliefs (statement/expectation/evidence) and framing obligations |
+| `planner` | Groups the open beliefs into the next execution batch (one batch per turn; whole-frame fallback on no valid selection) |
 | `execution` | Probes by observation first; when the intended outcome requires an actual change, makes the smallest edit as an intervention experiment, verifies it, then reports one raw observation sentence |
 | `distill` | Performs prediction-error distillation: explains the observation with current beliefs first, then updates only on the residual |
 | `finalAnswer` | Writes the conclusion from the injected belief snapshot; no tools |

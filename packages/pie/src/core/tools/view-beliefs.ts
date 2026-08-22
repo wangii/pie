@@ -15,7 +15,7 @@ const viewBeliefsSchema = Type.Object({});
 
 export function createViewBeliefsToolDefinition(
 	beliefSet: BeliefSet,
-	currentRole: () => "propose" | "distill" | "execution" | "finalAnswer" = () => "propose",
+	currentRole: () => "propose" | "planner" | "distill" | "execution" | "finalAnswer" = () => "propose",
 ): ToolDefinition<typeof viewBeliefsSchema, undefined> {
 	return {
 		name: "view_beliefs",

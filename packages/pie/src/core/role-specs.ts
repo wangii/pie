@@ -16,10 +16,11 @@
  * instruction.
  */
 
-export type LoopRole = "propose" | "distill" | "execution" | "finalAnswer";
+export type LoopRole = "propose" | "planner" | "distill" | "execution" | "finalAnswer";
 
-/** Which model the role runs on: the session's main model, the configured execution model, or the distillation model. */
-export type ModelPolicy = "default" | "execution" | "distillation";
+/** Which model the role runs on: the session's main model, the configured execution model, the
+ *  configured planner model, or the distillation model. */
+export type ModelPolicy = "default" | "execution" | "distillation" | "planner";
 
 /** Which message projection the role's context uses (see `_projectMessage`). */
 export type ProjectionKind = "belief" | "distill" | "execution" | "finalAnswer";
@@ -54,7 +55,7 @@ export interface RoleSpec {
 
 /** Shared propose role header: who the role is, its tools, and the belief language. */
 const PROPOSE_ROLE_HEADER =
-	"\n\nYou are the propose role of the four-phase investigation loop (propose → execution → distill → finalAnswer). You work entirely through beliefs: " +
+	"\n\nYou are the propose role of the four-phase investigation loop (propose → planner → execution → distill → finalAnswer). You work entirely through beliefs: " +
 	"you decide what to test and what to conclude, while a separate execution role performs the actual " +
 	"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
 	"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
@@ -121,13 +122,27 @@ const PROPOSE_PROTOCOL =
 	"change with proportionate verification of its result, or (b) a concrete blocker observed after " +
 	"a reasonable execution attempt. A plan, a list of intended changes, or a claim about what should " +
 	"work does not discharge that obligation.\n" +
-	"2. After you propose a belief, the execution role runs the probe automatically and reports back " +
-	"what it observed, and a separate distill step accounts for that report and updates the beliefs. " +
+	"2. After you propose a belief, the planner role groups the open beliefs into the next execution batch, the execution role " +
+	"runs the probe automatically and reports back what it observed, and a separate distill step accounts for that report " +
+	"and updates the beliefs. " +
 	"You never do the probing and you never do that accounting — you only state what should be tested " +
 	"and then decide what to test next.\n" +
 	"3. Keep proposing beliefs until the task is fully answered, close every open framing obligation " +
 	"(support, refine, or retract it via declare_belief), then call conclude — in the same turn " +
 	"as your final belief update when nothing remains to test.";
+
+/** Shared planner role header: who the role is, its tools, and what a batch is. The open beliefs
+ *  are handed to the planner in its system prompt (role-scoped, so their statements never leak into
+ *  other roles' transcripts) — it has no tools, so its plain-text reply *is* the batch selection. */
+const PLANNER_ROLE_HEADER =
+	"\n\nYou are the planner role of the belief-loop investigation (propose → planner → execution → distill → finalAnswer). " +
+	"The propose role has declared open beliefs (listed at the end of this prompt); your job is to decide which subset of " +
+	"them becomes the next execution batch — exactly one batch per turn. Group beliefs that one execution episode can probe " +
+	"together coherently: shared probe target or code locality, the same tools or skills, evidence dependencies, compatible " +
+	"side effects, and similar evidence rounds. Plan one batch only — the remaining open beliefs are planned after this " +
+	"batch is settled. You only group beliefs; you never probe and never update them. You have no tools: reply with exactly " +
+	"one line starting with `Batch:` followed by the selected belief ids, comma-separated — nothing else. Write any text in " +
+	"{beliefLang}.\n\n";
 
 export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	propose: {
@@ -143,9 +158,20 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			`the probe automatically after you propose a belief; express what you wanted to inspect as a ` +
 			`declare_belief proposal instead.`,
 	},
+	planner: {
+		instruction: PLANNER_ROLE_HEADER,
+		tools: [],
+		beliefScope: "frame",
+		modelPolicy: "planner",
+		projection: "belief",
+		strayToolSteer: (names) =>
+			`You tried to call ${names}, but the planner role has no tools. Reply with exactly one line ` +
+			`starting with \`Batch:\` listing the selected belief ids — nothing else. A separate execution ` +
+			`role runs the probes; you only group beliefs.`,
+	},
 	distill: {
 		instruction:
-			"\n\nYou are the distill role of the four-phase investigation loop (propose → execution → distill → finalAnswer). The execution role has just probed " +
+			"\n\nYou are the distill role of the four-phase investigation loop (propose → planner → execution → distill → finalAnswer). The execution role has just probed " +
 			"and reported its raw observation; your job is the prediction-error distillation that turns that " +
 			"observation into what the belief set must update on. Your only tools are declare_belief, " +
 			"view_beliefs, and conclude — exactly these three, and nothing else. Write every belief in {beliefLang}.\n\n" +
@@ -221,7 +247,19 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
  * picks the matching steer text here, so prompt drift is contained to one table.
  */
 export const TRANSITION_STEERS = {
-	/** propose/distill → execution: dispatch the open frame. */
+	/** propose/distill → planner: plan the next single batch from the open beliefs. The steer stays
+	 *  neutral — the open beliefs (id + statement) are injected into the planner's system prompt
+	 *  instead, so their statements do not leak into the shared transcript or the execution
+	 *  episode's context. The planner's plain-text `Batch:` reply is the selection. */
+	planBatch: () =>
+		`Plan the next execution batch: the open beliefs are listed at the end of your system prompt. Choose a coherent ` +
+		`subset of them as the next batch — exactly one batch, grouping beliefs that one execution episode can probe together ` +
+		`(shared probe target, tools/skills, dependencies, compatible side effects, similar evidence rounds). Reply with ` +
+		`exactly one line starting with \`Batch:\` followed by the selected belief ids, comma-separated — nothing else. ` +
+		`The remaining open beliefs will be planned after this batch is settled. If the open beliefs are all closely ` +
+		`related, select them all.`,
+	/** propose/distill/planner → execution: dispatch the open frame, the selected batch, or the
+	 *  whole-frame fallback (the planner case and the singleton direct dispatch both use this). */
 	dispatch: (statements: string) => `Run the experiments for the beliefs ${statements} and report your observations.`,
 	/** propose → execution on the fast path: execute the request directly and answer. */
 	fastPathDispatch:

@@ -275,6 +275,8 @@ export interface FauxStreamFnState {
 	callCount: number;
 	/** The context passed to each call, in order. */
 	contexts: Context[];
+	/** The model passed to each call, in order (same index as `contexts`). */
+	models: string[];
 }
 
 /**
@@ -293,12 +295,13 @@ export function createFauxStreamFn(responses: FauxResponseInput[]): {
 		throw new Error("createFauxStreamFn requires at least one response");
 	}
 
-	const state: FauxStreamFnState = { callCount: 0, contexts: [] };
+	const state: FauxStreamFnState = { callCount: 0, contexts: [], models: [] };
 
-	const streamFn = (_model: Model<any>, context: Context, _options?: SimpleStreamOptions) => {
+	const streamFn = (model: Model<any>, context: Context, _options?: SimpleStreamOptions) => {
 		const index = state.callCount % responses.length;
 		state.callCount++;
 		state.contexts.push(context);
+		state.models.push(model.id);
 
 		const resp = normalizeResponse(responses[index]);
 		const message = buildAssistantMessage(resp);
@@ -329,6 +332,8 @@ export interface HarnessOptions {
 	responses?: FauxResponseInput[];
 	/** Model to use. Default: fauxModel. */
 	model?: Model<any>;
+	/** Additional models to register in the model registry (e.g. a distinct planner model). */
+	extraModels?: Model<any>[];
 	/** Context window override (applied to the model). */
 	contextWindow?: number;
 	/** Settings overrides (retry, compaction, etc.). */
@@ -401,23 +406,26 @@ async function createHarnessWithResourceLoader(
 		[model.provider]: { type: "api_key", key: "faux-key" },
 	});
 	const modelRegistry = await createInMemoryModelRegistry(authStorage);
-	modelRegistry.registerProvider(model.provider, {
-		baseUrl: model.baseUrl,
-		api: model.api,
-		models: [
-			{
-				id: model.id,
-				name: model.name,
-				api: model.api,
-				reasoning: model.reasoning,
-				input: model.input,
-				cost: model.cost,
-				contextWindow: model.contextWindow,
-				maxTokens: model.maxTokens,
-				baseUrl: model.baseUrl,
-			},
-		],
-	});
+	const registeredModels = [model, ...(options.extraModels ?? [])];
+	for (const registered of registeredModels) {
+		modelRegistry.registerProvider(registered.provider, {
+			baseUrl: registered.baseUrl,
+			api: registered.api,
+			models: [
+				{
+					id: registered.id,
+					name: registered.name,
+					api: registered.api,
+					reasoning: registered.reasoning,
+					input: registered.input,
+					cost: registered.cost,
+					contextWindow: registered.contextWindow,
+					maxTokens: registered.maxTokens,
+					baseUrl: registered.baseUrl,
+				},
+			],
+		});
+	}
 
 	const session = new AgentSession({
 		agent,

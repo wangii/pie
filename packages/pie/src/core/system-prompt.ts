@@ -14,7 +14,7 @@ import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "
  * tools but must not be distracted by the pi-docs block, which is unrelated to the belief
  * it is probing.
  */
-export type SystemPromptRole = "coding" | "propose" | "distill" | "execution" | "finalAnswer";
+export type SystemPromptRole = "coding" | "propose" | "planner" | "distill" | "execution" | "finalAnswer";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -142,11 +142,13 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const preamble =
 		role === "propose" || role === "distill"
 			? "You are a scientific mind investigating a task by forming and testing beliefs about the product and code."
-			: role === "execution"
-				? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."
-				: role === "finalAnswer"
-					? "You are a scientific mind concluding an investigation and answering the user's task."
-					: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
+			: role === "planner"
+				? "You are the batching planner of a belief-loop investigation: you group the open beliefs into the next execution batch."
+				: role === "execution"
+					? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."
+					: role === "finalAnswer"
+						? "You are a scientific mind concluding an investigation and answering the user's task."
+						: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 
 	let prompt = `${preamble}
 

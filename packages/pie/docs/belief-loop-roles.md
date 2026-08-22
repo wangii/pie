@@ -3,9 +3,11 @@
 > **Status: current.** Describes the implemented loop in `agent-session.ts`,
 > `role-specs.ts`, `belief-set.ts`, and the belief tools.
 
-The belief loop has four phases. Their policy is declared centrally in
-`src/core/role-specs.ts` (`ROLE_SPECS` + `TRANSITION_STEERS`) so prompts, tool
-surfaces, model selection, and message projections cannot drift apart.
+The belief loop has four phases plus a batching planner step between propose and
+execution (propose → planner → execution → distill → finalAnswer). Their policy is
+declared centrally in `src/core/role-specs.ts` (`ROLE_SPECS` + `TRANSITION_STEERS`)
+so prompts, tool surfaces, model selection, and message projections cannot drift
+apart.
 
 > **Fast path.** A request may skip this loop. The propose role's first turn declares a
 > `route` belief (op `route`, domain `routing`) with a `decision`, `suitabilityProbability`,
@@ -53,17 +55,18 @@ surfaces, model selection, and message projections cannot drift apart.
 |---|---|---|
 | `epistemic` (old single role) | `propose` + `distill` | the belief-side pair; `epistemic` survives only as a deprecated key in `getRoleContextUsage` |
 | `two-role loop` | four-phase loop | the loop has four phases, not two |
+| — | `planner` | groups the open beliefs into one execution batch per turn (direct `Batch:` output; no tools); a single open belief or a failed selection falls back to the whole-frame dispatch |
 | — | `execution` | probes by observation or minimal intervention and reports raw observations |
 | — | `finalAnswer` | writes the conclusion from the injected snapshot |
 
-## The four roles
+## The five roles
 
-| | `propose` | `execution` | `distill` | `finalAnswer` |
-|---|---|---|---|---|
-| job | decide what to test; open/close framing obligations | probe the belief's referent; intervene minimally when the intended outcome requires an actual change | turn the observation into belief updates | write the conclusion |
-| tools | `declare_belief` `view_beliefs` `conclude` | all active tools except `declare_belief`/`conclude` + `view_beliefs` | `declare_belief` `view_beliefs` `conclude` | none |
-| `view_beliefs` scope | `all` | `frame` | `all` | n/a |
-| model | session default | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | session default |
+| | `propose` | `planner` | `execution` | `distill` | `finalAnswer` |
+|---|---|---|---|---|---|
+| job | decide what to test; open/close framing obligations | group the open beliefs into the next execution batch (one batch per turn) | probe the belief's referent; intervene minimally when the intended outcome requires an actual change | turn the observation into belief updates | write the conclusion |
+| tools | `declare_belief` `view_beliefs` `conclude` | none (open beliefs injected directly) | all active tools except `declare_belief`/`conclude` + `view_beliefs` | `declare_belief` `view_beliefs` `conclude` | none |
+| `view_beliefs` scope | `all` | n/a | `frame` | `all` | n/a |
+| model | session default | `pie.plannerModel` (settings) | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | session default |
 | thinking | session default | session default | `pie.distillationThinkingLevel` (settings, default `low`) | session default |
 | projection | operational detail masked unconditionally; probe calls and epistemic thinking elided | belief bookkeeping masked (`declare_belief`/`conclude`) | like `propose`, except the current episode's raw evidence is shown exactly once above the watermark, then masked; epistemic thinking elided | all operational detail, belief-tool echoes, and thinking masked |
 | output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation of the probe or intervention result | `support`/`refute`/`refine`/`retract` | the conclusion text |
@@ -87,7 +90,15 @@ prompt assembly.
 
 The state machine lives in `_transition`; every steer text lives in `TRANSITION_STEERS`:
 
-- propose → execution: dispatch the open frame ("Run the experiments for the beliefs …").
+- propose/distill → planner: plan the next batch from the remaining open beliefs
+  ("Plan the next execution batch …"). The planner has no tools: the open beliefs
+  (id + statement) are handed to it directly in the steer and it replies with exactly one
+  `Batch:` line naming the batch. A single remaining open belief needs no grouping decision
+  and is dispatched directly, and a failed selection (no `Batch:` line, an empty or stale
+  selection) falls back to the whole-frame dispatch.
+- planner → execution: dispatch the selected batch ("Run the experiments for the
+  beliefs …"), with a per-batch lease. After distill settles the batch, the remaining
+  open beliefs are re-planned from the latest open set.
 - execution → distill: `residual` steer ("Account for the observation: explain what your
   beliefs already explain, isolate the residual they do not, and update only on that
   residual."). The execution lease is `ceil(sum(evidenceRounds) × 1.3)` tool results; at
