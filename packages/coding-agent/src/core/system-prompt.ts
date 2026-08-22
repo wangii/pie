@@ -3,7 +3,7 @@
  */
 
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
-import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 /**
  * The operating role the prompt is assembled for. The default `"coding"` role renders
@@ -78,6 +78,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		// Append skills section (only if read tool is available)
 		if (customPromptHasRead && skills.length > 0) {
 			prompt += formatSkillsForPrompt(skills);
+		}
+
+		// The propose role has no `read`, so the full skills block is not rendered above, but it
+		// still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
+		if (role === "propose" && !customPromptHasRead && skills.length > 0) {
+			prompt += formatSkillCatalogForPrompt(skills);
 		}
 
 		prompt += `\nCurrent working directory: ${promptCwd}\n`;
@@ -190,6 +196,12 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {
 		prompt += formatSkillsForPrompt(skills);
+	}
+
+	// The propose role has no `read`, so the full skills block is not rendered above, but it
+	// still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
+	if (role === "propose" && !hasRead && skills.length > 0) {
+		prompt += formatSkillCatalogForPrompt(skills);
 	}
 
 	prompt += `\nCurrent working directory: ${promptCwd}`;

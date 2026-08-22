@@ -49,6 +49,12 @@ const declareBeliefSchema = Type.Object({
 			description: "How many tool results this test needs (1-5). Defaults to 1. Required for propose and refine.",
 		}),
 	),
+	skillRefs: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"Optional skill ids this belief references (e.g. skills the execution role should load). Accepted for propose; for refine it replaces the prior refs (omit to keep them).",
+		}),
+	),
 	beliefId: Type.Optional(
 		Type.String({
 			description: "The id of the belief to support/refute/refine/retract. Required for those ops.",
@@ -101,6 +107,7 @@ export const declareBeliefSystemPromptContribution = {
 	guidelines: [
 		"A belief names a relation and its falsifiable expectation; support or refute it with the evidence you observed",
 		"Write every belief in {beliefLang}, and tag each referent in the statement with one of [code] / [prod] / [user] / [convention]",
+		"When a skill matches the belief's target, pass its name in skillRefs so the execution role loads it",
 	],
 };
 
@@ -134,6 +141,7 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 				domain: input.domain,
 				expectation: input.expectation,
 				evidenceRounds: input.evidenceRounds ?? 1,
+				skillRefs: input.skillRefs,
 			};
 		case "support":
 			if (!input.beliefId) throw new Error("support requires a `beliefId`.");
@@ -214,6 +222,7 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 				statement: input.statement,
 				expectation: input.expectation,
 				evidenceRounds: input.evidenceRounds ?? 1,
+				skillRefs: input.skillRefs,
 			};
 	}
 }

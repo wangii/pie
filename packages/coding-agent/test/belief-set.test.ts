@@ -29,6 +29,21 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 		expect(set.open()).toHaveLength(1);
 	});
 
+	test("propose accepts optional skillRefs and surfaces them in the view", () => {
+		const set = new BeliefSet();
+		const belief = set.apply({
+			op: "propose",
+			statement: "adding an llm provider follows the add-llm-provider skill",
+			domain: "code",
+			expectation: "the skill's checklist is available to execution",
+			evidenceRounds: 1,
+			skillRefs: ["add-llm-provider"],
+		});
+
+		expect(belief.skillRefs).toEqual(["add-llm-provider"]);
+		expect(formatBeliefsForView(set.beliefs, "all")).toContain("skill refs: add-llm-provider");
+	});
+
 	test("support appends evidence and derives supported status", () => {
 		const set = new BeliefSet();
 		const belief = set.apply({
@@ -182,6 +197,37 @@ describe("BeliefSet status machine (immutable, derived status)", () => {
 		// The refined belief is a new hypothesis: it must re-enter the dispatch frame
 		// (`proposed()`), not be pre-settled without evidence.
 		expect(set.proposed().map((b) => b.id)).toEqual([refined.id]);
+	});
+
+	test("refine replaces skillRefs when given, and preserves prior refs otherwise", () => {
+		const set = new BeliefSet();
+		const belief = set.apply({
+			op: "propose",
+			statement: "the worker cache is the cause",
+			domain: "code",
+			expectation: "disabling cache stops staleness",
+			evidenceRounds: 1,
+			skillRefs: ["cache-debug"],
+		});
+
+		const replaced = set.apply({
+			op: "refine",
+			beliefId: belief.id,
+			statement: "stale-replica from the worker cache is the cause",
+			expectation: "the stale value matches the worker cache entry",
+			evidenceRounds: 1,
+			skillRefs: ["cache-deep-dive"],
+		});
+		expect(replaced.skillRefs).toEqual(["cache-deep-dive"]);
+
+		const preserved = set.apply({
+			op: "refine",
+			beliefId: replaced.id,
+			statement: "replica staleness is caused by the worker cache",
+			expectation: "the stale value matches the worker cache entry",
+			evidenceRounds: 1,
+		});
+		expect(preserved.skillRefs).toEqual(["cache-deep-dive"]);
 	});
 
 	test("retract withdraws a belief", () => {

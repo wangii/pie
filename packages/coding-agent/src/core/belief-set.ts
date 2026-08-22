@@ -44,6 +44,8 @@ export interface Belief {
 	readonly expectation: string;
 	/** Structured evidence-round estimate: how many tool results this test needs. */
 	readonly evidenceRounds: number;
+	/** Optional skill ids this belief references (e.g. skills the execution role should load). */
+	readonly skillRefs?: readonly string[];
 	/** Append-only evidence that settled the belief as supported. A framing belief's entries
 	 *  also carry the ids of the product/code beliefs whose support discharged the obligation. */
 	readonly supportedBy: readonly { evidence: string; beliefIds?: readonly string[] }[];
@@ -68,10 +70,24 @@ export const WITHDRAWN = "withdrawn";
  * settled the belief; `retract` withdraws it.
  */
 export type BeliefDelta =
-	| { op: "propose"; statement: string; domain: BeliefDomain; expectation: string; evidenceRounds: number }
+	| {
+			op: "propose";
+			statement: string;
+			domain: BeliefDomain;
+			expectation: string;
+			evidenceRounds: number;
+			skillRefs?: readonly string[];
+	  }
 	| { op: "support"; beliefId: string; evidence: string; evidenceBeliefIds?: readonly string[] }
 	| { op: "refute"; beliefId: string; evidence: string }
-	| { op: "refine"; beliefId: string; statement: string; expectation: string; evidenceRounds: number }
+	| {
+			op: "refine";
+			beliefId: string;
+			statement: string;
+			expectation: string;
+			evidenceRounds: number;
+			skillRefs?: readonly string[];
+	  }
 	| { op: "retract"; beliefId: string }
 	| {
 			op: "route";
@@ -217,6 +233,7 @@ export class BeliefSet {
 					domain: delta.domain,
 					expectation: delta.expectation.trim(),
 					evidenceRounds: delta.evidenceRounds,
+					skillRefs: delta.skillRefs,
 					supportedBy: [],
 					refutedBy: [],
 				};
@@ -246,6 +263,7 @@ export class BeliefSet {
 					// of the dispatch frame).
 					supportedBy: [],
 					refutedBy: [],
+					skillRefs: delta.skillRefs ?? prior.skillRefs,
 				};
 				this._replace(prior.id, { ...prior, supersededBy: refined.id });
 				this._beliefs.push(refined);
@@ -434,6 +452,9 @@ export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | 
 		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
 		lines.push(`  expectation: ${frame.expectation}`);
 		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);
+		if (frame.skillRefs && frame.skillRefs.length > 0) {
+			lines.push(`  skill refs: ${frame.skillRefs.join(", ")}`);
+		}
 	}
 	if (scope === "frame") {
 		return lines.length > 0 ? lines.join("\n") : "No open beliefs to probe.";
@@ -451,6 +472,9 @@ export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | 
 		lines.push("[SETTLED]");
 		for (const b of settled) {
 			lines.push(`  ${b.id} [${b.domain}] ${b.statement} (${statusOf(b)})`);
+			if (b.skillRefs && b.skillRefs.length > 0) {
+				lines.push(`    skill refs: ${b.skillRefs.join(", ")}`);
+			}
 		}
 	}
 	return lines.length > 0 ? lines.join("\n") : "No beliefs yet.";

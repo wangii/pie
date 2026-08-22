@@ -1248,6 +1248,9 @@ export class AgentSession {
 			for (const b of settledWorld) {
 				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
 				lines.push(`  expectation: ${b.expectation}`);
+				if (b.skillRefs && b.skillRefs.length > 0) {
+					lines.push(`  skill refs: ${b.skillRefs.join(", ")}`);
+				}
 				for (const e of b.supportedBy) {
 					lines.push(`  evidence: ${e.evidence}`);
 				}

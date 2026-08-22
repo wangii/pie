@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 
 describe("buildSystemPrompt", () => {
@@ -40,10 +41,51 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("- read:");
-			expect(prompt).toContain("- bash:");
-			expect(prompt).toContain("- edit:");
-			expect(prompt).toContain("- write:");
+			for (const name of ["read", "bash", "edit", "write"]) {
+				expect(prompt).toContain(`- ${name}:`);
+			}
+		});
+
+		test("propose role gets a lightweight skill catalog without read guidance", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["declare_belief", "view_beliefs", "conclude"],
+				role: "propose",
+				skills: [
+					{
+						name: "add-llm-provider",
+						description: "Checklist for adding a provider",
+						filePath: "/x/add-llm-provider.md",
+						baseDir: "/x",
+						sourceInfo: createSyntheticSourceInfo("/x/add-llm-provider.md", { source: "project" }),
+						disableModelInvocation: false,
+					},
+				],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("<available_skills>");
+			expect(prompt).toContain("<name>add-llm-provider</name>");
+			expect(prompt).not.toContain("Use the read tool to load a skill's file");
+		});
+
+		test("coding role with read still gets the full skills block", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				role: "coding",
+				skills: [
+					{
+						name: "add-llm-provider",
+						description: "Checklist for adding a provider",
+						filePath: "/x/add-llm-provider.md",
+						baseDir: "/x",
+						sourceInfo: createSyntheticSourceInfo("/x/add-llm-provider.md", { source: "project" }),
+						disableModelInvocation: false,
+					},
+				],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("Use the read tool to load a skill's file");
 		});
 
 		test("epistemic role omits the coding-agent preamble, pi docs, and file-path guideline", () => {

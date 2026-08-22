@@ -364,9 +364,35 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 		"Use the read tool to load a skill's file when the task matches its description.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
-		"<available_skills>",
+		...renderSkillEntries(visibleSkills),
 	];
 
+	return lines.join("\n");
+}
+
+/**
+ * Render a lightweight skill catalog for a role that has no `read` tool (e.g. propose):
+ * it names the available skills so the role can reference them by id (via `skillRefs`),
+ * while a separate execution role loads the bodies. No read guidance is emitted.
+ */
+export function formatSkillCatalogForPrompt(skills: Skill[]): string {
+	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
+
+	if (visibleSkills.length === 0) {
+		return "";
+	}
+
+	const lines = [
+		"\n\nThe following skills are available to the execution role; reference them by name via skillRefs when proposing beliefs (a separate execution role loads their bodies).",
+		"",
+		...renderSkillEntries(visibleSkills),
+	];
+
+	return lines.join("\n");
+}
+
+function renderSkillEntries(visibleSkills: Skill[]): string[] {
+	const lines: string[] = ["<available_skills>"];
 	for (const skill of visibleSkills) {
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
@@ -374,10 +400,8 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
 		lines.push("  </skill>");
 	}
-
 	lines.push("</available_skills>");
-
-	return lines.join("\n");
+	return lines;
 }
 
 function escapeXml(str: string): string {
