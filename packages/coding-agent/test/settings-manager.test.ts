@@ -254,8 +254,8 @@ describe("SettingsManager", () => {
 	});
 
 	describe("beliefLang", () => {
-		it("defaults to Chinese when not configured", () => {
-			expect(SettingsManager.inMemory().getBeliefLang()).toBe("Chinese");
+		it("defaults to English when not configured", () => {
+			expect(SettingsManager.inMemory().getBeliefLang()).toBe("English");
 		});
 
 		it("returns the configured belief language", () => {

@@ -100,7 +100,7 @@ export interface PieSettings {
 	distillationModel?: string;
 	/** Thinking level for the belief loop's distillation (prediction-error) role. Defaults to "low". */
 	distillationThinkingLevel?: ThinkingLevel;
-	/** The language belief-set prompts must write in. Defaults to "Chinese". */
+	/** The language belief-set prompts must write in. Defaults to "English". */
 	beliefLang?: string;
 	/**
 	 * Model for fast-path execution: a request routed to the fast path runs its execution on this
@@ -757,7 +757,7 @@ export class SettingsManager {
 	}
 
 	getBeliefLang(): string {
-		return this.settings.pie?.beliefLang ?? "Chinese";
+		return this.settings.pie?.beliefLang ?? "English";
 	}
 
 	setDefaultProvider(provider: string): void {
