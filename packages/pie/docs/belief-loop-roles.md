@@ -17,9 +17,12 @@ apart.
 > the run is then distilled with `pie.distillationModel` into a `fast_path_distillation`
 > custom summary and the loop resets to the next task's propose. Each `route` belief is
 > consumed by id on first evaluation, and only the latest unconsumed route decides; a
-> `fast-path` route dispatches when no open framing obligation blocks it (open world beliefs
-> do not block the fast path — they are handed over as unverified hypotheses and re-adjudicated
-> after the run). A later propose turn (after a distill batch
+> `fast-path` route dispatches when no open framing obligation blocks it. Open world beliefs
+> do not block this one-shot path, but they are not carried into it: the run executes without
+> seeing them, and on success `_resetLoopForNewTask()` prunes any still-open hypotheses (only
+> `supported` product/code knowledge survives). Snapshotting open world beliefs as unverified
+> hypotheses and re-adjudicating them after the run is specific to the authorized frame-open
+> handoff below. A later propose turn (after a distill batch
 > settles) may therefore declare a one-shot `fast-path` handoff for the remaining work. A tool
 > failure hands the same task back to propose with the summary (no `_resetLoopForNewTask()`);
 > the consumed route is not re-dispatched. A `belief-loop` decision — or a missing/rejected
@@ -41,10 +44,11 @@ apart.
 > naming **exactly** the open framing obligations it takes over, the current `parentTaskId`
 > (the session's stable task id), and a `reason`. The gate (`_frameOpenHandoffAuthorized`)
 > requires that every open framing is covered exactly and that the `parentTaskId` matches the
-> current task id; otherwise the route is rejected and the belief loop continues. Open world
-> beliefs do not block the handoff: any still-open hypotheses are snapshotted into the
-> fast-path context as unverified assumptions (not facts), and the belief loop re-adjudicates
-> them after the run. On success the harness synthesizes a `proposed` product/code outcome belief,
+> current task id; otherwise the route is rejected and the belief loop continues. Unlike the
+> one-shot path, the handoff snapshots any still-open world hypotheses into the fast-path
+> context as unverified assumptions (not facts): the execution role sees them explicitly, and
+> the distillation prompt lists them. Because the loop is not reset, the distill step
+> re-adjudicates any that remain after the run. On success the harness synthesizes a `proposed` product/code outcome belief,
 > marks it dispatched, and routes to distill via `fastPathDischarge`; the distill step then
 > supports/refutes the outcome and, once supported, discharges the authorized framing per the
 > `evidenceBeliefIds` rule. The `fast_path_distillation` summary carries the traceability

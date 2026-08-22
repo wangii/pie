@@ -713,8 +713,9 @@ describe("AgentSession fast path", () => {
 			// First propose turn: belief-loop route, no framing.
 			routeResponse("belief-loop"),
 			// Second propose turn: a one-shot fast-path route PLUS an open world hypothesis in
-			// the same turn. The route is evaluated first, so the fast path dispatches and the
-			// world hypothesis stays open as an unverified snapshot.
+			// the same turn. The route is evaluated first, so the fast path dispatches; on this
+			// path the world hypothesis is never snapshotted, and the task-boundary reset prunes
+			// it — the test therefore asserts only the distillation summary.
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "route",
