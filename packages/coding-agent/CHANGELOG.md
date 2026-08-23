@@ -8,6 +8,9 @@
 
 ### Changed
 
+- Changed the bundled Node.js runtime to load jiti's Babel transform only when an extension needs it, reducing CLI startup time and bundle size.
+- Changed syntax highlighting to initialize only twenty common languages eagerly and defer the remaining grammars until after the initial TUI render, reducing CLI startup time.
+- Changed the Node.js CLI and RPC entrypoints to load a bundled runtime, reducing startup filesystem reads while keeping the public library and legacy module paths on the modular runtime for normal dependency identity.
 - Changed session sharing to render clickable terminal links and Radius shares to display only the artifact's canonical URL.
 
 ### Fixed
@@ -28,6 +31,7 @@
 - Fixed inherited Xiaomi model catalogs listing shut-down MiMo V2 models in `/model` and `--list-models` ([#8187](https://github.com/earendil-works/pi/issues/8187)).
 - Fixed branch summary entries recording the navigation destination in `fromId` instead of the pre-navigation source leaf.
 - Fixed threshold auto-compaction being skipped when providers omit streaming usage data ([#8328](https://github.com/earendil-works/pi/issues/8328)).
+- Fixed dash-prefixed prompts being parsed as options by supporting `--` as an end-of-options delimiter ([#7269](https://github.com/earendil-works/pi/issues/7269)).
 
 ## [0.84.2] - 2026-08-14
 

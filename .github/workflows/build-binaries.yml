@@ -307,7 +307,9 @@ jobs:
           node scripts/publish-release-announcement.mjs \
             --version "${RELEASE_TAG#v}" \
             --bucket pi-artifacts \
-            --endpoint "$R2_ENDPOINT"
+            --endpoint "$R2_ENDPOINT" \
+            --installer-package-json packages/coding-agent/install-lock/package.json \
+            --installer-package-lock packages/coding-agent/install-lock/package-lock.json
 
   publish-github-release:
     runs-on: ubuntu-latest
