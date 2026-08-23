@@ -201,6 +201,7 @@ cat README.md | pi -p "Summarize this text"
 | `--session <path\|id>` | Use a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
+| `--dir <path>` | Run in the given working directory |
 | `--no-session` | Ephemeral mode; do not save |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
 

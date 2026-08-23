@@ -566,6 +566,14 @@ export async function main(args: string[], options?: MainOptions) {
 		process.env.PI_SKIP_VERSION_CHECK = "1";
 	}
 
+	// Run in a different working directory if requested. Doing this before any
+	// process.cwd() reads ensures project-local discovery, settings, sessions, and
+	// tools all operate on the target directory.
+	const dirArg = parseArgs(args).dir;
+	if (dirArg !== undefined) {
+		process.chdir(resolvePath(dirArg));
+	}
+
 	if (await runAuthCommand(args)) {
 		return;
 	}

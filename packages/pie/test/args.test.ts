@@ -146,6 +146,25 @@ describe("parseArgs", () => {
 			expect(result.export).toBe("session.jsonl");
 		});
 
+		test("parses --dir with a value", () => {
+			const result = parseArgs(["--dir", "/some/path"]);
+			expect(result.dir).toBe("/some/path");
+			expect(result.messages).toEqual([]);
+		});
+
+		test("does not consume the next option as the --dir value", () => {
+			const result = parseArgs(["--dir", "--print", "hello"]);
+			expect(result.dir).toBeUndefined();
+			expect(result.print).toBe(true);
+			expect(result.messages).toEqual(["hello"]);
+		});
+
+		test("reports missing --dir value", () => {
+			const result = parseArgs(["--dir"]);
+			expect(result.dir).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--dir requires a value" }]);
+		});
+
 		test("parses --thinking", () => {
 			const result = parseArgs(["--thinking", "high"]);
 			expect(result.thinking).toBe("high");

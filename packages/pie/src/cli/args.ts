@@ -37,6 +37,7 @@ export interface Args {
 	noExtensions?: boolean;
 	print?: boolean;
 	export?: string;
+	dir?: string;
 	noSkills?: boolean;
 	skills?: string[];
 	promptTemplates?: string[];
@@ -154,6 +155,14 @@ export function parseArgs(args: string[]): Args {
 			}
 		} else if (arg === "--export" && i + 1 < args.length) {
 			result.export = args[++i];
+		} else if (arg === "--dir") {
+			const dirValue = args[i + 1];
+			if (dirValue === undefined || dirValue.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--dir requires a value" });
+			} else {
+				result.dir = dirValue;
+				i++;
+			}
 		} else if ((arg === "--extension" || arg === "-e") && i + 1 < args.length) {
 			result.extensions = result.extensions ?? [];
 			result.extensions.push(args[++i]);
@@ -301,6 +310,7 @@ ${chalk.bold("Options:")}
   --no-themes                    Disable theme discovery and loading
   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
   --export <file>                Export session file to HTML and exit
+  --dir <path>                   Run the CLI in the given working directory
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --tui-mode <mode>              TUI mode: regular (default) or fullscreen
