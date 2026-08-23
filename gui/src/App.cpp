@@ -590,7 +590,14 @@ int main(int argc, char** argv) {
         // FreeType is required for a TTC; fall back to the default font and warn.
         std::fprintf(stderr, "WARNING: failed to load %s; using default font. TTC requires FreeType.\n", ttcPath);
     }
-    io.Fonts->Build();
+    // Do NOT call io.Fonts->Build() here. The vendored ImGui v1.92.5 OpenGL3
+    // backend sets ImGuiBackendFlags_RendererHasTextures in ImGui_ImplOpenGL3_Init
+    // (called below) and manages the font atlas lazily during ImGui::NewFrame().
+    // Calling Build() before that flag is set preloads all glyphs on the legacy
+    // path, then NewFrame() asserts in ImFontAtlasUpdateNewFrame
+    // ("Called ImFontAtlas::Build() before ImGuiBackendFlags_RendererHasTextures
+    // got set!"). If the font above failed to load, ImFontAtlasBuildMain falls
+    // back to AddFontDefault() automatically, so no explicit Build() is needed.
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glslVersion);
