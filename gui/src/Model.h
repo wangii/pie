@@ -163,6 +163,15 @@ public:
     void setRpcToolResult(int id, const std::string& toolCallId, const std::string& result, const std::string& status);
     void closeRpcFrame(int id, bool failed);
 
+    // Live in-message stream (the assistant's streaming reply shown in the
+    // ⌘T instruction palette). Populated by the RPC event adapter from
+    // message_start / message_update / message_end. ImGui-free so it can be
+    // unit-tested without a window.
+    void beginInMessage(const std::string& text);
+    void appendInMessage(const std::string& delta);
+    void endInMessage();
+    const std::string& inMessage() const { return inMessage_; }
+
 private:
     void openFrame(int id, const std::string& summary, const std::string& openedAt);
     LoopFrame* frame(int id);
@@ -177,6 +186,7 @@ private:
     FrameCursor cursor_;
     std::string session_;
     int nextRpcFrameId_ = 1000;  // auto-increment id for frames opened by the RPC adapter
+    std::string inMessage_;      // live streaming assistant reply for the ⌘T pane
 };
 
 // RPC event adapter (live mode). Consumes one runtime JSONL line (an

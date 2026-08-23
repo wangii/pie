@@ -6,8 +6,9 @@
 // NativeGuiModel cursor, which is set solely by explicit runtime events.
 //
 // Modes:
-//   default   feeds a scripted epistemic event stream (demoEvents()).
-//   --live    spawns `node <PI_CLI> -ne --mode rpc` and applies its JSONL.
+//   default   --live: spawns `node <PI_CLI> -ne --mode rpc` and applies its JSONL.
+//   --demo    injects the formal DemoEvents.h scripted event stream.
+//   --live    explicit; wins if both --demo and --live are supplied.
 // GL_SILENCE_DEPRECATION is supplied as an APPLE compile definition in CMake.
 
 #include <imgui.h>
@@ -152,7 +153,16 @@ bool spawnSdk(SdkProcess& sp) {
 void writeCommand(SdkProcess& sp, const std::string& cmd) {
     if (sp.inFd < 0) return;
     std::string line = cmd + "\n";
-    (void)!write(sp.inFd, line.data(), line.size());
+    ssize_t written = write(sp.inFd, line.data(), line.size());
+    // Trace GUI -> RPC on pie_gui's stdout (never on sp.inFd, so the RPC JSONL
+    // protocol on stdin is left untouched).
+    if (written > 0) {
+        std::printf("GUI -> RPC: %s\n", cmd.c_str());
+        std::fflush(stdout);
+    } else {
+        std::printf("GUI -> RPC FAILED: %s\n", cmd.c_str());
+        std::fflush(stdout);
+    }
 }
 
 // serializeInstructionCommand lives in InstructionCmd.h (inline) so it can be
@@ -185,7 +195,12 @@ void readerThread(SdkProcess& sp, EventQueue& q, std::atomic<bool>& stop) {
         while ((pos = buf.find('\n')) != std::string::npos) {
             std::string line = buf.substr(0, pos);
             buf.erase(0, pos + 1);
-            if (!line.empty()) q.push(std::move(line));
+            if (!line.empty()) {
+                // Trace RPC -> GUI on pie_gui's stdout.
+                std::printf("RPC -> GUI: %s\n", line.c_str());
+                std::fflush(stdout);
+                q.push(std::move(line));
+            }
         }
     }
     sp.running.store(false);
@@ -522,22 +537,29 @@ void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, boo
         ImGui::SetNextItemWidth(-1.0f);
         bool submit = ImGui::InputText("##instruction", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue);
 
-        ImGui::TextDisabled("Recent / Suggested");
+        // Live in-message (the assistant's streaming reply). Rendered below the
+        // input box in a scrollable container that auto-scrolls to the bottom as
+        // it grows. Only live mode feeds message_start/message_update/message_end;
+        // in demo mode this stays empty.
+        ImGui::TextDisabled("In-Message");
         ImGui::Separator();
-        const char* suggestions[] = {
-            "Explain current frame",
-            "Inspect selected beliefs",
-            "Explain current proposal",
-            "Stop execution",
-            "Reconsider B42",
-            "Show source of B53",
-        };
-        for (auto s : suggestions) {
-            if (ImGui::Selectable(s)) {
-                std::snprintf(buf, sizeof(buf), "%s", s);
-                submit = true;
-            }
+        ImGui::BeginChild("in_message", ImVec2(0, 140), true);
+        static size_t lastInMsgLen = 0;
+        if (!m.inMessage().empty()) {
+            ImGui::TextWrapped("%s", m.inMessage().c_str());
+        } else {
+            ImGui::TextDisabled("(waiting for a live message...)");
         }
+        // Auto-scroll to bottom whenever new content arrived. SetScrollHereY
+        // scrolls the current cursor line to the desired fraction (1.0 = bottom)
+        // of the child window.
+        if (m.inMessage().size() != lastInMsgLen) {
+            ImGui::SetScrollHereY(1.0f);
+        }
+        lastInMsgLen = m.inMessage().size();
+        ImGui::EndChild();
+        ImGui::Spacing();
+
         if (submit) {
             std::string instr(buf);
             // Always clear the input on Enter, then attempt to submit to rpc.
@@ -561,8 +583,15 @@ void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, boo
 } // namespace
 
 int main(int argc, char** argv) {
-    bool live = false;
-    for (int i = 1; i < argc; ++i) if (std::string(argv[i]) == "--live") live = true;
+    // Default: --live (spawn the RPC child). Pass --demo to opt into the
+    // formal DemoEvents.h fixture instead. --live is explicit and wins if both
+    // flags are supplied.
+    bool live = true;
+    bool demo = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--live") { live = true; demo = false; }
+        else if (std::string(argv[i]) == "--demo") { demo = true; live = false; }
+    }
 
     glfwSetErrorCallback([](int e, const char* d) { std::fprintf(stderr, "GLFW error %d: %s\n", e, d); });
     if (!glfwInit()) return 1;
@@ -644,6 +673,12 @@ int main(int argc, char** argv) {
     std::atomic<bool> stopReader{false};
     std::thread reader;
 
+    // Startup modes:
+    //   default --live -> spawn the RPC child; the ⌘T pane drives the session and
+    //     the runtime emits message_start/message_update/message_end on
+    //     submission. Input is always sendable in live mode.
+    //   --demo -> inject the formal DemoEvents.h fixture (full event stream).
+    //   --demo --live together -> live wins (spawn RPC).
     if (live) {
         if (!spawnSdk(sdk)) {
             std::fprintf(stderr, "Failed to spawn SDK child\n");
@@ -652,10 +687,11 @@ int main(int argc, char** argv) {
             return 1;
         }
         reader = std::thread(readerThread, std::ref(sdk), std::ref(queue), std::ref(stopReader));
-        writeCommand(sdk, "{\"type\":\"prompt\",\"id\":\"p1\",\"message\":\"hello, how are you today?\"}");
-    } else {
+        // No hardcoded prompt: the user drives the session via the ⌘T pane input.
+    } else if (demo) {
         for (auto& line : pie::gui::demoEvents()) model.applyLine(line);
     }
+    // else: default empty model.
 
     int viewId = -1;
     bool instructionOpen = false;

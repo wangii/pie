@@ -131,6 +131,21 @@ int main() {
         check(pie::gui::applyRpcLine(rpc, "{\"foo\":1}") == pie::gui::RpcApplyResult::Error, "missing type returns Error");
     }
 
+    // --- Live in-message stream (⌘T pane): message_start seeds, message_update ---
+    // --- appends text deltas, message_end finalizes.                            ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"seed "}]}})") == pie::gui::RpcApplyResult::Applied, "message_start seeds in-message");
+        check(rpc.inMessage() == "seed ", "in-message initialized from message_start");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}})") == pie::gui::RpcApplyResult::Applied, "text_delta appends");
+        check(rpc.inMessage() == "seed hello", "in-message appended with delta");
+        // Non-text deltas (toolcall/thinking) are not appended.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"..."}})") == pie::gui::RpcApplyResult::Ignored, "thinking_delta ignored");
+        check(rpc.inMessage() == "seed hello", "in-message unchanged by non-text delta");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "message_end finalizes");
+        check(rpc.inMessage() == "seed hello", "in-message retained after message_end");
+    }
+
     if (failures == 0) std::printf("ALL PASS\n");
     else std::printf("%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;

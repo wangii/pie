@@ -138,8 +138,11 @@ Notes:
 
 - Reconfigure CMake after changing `CMakeLists.txt` (new `find_package`).
 - `cmake --build build -j` must succeed.
-- Launch `./build/pie_gui` (demo mode) and verify: no crash, no "Could not load
-  font file" warning, status/navigator/lanes/summary do not overlap.
+- Launch `./build/pie_gui` (default: `--live`, spawns the RPC child so the ⌘T
+  pane can submit instructions) and verify: no crash, no "Could not load font
+  file" warning, status/navigator/lanes/summary do not overlap.
+- The demo mode is explicit: `./build/pie_gui --demo` injects the formal
+  `DemoEvents.h` event stream instead of live mode.
 - Optionally test a narrow/small window (via `PI_GUI_SIZE=WxH`, e.g.
   `PI_GUI_SIZE=320x500 ./build/pie_gui`) to confirm the stacked-lane fallback
   triggers instead of overlapping.

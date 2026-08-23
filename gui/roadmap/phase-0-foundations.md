@@ -85,9 +85,11 @@ Implementation notes for building with FreeType:
 ### Harness / GUI boundary (spec 26)
 
 The GUI and the harness communicate through an explicit event/state interface.
-First version uses JSONL over stdin/stdout (see the runtime client). In demo
-mode the non-live path applies the `DemoEvents.h` fixture via `applyLine`, whose
-recognized event types are `FrameOpened`, `BeliefsSelected`, `PlanProduced`,
+First version uses JSONL over stdin/stdout (see the runtime client). The GUI
+defaults to `--live` (spawns the RPC child; the ⌘T pane submits instructions).
+`--demo` instead applies the `DemoEvents.h` fixture via `applyLine` on the
+non-live path, whose recognized
+event types are `FrameOpened`, `BeliefsSelected`, `PlanProduced`,
 `ExecutionStarted`, `ToolCalled`, `ToolReturned`, `ExecutionCompleted`,
 `DistillationStarted`, `DistillationProduced`, `ProposalCreated`, `FrameClosed`,
 `BeliefUpdated`, `CursorChanged`. In live (`--live`) mode `applyRpcLine` adapts

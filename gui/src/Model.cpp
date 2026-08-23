@@ -246,8 +246,8 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
 
     const LoopFrame* active = model.activeFrame();
 
-    // Benign RPC control/stream events: no model state.
-    if (type == "response" || type == "message_update" || type == "message_end")
+    // Benign RPC control events: no model state.
+    if (type == "response")
         return RpcApplyResult::Ignored;
 
     if (type == "agent_start") {
@@ -261,11 +261,36 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         return RpcApplyResult::Applied;
     }
     if (type == "message_start") {
-        active = model.activeFrame();
-        if (!active) return RpcApplyResult::Ignored;
+        std::string role = str(line, "role");
         std::string text = extractMessageText(line);
-        if (text.empty()) return RpcApplyResult::Ignored;
-        model.appendRpcFrameSummary(active->id, text);
+        // Live in-message for the ⌘T pane is independent of any frame, but the
+        // pane should show the assistant's reply, not the user's prompt or the
+        // routing/fast-path scaffolding. Seed only on an assistant message; on a
+        // user message clear the buffer so the previous reply does not linger.
+        if (role == "assistant") {
+            model.beginInMessage(text);
+        } else if (role == "user") {
+            model.beginInMessage("");
+        }
+        // Frame summary folding only applies when a frame is actually active.
+        active = model.activeFrame();
+        if (active && !text.empty()) {
+            model.appendRpcFrameSummary(active->id, text);
+        }
+        return RpcApplyResult::Applied;
+    }
+    if (type == "message_update") {
+        // Streaming assistant delta. toJsonEvent remaps message_update to
+        // {type, usage, assistantMessageEvent}; append the text delta only.
+        std::string evt;
+        if (rawValue(line, "assistantMessageEvent", evt) && str(evt, "type") == "text_delta") {
+            model.appendInMessage(str(evt, "delta"));
+            return RpcApplyResult::Applied;
+        }
+        return RpcApplyResult::Ignored;
+    }
+    if (type == "message_end") {
+        model.endInMessage();
         return RpcApplyResult::Applied;
     }
     if (type == "tool_execution_start") {
@@ -393,6 +418,25 @@ void NativeGuiModel::closeRpcFrame(int id, bool failed) {
         cursor_.stage = FrameStage::NONE;
         cursor_.item.clear();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Live in-message stream (⌘T pane)
+// ---------------------------------------------------------------------------
+void NativeGuiModel::beginInMessage(const std::string& text) {
+    // message_start carries the initial authoritative text (may be empty if the
+    // turn streams through message_update deltas); seeding here reflects the
+    // contentText semantics for the initial content blocks only.
+    inMessage_ = text;
+}
+
+void NativeGuiModel::appendInMessage(const std::string& delta) {
+    inMessage_ += delta;
+}
+
+void NativeGuiModel::endInMessage() {
+    // Finalize. The buffer already holds the accumulated text; nothing more to
+    // do but keep it available for the pane until the next message_start.
 }
 
 // ---------------------------------------------------------------------------
