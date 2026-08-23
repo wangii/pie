@@ -65,11 +65,11 @@ GLFW / OpenGL (current); SDL3/SDL_GPU (future)
 
 ### Font asset and FreeType (foundational)
 
-The global UI font is the Sarasa Term SC Nerd collection at
-`assets/SarasaTermSCNerd.ttc`. It is a TrueType Collection (TTC) with 10 faces,
-so it requires FreeType: `find_package(Freetype)` is linked into the ImGui
+The global UI font is the Sarasa Term SC Nerd collection, a TrueType Collection
+(TTC) with 10 faces, so it requires FreeType: `find_package(Freetype)` is linked into the ImGui
 backend, `imgui_freetype.cpp` is compiled in, and `IMGUI_ENABLE_FREETYPE` is
-defined. The asset path is supplied as the `PI_FONT_PATH` compile definition.
+defined. The font is downloaded at build time from a pinned
+Sarasa-Term-SC-Nerd v2.3.1 release and placed next to `pie_gui`.
 
 Implementation notes for building with FreeType:
 
@@ -106,7 +106,7 @@ additionally includes OPEN and FAILED.
 ## Dependency (from Phase 0 to Phase 1)
 
 Phase 1 consumes the runtime data model and the runtime-client boundary. The
-`pi_gui_model` library is the model layer, and `pi_gui` is the UI app that links
+`pi_gui_model` library is the model layer, and `pie_gui` is the UI app that links
 it, the ImGui backend, and OpenGL.
 
 ## Verification

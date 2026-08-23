@@ -74,12 +74,12 @@ add_test(NAME pi_gui_layout_test COMMAND pi_gui_layout_test)
 # ---------------------------------------------------------------------------
 # GUI app: UI + runtime client, links the model layer + ImGui backend.
 # ---------------------------------------------------------------------------
-add_executable(pi_gui src/App.cpp)
-target_include_directories(pi_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(pi_gui PRIVATE pi_gui_model imgui_backend OpenGL::GL)
+add_executable(pie_gui src/App.cpp)
+target_include_directories(pie_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(pie_gui PRIVATE pi_gui_model imgui_backend OpenGL::GL)
 
 if(APPLE)
-    target_compile_definitions(pi_gui PRIVATE GL_SILENCE_DEPRECATION)
+    target_compile_definitions(pie_gui PRIVATE GL_SILENCE_DEPRECATION)
 endif()
 
 # SDK entry: repo root is one level above this gui/ dir.
@@ -87,7 +87,42 @@ add_compile_definitions(
     PI_CLI="${CMAKE_SOURCE_DIR}/../packages/pie/dist/cli.js"
 )
 
-# Global font asset (absolute path so it resolves regardless of the working dir).
-add_compile_definitions(
-    PI_FONT_PATH="${CMAKE_SOURCE_DIR}/assets/SarasaTermSCNerd.ttc"
+# ---------------------------------------------------------------------------
+# Sarasa Term SC Nerd font (downloaded at build time, not stored in the repo).
+#
+# The font is fetched from a pinned v2.3.1 release, verified against its archive
+# SHA256, extracted into the build font dir, and copied next to the pie_gui
+# binary so the app can resolve it relative to its own executable path. Keeping
+# the 270MB TTC out of the repo avoids the GitHub 100MB blob limit.
+# ---------------------------------------------------------------------------
+set(PIE_GUI_FONT_URL "https://github.com/laishulu/Sarasa-Term-SC-Nerd/releases/download/v2.3.1/SarasaTermSCNerd.ttc.tar.gz")
+set(PIE_GUI_FONT_ARCHIVE_SHA256 "5a25c36d77694667f847c22475e202de352ec1128f5055081d3e82cd8a039ae2")
+set(PIE_GUI_FONT_NAME "SarasaTermSCNerd.ttc")
+set(PIE_GUI_FONT_CACHE_DIR "${CMAKE_BINARY_DIR}/fonts")
+
+add_custom_command(
+    OUTPUT "${PIE_GUI_FONT_CACHE_DIR}/${PIE_GUI_FONT_NAME}"
+    COMMAND ${CMAKE_COMMAND}
+        -DPIE_GUI_FONT_URL=${PIE_GUI_FONT_URL}
+        -DPIE_GUI_FONT_ARCHIVE_SHA256=${PIE_GUI_FONT_ARCHIVE_SHA256}
+        -DPIE_GUI_FONT_NAME=${PIE_GUI_FONT_NAME}
+        -DPIE_GUI_FONT_CACHE_DIR=${PIE_GUI_FONT_CACHE_DIR}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchSarasaFont.cmake"
+    COMMENT "Fetching Sarasa Term SC Nerd font (${PIE_GUI_FONT_NAME})"
+    VERBATIM
 )
+
+add_custom_target(pie_gui_font DEPENDS "${PIE_GUI_FONT_CACHE_DIR}/${PIE_GUI_FONT_NAME}")
+
+# Copy the fetched TTC next to the pie_gui executable so the app can load it via
+# its own executable directory. POST_BUILD re-copies each build; the fetch itself
+# is cached by the custom_command OUTPUT so it does not re-download.
+add_custom_command(
+    TARGET pie_gui POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PIE_GUI_FONT_CACHE_DIR}/${PIE_GUI_FONT_NAME}"
+        "$<TARGET_FILE_DIR:pie_gui>/${PIE_GUI_FONT_NAME}"
+    COMMENT "Copying Sarasa font next to pie_gui"
+    VERBATIM
+)
+add_dependencies(pie_gui pie_gui_font)

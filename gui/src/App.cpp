@@ -20,11 +20,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -42,6 +49,38 @@
 #endif
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Locate the directory containing the running pie_gui executable, so the app can
+// load assets that are copied next to the binary regardless of the current
+// working directory. Uses the platform-native path API (not cwd).
+// ---------------------------------------------------------------------------
+std::string executableDirectory() {
+    std::error_code ec;
+#if defined(_WIN32)
+    std::vector<wchar_t> buf(32768);
+    DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n == 0 || n >= buf.size()) return {};
+    std::filesystem::path p(buf.data());
+    return std::filesystem::absolute(p).parent_path().string();
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buf(size);
+    if (_NSGetExecutablePath(buf.data(), &size) != 0) return {};
+    std::filesystem::path p = std::filesystem::canonical(buf.data(), ec);
+    return (ec ? std::filesystem::path(buf.data()) : p).parent_path().string();
+#else
+    // Linux/other: /proc/self/exe.
+    std::filesystem::path p = std::filesystem::canonical("/proc/self/exe", ec);
+    if (ec) return {};
+    return p.parent_path().string();
+#endif
+}
+
+std::string fontPath() {
+    return (std::filesystem::path(executableDirectory()) / "SarasaTermSCNerd.ttc").string();
+}
 
 // ---------------------------------------------------------------------------
 // Colors / small helpers
@@ -574,20 +613,16 @@ int main(int argc, char** argv) {
     // enabled to decode it. We select the Regular face and cover CJK ranges so
     // every component uses the same font without per-component PushFont.
     ImGuiIO& io = ImGui::GetIO();
-#ifdef PI_FONT_PATH
-    const char* ttcPath = PI_FONT_PATH;
-#else
-    const char* ttcPath = "assets/SarasaTermSCNerd.ttc";
-#endif
+    const std::string ttcPath = fontPath();
     // Select the Regular face (fc-scan index 7) of the Sarasa Term SC Nerd
     // collection. font_no 0 is Bold, so an explicit FontNo is required for a
     // regular-weight default.
     ImFontConfig fontCfg;
     fontCfg.FontNo = 7;  // Sarasa Term SC Nerd Regular
-    ImFont* font = io.Fonts->AddFontFromFileTTF(ttcPath, 18.0f, &fontCfg, io.Fonts->GetGlyphRangesChineseFull());
+    ImFont* font = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f, &fontCfg, io.Fonts->GetGlyphRangesChineseFull());
     if (font == nullptr) {
         // FreeType is required for a TTC; fall back to the default font and warn.
-        std::fprintf(stderr, "WARNING: failed to load %s; using default font. TTC requires FreeType.\n", ttcPath);
+        std::fprintf(stderr, "WARNING: failed to load %s; using default font. TTC requires FreeType.\n", ttcPath.c_str());
     }
     // Do NOT call io.Fonts->Build() here. The vendored ImGui v1.92.5 OpenGL3
     // backend sets ImGuiBackendFlags_RendererHasTextures in ImGui_ImplOpenGL3_Init

@@ -55,13 +55,17 @@ macOS/Windows/Linux conditional compile path.
 
 ## Font asset and FreeType / TTC constraint
 
-The global UI font is the Sarasa Term SC Nerd collection at
-`assets/SarasaTermSCNerd.ttc`. It is a TrueType Collection (TTC) with 10 faces,
-so it requires FreeType (`IMGUI_ENABLE_FREETYPE`) to be compiled in and linked
-(`find_package(Freetype)` + `imgui_freetype.cpp` in the ImGui backend).
+The global UI font is the Sarasa Term SC Nerd collection, a TrueType Collection
+(TTC) with 10 faces, so it requires FreeType (`IMGUI_ENABLE_FREETYPE`) to be
+compiled in and linked (`find_package(Freetype)` + `imgui_freetype.cpp` in the
+ImGui backend).
 
-- The path is supplied as the `PI_FONT_PATH` compile definition (absolute path
-  to the repo asset), not a relative path from the working directory.
+- The font is NOT stored in the repo. `gui/cmake/FetchSarasaFont.cmake` downloads
+  a pinned Sarasa-Term-SC-Nerd v2.3.1 release at build time, verifies it against
+  its archive SHA256, extracts `SarasaTermSCNerd.ttc` into the build font dir, and
+  copies it next to the `pie_gui` binary (`$<TARGET_FILE_DIR:pie_gui>`).
+- The app resolves the font relative to its own executable directory
+  (`executableDirectory()` in `src/App.cpp`), not the working directory.
 - `ImFontConfig::FontNo = 7` selects the Regular face (face 0 is Bold), and the
   CJK glyph range comes from `GetGlyphRangesChineseFull()`. The font is loaded
   once into the single `ImGui` context and applied globally, so no component
@@ -100,13 +104,13 @@ From `gui/` (the CMake source dir):
 
 ```bash
 # Configure (existing build dir)
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --preset debug
 
 # Build all targets
-cmake --build build -j
+cmake --build --preset debug
 
 # Run all CTest tests
-cd build && ctest --output-on-failure
+ctest --preset debug
 
 # Run the model test (headless)
 ./build/pi_gui_model_test
@@ -117,23 +121,27 @@ cd build && ctest --output-on-failure
 
 Notes:
 
+- `gui/CMakePresets.json` defines the `debug` configure/build/test presets as a
+  method refactor over the explicit `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
+  incantation. Run `cmake --list-presets` to inspect them.
+
 - The root `npm run check` covers JS/TS packages only and does not gate this
   C++/CMake workspace. Use the commands above.
 - `PI_CLI` is a compile definition pointing at
   `../packages/pie/dist/cli.js`; it must be defined or the build fails.
-- `PI_FONT_PATH` is a compile definition pointing at the Sarasa TTC asset; it
-  must be defined or the font cannot be located. After font/layout changes,
-  rebuild and run `./build/pi_gui` and confirm there is no
-  "Could not load font file" / font warning.
+- The Sarasa TTC is fetched at build time and placed next to `pie_gui` (see
+  `gui/cmake/FetchSarasaFont.cmake`). After font/layout changes, rebuild and run
+  `./build/pie_gui` and confirm there is no "Could not load font file" / font
+  warning.
 
 ## Font / layout change checklist
 
 - Reconfigure CMake after changing `CMakeLists.txt` (new `find_package`).
 - `cmake --build build -j` must succeed.
-- Launch `./build/pi_gui` (demo mode) and verify: no crash, no "Could not load
+- Launch `./build/pie_gui` (demo mode) and verify: no crash, no "Could not load
   font file" warning, status/navigator/lanes/summary do not overlap.
 - Optionally test a narrow/small window (via `PI_GUI_SIZE=WxH`, e.g.
-  `PI_GUI_SIZE=320x500 ./build/pi_gui`) to confirm the stacked-lane fallback
+  `PI_GUI_SIZE=320x500 ./build/pie_gui`) to confirm the stacked-lane fallback
   triggers instead of overlapping.
 
 ## Change checklist
@@ -145,7 +153,7 @@ Notes:
   (`pi_gui_model_test`, `pi_gui_instruction_test`); iterate until they pass.
 - Do not delete intended functionality without asking. In particular, the
   tracked legacy `gui/main.cpp` (an older standalone viewer) is retained and NOT
-  part of the `pi_gui` target; it is kept to avoid removing intentional code.
+  part of the `pie_gui` target; it is kept to avoid removing intentional code.
 - Commit only files you changed in this session, with explicit paths, and use
   the repo commit-message format `{feat,fix,docs}[(ai,tui,agent,coding-agent)]`.
 

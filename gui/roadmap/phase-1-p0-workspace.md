@@ -127,7 +127,7 @@ add proposal-to-source jump, frame comparison, and provenance inspection.
 
 ## Verification
 
-- `pi_gui` builds/links.
+- `pie_gui` builds/links.
 - GUI starts without crash (sustained event loop, empty stderr).
 - Structural proof each P0 region has explicit render code.
 - Model semantics proven by `pi_gui_model_test` (37/37) and
