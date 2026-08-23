@@ -1099,14 +1099,11 @@ export class AgentSession {
 				const route = routes[routes.length - 1];
 				if (route) {
 					this._consumedRouteIds.add(route.id);
-					// A frame-open handoff requires explicit authorization: the route names exactly the
-					// open framing obligations it takes over. This must be checked before the strict
-					// `_fastPathQuiescent` gate, which rejects any open framing outright and would
-					// otherwise send the (already consumed) route to deepen/conclude instead.
-					if (route.decision === "fast-path" && this._frameOpenHandoffAuthorized(route)) {
-						return this._dispatchToFastExecution(route);
-					}
-					if (route.decision === "fast-path" && this._fastPathQuiescent()) {
+					// The model's fast-path decision is authoritative: when it declares a `fast-path`
+					// route, dispatch directly without the framing gates. Open world beliefs and open
+					// framing obligations do not constrain the fast path — the run may execute the
+					// request while they remain open, and they are re-adjudicated after the run.
+					if (route.decision === "fast-path") {
 						return this._dispatchToFastExecution(route);
 					}
 				}
@@ -1427,16 +1424,6 @@ export class AgentSession {
 			},
 			steer: TRANSITION_STEERS.dispatch(statements),
 		};
-	}
-
-	/**
-	 * Whether the fast path may take over the current task with no frame-open handoff: no
-	 * framing obligation is open (proposed framing). Open world beliefs no longer block the
-	 * fast path — the execution role treats them as unverified hypotheses, and the distill step
-	 * re-adjudicates any that remain after the run.
-	 */
-	private _fastPathQuiescent(): boolean {
-		return this._beliefSet.framings().length === 0;
 	}
 
 	/**

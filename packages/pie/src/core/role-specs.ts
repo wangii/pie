@@ -71,26 +71,18 @@ const PROPOSE_ROUTING_HEADER =
 	"execution role will execute the request directly and a separate distillation step will summarize it. " +
 	"If you route `belief-loop`, continue with the protocol below.\n\n";
 
-/** Later propose turns: the initial route is settled; a gated one-shot fast-path handoff is optional. */
+/** Later propose turns: the initial route is settled; a fast-path handoff is optional. */
 const PROPOSE_CONTINUATION_HEADER =
 	"The task is already in the belief loop and its initial routing decision is settled. Continue the " +
 	"protocol below. Optionally, when the remaining work is simple (low side-effect risk, few steps, low " +
-	"ambiguity, high success probability) and no framing obligation is open, you may declare a one-shot " +
-	"fast-path handoff with declare_belief op `route` and " +
-	"decision `fast-path`: the execution role will then finish the request directly on the fast path and a " +
-	"separate distillation step will summarize it. Open world beliefs do not block this one-shot handoff, " +
-	"but they are not carried into it: the run executes without them, and any still-open hypotheses are " +
-	"pruned at the task boundary — only the authorized frame-open handoff below snapshots them as " +
-	"unverified hypotheses and re-adjudicates them. If the remaining work is " +
-	"execution-only and every open " +
-	"framing obligation is still satisfiable by executing it directly, you may declare an authorized " +
-	"frame-open fast-path handoff instead: declare_belief op " +
-	"`route` with decision `fast-path` plus `handoffFromBeliefIds` naming exactly the open framing " +
-	"obligations it takes over, the current `parentTaskId`, and a `reason` for the handoff — the fast path " +
-	"will then execute the work, your distill step will adjudicate the resulting outcome belief, and the " +
-	"framing will be discharged once supported. Any world hypotheses still open at the handoff are " +
-	"snapshotted as unverified assumptions (not facts) and re-adjudicated after the run. If any uncovered framing " +
-	"obligation is open, continue with the protocol below instead.\n\n";
+	"ambiguity, high success probability), you may declare a fast-path handoff with declare_belief op " +
+	"`route` and decision `fast-path`: the execution role will then finish the request directly on the fast " +
+	"path and a separate distillation step will summarize it. A fast-path decision ignores any open " +
+	"world beliefs and any open framing obligations — the run executes the request while they remain open, " +
+	"and they are re-adjudicated after the run. Open world beliefs are not carried into the run; any " +
+	"still-open hypotheses are re-adjudicated at the task boundary. If you declare `fast-path`, do NOT " +
+	"propose any other beliefs in this turn. If you instead continue the belief loop, keep the protocol " +
+	"below and continue proposing beliefs until the task is answered.\n\n";
 
 /** The propose protocol body shared by the routing and continuation instructions. */
 const PROPOSE_PROTOCOL =
@@ -142,7 +134,7 @@ const PROPOSE_PROTOCOL =
 const PLANNER_ROLE_HEADER =
 	"\n\nYou are the planner role of the belief-loop investigation (propose → planner → execution → distill → finalAnswer). " +
 	"The propose role has declared open beliefs (listed at the end of this prompt); your job is to decide which subset of " +
-	"them becomes the next execution batch — exactly one batch per turn. Group beliefs that one execution episode can probe " +
+	"them becomes the next execution batch — exactly one batch per turn, and at most 3 beliefs per batch. Group beliefs that one execution episode can probe " +
 	"together coherently: shared probe target or code locality, the same tools or skills, evidence dependencies, compatible " +
 	"side effects, and similar evidence rounds. Plan one batch only — the remaining open beliefs are planned after this " +
 	"batch is settled. You only group beliefs; you never probe and never update them. You have no tools: reply with exactly " +
@@ -258,7 +250,7 @@ export const TRANSITION_STEERS = {
 	 *  episode's context. The planner's plain-text `Batch:` reply is the selection. */
 	planBatch: () =>
 		`Plan the next execution batch: the open beliefs are listed at the end of your system prompt. Choose a coherent ` +
-		`subset of them as the next batch — exactly one batch, grouping beliefs that one execution episode can probe together ` +
+		`subset of them as the next batch — exactly one batch and at most 3 beliefs per batch, grouping beliefs that one execution episode can probe together ` +
 		`(shared probe target, tools/skills, dependencies, compatible side effects, similar evidence rounds). Reply with ` +
 		`exactly one line starting with \`Batch:\` followed by the selected belief ids, comma-separated — nothing else. ` +
 		`The remaining open beliefs will be planned after this batch is settled. If the open beliefs are all closely ` +
