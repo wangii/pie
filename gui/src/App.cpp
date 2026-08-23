@@ -203,10 +203,15 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
 }
 
 void renderNavigator(const pie::gui::NativeGuiModel& m, int& viewId) {
+    static char searchBuf[64] = {};
     const auto& frames = m.frames();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Frame Navigator:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##frame_search", searchBuf, sizeof(searchBuf));
     for (const auto& f : frames) {
+        if (!pie::gui::frameMatchesQuery(f, searchBuf)) continue;
         bool isView = (viewId == f.id);
         ImGui::PushID(f.id);
         ImGui::PushStyleColor(ImGuiCol_Text, historySymbol(f.history) == std::string("●") ? kAccent : ImGui::GetStyleColorVec4(ImGuiCol_Text));
@@ -628,7 +633,7 @@ int main(int argc, char** argv) {
 
         if (live) {
             std::string line;
-            while (queue.popIfAny(line)) model.applyLine(line);
+            while (queue.popIfAny(line)) pie::gui::applyRpcLine(model, line);
         }
 
         auto& io = ImGui::GetIO();

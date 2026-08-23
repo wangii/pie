@@ -85,12 +85,16 @@ Implementation notes for building with FreeType:
 ### Harness / GUI boundary (spec 26)
 
 The GUI and the harness communicate through an explicit event/state interface.
-First version uses JSONL over stdin/stdout (see the runtime client). Event types
-are consolidated in `Model.cpp`'s `applyLine` dispatch and the `DemoEvents.h`
-fixture, e.g. `FrameOpened`, `BeliefsSelected`, `PlanProduced`, `ExecutionStarted`,
-`ToolCalled`, `ToolReturned`, `ExecutionCompleted`, `DistillationStarted`,
-`DistillationProduced`, `ProposalCreated`, `FrameClosed`, `BeliefUpdated`,
-`CursorChanged`. MessagePack/protobuf are future transport options.
+First version uses JSONL over stdin/stdout (see the runtime client). In demo
+mode the non-live path applies the `DemoEvents.h` fixture via `applyLine`, whose
+recognized event types are `FrameOpened`, `BeliefsSelected`, `PlanProduced`,
+`ExecutionStarted`, `ToolCalled`, `ToolReturned`, `ExecutionCompleted`,
+`DistillationStarted`, `DistillationProduced`, `ProposalCreated`, `FrameClosed`,
+`BeliefUpdated`, `CursorChanged`. In live (`--live`) mode `applyRpcLine` adapts
+the real RPC `AgentSessionEvent` stream into the same model (agent/turn →
+`LoopFrame`, `tool_execution_start/end` → trajectory, message text → summary),
+without fabricating Belief/Proposal/Distillation events the runtime does not
+emit. MessagePack/protobuf are future transport options.
 
 ### Runtime data model (spec 27) and frame status (spec 28)
 
@@ -108,6 +112,6 @@ it, the ImGui backend, and OpenGL.
 ## Verification
 
 - `cmake --build .` succeeds.
-- `pi_gui_model_test` (headless) passes 27/27 assertions.
+- `pi_gui_model_test` (headless) passes 37/37 assertions.
 - `pi_gui_instruction_test` (serialization + pipe write) passes 8/8.
 - `ctest` passes 2/2.

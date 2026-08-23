@@ -14,7 +14,7 @@ The P1 list from spec §29:
 
 - belief filtering — **implemented** (open/selected/changed/all combo in the
   belief lane)
-- frame search — **not implemented**
+- frame search — **implemented** (case-insensitive `frameMatchesQuery` over frame display fields, wired into the navigator)
 - jump from proposal -> source trajectory — **not implemented**
 - jump from belief -> originating frame — **not implemented**
 - jump from execution -> planner intent — **not implemented**
@@ -25,8 +25,9 @@ The P1 list from spec §29:
 ## Status
 
 Partial. `renderBeliefLane` provides the `open|selected|changed|all` filter and
-the `source: #frame` provenance line; the remaining P1 items (search, jumps,
-comparison, deep provenance) are future work and are not part of the delivered P0.
+the `source: #frame` provenance line; `renderNavigator` now filters frames by a
+case-insensitive substring query (`frameMatchesQuery`). The remaining P1 items
+(jumps, comparison, deep provenance) are future work.
 
 ## Frame History Semantics (spec 20)
 

@@ -23,10 +23,10 @@ spec sections and source files.
 ## Implementation status
 
 - **Implemented and verified**: Phase 0 and Phase 1. Both are backed by a
-  headless model test (`pi_gui_model_test`, 27/27) and an instruction
+  headless model test (`pi_gui_model_test`, 37/37) and an instruction
   serialization/pipe test (`pi_gui_instruction_test`, 8/8), plus a successful
   `cmake --build .` and `ctest` (2/2).
-- **Partial**: Phase 2. Belief filtering is implemented; frame search,
+- **Partial**: Phase 2. Belief filtering and frame search are implemented;
   proposal-to-source jump, frame comparison, and full provenance inspection are
   not yet present.
 - **Not started**: Phase 3. These are explicitly deferred by the spec's "Not

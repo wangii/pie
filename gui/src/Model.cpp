@@ -1,7 +1,9 @@
 #include "Model.h"
 
+#include <cctype>
 #include <cstddef>
 #include <cstring>
+#include <string_view>
 
 namespace pie::gui {
 
@@ -125,6 +127,76 @@ std::vector<std::string> strArray(const std::string& v) {
     return out;
 }
 
+// Case-insensitive substring test. An empty needle matches anything.
+bool containsFold(const std::string& hay, std::string_view needle) {
+    if (needle.empty()) return true;
+    std::string hl;
+    hl.reserve(hay.size());
+    for (char c : hay)
+        hl.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    std::string nl;
+    nl.reserve(needle.size());
+    for (char c : needle)
+        nl.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return hl.find(nl) != std::string::npos;
+}
+
+// Extract the raw value (object/array/string/number) for a top-level key.
+// Handles nested {}[] and strings. Used to read args/result/content objects
+// that the minimal scalar helpers cannot parse.
+bool rawValue(const std::string& s, const std::string& key, std::string& out) {
+    const std::string pat = "\"" + key + "\"";
+    size_t p = s.find(pat);
+    if (p == std::string::npos) return false;
+    size_t colon = s.find(':', p + pat.size());
+    if (colon == std::string::npos) return false;
+    size_t i = colon + 1;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    if (i >= s.size()) return false;
+    size_t start = i;
+    bool inStr = false;
+    int depth = 0;
+    for (; i < s.size(); ++i) {
+        char c = s[i];
+        if (inStr) {
+            if (c == '\\') { ++i; continue; }
+            if (c == '"') inStr = false;
+            continue;
+        }
+        if (c == '"') inStr = true;
+        else if (c == '{' || c == '[') ++depth;
+        else if (c == '}' || c == ']') {
+            if (depth == 0) { out = trim(s.substr(start, i - start + 1)); return true; }
+            --depth;
+        } else if (c == ',' && depth == 0) {
+            out = trim(s.substr(start, i - start));
+            return true;
+        }
+    }
+    out = trim(s.substr(start));
+    return true;
+}
+
+// Join all `"text":"..."` string values found within a `content` array.
+std::string extractMessageText(const std::string& line) {
+    std::string content;
+    if (!rawValue(line, "content", content)) return {};
+    std::string out;
+    size_t p = 0;
+    while ((p = content.find("\"text\":\"", p)) != std::string::npos) {
+        p += 8;
+        size_t q = p;
+        while (q < content.size() && content[q] != '"') {
+            if (content[q] == '\\') ++q;
+            ++q;
+        }
+        std::string t = content.substr(p, q - p);
+        if (!t.empty()) { if (!out.empty()) out += " "; out += t; }
+        p = q + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 const char* frameStageToString(FrameStage s) {
@@ -139,6 +211,90 @@ const char* frameStageToString(FrameStage s) {
     return "NONE";
 }
 
+bool frameMatchesQuery(const LoopFrame& f, std::string_view query) {
+    if (query.empty()) return true;
+    if (containsFold(std::to_string(f.id), query)) return true;
+    if (containsFold(f.summary, query)) return true;
+    if (containsFold(f.plan.label, query)) return true;
+    if (containsFold(f.plan.question, query)) return true;
+    if (containsFold(f.plan.intent, query)) return true;
+    for (auto& t : f.trajectory) {
+        if (containsFold(t.tool, query)) return true;
+        if (containsFold(t.command, query)) return true;
+        if (containsFold(t.result, query)) return true;
+        if (containsFold(t.status, query)) return true;
+    }
+    if (containsFold(f.distillation.label, query)) return true;
+    for (auto& id : f.distillation.inputIds) if (containsFold(id, query)) return true;
+    if (containsFold(f.distillation.unexplained, query)) return true;
+    if (containsFold(f.distillation.interpretation, query)) return true;
+    for (auto& p : f.proposals) {
+        if (containsFold(std::string(1, p.op), query)) return true;
+        if (containsFold(p.belief, query)) return true;
+        if (containsFold(p.lhs, query)) return true;
+        if (containsFold(p.relation, query)) return true;
+        if (containsFold(p.rhs, query)) return true;
+        if (containsFold(p.detail, query)) return true;
+    }
+    return false;
+}
+
+RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
+    if (line.empty() || line[0] != '{') return RpcApplyResult::Error;
+    std::string type = str(line, "type");
+    if (type.empty()) return RpcApplyResult::Error;
+
+    const LoopFrame* active = model.activeFrame();
+
+    // Benign RPC control/stream events: no model state.
+    if (type == "response" || type == "message_update" || type == "message_end")
+        return RpcApplyResult::Ignored;
+
+    if (type == "agent_start") {
+        if (active) return RpcApplyResult::Ignored;
+        model.openRpcFrame("");
+        return RpcApplyResult::Applied;
+    }
+    if (type == "turn_start") {
+        if (model.activeFrame()) return RpcApplyResult::Ignored;
+        model.openRpcFrame("");
+        return RpcApplyResult::Applied;
+    }
+    if (type == "message_start") {
+        active = model.activeFrame();
+        if (!active) return RpcApplyResult::Ignored;
+        std::string text = extractMessageText(line);
+        if (text.empty()) return RpcApplyResult::Ignored;
+        model.appendRpcFrameSummary(active->id, text);
+        return RpcApplyResult::Applied;
+    }
+    if (type == "tool_execution_start") {
+        active = model.activeFrame();
+        if (!active) return RpcApplyResult::Ignored;
+        std::string args;
+        rawValue(line, "args", args);
+        model.addRpcToolCall(active->id, str(line, "toolCallId"), str(line, "toolName"), args);
+        return RpcApplyResult::Applied;
+    }
+    if (type == "tool_execution_end") {
+        active = model.activeFrame();
+        if (!active) return RpcApplyResult::Ignored;
+        std::string result;
+        rawValue(line, "result", result);
+        std::string isErr;
+        rawValue(line, "isError", isErr);
+        model.setRpcToolResult(active->id, str(line, "toolCallId"), result, isErr == "true" ? "failed" : "ok");
+        return RpcApplyResult::Applied;
+    }
+    if (type == "turn_end" || type == "agent_settled") {
+        active = model.activeFrame();
+        if (!active) return RpcApplyResult::Ignored;
+        model.closeRpcFrame(active->id, false);
+        return RpcApplyResult::Applied;
+    }
+    return RpcApplyResult::Ignored;
+}
+
 // ---------------------------------------------------------------------------
 // Frame / belief accessors
 // ---------------------------------------------------------------------------
@@ -148,6 +304,7 @@ void NativeGuiModel::reset() {
     beliefById_.clear();
     beliefs_.clear();
     cursor_ = FrameCursor{};
+    nextRpcFrameId_ = 1000;
 }
 
 LoopFrame* NativeGuiModel::frame(int id) {
@@ -183,6 +340,59 @@ bool NativeGuiModel::isSelectedInCurrentFrame(BeliefId b) const {
     if (!f) return false;
     for (auto s : f->selectedBeliefs) if (s.value == b.value) return true;
     return false;
+}
+
+// --- RPC event adapter support -------------------------------------------------
+
+int NativeGuiModel::openRpcFrame(const std::string& summary) {
+    int id = nextRpcFrameId_++;
+    openFrame(id, summary, "rpc");
+    return id;
+}
+
+void NativeGuiModel::appendRpcFrameSummary(int id, const std::string& text) {
+    if (text.empty()) return;
+    LoopFrame* f = frame(id);
+    if (!f) return;
+    if (!f->summary.empty()) f->summary += " ";
+    f->summary += text;
+}
+
+void NativeGuiModel::addRpcToolCall(int id, const std::string& toolCallId, const std::string& tool, const std::string& command) {
+    LoopFrame* f = frame(id);
+    if (!f) return;
+    ToolCall t;
+    t.id = toolCallId;
+    t.tool = tool;
+    t.command = command;
+    t.status = "running";
+    f->trajectory.push_back(std::move(t));
+}
+
+void NativeGuiModel::setRpcToolResult(int id, const std::string& toolCallId, const std::string& result, const std::string& status) {
+    LoopFrame* f = frame(id);
+    if (!f) return;
+    for (auto& t : f->trajectory) {
+        if (t.id == toolCallId) {
+            t.result = result;
+            t.status = status;
+            break;
+        }
+    }
+}
+
+void NativeGuiModel::closeRpcFrame(int id, bool failed) {
+    LoopFrame* f = frame(id);
+    if (!f) return;
+    f->closed = true;
+    if (failed) f->failed = true;
+    f->stage = FrameStage::CLOSED;
+    f->history = LoopFrame::History::Closed;
+    if (cursor_.frameId == id) {
+        cursor_.frameId = -1;
+        cursor_.stage = FrameStage::NONE;
+        cursor_.item.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------

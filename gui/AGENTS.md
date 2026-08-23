@@ -20,10 +20,7 @@ The source is split into three layers. Keep new code in the matching layer.
   `NativeGuiModel` consumes the runtime event/state stream and holds the belief
   snapshot, active loop frame, frame history, execution trace, and frame cursor.
   This layer must stay ImGui-free so it can be unit-tested without a window.
-- **Runtime client (transport)** — in `src/App.cpp`. Spawns the PI CLI in RPC
-  mode, reads JSONL events, and writes instructions back. It must not mutate the
-  model directly except by feeding events through `NativeGuiModel`, and must not
-  infer epistemic meaning.
+- **Runtime client (transport + RPC event adapter)** — in `src/App.cpp` + `src/Model.cpp`. Spawns the PI CLI in RPC mode, reads JSONL events, writes instructions back (`instruction`→`prompt` via `serializeInstructionCommand`), and in live mode feeds each event line through `applyRpcLine` into `NativeGuiModel`. It must not mutate the model directly except by feeding events through `NativeGuiModel`, and must not infer epistemic meaning.
 - **UI (ImGui)** — `src/App.cpp` render functions (the three lanes, status bar,
   navigator, summary, instruction palette). The UI reads model state; it never
   decides stage, cursor, or belief semantics.

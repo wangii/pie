@@ -11,6 +11,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 
@@ -108,6 +109,11 @@ struct LoopFrame {
     History history = History::Closed;
 };
 
+// P1 frame search: case-insensitive substring test over the frame's display
+// fields (id, summary, plan, trajectory, distillation, proposals). An empty
+// query matches every frame; a non-matching query returns false.
+bool frameMatchesQuery(const LoopFrame& f, std::string_view query);
+
 struct FrameCursor {
     int frameId = -1;
     FrameStage stage = FrameStage::NONE;
@@ -149,6 +155,14 @@ public:
     // Determine whether a belief is selected in the active frame.
     bool isSelectedInCurrentFrame(BeliefId b) const;
 
+    // RPC event adapter support (live mode). These build a real frame from the
+    // runtime event stream without inventing Belief/Proposal data.
+    int openRpcFrame(const std::string& summary);
+    void appendRpcFrameSummary(int id, const std::string& text);
+    void addRpcToolCall(int id, const std::string& toolCallId, const std::string& tool, const std::string& command);
+    void setRpcToolResult(int id, const std::string& toolCallId, const std::string& result, const std::string& status);
+    void closeRpcFrame(int id, bool failed);
+
 private:
     void openFrame(int id, const std::string& summary, const std::string& openedAt);
     LoopFrame* frame(int id);
@@ -162,6 +176,14 @@ private:
     std::vector<Belief> beliefs_;  // first-inserted order
     FrameCursor cursor_;
     std::string session_;
+    int nextRpcFrameId_ = 1000;  // auto-increment id for frames opened by the RPC adapter
 };
+
+// RPC event adapter (live mode). Consumes one runtime JSONL line (an
+// AgentSessionEvent or an RpcResponse ack) and updates the model. Returns
+// Applied if the line produced a model change, Ignored if it was a benign
+// non-model event, or Error if the line could not be interpreted.
+enum class RpcApplyResult { Applied, Ignored, Error };
+RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line);
 
 } // namespace pie::gui

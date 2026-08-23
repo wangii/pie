@@ -1,6 +1,8 @@
 // Instruction command serialization, extracted as a pure inline function so it
-// can be unit-tested without spawning a node subprocess. The wire schema is a
-// stable JSON object: {"type":"instruction","id":<uuid>,"message":<msg>}.
+// can be unit-tested without spawning a node subprocess. The GUI sends user
+// instructions to the RPC as a `prompt` command (the only recognized RpcCommand
+// that carries a free text message). Wire schema:
+//   {"type":"prompt","id":<uuid>,"message":<msg>}
 // Only `"` and `\` need escaping inside a JSON string value (LF/CR/other are
 // permitted literally but harmless; we do minimal correct escaping here).
 
@@ -17,7 +19,7 @@ inline std::string serializeInstructionCommand(const std::string& uuid, const st
         if (c == '"' || c == '\\') escaped += '\\';
         escaped += c;
     }
-    return "{\"type\":\"instruction\",\"id\":\"" + uuid +
+    return "{\"type\":\"prompt\",\"id\":\"" + uuid +
            "\",\"message\":\"" + escaped + "\"}";
 }
 

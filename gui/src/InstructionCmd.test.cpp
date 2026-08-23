@@ -28,7 +28,7 @@ int main() {
     // --- schema shape (normal) ---
     {
         std::string s = serializeInstructionCommand("p-ins", "explain current frame");
-        check(s == "{\"type\":\"instruction\",\"id\":\"p-ins\",\"message\":\"explain current frame\"}", "normal instruction schema");
+        check(s == "{\"type\":\"prompt\",\"id\":\"p-ins\",\"message\":\"explain current frame\"}", "normal instruction schema");
     }
     // --- quote escaping ---
     {
@@ -46,7 +46,7 @@ int main() {
         std::string s = serializeInstructionCommand("i4", "line1\nline2");
         check(s.find("line1") != std::string::npos && s.find("line2") != std::string::npos, "newline payload retained");
         check(s.find("\"message\":\"") != std::string::npos, "message key present");
-        check(s.find("\"type\":\"instruction\"") != std::string::npos, "type key present");
+        check(s.find("\"type\":\"prompt\"") != std::string::npos, "type key present");
     }
 
     // --- outbound pipe: bytes actually written reach the read end ---

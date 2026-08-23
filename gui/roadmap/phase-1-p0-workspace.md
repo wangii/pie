@@ -88,8 +88,9 @@ sees what the planner picked.
 ### Command palette role (spec 23)
 
 The instruction palette is the entry point to a Universal Intervention
-Interface. The implemented submit path (live mode) sends a user instruction to
-the runtime client; it is not itself a belief mutation. Commands like
+Interface. The implemented submit path (live mode) serializes the user
+instruction as an RPC `prompt` command (`serializeInstructionCommand`), which is
+not itself a belief mutation. Commands like
 `inspect B42`, `explain frame 128`, `compare frame 124 128`, `replay frame 126`,
 and `open execution E91` are forward-looking uses of that interface: the
 instruction emission is in place (Phase 1), while the domain-specific compare
@@ -122,13 +123,12 @@ animation.
 ## Dependency (from Phase 1 to Phase 2)
 
 Phase 2 (navigation/inspection) reads the frame history and the P0 workspace to
-add frame search, proposal-to-source jump, frame comparison, and provenance
-inspection.
+add proposal-to-source jump, frame comparison, and provenance inspection.
 
 ## Verification
 
 - `pi_gui` builds/links.
 - GUI starts without crash (sustained event loop, empty stderr).
 - Structural proof each P0 region has explicit render code.
-- Model semantics proven by `pi_gui_model_test` (27/27) and
+- Model semantics proven by `pi_gui_model_test` (37/37) and
   `pi_gui_instruction_test` (8/8).

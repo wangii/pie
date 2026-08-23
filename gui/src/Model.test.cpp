@@ -91,6 +91,46 @@ int main() {
     model.applyLine(R"({"type":"RandomThing","foo":1})");
     check(static_cast<int>(model.frames().size()) == before, "garbage ignored");
 
+    // --- P1 frame search: frameMatchesQuery (case-insensitive substring) ---
+    const auto* f128 = model.frameById(128);
+    check(f128 && pie::gui::frameMatchesQuery(*f128, ""), "empty query matches all");
+    check(f128 && pie::gui::frameMatchesQuery(*f128, "PYTEST"), "case-insensitive match on result");
+    check(f128 && pie::gui::frameMatchesQuery(*f128, "128"), "match on frame id");
+    check(f128 && pie::gui::frameMatchesQuery(*f128, "dependency against runtime"), "match on plan intent");
+    check(f128 && pie::gui::frameMatchesQuery(*f128, "runtime_environment"), "match on proposal lhs");
+    check(f128 && !pie::gui::frameMatchesQuery(*f128, "zzzzz"), "non-matching query rejected");
+    const auto* f132s = model.frameById(132);
+    check(f132s && pie::gui::frameMatchesQuery(*f132s, "re-audit"), "match on summary");
+    check(f132s && pie::gui::frameMatchesQuery(*f132s, "132"), "match on frame id 132");
+    check(f132s && !pie::gui::frameMatchesQuery(*f132s, "pytest"), "frame 132 does not match pytest");
+
+    // --- RPC event adapter (live mode): build frame/summary/trajectory, do    ---
+    // --- not fabricate Belief/Proposal/Distillation.                          ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"response","id":"p1","command":"prompt","success":true})") == pie::gui::RpcApplyResult::Ignored, "response ack ignored");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "agent_start opens frame");
+        check(rpc.frames().size() == 1, "one frame after agent_start");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"explain current frame"}],"timestamp":0}})") == pie::gui::RpcApplyResult::Applied, "user message appended to summary");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"tool_execution_start","toolCallId":"call_E88","toolName":"read","args":{"path":"x"}})") == pie::gui::RpcApplyResult::Applied, "tool_execution_start adds trajectory");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"tool_execution_end","toolCallId":"call_E88","toolName":"read","result":{"text":"ok"},"isError":false})") == pie::gui::RpcApplyResult::Applied, "tool_execution_end sets result");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"turn_end"})") == pie::gui::RpcApplyResult::Applied, "turn_end closes frame");
+
+        const auto* fr = rpc.frameById(1000);
+        check(fr != nullptr, "rpc frame 1000 exists");
+        check(fr && fr->summary.find("explain current frame") != std::string::npos, "frame summary has user text");
+        check(fr && fr->trajectory.size() == 1, "frame has one trajectory entry");
+        check(fr && fr->trajectory[0].tool == "read", "trajectory tool captured");
+        check(fr && fr->trajectory[0].status == "ok", "trajectory status ok");
+        check(fr && fr->trajectory[0].result.find("text") != std::string::npos, "trajectory result captured");
+        check(fr && fr->closed, "rpc frame closed after turn_end");
+        check(rpc.beliefs().empty(), "no beliefs fabricated");
+        check(fr && fr->proposals.empty(), "no proposals fabricated");
+        check(fr && fr->distillation.label.empty(), "no distillation fabricated");
+        check(pie::gui::applyRpcLine(rpc, "not json") == pie::gui::RpcApplyResult::Error, "malformed line returns Error");
+        check(pie::gui::applyRpcLine(rpc, "{\"foo\":1}") == pie::gui::RpcApplyResult::Error, "missing type returns Error");
+    }
+
     if (failures == 0) std::printf("ALL PASS\n");
     else std::printf("%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;
