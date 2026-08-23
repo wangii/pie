@@ -221,7 +221,11 @@ export {
 	createReadOnlyTools,
 	createReadTool,
 	createWriteTool,
+	// Native GUI snapshot
+	getNativeGuiSnapshot,
+	type NativeGuiSnapshot,
 	type PromptTemplate,
+	subscribeNativeGuiSnapshot,
 } from "./core/sdk.ts";
 export {
 	type BranchSummaryEntry,

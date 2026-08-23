@@ -1,10 +1,17 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentState,
+	setDefaultStreamFn,
+	type ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, type AgentSessionEvent, type RoleStatus } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import type { Belief } from "./belief-set.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -168,6 +175,74 @@ function getDefaultAgentDir(): string {
  * });
  * ```
  */
+/**
+ * Structured belief-loop state snapshot for external native GUI consumers.
+ *
+ * Composed exclusively from AgentSession's public getters, so exposing it
+ * requires no changes to session internals, protocol schemas, or the TUI.
+ *
+ * The current belief-loop role is intentionally absent: `LoopState` and the
+ * active role have no public accessor on AgentSession, so a single-file change
+ * cannot provide it.
+ */
+export interface NativeGuiSnapshot {
+	readonly sessionId: string;
+	readonly state: AgentState;
+	readonly thinkingLevel: ThinkingLevel;
+	readonly isStreaming: boolean;
+	readonly messages: AgentMessage[];
+	readonly beliefs: readonly Belief[];
+	readonly roleStatus: RoleStatus | undefined;
+}
+
+/** Build a structured snapshot for a native GUI from the session's public getters. */
+export function getNativeGuiSnapshot(session: AgentSession): NativeGuiSnapshot {
+	const state = session.state;
+	return {
+		sessionId: session.sessionId,
+		// Shallow copy: AgentState.model is a Model<any> with functions, so
+		// structuredClone is not usable. Top-level and array writes must not
+		// write back into the session; nested mutable objects (message content,
+		// model) remain shared references.
+		state: {
+			...state,
+			tools: [...state.tools],
+			messages: [...state.messages],
+			pendingToolCalls: new Set(state.pendingToolCalls),
+		},
+		thinkingLevel: session.thinkingLevel,
+		isStreaming: session.isStreaming,
+		messages: [...session.messages],
+		beliefs: [...session.beliefs],
+		roleStatus: (() => {
+			const roleStatus = session.getRoleStatus();
+			if (!roleStatus) return undefined;
+			return {
+				epistemic: { ...roleStatus.epistemic },
+				planner: { ...roleStatus.planner },
+				distillation: { ...roleStatus.distillation },
+				execution: { ...roleStatus.execution },
+			};
+		})(),
+	};
+}
+
+/**
+ * Subscribe a native GUI listener to snapshot updates.
+ *
+ * Emits the current snapshot immediately, then re-emits it on every
+ * `AgentSessionEvent`. Returns an unsubscribe function.
+ */
+export function subscribeNativeGuiSnapshot(
+	session: AgentSession,
+	listener: (snapshot: NativeGuiSnapshot) => void,
+): () => void {
+	listener(getNativeGuiSnapshot(session));
+	return session.subscribe((_event: AgentSessionEvent) => {
+		listener(getNativeGuiSnapshot(session));
+	});
+}
+
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
