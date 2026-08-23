@@ -83,12 +83,12 @@ so it requires FreeType (`IMGUI_ENABLE_FREETYPE`) to be compiled in and linked
   minimum lane width. When the window is too narrow for three side-by-side
   lanes, the lanes stack vertically inside a scrollable region instead of
   overlapping.
-- The instruction palette is NOT a floating overlay: it is a docked child band
-  rendered between the frame navigator and the lanes. When open, its height is
-  reserved in the layout (deducted from the lane region) so the palette never
-  overlaps the status bar, navigator, lanes, or summary. The geometry is
-  computed by `LayoutMetrics` (`computeLayout`/`laneRects`) and covered by the
-  headless `pi_gui_layout_test`.
+- The instruction palette is a floating overlay window toggled by ⌘T/Ctrl-T,
+  independent of the main workspace layout. When open it is rendered as its own
+  ImGui window; it does not reserve any band in the layout, so it never overlaps
+  the status bar, navigator, lanes, or summary. The geometry of the remaining
+  (status bar, navigator, lanes, summary) regions is computed by `LayoutMetrics`
+  (`computeLayout`/`laneRects`) and covered by the headless `pi_gui_layout_test`.
 - The window enforces a minimum size matching the layout formula via
   `glfwSetWindowSizeLimits`, using the single-source constants
   `kMinWindowWidth`/`kMinWindowHeight` from `LayoutMetrics.h`. Resizing the

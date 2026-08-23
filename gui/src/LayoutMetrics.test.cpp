@@ -1,7 +1,7 @@
 // Headless test for the no-overlap layout geometry. Verifies that region sizes
 // are non-negative, contained in the work area, and pairwise disjoint (no
-// vertical overlap) across a range of window sizes, with the palette open and
-// closed, and with the stacked-lane fallback for narrow windows.
+// vertical overlap) across a range of window sizes, and with the stacked-lane
+// fallback for narrow windows.
 
 #include "LayoutMetrics.h"
 
@@ -33,19 +33,18 @@ int main() {
 
     for (float winW : {pie::gui::kMinWindowWidth, 500.0f, 800.0f, 1440.0f}) {
         for (float winH : {pie::gui::kMinWindowHeight, 600.0f, 900.0f}) {
-            for (bool paletteOpen : {false, true}) {
-                LayoutMetrics m = computeLayout(winW, winH, rowH, paletteOpen);
+            {
+                LayoutMetrics m = computeLayout(winW, winH, rowH);
 
                 check(m.headerH > 0.0f, "header height positive");
                 check(m.navH > 0.0f, "nav height positive");
                 check(m.summaryH > 0.0f, "summary height positive");
                 check(m.laneH > 0.0f, "lane height positive");
 
-                // Vertically stacked regions: top, nav, palette, lanes, summary.
+                // Vertically stacked regions: top, nav, lanes, summary.
                 Rect top{0, 0, winW, m.headerH};
                 Rect nav{0, top.bottom(), winW, m.navH};
-                Rect palette{0, nav.bottom(), winW, m.paletteH};
-                Rect lanes{0, m.paletteH > 0 ? palette.bottom() : nav.bottom(), winW, m.laneH};
+                Rect lanes{0, nav.bottom(), winW, m.laneH};
                 Rect summary{0, lanes.bottom(), winW, m.summaryH};
 
                 // All within the window height (no out-of-work-area, no negative).
@@ -55,10 +54,6 @@ int main() {
                 check(disjoint(top, nav), "top vs nav disjoint");
                 check(disjoint(nav, lanes), "nav vs lanes disjoint");
                 check(disjoint(lanes, summary), "lanes vs summary disjoint");
-                if (m.paletteH > 0) {
-                    check(disjoint(nav, palette), "nav vs palette disjoint");
-                    check(disjoint(palette, lanes), "palette vs lanes disjoint");
-                }
 
                 // Lane widths: non-negative.
                 float left = 0, mid = 0, right = 0;

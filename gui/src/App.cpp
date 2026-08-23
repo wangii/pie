@@ -260,29 +260,19 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
         ImGui::PushID(b.id.value);
         ImGui::BeginGroup();
 
-        // Top line: id + confidence + status + SELECTED badge.
-        ImGui::PushStyleColor(ImGuiCol_Text, isSel ? kAccent : ImGui::GetStyleColorVec4(ImGuiCol_Text));
-        ImGui::TextUnformatted(beliefLabel(b.id.value).c_str());
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
+        // Content line colored by status (no id/status text): color encodes state.
         ImGui::TextDisabled("%.2f", b.confidence);
-        if (isSel) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-            ImGui::TextUnformatted("SELECTED");
-            ImGui::PopStyleColor();
-        }
-        if (isChanged) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
-            ImGui::TextUnformatted("CHANGED");
-            ImGui::PopStyleColor();
-        }
         ImGui::SameLine();
-        ImGui::TextDisabled("(%s)", b.status.c_str());
-
-        // Relation line.
+        ImVec4 c = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        if (b.status == "open") c = kAccent;
+        else if (b.status == "closed") c = kGreen;
+        else if (b.status == "falsified") c = kRed;
+        else if (b.status == "revised") c = kAmber;
+        if (isSel) c = kAccent;
+        if (isChanged) c = kAmber;
+        ImGui::PushStyleColor(ImGuiCol_Text, c);
         ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
+        ImGui::PopStyleColor();
 
         // Provenance.
         if (!b.sourceFrames.empty()) {
@@ -467,57 +457,60 @@ void renderSummary(const pie::gui::NativeGuiModel& m, int viewId) {
 
 using InstructionSender = std::function<void(const std::string&)>;
 
-// Render the instruction palette as a docked child inside the main workspace
-// (not a floating window). The caller reserves `height` in the layout between
-// the navigator and the lanes, so the palette's visible rectangle never
-// overlaps the status bar, navigator, lanes, or summary.
-void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, bool canSend, InstructionSender send, float height) {
+// Render the instruction palette as a standalone floating window (not docked
+// into the main workspace). It no longer reserves layout space; the caller only
+// toggles `open` via the cmd/cmd-T shortcut.
+void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, bool canSend, InstructionSender send) {
     if (!open) return;
 
-    ImGui::BeginChild("palette", ImVec2(0, height), true);
-
-    // Keep focus on the input box once opened.
     static bool focusOnce = true;
     static char buf[256] = {};
-    if (focusOnce) { ImGui::SetKeyboardFocusHere(); focusOnce = false; }
 
-    ImGui::TextUnformatted(">");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(-1.0f);
-    bool submit = ImGui::InputText("##instruction", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImVec2(120, 120), ImGuiCond_Appearing);
+    bool close = false;
+    if (ImGui::Begin("User Instruction", &close, ImGuiWindowFlags_NoCollapse)) {
+        // Keep focus on the input box once opened.
+        if (focusOnce) { ImGui::SetKeyboardFocusHere(); focusOnce = false; }
 
-    ImGui::TextDisabled("Recent / Suggested");
-    ImGui::Separator();
-    const char* suggestions[] = {
-        "Explain current frame",
-        "Inspect selected beliefs",
-        "Explain current proposal",
-        "Stop execution",
-        "Reconsider B42",
-        "Show source of B53",
-    };
-    for (auto s : suggestions) {
-        if (ImGui::Selectable(s)) {
-            std::snprintf(buf, sizeof(buf), "%s", s);
-            submit = true;
+        ImGui::TextUnformatted(">");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        bool submit = ImGui::InputText("##instruction", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::TextDisabled("Recent / Suggested");
+        ImGui::Separator();
+        const char* suggestions[] = {
+            "Explain current frame",
+            "Inspect selected beliefs",
+            "Explain current proposal",
+            "Stop execution",
+            "Reconsider B42",
+            "Show source of B53",
+        };
+        for (auto s : suggestions) {
+            if (ImGui::Selectable(s)) {
+                std::snprintf(buf, sizeof(buf), "%s", s);
+                submit = true;
+            }
         }
-    }
-    if (submit) {
-        std::string instr(buf);
-        if (canSend && send && !instr.empty()) {
-            send(instr);  // reverse path: instruction -> runtime client
+        if (submit) {
+            std::string instr(buf);
+            // Always clear the input on Enter, then attempt to submit to rpc.
             buf[0] = '\0';
-        } else {
-            // demo / non-live: no runtime client, so show a disabled state and
-            // keep the text so the user sees it was not actually sent.
-            ImGui::PushStyleColor(ImGuiCol_Text, kGray);
-            ImGui::TextDisabled("(not sent: not connected to a runtime client)");
-            ImGui::PopStyleColor();
+            if (canSend && send && !instr.empty()) {
+                send(instr);  // reverse path: instruction -> runtime client
+            } else {
+                // demo / non-live: no runtime client, so show a disabled state.
+                ImGui::PushStyleColor(ImGuiCol_Text, kGray);
+                ImGui::TextDisabled("(not sent: not connected to a runtime client)");
+                ImGui::PopStyleColor();
+            }
         }
     }
-    ImGui::EndChild();
+    ImGui::End();
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; focusOnce = true; }
+    if (close || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; focusOnce = true; }
     ImGui::SetNextFrameWantCaptureKeyboard(true);
 }
 
@@ -555,9 +548,10 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
     // Enforce a minimum window size matching the layout formula so the status
-    // bar, navigator, lanes, summary, and palette always fit the work area
-    // without overlap. The bounds come from the single source of truth in
-    // LayoutMetrics.h so code, tests, and docs cannot drift.
+    // bar, navigator, lanes, and summary always fit the work area without
+    // overlap. The bounds come from the single source of truth in
+    // LayoutMetrics.h so code, tests, and docs cannot drift. The instruction
+    // palette is a floating window and does not participate in this layout.
     glfwSetWindowSizeLimits(window,
                             static_cast<unsigned int>(pie::gui::kMinWindowWidth),
                             static_cast<unsigned int>(pie::gui::kMinWindowHeight),
@@ -656,11 +650,10 @@ int main(int argc, char** argv) {
         // Derive vertical sizes from the frame height and font metrics so that
         // the layout tracks font scale instead of hardcoding pixel constants.
         float rowH = ImGui::GetFrameHeightWithSpacing();
-        pie::gui::LayoutMetrics lm = pie::gui::computeLayout(io.DisplaySize.x, winH, rowH, instructionOpen);
+        pie::gui::LayoutMetrics lm = pie::gui::computeLayout(io.DisplaySize.x, winH, rowH);
         float headerH = lm.headerH;   // status bar
         float navH = lm.navH;         // frame navigator
         float summaryH = lm.summaryH; // current-frame summary
-        float paletteH = lm.paletteH; // docked instruction palette band
         const float minLaneH = lm.minLaneH;
         const float minLaneW = lm.minLaneW;
         float laneH = lm.laneH;
@@ -673,13 +666,12 @@ int main(int argc, char** argv) {
         renderNavigator(model, viewId);
         ImGui::EndChild();
 
-        // Docked palette band: between navigator and lanes, never overlapping.
+        // Floating instruction window (cmd/cmd-T), independent of the main layout.
         renderInstructionPalette(instructionOpen, model, live,
                                  [&sdk](const std::string& msg) {
                                      // live mode: send the instruction to the runtime client.
                                      writeCommand(sdk, pie::gui::serializeInstructionCommand("p-ins", msg));
-                                 },
-                                 paletteH);
+                                 });
 
         ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
         float availW = std::max(0.0f, winW - pad * 2);
