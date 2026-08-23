@@ -1,2 +1,5 @@
 # c++
 build/
+
+# macOS Finder metadata
+.DS_Store
