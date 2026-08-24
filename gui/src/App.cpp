@@ -241,8 +241,18 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
             ImGui::SameLine();
             ImGui::Separator();
         }
-        if (!c.item.empty()) {
-            ImGui::TextUnformatted(("Current: " + c.item).c_str());
+        // The runtime never provides CursorChanged.item (rpc.md and the runtime
+        // emit only frameId+stage), so derive the "current" tool from the active
+        // frame's in-flight trajectory instead of a static, never-populated field.
+        if (c.stage == pie::gui::FrameStage::EXECUTING) {
+            if (const auto* f = m.frameById(c.frameId)) {
+                for (const auto& t : f->trajectory) {
+                    if (t.status == "running") {
+                        ImGui::TextUnformatted(("Current: " + t.id).c_str());
+                        break;
+                    }
+                }
+            }
         }
     } else {
         ImGui::TextUnformatted("(no active frame)");
@@ -445,7 +455,9 @@ void renderExecutionLane(const pie::gui::NativeGuiModel& m, int viewId) {
     if (f->trajectory.empty()) { ImGui::TextDisabled("(no execution steps)"); ImGui::EndChild(); return; }
 
     for (auto& t : f->trajectory) {
-        bool isCurrent = (cur.valid() && cur.stage == pie::gui::FrameStage::EXECUTING && cur.item == t.id);
+        // The runtime never provides CursorChanged.item, so a tool is "current"
+        // when it is in flight (status == running) during the EXECUTING stage.
+        bool isCurrent = (cur.valid() && cur.stage == pie::gui::FrameStage::EXECUTING && t.status == "running");
         std::string statusSym = "○";
         if (t.status == "ok") statusSym = "✓";
         else if (t.status == "running") statusSym = "●";

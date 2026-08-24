@@ -153,6 +153,14 @@ public:
     // populate belief-loop phase state (selected beliefs, plan, distillation).
     LoopFrame* mutableFrame(int id) { return frame(id); }
 
+    // Live RPC frame binding. The runtime's belief-loop phase events carry the
+    // authoritative frame id (_taskId, 1-based). The RPC adapter opens a
+    // placeholder frame on agent_start/turn_start under a synthetic id (1000+);
+    // this resolves a runtime frame id to a frame, rebinding (renaming) the
+    // current placeholder frame to the runtime id on first arrival so every later
+    // phase event for the same task hits the same frame. ImGui-free, unit-testable.
+    LoopFrame* rpcFrame(int runtimeFrameId);
+
     const FrameCursor& cursor() const { return cursor_; }
     // Mutable cursor access, used by the RPC event adapter to update the
     // active-frame cursor from a CursorChanged phase event.

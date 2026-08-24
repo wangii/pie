@@ -1276,7 +1276,11 @@ Emitted when the belief loop proposes a belief. The belief loop is prose-only, s
 
 ### CursorChanged
 
-Emitted when the belief loop advances to a new phase. `stage` is one of `PLANNING`/`EXECUTING`/`DISTILLING`/`PROPOSING`/`CLOSED`.
+Emitted when the belief loop advances to a new phase. `stage` is the authoritative
+phase signal; clients drive the phase display solely from `CursorChanged.stage`
+and must not infer it from `Execution*`/`Distillation*` events (the runtime never
+emits `ExecutionStarted`/`ExecutionCompleted`/`DistillationStarted` as RPC events;
+those exist only in the demo/headless fixture).
 
 ```json
 {
@@ -1298,6 +1302,22 @@ Emitted when the distill role produces a distillation block. `interpretation` ca
   "interpretation": "distilled line 1\ndistilled line 2"
 }
 ```
+
+### Belief-loop distillation blocks as custom messages
+
+In addition to `DistillationProduced`, the belief loop surfaces a displayable
+distillation block as a `custom` message (`message_start`/`message_end` with
+`message.role === "custom"` and a `message.customType`). Two custom types are
+used:
+
+- `fast_path_distillation` — the fast-path run's summary. The fast path never
+  emits `DistillationProduced`, so a client rendering a Cognitive Process pane
+  must also key on this custom type.
+- `belief_distillation` — the in-loop distillation block, emitted alongside
+  `DistillationProduced` after a distill turn applies belief updates.
+
+A client that renders the distillation lane should surface both the
+`DistillationProduced` phase event and these custom-message blocks.
 
 ## Extension UI Protocol
 

@@ -350,14 +350,32 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     // Belief-loop phase events (live mode). These carry the epistemic state the
     // demo/headless path produces via applyLine(): the selected belief ids, the
     // planner's plan, the distillation output, and the execution stage. Live mode
-    // builds its frame via openRpcFrame (agent_start/turn_start) so we bind each
-    // phase event to the currently active frame.
-    LoopFrame* phaseFrame = model.mutableFrame(model.cursor().frameId);
+    // builds its frame via openRpcFrame (agent_start/turn_start) as a synthetic
+    // placeholder; the runtime's frame id (taskId, 1-based) is authoritative, so
+    // each phase event resolves/rebinds the frame via model.rpcFrame(frameId).
+    // Stage comes only from CursorChanged; DistillationProduced consumes only the
+    // documented rpc.md fields (label/interpretation), never inputIds/unexplained.
+    auto phaseFrame = [&]() -> LoopFrame* {
+        return model.rpcFrame(intVal(line, "frameId", model.cursor().frameId));
+    };
     if (type == "BeliefsSelected") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
+        LoopFrame* p = phaseFrame();
+        if (!p) return RpcApplyResult::Ignored;
         std::string raw;
         if (!findKey(line, "beliefs", raw)) return RpcApplyResult::Ignored;
-        phaseFrame->selectedBeliefs = beliefsArray(raw);
+        p->selectedBeliefs = beliefsArray(raw);
+        return RpcApplyResult::Applied;
+    }
+    if (type == "BeliefCreated") {
+        // A new belief record from the runtime (declare_belief op propose/refine).
+        // Register it so the Belief pane shows it immediately, before any later
+        // support/refute/retract emits a BeliefUpdated for the same id. The event
+        // carries statement/domain/expectation (no status); a new record is proposed.
+        BeliefId id{intVal(line, "beliefId")};
+        if (!id.valid()) return RpcApplyResult::Ignored;
+        Belief& b = model.upsertBeliefRpc(id);
+        b.status = str(line, "status", "proposed");
+        b.statement = str(line, "statement", b.statement);
         return RpcApplyResult::Applied;
     }
     if (type == "BeliefUpdated") {
@@ -372,60 +390,45 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         return RpcApplyResult::Applied;
     }
     if (type == "PlanProduced") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
-        phaseFrame->plan.label = str(line, "label");
-        phaseFrame->plan.question = str(line, "question");
-        phaseFrame->plan.intent = str(line, "intent");
-        return RpcApplyResult::Applied;
-    }
-    if (type == "ExecutionStarted") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
-        phaseFrame->stage = FrameStage::EXECUTING;
-        return RpcApplyResult::Applied;
-    }
-    if (type == "ExecutionCompleted") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
-        phaseFrame->stage = FrameStage::DISTILLING;
-        return RpcApplyResult::Applied;
-    }
-    if (type == "DistillationStarted") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
-        phaseFrame->stage = FrameStage::DISTILLING;
+        LoopFrame* p = phaseFrame();
+        if (!p) return RpcApplyResult::Ignored;
+        p->plan.label = str(line, "label");
+        p->plan.question = str(line, "question");
+        p->plan.intent = str(line, "intent");
         return RpcApplyResult::Applied;
     }
     if (type == "DistillationProduced") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
-        phaseFrame->distillation.label = str(line, "label");
-        phaseFrame->distillation.inputIds = [&] {
-            std::string raw;
-            return findKey(line, "inputIds", raw) ? strArray(raw) : std::vector<std::string>{};
-        }();
-        phaseFrame->distillation.unexplained = str(line, "unexplained");
-        phaseFrame->distillation.interpretation = str(line, "interpretation");
-        phaseFrame->stage = FrameStage::PROPOSING;
+        // Consume only the documented rpc.md fields (label, interpretation). The
+        // runtime never emits inputIds/unexplained, so those stay empty.
+        LoopFrame* p = phaseFrame();
+        if (!p) return RpcApplyResult::Ignored;
+        p->distillation.label = str(line, "label");
+        p->distillation.interpretation = str(line, "interpretation");
         return RpcApplyResult::Applied;
     }
     if (type == "ProposalCreated") {
-        if (!phaseFrame) return RpcApplyResult::Ignored;
-        Proposal p;
-        p.op = charVal(line, "op", '?');
-        p.belief = str(line, "belief");
-        p.lhs = str(line, "lhs");
-        p.relation = str(line, "relation");
-        p.rhs = str(line, "rhs");
-        p.detail = str(line, "detail");
-        phaseFrame->proposals.push_back(std::move(p));
+        LoopFrame* p = phaseFrame();
+        if (!p) return RpcApplyResult::Ignored;
+        Proposal prop;
+        prop.op = charVal(line, "op", '?');
+        prop.belief = str(line, "belief");
+        prop.lhs = str(line, "lhs");
+        prop.relation = str(line, "relation");
+        prop.rhs = str(line, "rhs");
+        prop.detail = str(line, "detail");
+        p->proposals.push_back(std::move(prop));
         return RpcApplyResult::Applied;
     }
     if (type == "CursorChanged") {
-        std::string rawFrameId;
-        if (findKey(line, "frameId", rawFrameId)) {
-            model.mutableCursor().frameId = static_cast<int>(std::strtol(rawFrameId.c_str(), nullptr, 10));
-        }
-        model.mutableCursor().stage = parseStage(str(line, "stage"));
+        // The runtime's frame id (taskId) is authoritative: resolve/rebind the
+        // frame, then drive stage/item from this single event. Stage is never
+        // inferred from Execution* / Distillation* events (those are not emitted
+        // by the runtime).
+        LoopFrame* p = phaseFrame();
+        const FrameStage st = parseStage(str(line, "stage"));
+        model.mutableCursor().stage = st;
         model.mutableCursor().item = str(line, "item");
-        LoopFrame* f = model.mutableFrame(model.mutableCursor().frameId);
-        if (f && model.mutableCursor().stage != FrameStage::NONE) f->stage = model.mutableCursor().stage;
+        if (p && st != FrameStage::NONE) p->stage = st;
         return RpcApplyResult::Applied;
     }
     if (type == "turn_end" || type == "agent_settled") {
@@ -496,6 +499,29 @@ int NativeGuiModel::openRpcFrame(const std::string& summary) {
     int id = nextRpcFrameId_++;
     openFrame(id, summary, "rpc");
     return id;
+}
+
+LoopFrame* NativeGuiModel::rpcFrame(int runtimeFrameId) {
+    if (runtimeFrameId < 0) return frame(cursor_.frameId);
+    // Already resolved under this runtime id: return the existing frame.
+    if (frames_.count(runtimeFrameId)) return frame(runtimeFrameId);
+    // Rebind the current placeholder frame (opened by agent_start/turn_start with a
+    // synthetic id) to the runtime's authoritative id so all later events for the
+    // same task resolve to the same frame.
+    const int cur = cursor_.frameId;
+    if (cur >= 0 && frames_.count(cur)) {
+        LoopFrame f = std::move(frames_[cur]);
+        frames_.erase(cur);
+        for (auto& id : frameOrder_) {
+            if (id == cur) { id = runtimeFrameId; break; }
+        }
+        frames_[runtimeFrameId] = std::move(f);
+        if (cursor_.frameId == cur) cursor_.frameId = runtimeFrameId;
+        return frame(runtimeFrameId);
+    }
+    // No placeholder: open a fresh frame keyed by the runtime id.
+    openFrame(runtimeFrameId, "", "rpc");
+    return frame(runtimeFrameId);
 }
 
 void NativeGuiModel::appendRpcFrameSummary(int id, const std::string& text) {

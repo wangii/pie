@@ -132,15 +132,19 @@ int main() {
     }
 
     // --- Belief-loop phase events (live mode): populate selected beliefs, plan, ---
-    // --- distillation, and execution stage on the active frame.                  ---
+    // --- distillation, and stage on the active frame. Stage is driven by
+    // --- CursorChanged (not by Execution* / Distillation* events, which the
+    // --- runtime never emits); DistillationProduced consumes only label and
+    // --- interpretation (inputIds/unexplained never come from the runtime).
     {
         pie::gui::NativeGuiModel rpc;
         check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "agent_start opens frame");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefsSelected","frameId":1000,"beliefs":[42,47]})") == pie::gui::RpcApplyResult::Applied, "beliefs_selected applied");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefUpdated","beliefId":42,"status":"proposed","statement":"project uses pytest"})") == pie::gui::RpcApplyResult::Applied, "belief_updated applied");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"PlanProduced","frameId":1000,"label":"P-128","question":"Is pytest available?","intent":"verify dependency"})") == pie::gui::RpcApplyResult::Applied, "plan_produced applied");
-        check(pie::gui::applyRpcLine(rpc, R"({"type":"ExecutionStarted","frameId":1000})") == pie::gui::RpcApplyResult::Applied, "execution_started applied");
-        check(pie::gui::applyRpcLine(rpc, R"({"type":"DistillationProduced","frameId":1000,"label":"D-42","inputIds":["E-88"],"unexplained":"declared vs runtime differ","interpretation":"mismatch"})") == pie::gui::RpcApplyResult::Applied, "distillation_produced applied");
+        // Stage is driven by CursorChanged, not synthesized from a phase event.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1000,"stage":"EXECUTING","item":"E-88"})") == pie::gui::RpcApplyResult::Applied, "cursor_changed sets stage");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"DistillationProduced","frameId":1000,"label":"D-42","interpretation":"mismatch"})") == pie::gui::RpcApplyResult::Applied, "distillation_produced applied");
 
         const auto* fr = rpc.frameById(1000);
         check(fr != nullptr, "rpc frame 1000 exists");
@@ -148,15 +152,59 @@ int main() {
         check(fr && fr->selectedBeliefs[0].value == 42, "first selected belief id 42");
         check(fr && fr->plan.valid() && fr->plan.label == "P-128", "plan label set");
         check(fr && fr->plan.intent == "verify dependency", "plan intent set");
-        // After DistillationProduced the loop moves to the proposing phase.
-        check(fr && fr->stage == pie::gui::FrameStage::PROPOSING, "stage after distillation");
+        check(fr && fr->stage == pie::gui::FrameStage::EXECUTING, "stage driven by CursorChanged");
         check(fr && fr->distillation.valid() && fr->distillation.label == "D-42", "distillation label");
-        check(fr && fr->distillation.inputIds.size() == 1, "distillation inputs");
+        check(fr && fr->distillation.interpretation == "mismatch", "distillation interpretation");
+        check(fr && fr->distillation.inputIds.empty(), "distillation inputIds empty (runtime never sends)");
 
         check(rpc.beliefs().size() == 1, "one belief registered");
         check(rpc.beliefs()[0].id.value == 42, "registered belief id 42");
         check(rpc.beliefs()[0].statement == "project uses pytest", "registered belief statement");
         check(rpc.beliefs()[0].status == "proposed", "registered belief status");
+    }
+
+    // --- Regression: the runtime frame id (taskId, 1-based) is authoritative. ---
+    // --- The adapter opens a synthetic placeholder (1000); first real frame id  ---
+    // --- must rebind it so later phase events land on the same frame, instead of ---
+    // --- the panes dropping events after a frame id mismatch.                   ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "regression: agent_start opens placeholder");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1,"stage":"PLANNING"})") == pie::gui::RpcApplyResult::Applied, "regression: cursor_changed binds runtime frame id");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefsSelected","frameId":1,"beliefs":[42,47]})") == pie::gui::RpcApplyResult::Applied, "regression: beliefs_selected on runtime frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"PlanProduced","frameId":1,"label":"P-1","question":"q","intent":"intent"})") == pie::gui::RpcApplyResult::Applied, "regression: plan on runtime frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1,"stage":"EXECUTING","item":"E-1"})") == pie::gui::RpcApplyResult::Applied, "regression: cursor stage");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"DistillationProduced","frameId":1,"label":"D-1","interpretation":"distilled"})") == pie::gui::RpcApplyResult::Applied, "regression: distillation on runtime frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"ProposalCreated","frameId":1,"op":"+","belief":"B3","lhs":"","relation":"","rhs":"","detail":"proposal"})") == pie::gui::RpcApplyResult::Applied, "regression: proposal on runtime frame");
+
+        check(rpc.cursor().frameId == 1, "regression: cursor bound to runtime frame id");
+        const auto* f1 = rpc.frameById(1);
+        check(f1 != nullptr, "regression: frame 1 exists after rebind");
+        check(f1 && f1->selectedBeliefs.size() == 2, "regression: selected beliefs on runtime frame");
+        check(f1 && f1->plan.valid() && f1->plan.label == "P-1", "regression: plan on runtime frame");
+        check(f1 && f1->stage == pie::gui::FrameStage::EXECUTING, "regression: stage on runtime frame");
+        check(f1 && f1->distillation.valid() && f1->distillation.label == "D-1", "regression: distillation label");
+        check(f1 && f1->distillation.inputIds.empty(), "regression: distillation inputIds empty (runtime never sends)");
+        check(f1 && f1->distillation.interpretation == "distilled", "regression: distillation interpretation");
+        check(f1 && f1->proposals.size() == 1, "regression: proposal on runtime frame");
+        check(rpc.frameById(1000) == nullptr, "regression: synthetic placeholder 1000 no longer exists");
+    }
+
+    // --- Regression: BeliefCreated registers a new belief immediately, and a
+    // --- later BeliefUpdated for the same id updates it in place (no duplicate).
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "belief_created: agent_start opens frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefCreated","beliefId":42,"statement":"project uses pytest","domain":"code","expectation":"pytest is importable","evidenceRounds":1})") == pie::gui::RpcApplyResult::Applied, "belief_created applied");
+        check(rpc.beliefs().size() == 1, "belief registered immediately on BeliefCreated");
+        check(rpc.beliefs()[0].id.value == 42, "belief id 42 registered");
+        check(rpc.beliefs()[0].statement == "project uses pytest", "belief statement set");
+        check(rpc.beliefs()[0].status == "proposed", "new belief status proposed");
+        // Same id later updated (support) must update the same entry, not add a dup.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefUpdated","beliefId":42,"status":"supported","previousStatus":"proposed","statement":"project uses pytest"})") == pie::gui::RpcApplyResult::Applied, "belief_updated applied");
+        check(rpc.beliefs().size() == 1, "no duplicate after BeliefUpdated");
+        check(rpc.beliefs()[0].status == "supported", "same entry status updated in place");
+        check(rpc.beliefs()[0].statement == "project uses pytest", "same entry statement retained");
     }
 
     // --- Live RPC ProposalCreated: agent_start then ProposalCreated lands on the
