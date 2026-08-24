@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <thread>
@@ -150,7 +151,9 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init(glslVersion);
 
     NativeGuiModel model;
-    model.setSession("repo-analysis");
+    // The "PIE Session:" status slot shows the current working path (where this
+    // GUI was launched), not a hardcoded session name.
+    model.setSession(std::filesystem::current_path().string());
 
     SdkProcess sdk;
     EventQueue queue;
