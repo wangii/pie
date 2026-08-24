@@ -1,9 +1,12 @@
 // PIE Native GUI - cognitive feedback loop workbench (P0).
 //
-// Layout: global status bar / frame navigator / user instruction entrance,
-// three lanes (BELIEF SET | COGNITIVE PROCESS | EXECUTION), and a bottom
-// current-frame summary. Frame # + stage + current item come ONLY from the
-// NativeGuiModel cursor, which is set solely by explicit runtime events.
+// Application orchestration only: window/ImGui/GLFW setup, the runtime RPC
+// child (--live) or DemoEvents fixture (--demo), and the main loop that lays
+// out the status bar / lanes / summary and routes each region's render to the
+// extracted UI components. Region rendering lives in
+// StatusBar/BeliefLane/CognitiveLane/ExecutionLane/Summary/InstructionPalette;
+// theme/markdown/shared helpers in Theme/UiMarkdown/UiShared; the SDK transport
+// in RuntimeClient; platform paths in Paths. This file only wires them together.
 //
 // Modes:
 //   default   --live: spawns `node <PI_CLI> -ne --mode rpc` and applies its JSONL.
@@ -14,808 +17,40 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
-#include <imgui_markdown.h>
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <filesystem>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
-
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <signal.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 #include "Model.h"
 #include "DemoEvents.h"
 #include "InstructionCmd.h"
 #include "LayoutMetrics.h"
-#include "PaletteMetrics.h"
+#include "StatusBar.h"
+#include "BeliefLane.h"
+#include "CognitiveLane.h"
+#include "ExecutionLane.h"
+#include "Summary.h"
+#include "InstructionPalette.h"
+#include "Theme.h"
+#include "Paths.h"
+#include "RuntimeClient.h"
 
 #ifndef PI_CLI
 #error "PI_CLI must be defined (absolute path to packages/pie/dist/cli.js)"
 #endif
 
-namespace {
-
-// ---------------------------------------------------------------------------
-// Locate the directory containing the running pie_gui executable, so the app can
-// load assets that are copied next to the binary regardless of the current
-// working directory. Uses the platform-native path API (not cwd).
-// ---------------------------------------------------------------------------
-std::string executableDirectory() {
-    std::error_code ec;
-#if defined(_WIN32)
-    std::vector<wchar_t> buf(32768);
-    DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
-    if (n == 0 || n >= buf.size()) return {};
-    std::filesystem::path p(buf.data());
-    return std::filesystem::absolute(p).parent_path().string();
-#elif defined(__APPLE__)
-    uint32_t size = 0;
-    _NSGetExecutablePath(nullptr, &size);
-    std::vector<char> buf(size);
-    if (_NSGetExecutablePath(buf.data(), &size) != 0) return {};
-    std::filesystem::path p = std::filesystem::canonical(buf.data(), ec);
-    return (ec ? std::filesystem::path(buf.data()) : p).parent_path().string();
-#else
-    // Linux/other: /proc/self/exe.
-    std::filesystem::path p = std::filesystem::canonical("/proc/self/exe", ec);
-    if (ec) return {};
-    return p.parent_path().string();
-#endif
-}
-
-std::string fontPath() {
-    return (std::filesystem::path(executableDirectory()) / "SarasaTermSCNerd.ttc").string();
-}
-
-// Italic face (Sarasa Term SC Nerd Italic, fc-scan index 4) loaded from the same
-// TTC as the global Regular face. Used by the markdown renderer for inline code
-// spans and fenced code blocks in place of the former lighter background box.
-static ImFont* gMarkdownCodeFont = nullptr;
-
-// Bold face (Sarasa Term SC Nerd Bold, fc-scan index 0) loaded from the same
-// TTC. imgui_markdown renders strong emphasis (**__**) and headings (## etc.)
-// with the last headingFormat slot's font, so a real Bold face must be loaded
-// and assigned there for bold content to actually appear bold.
-static ImFont* gMarkdownBoldFont = nullptr;
-
-// ---------------------------------------------------------------------------
-// Colors / small helpers
-// ---------------------------------------------------------------------------
-const ImVec4 kAccent(0.36f, 0.63f, 0.98f, 1.0f);
-const ImVec4 kGreen(0.45f, 0.79f, 0.47f, 1.0f);
-const ImVec4 kAmber(0.95f, 0.77f, 0.38f, 1.0f);
-const ImVec4 kRed(0.86f, 0.38f, 0.35f, 1.0f);
-const ImVec4 kGray(0.62f, 0.62f, 0.62f, 1.0f);
-// Dark gray background used to highlight the pane/paragraph that corresponds
-// to the current flow step (the CursorChanged stage): PLAN / DISTILLATION /
-// PROPOSALS paragraphs in the cognitive lane, or the right execution lane for
-// the EXECUTING stage. Distinct from kGray, which is a text color.
-const ImVec4 kPaneBgDark(0.22f, 0.23f, 0.25f, 1.0f);
-
-// Animated background for the current flow-step pane. The active pane's
-// background oscillates between black and kPaneBgDark following a sinusoidal
-// (non-linear) time relationship, per the user's explicit request overriding
-// the gui no-animation rule for this highlight. The factor cycles smoothly
-// through 0..1 over time and never exceeds that range; inactive panes keep the
-// default child background.
-ImVec4 paneBg(bool active) {
-    if (!active) return ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
-    const float kSpeed = 1.0f;  // radians per second; full cycle ~ 6.28 s
-    const float t = 0.5f - 0.5f * std::cos(ImGui::GetTime() * kSpeed);  // 0..1
-    return ImVec4(kPaneBgDark.x * t, kPaneBgDark.y * t, kPaneBgDark.z * t, 1.0f);
-}
-
-const char* historySymbol(pie::gui::LoopFrame::History h) {
-    switch (h) {
-        case pie::gui::LoopFrame::History::Closed: return "✓";
-        case pie::gui::LoopFrame::History::Unresolved: return "!";
-        case pie::gui::LoopFrame::History::Falsified: return "✗";
-        case pie::gui::LoopFrame::History::NewBelief: return "+";
-        case pie::gui::LoopFrame::History::Revised: return "~";
-        case pie::gui::LoopFrame::History::Current: return "●";
-    }
-    return "";
-}
-
-int beliefIdFromLabel(const std::string& label) {
-    if (label.empty() || label[0] != 'B') return -1;
-    int id = 0;
-    for (size_t i = 1; i < label.size(); ++i) {
-        if (label[i] < '0' || label[i] > '9') break;
-        id = id * 10 + (label[i] - '0');
-    }
-    return id;
-}
-
-std::string beliefLabel(int id) { return "B" + std::to_string(id); }
-
-// ---------------------------------------------------------------------------
-// SDK child process (used in --live mode). Same transport as the previous
-// build: fork/exec node, JSONL on stdout, commands on stdin.
-// ---------------------------------------------------------------------------
-struct SdkProcess {
-    pid_t pid = -1;
-    int inFd = -1;
-    int outFd = -1;
-    std::atomic<bool> running{false};
-};
-
-bool spawnSdk(SdkProcess& sp) {
-    int inPipe[2], outPipe[2];
-    if (pipe(inPipe) != 0) return false;
-    if (pipe(outPipe) != 0) { close(inPipe[0]); close(inPipe[1]); return false; }
-    pid_t pid = fork();
-    if (pid < 0) return false;
-    if (pid == 0) {
-        dup2(inPipe[0], STDIN_FILENO);
-        dup2(outPipe[1], STDOUT_FILENO);
-        close(inPipe[0]); close(inPipe[1]);
-        close(outPipe[0]); close(outPipe[1]);
-        const char* argv[] = {"node", PI_CLI, "-ne", "--mode", "rpc", nullptr};
-        execvp("node", const_cast<char**>(argv));
-        _exit(127);
-    }
-    close(inPipe[0]); close(outPipe[1]);
-    sp.pid = pid;
-    sp.inFd = inPipe[1];
-    sp.outFd = outPipe[0];
-    sp.running.store(true);
-    return true;
-}
-
-void writeCommand(SdkProcess& sp, const std::string& cmd) {
-    if (sp.inFd < 0) return;
-    std::string line = cmd + "\n";
-    ssize_t written = write(sp.inFd, line.data(), line.size());
-    // Trace GUI -> RPC on pie_gui's stdout (never on sp.inFd, so the RPC JSONL
-    // protocol on stdin is left untouched).
-    if (written > 0) {
-        // std::printf("GUI -> RPC: %s\n", cmd.c_str());
-        // std::fflush(stdout);
-    } else {
-        std::printf("GUI -> RPC FAILED: %s\n", cmd.c_str());
-        std::fflush(stdout);
-    }
-}
-
-// serializeInstructionCommand lives in InstructionCmd.h (inline) so it can be
-// unit-tested without a node subprocess.
-
-class EventQueue {
-public:
-    void push(std::string line) { std::lock_guard<std::mutex> lk(m_); q_.push_back(std::move(line)); }
-    bool popIfAny(std::string& out) {
-        std::lock_guard<std::mutex> lk(m_);
-        if (q_.empty()) return false;
-        out = std::move(q_.front());
-        q_.pop_front();
-        return true;
-    }
-private:
-    std::mutex m_;
-    std::deque<std::string> q_;
-};
-
-void readerThread(SdkProcess& sp, EventQueue& q, std::atomic<bool>& stop) {
-    std::string buf;
-    char chunk[4096];
-    while (!stop.load()) {
-        ssize_t n = read(sp.outFd, chunk, sizeof(chunk));
-        if (n < 0) { if (errno == EINTR) continue; break; }
-        if (n == 0) break;
-        buf.append(chunk, static_cast<size_t>(n));
-        size_t pos;
-        while ((pos = buf.find('\n')) != std::string::npos) {
-            std::string line = buf.substr(0, pos);
-            buf.erase(0, pos + 1);
-            if (!line.empty()) {
-                // // Trace RPC -> GUI on pie_gui's stdout.
-                // std::printf("RPC -> GUI: %s\n", line.c_str());
-                // std::fflush(stdout);
-                q.push(std::move(line));
-            }
-        }
-    }
-    sp.running.store(false);
-}
-
-// ---------------------------------------------------------------------------
-// Lane rendering
-// ---------------------------------------------------------------------------
-const pie::gui::LoopFrame* displayedFrame(const pie::gui::NativeGuiModel& m, int viewId) {
-    if (viewId >= 0) return m.frameById(viewId);
-    return m.activeFrame();
-}
-
-void renderStatusBar(const pie::gui::NativeGuiModel& m) {
-    const auto& c = m.cursor();
-    ImGui::TextUnformatted("PIE");
-    ImGui::SameLine();
-    ImGui::TextUnformatted(("Session: " + m.session()).c_str());
-    ImGui::SameLine();
-    ImGui::Separator();
-
-    if (c.valid()) {
-        ImGui::TextUnformatted(("Frame #" + std::to_string(c.frameId)).c_str());
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-        ImGui::TextUnformatted(pie::gui::frameStageToString(c.stage));
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-        ImGui::Separator();
-
-        if (const auto* f = m.frameById(c.frameId); f && !f->selectedBeliefs.empty()) {
-            std::string sel = "Selected: ";
-            for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
-                if (i) sel += ", ";
-                sel += beliefLabel(f->selectedBeliefs[i].value);
-            }
-            ImGui::TextUnformatted(sel.c_str());
-            ImGui::SameLine();
-            ImGui::Separator();
-        }
-        // The runtime never provides CursorChanged.item (rpc.md and the runtime
-        // emit only frameId+stage), so derive the "current" tool from the active
-        // frame's in-flight trajectory instead of a static, never-populated field.
-        if (c.stage == pie::gui::FrameStage::EXECUTING) {
-            if (const auto* f = m.frameById(c.frameId)) {
-                for (const auto& t : f->trajectory) {
-                    if (t.status == "running") {
-                        ImGui::TextUnformatted(("Current: " + t.id).c_str());
-                        break;
-                    }
-                }
-            }
-        }
-    } else {
-        ImGui::TextUnformatted("(no active frame)");
-    }
-
-    ImGui::SameLine();
-    float avail = ImGui::GetContentRegionAvail().x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(30.0f, avail - 120.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, kGray);
-    ImGui::TextUnformatted("⌘T  User prompt");
-    ImGui::PopStyleColor();
-}
-
-void renderNavigator(const pie::gui::NativeGuiModel& m, int& viewId) {
-    static char searchBuf[64] = {};
-    const auto& frames = m.frames();
-    ImGui::SetNextItemWidth(140.0f);
-    ImGui::InputText("##frame_search", searchBuf, sizeof(searchBuf));
-    for (const auto& f : frames) {
-        if (!pie::gui::frameMatchesQuery(f, searchBuf)) continue;
-        bool isView = (viewId == f.id);
-        ImGui::PushID(f.id);
-        ImGui::PushStyleColor(ImGuiCol_Text, historySymbol(f.history) == std::string("●") ? kAccent : ImGui::GetStyleColorVec4(ImGuiCol_Text));
-        if (ImGui::Selectable((std::string("#") + std::to_string(f.id)).c_str(), isView, 0, ImVec2(0, 0))) {
-            viewId = f.id;
-        }
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-        ImGui::PopID();
-    }
-    if (viewId >= 0) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("back to current")) viewId = -1;
-    }
-}
-
-// Status -> color for the belief set pane. Shared by the legend and the per-row
-// header, so the legend cannot drift from the actual row coloring.
-ImVec4 beliefStatusColor(const std::string& status) {
-    if (status == "open") return kAccent;
-    if (status == "closed") return kGreen;
-    if (status == "falsified") return kRed;
-    if (status == "revised") return kAmber;
-    return ImGui::GetStyleColorVec4(ImGuiCol_Text);
-}
-
-// Fixed height for the belief color-legend child region. The legend is a small
-// swatch row plus a hint line; giving it a bounded height here (instead of the
-// 0 which fills all remaining space and starves the rows below) lets the belief
-// scroll child below retain the rest of the lane.
-float beliefLegendHeight() {
-    const float lineH = ImGui::GetTextLineHeightWithSpacing();
-    const float pad = ImGui::GetStyle().WindowPadding.y * 2.0f;
-    // One line of swatch labels + one hint line + small breathing room.
-    return lineH * 2.0f + pad + lineH * 0.5f;
-}
-
-void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
-    const auto* f = displayedFrame(m, viewId);
-
-    std::vector<int> changedIds;
-    if (f) {
-        for (auto& p : f->proposals) {
-            int id = beliefIdFromLabel(p.belief);
-            if (id > 0) changedIds.push_back(id);
-        }
-    }
-
-    ImGui::TextUnformatted("BELIEF SET");
-    ImGui::Separator();
-
-    // Color schema legend: one swatch + label per status and per override. The
-    // swatch and label come from the actual row color so the legend stays in sync
-    // with the rows. The override colors follow the row priority: a changed belief
-    // (amber) overrides a selected belief (accent), which overrides the status.
-    // struct LegendItem { const char* label; ImVec4 color; };
-    // static const LegendItem legend[] = {
-    //     {"open", beliefStatusColor("open")},
-    //     {"closed", beliefStatusColor("closed")},
-    //     {"revised", beliefStatusColor("revised")},
-    //     {"falsified", beliefStatusColor("falsified")},
-    //     {"selected", kAccent},
-    //     {"changed", kAmber},
-    // };
-    // ImGui::BeginChild("belief_legend", ImVec2(0, beliefLegendHeight()), false);
-    // {
-    //     ImVec2 p = ImGui::GetCursorScreenPos();
-    //     for (int i = 0; i < (int)(sizeof(legend) / sizeof(legend[0])); ++i) {
-    //         if (i % 3) ImGui::SameLine();
-    //         ImVec4 c = legend[i].color;
-    //         ImDrawList* dl = ImGui::GetWindowDrawList();
-    //         dl->AddRectFilled(p, ImVec2(p.x + 10.0f, p.y + ImGui::GetTextLineHeight() - 2.0f),
-    //                           ImGui::GetColorU32(c));
-    //         ImGui::TextDisabled("%s", legend[i].label);
-    //         p.x = ImGui::GetCursorScreenPos().x + ImGui::GetTextLineHeight();
-    //     }
-    //     ImGui::Spacing();
-    //     ImGui::TextDisabled("changed overrides selected");
-    // }
-    // ImGui::EndChild();
-
-    ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
-    const auto& beliefs = m.beliefs();
-    for (const auto& b : beliefs) {
-        bool isSel = false;
-        if (f) for (auto s : f->selectedBeliefs) if (s.value == b.id.value) { isSel = true; break; }
-        bool isChanged = false;
-        for (int id : changedIds) if (id == b.id.value) { isChanged = true; break; }
-
-        ImVec2 start = ImGui::GetCursorScreenPos();
-        ImGui::PushID(b.id.value);
-
-        // Visible belief ID as the header title. Items default to open so the statement
-        // is visible without extra clicks; DefaultOpen only sets the initial state, so a
-        // manual collapse afterward is preserved (ImGui TreeNodeUpdateNextOpen stores it).
-        const std::string title = beliefLabel(b.id.value) + " " + b.status;
-        ImVec4 c = beliefStatusColor(b.status);
-        if (isSel) c = kAccent;
-        if (isChanged) c = kAmber;
-        ImGui::PushStyleColor(ImGuiCol_Text, c);
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(c.x, c.y, c.z, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(c.x, c.y, c.z, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(c.x, c.y, c.z, 0.25f));
-        bool open = ImGui::CollapsingHeader(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
-        ImGui::PopStyleColor(4);
-
-        if (open) {
-            ImGui::Indent();
-            if (b.confidence >= 0.0) {
-                ImGui::TextDisabled("%.2f", b.confidence);
-            }
-            // Live mode carries the prose belief statement; the demo/headless
-            // fixture uses the structured lhs/relation/rhs.
-            if (!b.statement.empty()) {
-                ImGui::TextWrapped("%s", b.statement.c_str());
-            } else {
-                ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
-            }
-            if (!b.sourceFrames.empty()) {
-                std::string src = "source: ";
-                for (size_t i = 0; i < b.sourceFrames.size(); ++i) {
-                    if (i) src += ", ";
-                    src += "#" + std::to_string(b.sourceFrames[i]);
-                }
-                ImGui::TextDisabled("%s", src.c_str());
-            }
-            ImGui::Unindent();
-        }
-
-        ImGui::PopID();
-
-        // Left accent bar for selected beliefs.
-        if (isSel) {
-            ImVec2 end = ImGui::GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                ImVec2(start.x - 4.0f, start.y),
-                ImVec2(start.x - 1.0f, end.y),
-                ImGui::GetColorU32(kAccent));
-        }
-        ImGui::Spacing();
-    }
-    ImGui::EndChild();
-}
-
-// Forward declaration so renderCognitiveLane (defined earlier in this file,
-// before renderMarkdownMessage) can route distillation prose through the shared
-// Markdown renderer without the compiler seeing the use before the definition.
-static void renderMarkdownMessage(const std::string& text);
-
-void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
-    const auto* f = displayedFrame(m, viewId);
-    ImGui::TextUnformatted("COGNITIVE PROCESS");
-    ImGui::Separator();
-    ImGui::BeginChild("cog_scroll", ImVec2(0, 0), false);
-    if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
-
-    // The CursorChanged stage of the active frame drives which paragraph in the
-    // cognitive lane is the current flow step. Only the matching paragraph gets
-    // the dark-gray background; the other two keep the default child background.
-    const pie::gui::FrameStage stage = m.cursor().valid() ? m.cursor().stage : pie::gui::FrameStage::NONE;
-
-    // PLAN
-    {
-        bool active = (stage == pie::gui::FrameStage::PLANNING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
-        ImGui::BeginChild("plan_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
-        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-        ImGui::TextUnformatted("PLAN");
-        ImGui::PopStyleColor();
-        if (f->plan.valid()) {
-            ImGui::TextUnformatted(("Intent " + f->plan.label).c_str());
-            if (!f->selectedBeliefs.empty()) {
-                std::string sel = "Selected: ";
-                for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
-                    if (i) sel += ", ";
-                    sel += beliefLabel(f->selectedBeliefs[i].value);
-                }
-                ImGui::TextDisabled("%s", sel.c_str());
-            }
-            ImGui::TextUnformatted(("Q: " + f->plan.question).c_str());
-            ImGui::TextWrapped(("Intent: " + f->plan.intent).c_str());
-        } else {
-            ImGui::TextDisabled("(no plan yet)");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(1);
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    // DISTILLATION
-    {
-        bool active = (stage == pie::gui::FrameStage::DISTILLING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
-        ImGui::BeginChild("distillation_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
-        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
-        ImGui::TextUnformatted("DISTILLATION");
-        ImGui::PopStyleColor();
-        if (f->distillation.valid()) {
-            ImGui::TextUnformatted(("D-42 " + f->distillation.label).c_str());
-            ImGui::TextUnformatted("Input:");
-            for (auto& id : f->distillation.inputIds) {
-                ImGui::BulletText("%s", id.c_str());
-            }
-            if (!f->distillation.unexplained.empty()) {
-                ImGui::TextWrapped("Unexplained:");
-                ImGui::NewLine();
-                renderMarkdownMessage(f->distillation.unexplained);
-            }
-            if (!f->distillation.interpretation.empty()) {
-                ImGui::TextWrapped("Interpretation:");
-                ImGui::NewLine();
-                renderMarkdownMessage(f->distillation.interpretation);
-            }
-        } else {
-            ImGui::TextDisabled("(no distillation yet)");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(1);
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    // PROPOSALS
-    {
-        bool active = (stage == pie::gui::FrameStage::PROPOSING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
-        ImGui::BeginChild("proposals_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
-        ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
-        ImGui::TextUnformatted("PROPOSALS");
-        ImGui::PopStyleColor();
-        if (!f->proposals.empty()) {
-            for (auto& p : f->proposals) {
-                ImVec4 c = kGray;
-                if (p.op == '+') c = kGreen;
-                else if (p.op == '~') c = kAmber;
-                else if (p.op == '-') c = kRed;
-                ImGui::PushStyleColor(ImGuiCol_Text, c);
-                std::string line = std::string(1, p.op) + " " + p.belief;
-                ImGui::TextUnformatted(line.c_str());
-                ImGui::PopStyleColor();
-                if (!p.relation.empty())
-                    ImGui::TextDisabled("  %s ──%s──> %s", p.lhs.c_str(), p.relation.c_str(), p.rhs.c_str());
-                if (!p.detail.empty())
-                    ImGui::TextDisabled("  %s", p.detail.c_str());
-            }
-        } else {
-            ImGui::TextDisabled("(no proposals yet)");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(1);
-    }
-
-    ImGui::EndChild();
-}
-
-void renderExecutionLane(const pie::gui::NativeGuiModel& m, int viewId) {
-    const auto* f = displayedFrame(m, viewId);
-    const auto& cur = m.cursor();
-    ImGui::TextUnformatted("EXECUTION");
-    if (f && f->closed) { ImGui::SameLine(); ImGui::TextDisabled("(closed)"); }
-    ImGui::Separator();
-    ImGui::BeginChild("exec_scroll", ImVec2(0, 0), false);
-    if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
-    if (f->trajectory.empty()) { ImGui::TextDisabled("(no execution steps)"); ImGui::EndChild(); return; }
-
-    for (auto& t : f->trajectory) {
-        // The runtime never provides CursorChanged.item, so a tool is "current"
-        // when it is in flight (status == running) during the EXECUTING stage.
-        bool isCurrent = (cur.valid() && cur.stage == pie::gui::FrameStage::EXECUTING && t.status == "running");
-        std::string statusSym = "○";
-        if (t.status == "ok") statusSym = "✓";
-        else if (t.status == "running") statusSym = "●";
-        else if (t.status == "failed") statusSym = "✗";
-        else if (t.status == "pending") statusSym = "○";
-
-        std::string label = std::string(statusSym) + " " + t.tool + ": " + t.command;
-        if (isCurrent) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-            label += "   CURRENT";
-        }
-
-        ImGui::PushID(t.id.c_str());
-        if (ImGui::TreeNode(label.c_str())) {
-            if (isCurrent) ImGui::PopStyleColor();
-            ImGui::TextUnformatted(("tool:   " + t.tool).c_str());
-            ImGui::TextWrapped(("command: " + t.command).c_str());
-            ImGui::TextWrapped(("result:  " + t.result).c_str());
-            if (!t.warning.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
-                ImGui::TextWrapped(("WARNING: " + t.warning).c_str());
-                ImGui::PopStyleColor();
-            }
-            ImGui::TextDisabled("status: %s", t.status.c_str());
-            ImGui::TreePop();
-            ImGui::PopID();
-            continue;
-        }
-        if (isCurrent) ImGui::PopStyleColor();
-        ImGui::PopID();
-    }
-
-    // Always keep the execution log scrolled to the bottom so the newest step
-    // stays visible as content is appended.
-    ImGui::SetScrollHereY(1.0f);
-    ImGui::EndChild();
-}
-
-void renderSummary(const pie::gui::NativeGuiModel& m, int viewId) {
-    const auto* f = displayedFrame(m, viewId);
-    ImGui::TextUnformatted("CURRENT FRAME");
-    ImGui::SameLine();
-    if (f) ImGui::TextDisabled("#%d", f->id);
-    ImGui::Separator();
-    if (!f) { ImGui::TextDisabled("(no frame)"); return; }
-
-    // B42 + B47 -> intent -> N steps -> distillation -> {proposals}
-    std::string sel;
-    for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
-        if (i) sel += " + ";
-        sel += beliefLabel(f->selectedBeliefs[i].value);
-    }
-    if (sel.empty()) sel = "(none)";
-    std::string line = sel + "  →  ";
-    line += f->plan.valid() ? f->plan.intent : "(planning)";
-    line += "  →  ";
-    line += std::to_string(f->trajectory.size()) + " execution step(s)";
-    line += "  →  ";
-    line += f->distillation.valid() ? (f->distillation.unexplained.empty() ? "distilled" : f->distillation.unexplained) : "(pending)";
-    if (!f->proposals.empty()) {
-        line += "  →  {";
-        for (size_t i = 0; i < f->proposals.size(); ++i) {
-            if (i) line += ", ";
-            line += std::string(1, f->proposals[i].op) + f->proposals[i].belief;
-        }
-        line += "}";
-    }
-    ImGui::TextWrapped("%s", line.c_str());
-}
-
-using InstructionSender = std::function<void(const std::string&)>;
-
-// ImGui input-text resize callback backing instrBuf. On CallbackResize ImGui
-// wants the buffer to hold BufTextLen bytes; grow the std::string to that
-// length and hand back a writable, null-terminated pointer. This lets a
-// multiline instruction exceed a fixed-size stack buffer without truncation.
-static int instructionResizeCallback(ImGuiInputTextCallbackData* data) {
-    if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
-        auto* s = static_cast<std::string*>(data->UserData);
-        s->resize(data->BufTextLen);
-        data->Buf = const_cast<char*>(s->data());
-        data->BufSize = static_cast<int>(s->size()) + 1;
-    }
-    return 0;
-}
-
-inline std::string replace_escaped_newlines(const std::string& s) {
-    std::string result;
-    result.resize(s.size()); // upper bound, we'll shrink after
-    std::size_t out = 0;
-    for (std::size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == 'n') {
-            result[out++] = '\n';
-            ++i;
-        } else {
-            result[out++] = s[i];
-        }
-    }
-    result.resize(out);
-    return result;
-}
-
-// Render an assistant message as Markdown inside the current ImGui cursor
-// position. imgui_markdown is header-only; we build a MarkdownConfig using the
-// loaded global font for headings (top 3 levels), the italic code font for code
-// spans/fenced blocks, and default (no-op) link/image callbacks so links/images
-// degrade to plain text rather than crash. The call must occur while a valid
-// Markdown context exists (e.g. inside the "in_message" child window).
-static void renderMarkdownMessage(const std::string& text) {
-
-    // std::printf("renderMD: %s\n", text.c_str());
-    // std::fflush(stdout);
-
-    ImGui::MarkdownConfig mdConfig;
-    ImFont* font = ImGui::GetIO().Fonts->Fonts.empty()
-                       ? nullptr
-                       : ImGui::GetIO().Fonts->Fonts[0];
-    if (font) {
-        for (int i = 0; i < ImGui::MarkdownConfig::NUMHEADINGS; ++i) {
-            // Strong emphasis (**__** ) and headings use the last headingFormat
-            // slot's font, so route them through the Bold face. Heading levels
-            // below the last slot keep the regular (body) font.
-            mdConfig.headingFormats[i].font = gMarkdownBoldFont ? gMarkdownBoldFont : font;
-            mdConfig.headingFormats[i].separator = false;
-        }
-    }
-    // Preserve the real newlines carried in RPC payloads so multiline assistant
-    // content is not collapsed into a single blank line. The prior
-    // DiscardExtraNewLines flag folded consecutive newlines into one blank
-    // line, which made streaming content with \n read as a single block.
-    mdConfig.formatFlags = ImGuiMarkdownFormatFlags_None;
-    mdConfig.codeFont = gMarkdownCodeFont;
-
-    const auto nt = replace_escaped_newlines(text);
-    ImGui::Markdown(nt.c_str(), nt.size(), mdConfig);
-    // ImGui::Markdown(text.c_str(), text.size(), mdConfig);
-}
-
-// Render the instruction palette as a standalone floating window (not docked
-// into the main workspace). It no longer reserves layout space; the caller only
-// toggles `open` via the cmd/cmd-T shortcut.
-void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, bool canSend, InstructionSender send) {
-    if (!open) return;
-
-    // Growable instruction text. Enter inserts a newline (no EnterReturnsTrue);
-    // submission is via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so a
-    // multiline instruction is preserved end to end and serializeInstructionCommand
-    // keeps the newline inside the JSON message on the way to the runtime client.
-    static std::string instrBuf;
-    auto& io = ImGui::GetIO();
-
-    // Fixed geometry: centered in the app at a quarter of its area (1/2 width x
-    // 1/2 height), undecorated (no title bar), and not user-resizable/movable.
-    const ImVec2 d = ImGui::GetIO().DisplaySize;
-    const ImVec2 winSize(d.x * 0.5f, d.y * 0.5f);
-    const ImVec2 winPos((d.x - winSize.x) * 0.5f, (d.y - winSize.y) * 0.5f);
-    ImGui::SetNextWindowSize(winSize, ImGuiCond_Always);
-    ImGui::SetNextWindowPos(winPos, ImGuiCond_Always);
-    bool close = false;
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
-    if (ImGui::Begin("User Instruction", &close, flags)) {
-        // Keep the input box focused the entire time the window is visible so the
-        // user can keep typing without clicking.
-        ImGui::SetKeyboardFocusHere();
-
-        ImGui::TextUnformatted(">");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1.0f);
-
-        // Auto-grow the input height as the text wraps past the available width.
-        // Measure the wrapped height of the current buffer at the widget width.
-        const float framePad = ImGui::GetStyle().FramePadding.y * 2.0f;
-        const float widgetW = ImGui::GetContentRegionAvail().x;
-        const float innerW = widgetW - ImGui::GetStyle().FramePadding.x * 2.0f;
-        const float lineH = ImGui::GetTextLineHeight();
-        const ImVec2 wrapped = ImGui::CalcTextSize(instrBuf.c_str(), nullptr, false, innerW);
-        // Reserve one extra line when the buffer ends in a newline (the cursor
-        // sits on a fresh empty line that CalcTextSize.y does not count).
-        const int extraLines = pie::gui::paletteTrailingEmptyLines(instrBuf.c_str());
-        const float inputH = pie::gui::paletteInputBoxHeight(wrapped.y, lineH, framePad, extraLines);
-        // Clamp so the input can't consume the entire panel; the in-message area
-        // keeps the rest.
-        const float maxInputH = winSize.y * 0.5f;
-        ImGui::InputTextMultiline("##instruction", instrBuf.data(), static_cast<int>(instrBuf.size()) + 1,
-                                  ImVec2(-1.0f, std::min(inputH, maxInputH)),
-                                  ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize |
-                                      ImGuiInputTextFlags_WordWrap,
-                                  instructionResizeCallback, &instrBuf);
-
-        // Submit via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so Enter still
-        // inserts a newline and a multiline instruction is preserved end to end.
-        // The input does not use EnterReturnsTrue, so plain Enter is consumed by
-        // the widget as a newline while the Cmd/Ctrl+Enter chord is not, so this
-        // check cannot hijack newline input. In live mode this goes through
-        // serializeInstructionCommand, which keeps the newline in the JSON.
-        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
-            std::string instr = instrBuf;
-            instrBuf.clear();
-            if (canSend && send && !instr.empty()) {
-                send(instr);  // reverse path: instruction -> runtime client
-            }
-        }
-
-        // in-message (the assistant's streaming reply). Rendered below the input
-        // box and filling the remaining panel space, auto-scrolling to the bottom
-        // as it grows. Only live mode feeds message_start/message_update/message_end;
-        // in demo mode this stays empty.
-        ImGui::Separator();
-        ImGui::BeginChild("in_message", ImVec2(0, 0), true);
-        static size_t lastInMsgLen = 0;
-        if (!m.inMessage().empty()) {
-            // Render the incoming assistant reply (including the finalAnswer
-            // conclusion, which reaches this same buffer) as Markdown. During
-            // the thinking phase the model still accumulates reasoning deltas
-            // into inMessage_, so render that content rather than hiding it.
-            renderMarkdownMessage(m.inMessage());
-        } else if (m.inMessageThinking()) {
-            // No content yet but the live message is still thinking.
-            ImGui::TextDisabled("thinking");
-        } else {
-            ImGui::TextDisabled("(waiting for a live message...)");
-        }
-        // Auto-scroll to bottom whenever new content arrived. SetScrollHereY
-        // scrolls the current cursor line to the desired fraction (1.0 = bottom)
-        // of the child window.
-        if (m.inMessage().size() != lastInMsgLen) {
-            ImGui::SetScrollHereY(1.0f);
-        }
-        lastInMsgLen = m.inMessage().size();
-        ImGui::EndChild();
-    }
-    ImGui::End();
-
-    if (close || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; }
-    ImGui::SetNextFrameWantCaptureKeyboard(true);
-}
-
-} // namespace
+using namespace pie::gui;
 
 int main(int argc, char** argv) {
     // Default: --live (spawn the RPC child). Pass --demo to opt into the
@@ -861,11 +96,9 @@ int main(int argc, char** argv) {
     // LayoutMetrics.h so code, tests, and docs cannot drift. The instruction
     // palette is a floating window and does not participate in this layout.
     glfwSetWindowSizeLimits(window,
-                            static_cast<unsigned int>(pie::gui::kMinWindowWidth),
-                            static_cast<unsigned int>(pie::gui::kMinWindowHeight),
+                            static_cast<unsigned int>(kMinWindowWidth),
+                            static_cast<unsigned int>(kMinWindowHeight),
                             GLFW_DONT_CARE, GLFW_DONT_CARE);
-
-
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -892,35 +125,31 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "WARNING: failed to load %s; using default font. TTC requires FreeType.\n", ttcPath.c_str());
     }
     // Load the Italic face (fc-scan index 4) for markdown code spans/fenced blocks.
-    // It replaces the former lighter-than-pane background with an italic glyph slant.
     ImFontConfig italicFontCfg;
     italicFontCfg.FontNo = 4;  // Sarasa Term SC Nerd Italic
-    gMarkdownCodeFont = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &italicFontCfg, io.Fonts->GetGlyphRangesChineseFull());
-    if (gMarkdownCodeFont == nullptr) {
+    ImFont* codeFont = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &italicFontCfg, io.Fonts->GetGlyphRangesChineseFull());
+    if (codeFont == nullptr) {
         std::fprintf(stderr, "WARNING: failed to load italic code font (FontNo=4) from %s; code will render without italic.\n", ttcPath.c_str());
     }
     // Load the Bold face (fc-scan index 0) for markdown strong emphasis and
-    // headings. It replaces the regular weight used by `**`/`##` so emphasized
-    // content renders visibly bold instead of the same weight as body text.
+    // headings.
     ImFontConfig boldFontCfg;
     boldFontCfg.FontNo = 0;  // Sarasa Term SC Nerd Bold
-    gMarkdownBoldFont = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &boldFontCfg, io.Fonts->GetGlyphRangesChineseFull());
-    if (gMarkdownBoldFont == nullptr) {
+    ImFont* boldFont = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &boldFontCfg, io.Fonts->GetGlyphRangesChineseFull());
+    if (boldFont == nullptr) {
         std::fprintf(stderr, "WARNING: failed to load bold markdown font (FontNo=0) from %s; bold text will render without bold.\n", ttcPath.c_str());
     }
+    // Hand the markdown renderer its font resources; the vendor may be null (fall
+    // back inside UiMarkdown) when a TTC face failed to load.
+    setMarkdownFonts(codeFont, boldFont);
     // Do NOT call io.Fonts->Build() here. The vendored ImGui v1.92.5 OpenGL3
     // backend sets ImGuiBackendFlags_RendererHasTextures in ImGui_ImplOpenGL3_Init
     // (called below) and manages the font atlas lazily during ImGui::NewFrame().
-    // Calling Build() before that flag is set preloads all glyphs on the legacy
-    // path, then NewFrame() asserts in ImFontAtlasUpdateNewFrame
-    // ("Called ImFontAtlas::Build() before ImGuiBackendFlags_RendererHasTextures
-    // got set!"). If the font above failed to load, ImFontAtlasBuildMain falls
-    // back to AddFontDefault() automatically, so no explicit Build() is needed.
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glslVersion);
 
-    pie::gui::NativeGuiModel model;
+    NativeGuiModel model;
     model.setSession("repo-analysis");
 
     SdkProcess sdk;
@@ -950,6 +179,7 @@ int main(int argc, char** argv) {
 
     int viewId = -1;
     bool instructionOpen = false;
+    InstructionPaletteState instrState;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -959,7 +189,7 @@ int main(int argc, char** argv) {
 
         if (live) {
             std::string line;
-            while (queue.popIfAny(line)) pie::gui::applyRpcLine(model, line);
+            while (queue.popIfAny(line)) applyRpcLine(model, line);
             // When the belief loop reaches the terminal finalAnswer role and its
             // conclusion message ends, auto-reopen the user instruction pane so the
             // user can view the answer, even if they had closed it.
@@ -985,7 +215,7 @@ int main(int argc, char** argv) {
         // Derive vertical sizes from the frame height and font metrics so that
         // the layout tracks font scale instead of hardcoding pixel constants.
         float rowH = ImGui::GetFrameHeightWithSpacing();
-        pie::gui::LayoutMetrics lm = pie::gui::computeLayout(io.DisplaySize.x, winH, rowH);
+        LayoutMetrics lm = computeLayout(io.DisplaySize.x, winH, rowH);
         float headerH = lm.headerH;   // status bar
         float summaryH = lm.summaryH; // current-frame summary
         const float minLaneH = lm.minLaneH;
@@ -996,15 +226,11 @@ int main(int argc, char** argv) {
         renderStatusBar(model);
         ImGui::EndChild();
 
-        // The frame navigator is no longer rendered; its layout band was removed
-        // from LayoutMetrics, so the lanes below reclaim the vertical space it
-        // used to reserve (previously left empty between status bar and lanes).
-
         // Floating instruction window (cmd/cmd-T), independent of the main layout.
-        renderInstructionPalette(instructionOpen, model, live,
+        renderInstructionPalette(instructionOpen, instrState, model, live,
                                  [&sdk](const std::string& msg) {
                                      // live mode: send the instruction to the runtime client.
-                                     writeCommand(sdk, pie::gui::serializeInstructionCommand("p-ins", msg));
+                                     writeCommand(sdk, serializeInstructionCommand("p-ins", msg));
                                  });
 
         ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
@@ -1017,7 +243,7 @@ int main(int argc, char** argv) {
         float rightW = std::max(0.0f, availW - leftW - midW);
         // The right lane is the execution pane; it gets the dark-gray background
         // when the CursorChanged stage is EXECUTING (the current flow step).
-        const bool execActive = model.cursor().valid() && model.cursor().stage == pie::gui::FrameStage::EXECUTING;
+        const bool execActive = model.cursor().valid() && model.cursor().stage == FrameStage::EXECUTING;
         if (availW < minLaneW * 3) {
             // Too narrow for three side-by-side lanes: stack them vertically
             // inside the scrollable region instead of overlapping.

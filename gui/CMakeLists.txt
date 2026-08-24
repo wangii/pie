@@ -84,7 +84,20 @@ add_test(NAME pi_gui_palette_metrics_test COMMAND pi_gui_palette_metrics_test)
 # ---------------------------------------------------------------------------
 # GUI app: UI + runtime client, links the model layer + ImGui backend.
 # ---------------------------------------------------------------------------
-add_executable(pie_gui src/App.cpp)
+add_executable(pie_gui
+    src/App.cpp
+    src/StatusBar.cpp
+    src/BeliefLane.cpp
+    src/CognitiveLane.cpp
+    src/ExecutionLane.cpp
+    src/Summary.cpp
+    src/InstructionPalette.cpp
+    src/Theme.cpp
+    src/UiMarkdown.cpp
+    src/UiShared.cpp
+    src/Paths.cpp
+    src/RuntimeClient.cpp
+)
 target_include_directories(pie_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(pie_gui PRIVATE pi_gui_model imgui_backend OpenGL::GL)
 target_include_directories(pie_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)

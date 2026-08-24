@@ -1,0 +1,123 @@
+// PIE Native GUI - Cognitive Process lane component.
+#include "CognitiveLane.h"
+
+#include <imgui.h>
+
+#include <string>
+
+#include "Theme.h"
+#include "UiMarkdown.h"
+#include "UiShared.h"
+
+namespace pie::gui {
+
+void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
+    const auto* f = displayedFrame(m, viewId);
+    ImGui::TextUnformatted("COGNITIVE PROCESS");
+    ImGui::Separator();
+    ImGui::BeginChild("cog_scroll", ImVec2(0, 0), false);
+    if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
+
+    // The CursorChanged stage of the active frame drives which paragraph in the
+    // cognitive lane is the current flow step. Only the matching paragraph gets
+    // the dark-gray background; the other two keep the default child background.
+    const pie::gui::FrameStage stage = m.cursor().valid() ? m.cursor().stage : pie::gui::FrameStage::NONE;
+
+    // PLAN
+    {
+        bool active = (stage == pie::gui::FrameStage::PLANNING);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
+        ImGui::BeginChild("plan_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+        ImGui::TextUnformatted("PLAN");
+        ImGui::PopStyleColor();
+        if (f->plan.valid()) {
+            ImGui::TextUnformatted(("Intent " + f->plan.label).c_str());
+            if (!f->selectedBeliefs.empty()) {
+                std::string sel = "Selected: ";
+                for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
+                    if (i) sel += ", ";
+                    sel += beliefLabel(f->selectedBeliefs[i].value);
+                }
+                ImGui::TextDisabled("%s", sel.c_str());
+            }
+            ImGui::TextUnformatted(("Q: " + f->plan.question).c_str());
+            ImGui::TextWrapped("%s", ("Intent: " + f->plan.intent).c_str());
+        } else {
+            ImGui::TextDisabled("(no plan yet)");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(1);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // DISTILLATION
+    {
+        bool active = (stage == pie::gui::FrameStage::DISTILLING);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
+        ImGui::BeginChild("distillation_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+        ImGui::TextUnformatted("DISTILLATION");
+        ImGui::PopStyleColor();
+        if (f->distillation.valid()) {
+            ImGui::TextUnformatted(("D-42 " + f->distillation.label).c_str());
+            ImGui::TextUnformatted("Input:");
+            for (auto& id : f->distillation.inputIds) {
+                ImGui::BulletText("%s", id.c_str());
+            }
+            if (!f->distillation.unexplained.empty()) {
+                ImGui::TextWrapped("Unexplained:");
+                ImGui::NewLine();
+                renderMarkdownMessage(f->distillation.unexplained);
+            }
+            if (!f->distillation.interpretation.empty()) {
+                ImGui::TextWrapped("Interpretation:");
+                ImGui::NewLine();
+                renderMarkdownMessage(f->distillation.interpretation);
+            }
+        } else {
+            ImGui::TextDisabled("(no distillation yet)");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(1);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // PROPOSALS
+    {
+        bool active = (stage == pie::gui::FrameStage::PROPOSING);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
+        ImGui::BeginChild("proposals_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
+        ImGui::TextUnformatted("PROPOSALS");
+        ImGui::PopStyleColor();
+        if (!f->proposals.empty()) {
+            for (auto& p : f->proposals) {
+                ImVec4 c = kGray;
+                if (p.op == '+') c = kGreen;
+                else if (p.op == '~') c = kAmber;
+                else if (p.op == '-') c = kRed;
+                ImGui::PushStyleColor(ImGuiCol_Text, c);
+                std::string line = std::string(1, p.op) + " " + p.belief;
+                ImGui::TextUnformatted(line.c_str());
+                ImGui::PopStyleColor();
+                if (!p.relation.empty())
+                    ImGui::TextDisabled("  %s ──%s──> %s", p.lhs.c_str(), p.relation.c_str(), p.rhs.c_str());
+                if (!p.detail.empty())
+                    ImGui::TextDisabled("  %s", p.detail.c_str());
+            }
+        } else {
+            ImGui::TextDisabled("(no proposals yet)");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(1);
+    }
+
+    ImGui::EndChild();
+}
+
+} // namespace pie::gui
