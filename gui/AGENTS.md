@@ -119,6 +119,11 @@ cmake --build --preset debug
 # Run all CTest tests
 ctest --preset debug
 
+# Release build (configure + build + test)
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
+
 # Run the model test (headless)
 ./build/pi_gui_model_test
 
@@ -128,9 +133,10 @@ ctest --preset debug
 
 Notes:
 
-- `gui/CMakePresets.json` defines the `debug` configure/build/test presets as a
-  method refactor over the explicit `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`
-  incantation. Run `cmake --list-presets` to inspect them.
+- `gui/CMakePresets.json` defines the `debug` and `release` configure/build/test
+  presets as a method refactor over the explicit `cmake -S . -B build/<preset>`
+  with `-G Ninja -DCMAKE_BUILD_TYPE=<Debug|Release>` incantation. Run
+  `cmake --list-presets` to inspect them.
 
 - The root `npm run check` covers JS/TS packages only and does not gate this
   C++/CMake workspace. Use the commands above.

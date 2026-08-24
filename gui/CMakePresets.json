@@ -15,6 +15,16 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "description": "Release build with Ninja; mirrors the debug preset with a Release build type",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
@@ -22,6 +32,11 @@
       "name": "debug",
       "displayName": "Debug build",
       "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "displayName": "Release build",
+      "configurePreset": "release"
     }
   ],
   "testPresets": [
@@ -29,6 +44,14 @@
       "name": "debug",
       "displayName": "Debug tests",
       "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release tests",
+      "configurePreset": "release",
       "output": {
         "outputOnFailure": true
       }
