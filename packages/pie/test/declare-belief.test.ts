@@ -251,4 +251,42 @@ describe("view_beliefs tool", () => {
 
 		expect((result.content[0] as { text: string }).text).toContain("the cache is warm");
 	});
+
+	test("always renders framing and routing beliefs in addition to the frame, for any role", async () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		set.apply({
+			op: "propose",
+			statement: "the answer must establish X",
+			domain: "framing",
+			expectation: "no second mechanism",
+			evidenceRounds: 1,
+		});
+		set.apply({
+			op: "route",
+			statement: "this request is simple",
+			expectation: "observe",
+			decision: "fast-path",
+			suitabilityProbability: 0.9,
+			successProbability: 0.9,
+			estimatedSteps: 2,
+			difficulty: "low",
+		});
+
+		// The tool signature takes no role callback now, so it is role-independent.
+		const tool = createViewBeliefsToolDefinition(set);
+		const result = await tool.execute("tc-1", {}, undefined, undefined, undefined as never);
+		const text = (result.content[0] as { text: string }).text;
+
+		expect(text).toContain("[FRAME]");
+		expect(text).toContain("[FRAMING]");
+		expect(text).toContain("[SETTLED]");
+		expect(text).toContain("this request is simple");
+	});
 });

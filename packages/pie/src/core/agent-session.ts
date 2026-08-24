@@ -1534,7 +1534,10 @@ export class AgentSession {
 	 * batch selection. `belief` is the result `apply` returned and is supplied by the tool
 	 * callback. A `propose`/`refine` that creates a new record records `BeliefCreated`; a
 	 * mutation that changes an existing belief's observable status records `BeliefUpdated`.
-	 * `route` is stored settled and never enters the dispatch frame, so it is not surfaced.
+	 * `route` is stored settled and never enters the dispatch frame, but it must still be
+	 * surfaced as a `BeliefCreated` so the native GUI registers it in the belief registry;
+	 * otherwise a routing belief would only reach the GUI as a `ProposalCreated` and never
+	 * appear in the belief-set pane.
 	 */
 	private _onBeliefDelta(
 		delta: BeliefDelta,
@@ -1544,6 +1547,23 @@ export class AgentSession {
 	): void {
 		switch (delta.op) {
 			case "propose":
+				this._emit({
+					type: "BeliefCreated",
+					beliefId: this._beliefNumericId(belief),
+					statement: belief.statement,
+					domain: belief.domain,
+					expectation: belief.expectation,
+					evidenceRounds: belief.evidenceRounds,
+				});
+				return;
+			case "route":
+				// A routing belief is created settled (see belief-set.ts `route`): it has
+				// `supportedBy` already populated and `statusOf` returns `supported`. It never
+				// dispatches as an open belief, but it must still be registered in the belief
+				// registry for the native GUI. The `BeliefCreated` event schema carries no
+				// status field (the GUI defaults a new belief to `proposed`), but the GUI only
+				// distinguishes an open belief by the `open` status color, so a routing belief
+				// renders as default text and is not shown as open.
 				this._emit({
 					type: "BeliefCreated",
 					beliefId: this._beliefNumericId(belief),
@@ -4263,10 +4283,7 @@ export class AgentSession {
 				this._onBeliefDelta(delta, belief, previousStatus, priorBelief),
 			) as ToolDefinition,
 		);
-		this._baseToolDefinitions.set(
-			"view_beliefs",
-			createViewBeliefsToolDefinition(this._beliefSet, () => this._role) as ToolDefinition,
-		);
+		this._baseToolDefinitions.set("view_beliefs", createViewBeliefsToolDefinition(this._beliefSet) as ToolDefinition);
 		this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
 
 		const extensionsResult = this._resourceLoader.getExtensions();

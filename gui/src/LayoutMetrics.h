@@ -45,7 +45,7 @@ struct LayoutMetrics {
 // `rowH`.
 inline LayoutMetrics computeLayout(float winW, float winH, float rowH) {
     LayoutMetrics m;
-    m.headerH = rowH * 1.2f;
+    m.headerH = (rowH * 2.) * 1.2f;
     m.navH = rowH * 1.0f;
     m.summaryH = rowH * 2.0f;
 

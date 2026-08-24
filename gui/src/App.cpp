@@ -92,6 +92,11 @@ const ImVec4 kGreen(0.45f, 0.79f, 0.47f, 1.0f);
 const ImVec4 kAmber(0.95f, 0.77f, 0.38f, 1.0f);
 const ImVec4 kRed(0.86f, 0.38f, 0.35f, 1.0f);
 const ImVec4 kGray(0.62f, 0.62f, 0.62f, 1.0f);
+// Dark gray background used to highlight the pane/paragraph that corresponds
+// to the current flow step (the CursorChanged stage): PLAN / DISTILLATION /
+// PROPOSALS paragraphs in the cognitive lane, or the right execution lane for
+// the EXECUTING stage. Distinct from kGray, which is a text color.
+const ImVec4 kPaneBgDark(0.22f, 0.23f, 0.25f, 1.0f);
 
 const char* historySymbol(pie::gui::LoopFrame::History h) {
     switch (h) {
@@ -261,9 +266,9 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
 
     ImGui::SameLine();
     float avail = ImGui::GetContentRegionAvail().x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, avail - 120.0f));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(30.0f, avail - 120.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, kGray);
-    ImGui::TextUnformatted("⌘T  User Instruction");
+    ImGui::TextUnformatted("⌘T  User prompt");
     ImGui::PopStyleColor();
 }
 
@@ -329,31 +334,31 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
     // swatch and label come from the actual row color so the legend stays in sync
     // with the rows. The override colors follow the row priority: a changed belief
     // (amber) overrides a selected belief (accent), which overrides the status.
-    struct LegendItem { const char* label; ImVec4 color; };
-    static const LegendItem legend[] = {
-        {"open", beliefStatusColor("open")},
-        {"closed", beliefStatusColor("closed")},
-        {"revised", beliefStatusColor("revised")},
-        {"falsified", beliefStatusColor("falsified")},
-        {"selected", kAccent},
-        {"changed", kAmber},
-    };
-    ImGui::BeginChild("belief_legend", ImVec2(0, beliefLegendHeight()), false);
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        for (int i = 0; i < (int)(sizeof(legend) / sizeof(legend[0])); ++i) {
-            if (i % 3) ImGui::SameLine();
-            ImVec4 c = legend[i].color;
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(p, ImVec2(p.x + 10.0f, p.y + ImGui::GetTextLineHeight() - 2.0f),
-                              ImGui::GetColorU32(c));
-            ImGui::TextDisabled("%s", legend[i].label);
-            p.x = ImGui::GetCursorScreenPos().x + ImGui::GetTextLineHeight();
-        }
-        ImGui::Spacing();
-        ImGui::TextDisabled("changed overrides selected");
-    }
-    ImGui::EndChild();
+    // struct LegendItem { const char* label; ImVec4 color; };
+    // static const LegendItem legend[] = {
+    //     {"open", beliefStatusColor("open")},
+    //     {"closed", beliefStatusColor("closed")},
+    //     {"revised", beliefStatusColor("revised")},
+    //     {"falsified", beliefStatusColor("falsified")},
+    //     {"selected", kAccent},
+    //     {"changed", kAmber},
+    // };
+    // ImGui::BeginChild("belief_legend", ImVec2(0, beliefLegendHeight()), false);
+    // {
+    //     ImVec2 p = ImGui::GetCursorScreenPos();
+    //     for (int i = 0; i < (int)(sizeof(legend) / sizeof(legend[0])); ++i) {
+    //         if (i % 3) ImGui::SameLine();
+    //         ImVec4 c = legend[i].color;
+    //         ImDrawList* dl = ImGui::GetWindowDrawList();
+    //         dl->AddRectFilled(p, ImVec2(p.x + 10.0f, p.y + ImGui::GetTextLineHeight() - 2.0f),
+    //                           ImGui::GetColorU32(c));
+    //         ImGui::TextDisabled("%s", legend[i].label);
+    //         p.x = ImGui::GetCursorScreenPos().x + ImGui::GetTextLineHeight();
+    //     }
+    //     ImGui::Spacing();
+    //     ImGui::TextDisabled("changed overrides selected");
+    // }
+    // ImGui::EndChild();
 
     ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
     const auto& beliefs = m.beliefs();
@@ -366,14 +371,16 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
         ImVec2 start = ImGui::GetCursorScreenPos();
         ImGui::PushID(b.id.value);
 
-        // Visible belief ID as the default-collapsed header title.
-        const std::string title = beliefLabel(b.id.value);
+        // Visible belief ID as the header title. Items default to open so the statement
+        // is visible without extra clicks; DefaultOpen only sets the initial state, so a
+        // manual collapse afterward is preserved (ImGui TreeNodeUpdateNextOpen stores it).
+        const std::string title = beliefLabel(b.id.value) + " " + b.status;
         ImVec4 c = beliefStatusColor(b.status);
         if (isSel) c = kAccent;
         if (isChanged) c = kAmber;
         ImGui::PushStyleColor(ImGuiCol_Text, c);
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(c.x, c.y, c.z, 0.25f));
-        bool open = ImGui::CollapsingHeader(title.c_str());  // default collapsed
+        bool open = ImGui::CollapsingHeader(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopStyleColor(2);
 
         if (open) {
@@ -421,71 +428,97 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
     ImGui::BeginChild("cog_scroll", ImVec2(0, 0), false);
     if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
 
+    // The CursorChanged stage of the active frame drives which paragraph in the
+    // cognitive lane is the current flow step. Only the matching paragraph gets
+    // the dark-gray background; the other two keep the default child background.
+    const pie::gui::FrameStage stage = m.cursor().valid() ? m.cursor().stage : pie::gui::FrameStage::NONE;
+
     // PLAN
-    ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-    ImGui::TextUnformatted("PLAN");
-    ImGui::PopStyleColor();
-    if (f->plan.valid()) {
-        ImGui::TextUnformatted(("Intent " + f->plan.label).c_str());
-        if (!f->selectedBeliefs.empty()) {
-            std::string sel = "Selected: ";
-            for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
-                if (i) sel += ", ";
-                sel += beliefLabel(f->selectedBeliefs[i].value);
+    {
+        bool active = (stage == pie::gui::FrameStage::PLANNING);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, active ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+        ImGui::BeginChild("plan_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+        ImGui::TextUnformatted("PLAN");
+        ImGui::PopStyleColor();
+        if (f->plan.valid()) {
+            ImGui::TextUnformatted(("Intent " + f->plan.label).c_str());
+            if (!f->selectedBeliefs.empty()) {
+                std::string sel = "Selected: ";
+                for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
+                    if (i) sel += ", ";
+                    sel += beliefLabel(f->selectedBeliefs[i].value);
+                }
+                ImGui::TextDisabled("%s", sel.c_str());
             }
-            ImGui::TextDisabled("%s", sel.c_str());
+            ImGui::TextUnformatted(("Q: " + f->plan.question).c_str());
+            ImGui::TextWrapped(("Intent: " + f->plan.intent).c_str());
+        } else {
+            ImGui::TextDisabled("(no plan yet)");
         }
-        ImGui::TextUnformatted(("Q: " + f->plan.question).c_str());
-        ImGui::TextWrapped(("Intent: " + f->plan.intent).c_str());
-    } else {
-        ImGui::TextDisabled("(no plan yet)");
+        ImGui::EndChild();
+        ImGui::PopStyleColor(1);
     }
 
     ImGui::Spacing();
     ImGui::Separator();
 
     // DISTILLATION
-    ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
-    ImGui::TextUnformatted("DISTILLATION");
-    ImGui::PopStyleColor();
-    if (f->distillation.valid()) {
-        ImGui::TextUnformatted(("D-42 " + f->distillation.label).c_str());
-        ImGui::TextUnformatted("Input:");
-        for (auto& id : f->distillation.inputIds) {
-            ImGui::BulletText("%s", id.c_str());
+    {
+        bool active = (stage == pie::gui::FrameStage::DISTILLING);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, active ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+        ImGui::BeginChild("distillation_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+        ImGui::TextUnformatted("DISTILLATION");
+        ImGui::PopStyleColor();
+        if (f->distillation.valid()) {
+            ImGui::TextUnformatted(("D-42 " + f->distillation.label).c_str());
+            ImGui::TextUnformatted("Input:");
+            for (auto& id : f->distillation.inputIds) {
+                ImGui::BulletText("%s", id.c_str());
+            }
+            if (!f->distillation.unexplained.empty())
+                ImGui::TextWrapped(("Unexplained: " + f->distillation.unexplained).c_str());
+            if (!f->distillation.interpretation.empty())
+                ImGui::TextWrapped(("Interpretation: " + f->distillation.interpretation).c_str());
+        } else {
+            ImGui::TextDisabled("(no distillation yet)");
         }
-        if (!f->distillation.unexplained.empty())
-            ImGui::TextWrapped(("Unexplained: " + f->distillation.unexplained).c_str());
-        if (!f->distillation.interpretation.empty())
-            ImGui::TextWrapped(("Interpretation: " + f->distillation.interpretation).c_str());
-    } else {
-        ImGui::TextDisabled("(no distillation yet)");
+        ImGui::EndChild();
+        ImGui::PopStyleColor(1);
     }
 
     ImGui::Spacing();
     ImGui::Separator();
 
     // PROPOSALS
-    ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
-    ImGui::TextUnformatted("PROPOSALS");
-    ImGui::PopStyleColor();
-    if (!f->proposals.empty()) {
-        for (auto& p : f->proposals) {
-            ImVec4 c = kGray;
-            if (p.op == '+') c = kGreen;
-            else if (p.op == '~') c = kAmber;
-            else if (p.op == '-') c = kRed;
-            ImGui::PushStyleColor(ImGuiCol_Text, c);
-            std::string line = std::string(1, p.op) + " " + p.belief;
-            ImGui::TextUnformatted(line.c_str());
-            ImGui::PopStyleColor();
-            if (!p.relation.empty())
-                ImGui::TextDisabled("  %s ──%s──> %s", p.lhs.c_str(), p.relation.c_str(), p.rhs.c_str());
-            if (!p.detail.empty())
-                ImGui::TextDisabled("  %s", p.detail.c_str());
+    {
+        bool active = (stage == pie::gui::FrameStage::PROPOSING);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, active ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+        ImGui::BeginChild("proposals_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
+        ImGui::TextUnformatted("PROPOSALS");
+        ImGui::PopStyleColor();
+        if (!f->proposals.empty()) {
+            for (auto& p : f->proposals) {
+                ImVec4 c = kGray;
+                if (p.op == '+') c = kGreen;
+                else if (p.op == '~') c = kAmber;
+                else if (p.op == '-') c = kRed;
+                ImGui::PushStyleColor(ImGuiCol_Text, c);
+                std::string line = std::string(1, p.op) + " " + p.belief;
+                ImGui::TextUnformatted(line.c_str());
+                ImGui::PopStyleColor();
+                if (!p.relation.empty())
+                    ImGui::TextDisabled("  %s ──%s──> %s", p.lhs.c_str(), p.relation.c_str(), p.rhs.c_str());
+                if (!p.detail.empty())
+                    ImGui::TextDisabled("  %s", p.detail.c_str());
+            }
+        } else {
+            ImGui::TextDisabled("(no proposals yet)");
         }
-    } else {
-        ImGui::TextDisabled("(no proposals yet)");
+        ImGui::EndChild();
+        ImGui::PopStyleColor(1);
     }
 
     ImGui::EndChild();
@@ -511,7 +544,7 @@ void renderExecutionLane(const pie::gui::NativeGuiModel& m, int viewId) {
         else if (t.status == "failed") statusSym = "✗";
         else if (t.status == "pending") statusSym = "○";
 
-        std::string label = std::string(statusSym) + " " + t.id + "  " + t.tool + ": " + t.command;
+        std::string label = std::string(statusSym) + " " + t.tool + ": " + t.command;
         if (isCurrent) {
             ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
             label += "   CURRENT";
@@ -840,9 +873,9 @@ int main(int argc, char** argv) {
         renderStatusBar(model);
         ImGui::EndChild();
 
-        ImGui::BeginChild("nav", ImVec2(0, navH), false);
-        renderNavigator(model, viewId);
-        ImGui::EndChild();
+        // ImGui::BeginChild("nav", ImVec2(0, navH), false);
+        // renderNavigator(model, viewId);
+        // ImGui::EndChild();
 
         // Floating instruction window (cmd/cmd-T), independent of the main layout.
         renderInstructionPalette(instructionOpen, model, live,
@@ -859,6 +892,9 @@ int main(int argc, char** argv) {
         float leftW = availW * 0.27f;
         float midW = availW * 0.36f;
         float rightW = std::max(0.0f, availW - leftW - midW);
+        // The right lane is the execution pane; it gets the dark-gray background
+        // when the CursorChanged stage is EXECUTING (the current flow step).
+        const bool execActive = model.cursor().valid() && model.cursor().stage == pie::gui::FrameStage::EXECUTING;
         if (availW < minLaneW * 3) {
             // Too narrow for three side-by-side lanes: stack them vertically
             // inside the scrollable region instead of overlapping.
@@ -870,9 +906,11 @@ int main(int argc, char** argv) {
             renderCognitiveLane(model, viewId);
             ImGui::EndChild();
             ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, execActive ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
             ImGui::BeginChild("right", ImVec2(0, 0), true);
             renderExecutionLane(model, viewId);
             ImGui::EndChild();
+            ImGui::PopStyleColor(1);
         } else {
             ImGui::BeginChild("left", ImVec2(leftW, 0), true);
             renderBeliefLane(model, viewId);
@@ -882,9 +920,11 @@ int main(int argc, char** argv) {
             renderCognitiveLane(model, viewId);
             ImGui::EndChild();
             ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, execActive ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
             ImGui::BeginChild("right", ImVec2(rightW, 0), true);
             renderExecutionLane(model, viewId);
             ImGui::EndChild();
+            ImGui::PopStyleColor(1);
         }
         ImGui::EndChild();
 

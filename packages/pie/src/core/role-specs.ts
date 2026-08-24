@@ -1,12 +1,11 @@
 /**
  * The four belief-loop roles' policy, centralized as a single authoritative source.
  *
- * Everything a role is — its instruction text, its tool surface, its belief-view scope,
- * its model policy, its message projection, and its stray-tool steer — is declared here.
+ * Everything a role is — its instruction text, its tool surface, its model policy, its
+ * message projection, and its stray-tool steer — is declared here.
  * The steers between roles live in `TRANSITION_STEERS`. Consumers are `agent-session.ts`
  * (`_roleInstruction`, `_roleToolNames`, `_roleModel`, `_projectMessage`,
- * `_steerStrayToolCall`, `_transition`, `_concludeTransition`) and the `view_beliefs`
- * tool (`beliefScope`).
+ * `_steerStrayToolCall`, `_transition`, `_concludeTransition`).
  *
  * Naming: the loop has four phases — `propose` (decide what to test), `execution` (probe
  * the code/product), `distill` (account for the observation), `finalAnswer` (write the
@@ -25,9 +24,6 @@ export type ModelPolicy = "default" | "execution" | "distillation" | "planner" |
 /** Which message projection the role's context uses (see `_projectMessage`). */
 export type ProjectionKind = "belief" | "distill" | "execution" | "finalAnswer";
 
-/** The belief-view scope: the belief-side roles read the full set, execution only the frame. */
-export type BeliefScope = "all" | "frame";
-
 export interface RoleToolContext {
 	/** The full active tool names, independent of the role's projected subset. */
 	fullActiveToolNames: string[];
@@ -43,8 +39,6 @@ export interface RoleSpec {
 	 * a function for execution, which derives its probe surface from the full active set.
 	 */
 	tools: readonly string[] | ((ctx: RoleToolContext) => string[]);
-	/** The scope handed to `view_beliefs`: "all" or "frame". */
-	beliefScope: BeliefScope;
 	/** Which model the role runs on. */
 	modelPolicy: ModelPolicy;
 	/** Which message projection the role's context uses. */
@@ -146,7 +140,6 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		instruction: PROPOSE_ROLE_HEADER + PROPOSE_ROUTING_HEADER + PROPOSE_PROTOCOL,
 		continuationInstruction: PROPOSE_ROLE_HEADER + PROPOSE_CONTINUATION_HEADER + PROPOSE_PROTOCOL,
 		tools: ["declare_belief", "view_beliefs", "conclude"],
-		beliefScope: "all",
 		modelPolicy: "default",
 		projection: "belief",
 		strayToolSteer: (names) =>
@@ -158,7 +151,6 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	planner: {
 		instruction: PLANNER_ROLE_HEADER,
 		tools: [],
-		beliefScope: "frame",
 		modelPolicy: "planner",
 		projection: "belief",
 		strayToolSteer: (names) =>
@@ -187,7 +179,6 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"4. Once every open belief is updated from the residual, stop — proposing the next belief is a " +
 			"separate propose step, not yours.",
 		tools: ["declare_belief", "view_beliefs", "conclude"],
-		beliefScope: "all",
 		modelPolicy: "distillation",
 		projection: "distill",
 		strayToolSteer: (names) =>
@@ -216,7 +207,6 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			// must not mutate the belief set (`declare_belief`) or conclude (`conclude`),
 			// both of which are the belief-side roles' calls.
 			fullActiveToolNames.filter((name) => name !== "declare_belief" && name !== "conclude"),
-		beliefScope: "frame",
 		modelPolicy: "execution",
 		projection: "execution",
 		strayToolSteer: (names) =>
@@ -231,7 +221,6 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"\n\nYou are a scientific mind writing the conclusion: answer the original task directly and " +
 			"concisely, grounded in the beliefs you have settled.",
 		tools: [],
-		beliefScope: "all",
 		modelPolicy: "fastPath",
 		projection: "finalAnswer",
 		strayToolSteer: (names) =>

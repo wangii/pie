@@ -167,4 +167,43 @@ describe("belief-loop event family", () => {
 		expect(superseded).toBeDefined();
 		expect(superseded?.previousStatus).toBe("proposed");
 	});
+
+	it("emits a BeliefCreated for the routing belief so the native GUI registers it", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		harness.setResponses([
+			// Propose role: declare a fast-path routing decision.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "route",
+					statement: "本请求适合 fast path 执行",
+					expectation: "该请求为简单任务",
+					decision: "fast-path",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 1,
+					difficulty: "low",
+				}),
+			]),
+			// Fast execution: answer the user directly, no tool calls.
+			fauxAssistantMessage("Done."),
+			// Distillation summary.
+			fauxAssistantMessage("Summary: completed the request."),
+		]);
+
+		await harness.session.prompt("please echo hello");
+
+		// A routing belief must surface as a BeliefCreated so the GUI registers it in the
+		// belief registry (otherwise it would only reach the GUI as a ProposalCreated and
+		// never appear in the belief-set pane).
+		const routingCreated = harness.eventsOfType("BeliefCreated").filter((ev) => ev.domain === "routing");
+		expect(routingCreated.length).toBe(1);
+		expect(routingCreated[0].beliefId).toBeGreaterThan(0);
+		expect(routingCreated[0].statement).toBeTruthy();
+		expect(routingCreated[0].evidenceRounds).toBeGreaterThan(0);
+		// The `BeliefCreated` event schema carries no status field; the GUI defaults a
+		// new belief to `proposed`, and since only the `open` status maps to the accent
+		// color, a routing belief renders as default text (never as open).
+	});
 });
