@@ -228,6 +228,74 @@ describe("declare_belief integration", () => {
 		}
 	});
 
+	test("finalAnswer role prompt follows pie.beliefLang in the conclusion instruction", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "echoed" }],
+				details: undefined,
+			}),
+		};
+
+		const harness = await createHarness({
+			settings: { pie: { beliefLang: "Chinese" } },
+			baseToolsOverride: { echo: echoTool },
+			responses: [
+				// Propose.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: {
+								op: "propose",
+								statement: "the cache survives logout",
+								domain: "product",
+								expectation: "a probe keeps the value",
+								evidenceRounds: 1,
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				// Execution: probe.
+				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
+				// Execution: distilled sentence.
+				"the value persisted",
+				// Distill: settle the last belief.
+				{
+					toolCalls: [
+						{
+							name: "declare_belief",
+							args: { op: "support", beliefId: "belief-1", evidence: "the value persisted" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				conclude,
+				conclude,
+				// finalAnswer.
+				"the conclusion",
+			],
+		});
+		try {
+			await harness.session.prompt("hi");
+
+			const finalAnswerContexts = harness.faux.contexts.filter((c) =>
+				(c.systemPrompt ?? "").includes("writing the conclusion"),
+			);
+			expect(finalAnswerContexts.length).toBeGreaterThan(0);
+			for (const c of finalAnswerContexts) {
+				expect(c.systemPrompt).toContain("in Chinese");
+				expect(c.systemPrompt).not.toContain("{beliefLang}");
+			}
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("four-phase flow: propose dispatches to execution, then adjudication settles the frame", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",

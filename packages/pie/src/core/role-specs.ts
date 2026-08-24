@@ -219,7 +219,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	finalAnswer: {
 		instruction:
 			"\n\nYou are a scientific mind writing the conclusion: answer the original task directly and " +
-			"concisely, grounded in the beliefs you have settled.",
+			"concisely, grounded in the beliefs you have settled. Write your conclusion in {beliefLang}.",
 		tools: [],
 		modelPolicy: "fastPath",
 		projection: "finalAnswer",
