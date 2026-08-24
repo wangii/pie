@@ -511,6 +511,10 @@ LoopFrame* NativeGuiModel::rpcFrame(int runtimeFrameId) {
     const int cur = cursor_.frameId;
     if (cur >= 0 && frames_.count(cur)) {
         LoopFrame f = std::move(frames_[cur]);
+        // Keep the frame's own id in sync with the map key so later lookups by
+        // frame()->id (addRpcToolCall/setRpcToolResult/closeRpcFrame) resolve to
+        // the rebound frame instead of the stale synthetic placeholder id.
+        f.id = runtimeFrameId;
         frames_.erase(cur);
         for (auto& id : frameOrder_) {
             if (id == cur) { id = runtimeFrameId; break; }

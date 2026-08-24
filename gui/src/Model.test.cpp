@@ -190,6 +190,27 @@ int main() {
         check(rpc.frameById(1000) == nullptr, "regression: synthetic placeholder 1000 no longer exists");
     }
 
+    // --- Regression: tool_execution_start after the runtime frame rebind lands ---
+    // --- on the rebound frame (taskId, 1-based), not the synthetic placeholder. ---
+    // --- Covers the live sequence agent_start -> CursorChanged(frameId:1) -> ---
+    // --- tool_execution_start, which the earlier tests only exercise apart. ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "rebind+tool: agent_start opens placeholder");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1,"stage":"EXECUTING","item":"E-1"})") == pie::gui::RpcApplyResult::Applied, "rebind+tool: cursor rebound to runtime frame id");
+        check(rpc.cursor().frameId == 1, "rebind+tool: cursor on runtime frame id");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"tool_execution_start","toolCallId":"call_E1","toolName":"bash","args":{"command":"ls"}})") == pie::gui::RpcApplyResult::Applied, "rebind+tool: tool_execution_start applied");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"tool_execution_end","toolCallId":"call_E1","toolName":"bash","result":{"output":"x"},"isError":false})") == pie::gui::RpcApplyResult::Applied, "rebind+tool: tool_execution_end applied");
+
+        const auto* f1 = rpc.frameById(1);
+        check(f1 != nullptr, "rebind+tool: frame 1 exists after rebind");
+        check(f1 && f1->trajectory.size() == 1, "rebind+tool: one trajectory entry on rebound frame");
+        check(f1 && f1->trajectory[0].tool == "bash", "rebind+tool: trajectory tool captured");
+        check(f1 && f1->trajectory[0].command.find("ls") != std::string::npos, "rebind+tool: trajectory command captured");
+        check(f1 && f1->trajectory[0].status == "ok", "rebind+tool: trajectory status ok");
+        check(rpc.frameById(1000) == nullptr, "rebind+tool: synthetic placeholder 1000 gone");
+    }
+
     // --- Regression: BeliefCreated registers a new belief immediately, and a
     // --- later BeliefUpdated for the same id updates it in place (no duplicate).
     {

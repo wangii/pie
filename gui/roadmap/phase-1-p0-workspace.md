@@ -35,7 +35,7 @@ Implementation Priority), 31 (Design Principle).
 | Current item indicator | `renderStatusBar` / `renderExecutionLane` CURRENT |
 | Frame history navigator | `renderNavigator` |
 | Historical frame inspection | `viewId` frame lookup + `back to current` |
-| Cmd/Ctrl+T instruction box | `renderInstructionPalette` (Cmd/Ctrl+T on `ImGuiKey_T`) |
+| Cmd/Ctrl+T instruction box | `renderInstructionPalette` (Cmd/Ctrl+T toggles `open`, Cmd/Ctrl+Enter submits) |
 
 ## Key elements
 

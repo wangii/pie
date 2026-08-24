@@ -71,6 +71,11 @@ add_executable(pi_gui_layout_test src/LayoutMetrics.test.cpp)
 target_include_directories(pi_gui_layout_test PRIVATE src)
 add_test(NAME pi_gui_layout_test COMMAND pi_gui_layout_test)
 
+# Instruction palette input autogrow height (pure logic; headless).
+add_executable(pi_gui_palette_metrics_test src/PaletteMetrics.test.cpp)
+target_include_directories(pi_gui_palette_metrics_test PRIVATE src)
+add_test(NAME pi_gui_palette_metrics_test COMMAND pi_gui_palette_metrics_test)
+
 # ---------------------------------------------------------------------------
 # GUI app: UI + runtime client, links the model layer + ImGui backend.
 # ---------------------------------------------------------------------------

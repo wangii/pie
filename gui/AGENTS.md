@@ -86,10 +86,12 @@ ImGui backend).
   overlapping.
 - The instruction palette is a floating overlay window toggled by ⌘T/Ctrl-T,
   independent of the main workspace layout. When open it is rendered as its own
-  ImGui window; it does not reserve any band in the layout, so it never overlaps
-  the status bar, navigator, lanes, or summary. The geometry of the remaining
-  (status bar, navigator, lanes, summary) regions is computed by `LayoutMetrics`
-  (`computeLayout`/`laneRects`) and covered by the headless `pi_gui_layout_test`.
+  ImGui window; text is submitted with Cmd/Ctrl+Enter (Enter inserts a newline,
+  so a multiline instruction is preserved end to end). It does not reserve any
+  band in the layout, so it never overlaps the status bar, navigator, lanes, or
+  summary. The geometry of the remaining (status bar, navigator, lanes, summary)
+  regions is computed by `LayoutMetrics` (`computeLayout`/`laneRects`) and
+  covered by the headless `pi_gui_layout_test`.
 - The window enforces a minimum size matching the layout formula via
   `glfwSetWindowSizeLimits`, using the single-source constants
   `kMinWindowWidth`/`kMinWindowHeight` from `LayoutMetrics.h`. Resizing the

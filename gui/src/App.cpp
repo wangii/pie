@@ -44,6 +44,7 @@
 #include "DemoEvents.h"
 #include "InstructionCmd.h"
 #include "LayoutMetrics.h"
+#include "PaletteMetrics.h"
 
 #ifndef PI_CLI
 #error "PI_CLI must be defined (absolute path to packages/pie/dist/cli.js)"
@@ -269,9 +270,6 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
 void renderNavigator(const pie::gui::NativeGuiModel& m, int& viewId) {
     static char searchBuf[64] = {};
     const auto& frames = m.frames();
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Frame Navigator:");
-    ImGui::SameLine();
     ImGui::SetNextItemWidth(140.0f);
     ImGui::InputText("##frame_search", searchBuf, sizeof(searchBuf));
     for (const auto& f : frames) {
@@ -292,6 +290,27 @@ void renderNavigator(const pie::gui::NativeGuiModel& m, int& viewId) {
     }
 }
 
+// Status -> color for the belief set pane. Shared by the legend and the per-row
+// header, so the legend cannot drift from the actual row coloring.
+ImVec4 beliefStatusColor(const std::string& status) {
+    if (status == "open") return kAccent;
+    if (status == "closed") return kGreen;
+    if (status == "falsified") return kRed;
+    if (status == "revised") return kAmber;
+    return ImGui::GetStyleColorVec4(ImGuiCol_Text);
+}
+
+// Fixed height for the belief color-legend child region. The legend is a small
+// swatch row plus a hint line; giving it a bounded height here (instead of the
+// 0 which fills all remaining space and starves the rows below) lets the belief
+// scroll child below retain the rest of the lane.
+float beliefLegendHeight() {
+    const float lineH = ImGui::GetTextLineHeightWithSpacing();
+    const float pad = ImGui::GetStyle().WindowPadding.y * 2.0f;
+    // One line of swatch labels + one hint line + small breathing room.
+    return lineH * 2.0f + pad + lineH * 0.5f;
+}
+
 void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
     const auto* f = displayedFrame(m, viewId);
 
@@ -305,8 +324,38 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
 
     ImGui::TextUnformatted("BELIEF SET");
     ImGui::Separator();
-    ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
 
+    // Color schema legend: one swatch + label per status and per override. The
+    // swatch and label come from the actual row color so the legend stays in sync
+    // with the rows. The override colors follow the row priority: a changed belief
+    // (amber) overrides a selected belief (accent), which overrides the status.
+    struct LegendItem { const char* label; ImVec4 color; };
+    static const LegendItem legend[] = {
+        {"open", beliefStatusColor("open")},
+        {"closed", beliefStatusColor("closed")},
+        {"revised", beliefStatusColor("revised")},
+        {"falsified", beliefStatusColor("falsified")},
+        {"selected", kAccent},
+        {"changed", kAmber},
+    };
+    ImGui::BeginChild("belief_legend", ImVec2(0, beliefLegendHeight()), false);
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        for (int i = 0; i < (int)(sizeof(legend) / sizeof(legend[0])); ++i) {
+            if (i % 3) ImGui::SameLine();
+            ImVec4 c = legend[i].color;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p, ImVec2(p.x + 10.0f, p.y + ImGui::GetTextLineHeight() - 2.0f),
+                              ImGui::GetColorU32(c));
+            ImGui::TextDisabled("%s", legend[i].label);
+            p.x = ImGui::GetCursorScreenPos().x + ImGui::GetTextLineHeight();
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("changed overrides selected");
+    }
+    ImGui::EndChild();
+
+    ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
     const auto& beliefs = m.beliefs();
     for (const auto& b : beliefs) {
         bool isSel = false;
@@ -314,44 +363,42 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
         bool isChanged = false;
         for (int id : changedIds) if (id == b.id.value) { isChanged = true; break; }
 
-        // Accent bar + row.
         ImVec2 start = ImGui::GetCursorScreenPos();
         ImGui::PushID(b.id.value);
-        ImGui::BeginGroup();
 
-        // Content line colored by status (no id/status text): color encodes state.
-        if (b.confidence >= 0.0) {
-            ImGui::TextDisabled("%.2f", b.confidence);
-            ImGui::SameLine();
-        }
-        ImVec4 c = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-        if (b.status == "open") c = kAccent;
-        else if (b.status == "closed") c = kGreen;
-        else if (b.status == "falsified") c = kRed;
-        else if (b.status == "revised") c = kAmber;
+        // Visible belief ID as the default-collapsed header title.
+        const std::string title = beliefLabel(b.id.value);
+        ImVec4 c = beliefStatusColor(b.status);
         if (isSel) c = kAccent;
         if (isChanged) c = kAmber;
         ImGui::PushStyleColor(ImGuiCol_Text, c);
-        // Live mode carries the prose belief statement; the demo/headless fixture
-        // uses the structured lhs/relation/rhs. Prefer the statement when present.
-        if (!b.statement.empty()) {
-            ImGui::TextWrapped("%s", b.statement.c_str());
-        } else {
-            ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
-        }
-        ImGui::PopStyleColor();
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(c.x, c.y, c.z, 0.25f));
+        bool open = ImGui::CollapsingHeader(title.c_str());  // default collapsed
+        ImGui::PopStyleColor(2);
 
-        // Provenance.
-        if (!b.sourceFrames.empty()) {
-            std::string src = "source: ";
-            for (size_t i = 0; i < b.sourceFrames.size(); ++i) {
-                if (i) src += ", ";
-                src += "#" + std::to_string(b.sourceFrames[i]);
+        if (open) {
+            ImGui::Indent();
+            if (b.confidence >= 0.0) {
+                ImGui::TextDisabled("%.2f", b.confidence);
             }
-            ImGui::TextDisabled("%s", src.c_str());
+            // Live mode carries the prose belief statement; the demo/headless
+            // fixture uses the structured lhs/relation/rhs.
+            if (!b.statement.empty()) {
+                ImGui::TextWrapped("%s", b.statement.c_str());
+            } else {
+                ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
+            }
+            if (!b.sourceFrames.empty()) {
+                std::string src = "source: ";
+                for (size_t i = 0; i < b.sourceFrames.size(); ++i) {
+                    if (i) src += ", ";
+                    src += "#" + std::to_string(b.sourceFrames[i]);
+                }
+                ImGui::TextDisabled("%s", src.c_str());
+            }
+            ImGui::Unindent();
         }
 
-        ImGui::EndGroup();
         ImGui::PopID();
 
         // Left accent bar for selected beliefs.
@@ -526,34 +573,91 @@ void renderSummary(const pie::gui::NativeGuiModel& m, int viewId) {
 
 using InstructionSender = std::function<void(const std::string&)>;
 
+// ImGui input-text resize callback backing instrBuf. On CallbackResize ImGui
+// wants the buffer to hold BufTextLen bytes; grow the std::string to that
+// length and hand back a writable, null-terminated pointer. This lets a
+// multiline instruction exceed a fixed-size stack buffer without truncation.
+static int instructionResizeCallback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+        auto* s = static_cast<std::string*>(data->UserData);
+        s->resize(data->BufTextLen);
+        data->Buf = const_cast<char*>(s->data());
+        data->BufSize = static_cast<int>(s->size()) + 1;
+    }
+    return 0;
+}
+
 // Render the instruction palette as a standalone floating window (not docked
 // into the main workspace). It no longer reserves layout space; the caller only
 // toggles `open` via the cmd/cmd-T shortcut.
 void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, bool canSend, InstructionSender send) {
     if (!open) return;
 
-    static bool focusOnce = true;
-    static char buf[256] = {};
+    // Growable instruction text. Enter inserts a newline (no EnterReturnsTrue);
+    // submission is via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so a
+    // multiline instruction is preserved end to end and serializeInstructionCommand
+    // keeps the newline inside the JSON message on the way to the runtime client.
+    static std::string instrBuf;
+    auto& io = ImGui::GetIO();
 
-    ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
-    ImGui::SetNextWindowPos(ImVec2(120, 120), ImGuiCond_Appearing);
+    // Fixed geometry: centered in the app at a quarter of its area (1/2 width x
+    // 1/2 height), undecorated (no title bar), and not user-resizable/movable.
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    const ImVec2 winSize(d.x * 0.5f, d.y * 0.5f);
+    const ImVec2 winPos((d.x - winSize.x) * 0.5f, (d.y - winSize.y) * 0.5f);
+    ImGui::SetNextWindowSize(winSize, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(winPos, ImGuiCond_Always);
     bool close = false;
-    if (ImGui::Begin("User Instruction", &close, ImGuiWindowFlags_NoCollapse)) {
-        // Keep focus on the input box once opened.
-        if (focusOnce) { ImGui::SetKeyboardFocusHere(); focusOnce = false; }
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+    if (ImGui::Begin("User Instruction", &close, flags)) {
+        // Keep the input box focused the entire time the window is visible so the
+        // user can keep typing without clicking.
+        ImGui::SetKeyboardFocusHere();
 
         ImGui::TextUnformatted(">");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(-1.0f);
-        bool submit = ImGui::InputText("##instruction", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue);
 
-        // Live in-message (the assistant's streaming reply). Rendered below the
-        // input box in a scrollable container that auto-scrolls to the bottom as
-        // it grows. Only live mode feeds message_start/message_update/message_end;
+        // Auto-grow the input height as the text wraps past the available width.
+        // Measure the wrapped height of the current buffer at the widget width.
+        const float framePad = ImGui::GetStyle().FramePadding.y * 2.0f;
+        const float widgetW = ImGui::GetContentRegionAvail().x;
+        const float innerW = widgetW - ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float lineH = ImGui::GetTextLineHeight();
+        const ImVec2 wrapped = ImGui::CalcTextSize(instrBuf.c_str(), nullptr, false, innerW);
+        // Reserve one extra line when the buffer ends in a newline (the cursor
+        // sits on a fresh empty line that CalcTextSize.y does not count).
+        const int extraLines = pie::gui::paletteTrailingEmptyLines(instrBuf.c_str());
+        const float inputH = pie::gui::paletteInputBoxHeight(wrapped.y, lineH, framePad, extraLines);
+        // Clamp so the input can't consume the entire panel; the in-message area
+        // keeps the rest.
+        const float maxInputH = winSize.y * 0.5f;
+        ImGui::InputTextMultiline("##instruction", instrBuf.data(), static_cast<int>(instrBuf.size()) + 1,
+                                  ImVec2(-1.0f, std::min(inputH, maxInputH)),
+                                  ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize,
+                                  instructionResizeCallback, &instrBuf);
+
+        // Submit via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so Enter still
+        // inserts a newline and a multiline instruction is preserved end to end.
+        // The input does not use EnterReturnsTrue, so plain Enter is consumed by
+        // the widget as a newline while the Cmd/Ctrl+Enter chord is not, so this
+        // check cannot hijack newline input. In live mode this goes through
+        // serializeInstructionCommand, which keeps the newline in the JSON.
+        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+            std::string instr = instrBuf;
+            instrBuf.clear();
+            if (canSend && send && !instr.empty()) {
+                send(instr);  // reverse path: instruction -> runtime client
+            }
+        }
+
+        // in-message (the assistant's streaming reply). Rendered below the input
+        // box and filling the remaining panel space, auto-scrolling to the bottom
+        // as it grows. Only live mode feeds message_start/message_update/message_end;
         // in demo mode this stays empty.
-        ImGui::TextDisabled("In-Message");
         ImGui::Separator();
-        ImGui::BeginChild("in_message", ImVec2(0, 140), true);
+        ImGui::BeginChild("in_message", ImVec2(0, 0), true);
         static size_t lastInMsgLen = 0;
         if (!m.inMessage().empty()) {
             ImGui::TextWrapped("%s", m.inMessage().c_str());
@@ -568,25 +672,10 @@ void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, boo
         }
         lastInMsgLen = m.inMessage().size();
         ImGui::EndChild();
-        ImGui::Spacing();
-
-        if (submit) {
-            std::string instr(buf);
-            // Always clear the input on Enter, then attempt to submit to rpc.
-            buf[0] = '\0';
-            if (canSend && send && !instr.empty()) {
-                send(instr);  // reverse path: instruction -> runtime client
-            } else {
-                // demo / non-live: no runtime client, so show a disabled state.
-                ImGui::PushStyleColor(ImGuiCol_Text, kGray);
-                ImGui::TextDisabled("(not sent: not connected to a runtime client)");
-                ImGui::PopStyleColor();
-            }
-        }
     }
     ImGui::End();
 
-    if (close || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; focusOnce = true; }
+    if (close || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; }
     ImGui::SetNextFrameWantCaptureKeyboard(true);
 }
 
@@ -658,7 +747,10 @@ int main(int argc, char** argv) {
     // regular-weight default.
     ImFontConfig fontCfg;
     fontCfg.FontNo = 7;  // Sarasa Term SC Nerd Regular
-    ImFont* font = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f, &fontCfg, io.Fonts->GetGlyphRangesChineseFull());
+    // Global font sized up 35% (18 -> 24.3) to improve legibility. The rest of
+    // the layout derives from GetFrameHeightWithSpacing()/LayoutMetrics, so it
+    // tracks the larger font automatically.
+    ImFont* font = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &fontCfg, io.Fonts->GetGlyphRangesChineseFull());
     if (font == nullptr) {
         // FreeType is required for a TTC; fall back to the default font and warn.
         std::fprintf(stderr, "WARNING: failed to load %s; using default font. TTC requires FreeType.\n", ttcPath.c_str());
