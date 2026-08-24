@@ -1,5 +1,9 @@
 # Development Rules
 
+## Pie fork
+- This fork's primary codes are in `packages/pie` and `gui`
+- Keep changes inside these two directories!
+
 ## Conversational Style
 
 - Keep answers short and concise
