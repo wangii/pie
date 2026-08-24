@@ -47,6 +47,9 @@ struct Belief {
     std::string rhs;       // e.g. "pytest"
     double confidence = -1.0;
     std::string status;    // open / closed / falsified / revised ...
+    // Prose assertion (the runtime's belief statement). Populated by the live
+    // belief_updated event; lhs/relation/rhs remain for the demo/headless fixture.
+    std::string statement;
     std::vector<int> sourceFrames;  // provenance (frame ids)
 };
 
@@ -146,8 +149,14 @@ public:
     const LoopFrame* activeFrame() const;
     // Look up a closed frame for historical inspection.
     const LoopFrame* frameById(int id) const;
+    // Mutable access to an open/closed frame, used by the RPC event adapter to
+    // populate belief-loop phase state (selected beliefs, plan, distillation).
+    LoopFrame* mutableFrame(int id) { return frame(id); }
 
     const FrameCursor& cursor() const { return cursor_; }
+    // Mutable cursor access, used by the RPC event adapter to update the
+    // active-frame cursor from a CursorChanged phase event.
+    FrameCursor& mutableCursor() { return cursor_; }
 
     const std::string& session() const { return session_; }
     void setSession(std::string s) { session_ = std::move(s); }
@@ -162,6 +171,10 @@ public:
     void addRpcToolCall(int id, const std::string& toolCallId, const std::string& tool, const std::string& command);
     void setRpcToolResult(int id, const std::string& toolCallId, const std::string& result, const std::string& status);
     void closeRpcFrame(int id, bool failed);
+    // Register (or update) a belief from the live belief_updated phase event.
+    // Public wrapper around the private upsertBelief so the RPC adapter can
+    // populate the belief lane without accessing the private registry directly.
+    Belief& upsertBeliefRpc(BeliefId id) { return upsertBelief(id); }
 
     // Live in-message stream (the assistant's streaming reply shown in the
     // ⌘T instruction palette). Populated by the RPC event adapter from
@@ -181,7 +194,11 @@ private:
 
     std::map<int, LoopFrame> frames_;
     std::vector<int> frameOrder_;  // open order
-    std::map<int, Belief> beliefById_;
+    // id -> index into beliefs_ (the single source of truth for a belief's
+    // content). Keeping the canonical Belief in the vector means beliefs() and
+    // the beliefById_ index always agree; mutating through belief()/upsertBelief()
+    // updates the same object the viewer iterates.
+    std::map<int, int> beliefById_;
     std::vector<Belief> beliefs_;  // first-inserted order
     FrameCursor cursor_;
     std::string session_;

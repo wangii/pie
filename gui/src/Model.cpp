@@ -177,23 +177,29 @@ bool rawValue(const std::string& s, const std::string& key, std::string& out) {
     return true;
 }
 
-// Join all `"text":"..."` string values found within a `content` array.
+// Join all `"text":"..."` and `"thinking":"..."` string values found within
+// a `content` array so the ⌘T pane seeds the assistant's reply with both
+// visible text and reasoning blocks (thinking is a separate content field).
 std::string extractMessageText(const std::string& line) {
     std::string content;
     if (!rawValue(line, "content", content)) return {};
     std::string out;
-    size_t p = 0;
-    while ((p = content.find("\"text\":\"", p)) != std::string::npos) {
-        p += 8;
-        size_t q = p;
-        while (q < content.size() && content[q] != '"') {
-            if (content[q] == '\\') ++q;
-            ++q;
+    auto extractKey = [&](const std::string& keyLiteral) {
+        size_t p = 0;
+        while ((p = content.find(keyLiteral, p)) != std::string::npos) {
+            p += keyLiteral.size();
+            size_t q = p;
+            while (q < content.size() && content[q] != '"') {
+                if (content[q] == '\\') ++q;
+                ++q;
+            }
+            std::string t = content.substr(p, q - p);
+            if (!t.empty()) { if (!out.empty()) out += " "; out += t; }
+            p = q + 1;
         }
-        std::string t = content.substr(p, q - p);
-        if (!t.empty()) { if (!out.empty()) out += " "; out += t; }
-        p = q + 1;
-    }
+    };
+    extractKey("\"text\":\"");
+    extractKey("\"thinking\":\"");
     return out;
 }
 
@@ -263,6 +269,31 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     if (type == "message_start") {
         std::string role = str(line, "role");
         std::string text = extractMessageText(line);
+        // Fast-path distillation custom message: sendCustomMessage emits
+        // message_start/message_end with role="custom" and a customType
+        // (e.g. "fast_path_distillation"); its content is the distillation
+        // summary. Map it onto the frame's distillation output so the live
+        // cognitive-process pane shows the fast-path result, even though the
+        // fast path never emits a DistillationProduced phase event.
+        std::string customType = str(line, "customType");
+        if (role == "custom" && customType == "fast_path_distillation") {
+            LoopFrame* f = model.mutableFrame(model.cursor().frameId);
+            if (f) {
+                std::string distText;
+                std::string rawContent;
+                if (rawValue(line, "content", rawContent)) {
+                    std::string v = stringValue(rawContent);
+                    if (!v.empty()) distText = v;
+                }
+                if (distText.empty()) distText = text;
+                f->distillation.label = "D-" + std::to_string(f->id);
+                f->distillation.interpretation = distText;
+                f->distillation.inputIds = {};
+                f->distillation.unexplained = "";
+                model.beginInMessage("");
+            }
+            return RpcApplyResult::Applied;
+        }
         // Live in-message for the ⌘T pane is independent of any frame, but the
         // pane should show the assistant's reply, not the user's prompt or the
         // routing/fast-path scaffolding. Seed only on an assistant message; on a
@@ -281,11 +312,16 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
     if (type == "message_update") {
         // Streaming assistant delta. toJsonEvent remaps message_update to
-        // {type, usage, assistantMessageEvent}; append the text delta only.
+        // {type, usage, assistantMessageEvent}; append both text and thinking
+        // deltas so the ⌘T pane's in-message stream updates incrementally for
+        // visible content and reasoning alike.
         std::string evt;
-        if (rawValue(line, "assistantMessageEvent", evt) && str(evt, "type") == "text_delta") {
-            model.appendInMessage(str(evt, "delta"));
-            return RpcApplyResult::Applied;
+        if (rawValue(line, "assistantMessageEvent", evt)) {
+            std::string deltaType = str(evt, "type");
+            if (deltaType == "text_delta" || deltaType == "thinking_delta") {
+                model.appendInMessage(str(evt, "delta"));
+                return RpcApplyResult::Applied;
+            }
         }
         return RpcApplyResult::Ignored;
     }
@@ -311,9 +347,93 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         model.setRpcToolResult(active->id, str(line, "toolCallId"), result, isErr == "true" ? "failed" : "ok");
         return RpcApplyResult::Applied;
     }
+    // Belief-loop phase events (live mode). These carry the epistemic state the
+    // demo/headless path produces via applyLine(): the selected belief ids, the
+    // planner's plan, the distillation output, and the execution stage. Live mode
+    // builds its frame via openRpcFrame (agent_start/turn_start) so we bind each
+    // phase event to the currently active frame.
+    LoopFrame* phaseFrame = model.mutableFrame(model.cursor().frameId);
+    if (type == "BeliefsSelected") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        std::string raw;
+        if (!findKey(line, "beliefs", raw)) return RpcApplyResult::Ignored;
+        phaseFrame->selectedBeliefs = beliefsArray(raw);
+        return RpcApplyResult::Applied;
+    }
+    if (type == "BeliefUpdated") {
+        // Register (or update) a belief with its prose statement from the runtime's
+        // belief model. The demo/headless path uses lhs/relation/rhs/confidence via
+        // applyLine's BeliefUpdated branch; live mode carries the prose statement.
+        BeliefId id{intVal(line, "beliefId")};
+        if (!id.valid()) return RpcApplyResult::Ignored;
+        Belief& b = model.upsertBeliefRpc(id);
+        b.status = str(line, "status", b.status);
+        b.statement = str(line, "statement", b.statement);
+        return RpcApplyResult::Applied;
+    }
+    if (type == "PlanProduced") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        phaseFrame->plan.label = str(line, "label");
+        phaseFrame->plan.question = str(line, "question");
+        phaseFrame->plan.intent = str(line, "intent");
+        return RpcApplyResult::Applied;
+    }
+    if (type == "ExecutionStarted") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        phaseFrame->stage = FrameStage::EXECUTING;
+        return RpcApplyResult::Applied;
+    }
+    if (type == "ExecutionCompleted") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        phaseFrame->stage = FrameStage::DISTILLING;
+        return RpcApplyResult::Applied;
+    }
+    if (type == "DistillationStarted") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        phaseFrame->stage = FrameStage::DISTILLING;
+        return RpcApplyResult::Applied;
+    }
+    if (type == "DistillationProduced") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        phaseFrame->distillation.label = str(line, "label");
+        phaseFrame->distillation.inputIds = [&] {
+            std::string raw;
+            return findKey(line, "inputIds", raw) ? strArray(raw) : std::vector<std::string>{};
+        }();
+        phaseFrame->distillation.unexplained = str(line, "unexplained");
+        phaseFrame->distillation.interpretation = str(line, "interpretation");
+        phaseFrame->stage = FrameStage::PROPOSING;
+        return RpcApplyResult::Applied;
+    }
+    if (type == "ProposalCreated") {
+        if (!phaseFrame) return RpcApplyResult::Ignored;
+        Proposal p;
+        p.op = charVal(line, "op", '?');
+        p.belief = str(line, "belief");
+        p.lhs = str(line, "lhs");
+        p.relation = str(line, "relation");
+        p.rhs = str(line, "rhs");
+        p.detail = str(line, "detail");
+        phaseFrame->proposals.push_back(std::move(p));
+        return RpcApplyResult::Applied;
+    }
+    if (type == "CursorChanged") {
+        std::string rawFrameId;
+        if (findKey(line, "frameId", rawFrameId)) {
+            model.mutableCursor().frameId = static_cast<int>(std::strtol(rawFrameId.c_str(), nullptr, 10));
+        }
+        model.mutableCursor().stage = parseStage(str(line, "stage"));
+        model.mutableCursor().item = str(line, "item");
+        LoopFrame* f = model.mutableFrame(model.mutableCursor().frameId);
+        if (f && model.mutableCursor().stage != FrameStage::NONE) f->stage = model.mutableCursor().stage;
+        return RpcApplyResult::Applied;
+    }
     if (type == "turn_end" || type == "agent_settled") {
         active = model.activeFrame();
         if (!active) return RpcApplyResult::Ignored;
+        // Mark the frame closed but keep it visible (the lane still renders the
+        // execution trajectory) rather than clearing the cursor, so the finished
+        // turn's records do not vanish the moment the turn ends.
         model.closeRpcFrame(active->id, false);
         return RpcApplyResult::Applied;
     }
@@ -348,16 +468,19 @@ const LoopFrame* NativeGuiModel::frameById(int id) const { return frame(id); }
 
 Belief* NativeGuiModel::belief(BeliefId id) {
     auto it = beliefById_.find(id.value);
-    return it == beliefById_.end() ? nullptr : &it->second;
+    if (it == beliefById_.end()) return nullptr;
+    return &beliefs_[it->second];
 }
 
 Belief& NativeGuiModel::upsertBelief(BeliefId id) {
     auto it = beliefById_.find(id.value);
-    if (it != beliefById_.end()) return it->second;
+    if (it != beliefById_.end()) return beliefs_[it->second];
     Belief b;
     b.id = id;
-    beliefs_.push_back(b);
-    return beliefById_[id.value] = std::move(b);
+    const int idx = static_cast<int>(beliefs_.size());
+    beliefs_.push_back(std::move(b));
+    beliefById_[id.value] = idx;
+    return beliefs_[idx];
 }
 
 bool NativeGuiModel::isSelectedInCurrentFrame(BeliefId b) const {
@@ -413,11 +536,10 @@ void NativeGuiModel::closeRpcFrame(int id, bool failed) {
     if (failed) f->failed = true;
     f->stage = FrameStage::CLOSED;
     f->history = LoopFrame::History::Closed;
-    if (cursor_.frameId == id) {
-        cursor_.frameId = -1;
-        cursor_.stage = FrameStage::NONE;
-        cursor_.item.clear();
-    }
+    // Keep the cursor pointing at the just-closed frame so the execution lane
+    // and summary continue to render its trajectory after the turn ends. The
+    // demo/headless path clears the cursor explicitly via its own FrameClosed
+    // event, so this retention only affects the live RPC viewer.
 }
 
 // ---------------------------------------------------------------------------

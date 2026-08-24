@@ -131,6 +131,48 @@ int main() {
         check(pie::gui::applyRpcLine(rpc, "{\"foo\":1}") == pie::gui::RpcApplyResult::Error, "missing type returns Error");
     }
 
+    // --- Belief-loop phase events (live mode): populate selected beliefs, plan, ---
+    // --- distillation, and execution stage on the active frame.                  ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "agent_start opens frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefsSelected","frameId":1000,"beliefs":[42,47]})") == pie::gui::RpcApplyResult::Applied, "beliefs_selected applied");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefUpdated","beliefId":42,"status":"proposed","statement":"project uses pytest"})") == pie::gui::RpcApplyResult::Applied, "belief_updated applied");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"PlanProduced","frameId":1000,"label":"P-128","question":"Is pytest available?","intent":"verify dependency"})") == pie::gui::RpcApplyResult::Applied, "plan_produced applied");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"ExecutionStarted","frameId":1000})") == pie::gui::RpcApplyResult::Applied, "execution_started applied");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"DistillationProduced","frameId":1000,"label":"D-42","inputIds":["E-88"],"unexplained":"declared vs runtime differ","interpretation":"mismatch"})") == pie::gui::RpcApplyResult::Applied, "distillation_produced applied");
+
+        const auto* fr = rpc.frameById(1000);
+        check(fr != nullptr, "rpc frame 1000 exists");
+        check(fr && fr->selectedBeliefs.size() == 2, "two selected beliefs");
+        check(fr && fr->selectedBeliefs[0].value == 42, "first selected belief id 42");
+        check(fr && fr->plan.valid() && fr->plan.label == "P-128", "plan label set");
+        check(fr && fr->plan.intent == "verify dependency", "plan intent set");
+        // After DistillationProduced the loop moves to the proposing phase.
+        check(fr && fr->stage == pie::gui::FrameStage::PROPOSING, "stage after distillation");
+        check(fr && fr->distillation.valid() && fr->distillation.label == "D-42", "distillation label");
+        check(fr && fr->distillation.inputIds.size() == 1, "distillation inputs");
+
+        check(rpc.beliefs().size() == 1, "one belief registered");
+        check(rpc.beliefs()[0].id.value == 42, "registered belief id 42");
+        check(rpc.beliefs()[0].statement == "project uses pytest", "registered belief statement");
+        check(rpc.beliefs()[0].status == "proposed", "registered belief status");
+    }
+
+    // --- Live RPC ProposalCreated: agent_start then ProposalCreated lands on the
+    // --- active frame's proposals (bind to cursor frame, not the event's frameId). ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "agent_start opens frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"ProposalCreated","frameId":1,"op":"+","belief":"B3","lhs":"","relation":"","rhs":"","detail":"fast path routed"})") == pie::gui::RpcApplyResult::Applied, "proposal_created applied");
+
+        const auto* fr = rpc.frameById(rpc.cursor().frameId);
+        check(fr != nullptr, "rpc frame exists");
+        check(fr && fr->proposals.size() == 1, "one proposal recorded");
+        check(fr && fr->proposals[0].op == '+', "proposal op is +");
+        check(fr && fr->proposals[0].belief == "B3", "proposal belief label");
+    }
+
     // --- Live in-message stream (⌘T pane): message_start seeds, message_update ---
     // --- appends text deltas, message_end finalizes.                            ---
     {
@@ -139,11 +181,11 @@ int main() {
         check(rpc.inMessage() == "seed ", "in-message initialized from message_start");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}})") == pie::gui::RpcApplyResult::Applied, "text_delta appends");
         check(rpc.inMessage() == "seed hello", "in-message appended with delta");
-        // Non-text deltas (toolcall/thinking) are not appended.
-        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"..."}})") == pie::gui::RpcApplyResult::Ignored, "thinking_delta ignored");
-        check(rpc.inMessage() == "seed hello", "in-message unchanged by non-text delta");
+        // Thinking deltas are appended too, so the ⌘T pane shows reasoning incrementally.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"..."}})") == pie::gui::RpcApplyResult::Applied, "thinking_delta appends");
+        check(rpc.inMessage() == "seed hello...", "in-message appended with thinking delta");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "message_end finalizes");
-        check(rpc.inMessage() == "seed hello", "in-message retained after message_end");
+        check(rpc.inMessage() == "seed hello...", "in-message retained after message_end");
     }
 
     if (failures == 0) std::printf("ALL PASS\n");

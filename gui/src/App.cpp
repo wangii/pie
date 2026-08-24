@@ -283,7 +283,6 @@ void renderNavigator(const pie::gui::NativeGuiModel& m, int& viewId) {
 }
 
 void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
-    static int filter = 0;  // 0 open, 1 selected, 2 changed, 3 all
     const auto* f = displayedFrame(m, viewId);
 
     std::vector<int> changedIds;
@@ -295,24 +294,15 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
     }
 
     ImGui::TextUnformatted("BELIEF SET");
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 10.0f);
-    ImGui::Combo("##filter", &filter, "open\0selected\0changed\0all\0");
-
     ImGui::Separator();
     ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
 
     const auto& beliefs = m.beliefs();
     for (const auto& b : beliefs) {
-        bool isOpen = (b.status == "open");
         bool isSel = false;
         if (f) for (auto s : f->selectedBeliefs) if (s.value == b.id.value) { isSel = true; break; }
         bool isChanged = false;
         for (int id : changedIds) if (id == b.id.value) { isChanged = true; break; }
-
-        if (filter == 0 && !isOpen) continue;
-        if (filter == 1 && !isSel) continue;
-        if (filter == 2 && !isChanged) continue;
 
         // Accent bar + row.
         ImVec2 start = ImGui::GetCursorScreenPos();
@@ -320,8 +310,10 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
         ImGui::BeginGroup();
 
         // Content line colored by status (no id/status text): color encodes state.
-        ImGui::TextDisabled("%.2f", b.confidence);
-        ImGui::SameLine();
+        if (b.confidence >= 0.0) {
+            ImGui::TextDisabled("%.2f", b.confidence);
+            ImGui::SameLine();
+        }
         ImVec4 c = ImGui::GetStyleColorVec4(ImGuiCol_Text);
         if (b.status == "open") c = kAccent;
         else if (b.status == "closed") c = kGreen;
@@ -330,7 +322,13 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
         if (isSel) c = kAccent;
         if (isChanged) c = kAmber;
         ImGui::PushStyleColor(ImGuiCol_Text, c);
-        ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
+        // Live mode carries the prose belief statement; the demo/headless fixture
+        // uses the structured lhs/relation/rhs. Prefer the statement when present.
+        if (!b.statement.empty()) {
+            ImGui::TextWrapped("%s", b.statement.c_str());
+        } else {
+            ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
+        }
         ImGui::PopStyleColor();
 
         // Provenance.

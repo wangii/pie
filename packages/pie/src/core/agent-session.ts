@@ -54,7 +54,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { type Belief, BeliefSet, statusOf } from "./belief-set.ts";
+import { type Belief, BeliefSet, type BeliefStatus, statusOf } from "./belief-set.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -189,7 +189,45 @@ export type AgentSessionEvent =
 	  }
 	| { type: "summarization_retry_finished" }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "bash_execution_update"; id?: string; delta: string };
+	| { type: "bash_execution_update"; id?: string; delta: string }
+	// Belief-loop phase events (epistemic state feed for the native GUI). These mirror
+	// the demo/headless protocol so the live viewer can render the belief set, plan,
+	// distillation, and execution stage without inferring them from the message log.
+	| { type: "BeliefsSelected"; frameId: number; beliefs: number[] }
+	| {
+			type: "BeliefUpdated";
+			beliefId: number;
+			status: string;
+			statement: string;
+	  }
+	| { type: "PlanProduced"; frameId: number; label: string; question: string; intent: string }
+	| {
+			type: "ProposalCreated";
+			frameId: number;
+			op: string;
+			belief: string;
+			lhs: string;
+			relation: string;
+			rhs: string;
+			detail: string;
+	  }
+	| { type: "ExecutionStarted"; frameId: number }
+	| { type: "ExecutionCompleted"; frameId: number }
+	| { type: "DistillationStarted"; frameId: number }
+	| {
+			type: "DistillationProduced";
+			frameId: number;
+			label: string;
+			inputIds: string[];
+			unexplained: string;
+			interpretation: string;
+	  }
+	| {
+			type: "CursorChanged";
+			frameId: number;
+			stage: "PLANNING" | "EXECUTING" | "DISTILLING" | "PROPOSING" | "CLOSED";
+			item: string;
+	  };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -1061,6 +1099,22 @@ export class AgentSession {
 			});
 		}
 		this._applyRoleSurface();
+		this._emitCursorChanged(next.state.role);
+	}
+
+	/** Emit a CursorChanged phase event reflecting the role the loop just advanced to. */
+	private _emitCursorChanged(role: LoopState["role"]): void {
+		const stage =
+			role === "planner"
+				? "PLANNING"
+				: role === "execution"
+					? "EXECUTING"
+					: role === "distill"
+						? "DISTILLING"
+						: role === "finalAnswer"
+							? "CLOSED"
+							: "PROPOSING";
+		this._emit({ type: "CursorChanged", frameId: this._taskId, stage, item: "" });
 	}
 
 	/**
@@ -1104,6 +1158,19 @@ export class AgentSession {
 					// framing obligations do not constrain the fast path — the run may execute the
 					// request while they remain open, and they are re-adjudicated after the run.
 					if (route.decision === "fast-path") {
+						// Surface the routing decision to the native GUI's proposals lane. A fast-path
+						// session never reaches the planner's _emitBatchSelectionBlock, so this is the
+						// only ProposalCreated the proposals lane would otherwise see on that path.
+						this._emit({
+							type: "ProposalCreated",
+							frameId: this._taskId,
+							op: "+",
+							belief: "B" + this._beliefNumericId(route),
+							lhs: "",
+							relation: "",
+							rhs: "",
+							detail: route.statement,
+						});
 						return this._dispatchToFastExecution(route);
 					}
 				}
@@ -1408,6 +1475,80 @@ export class AgentSession {
 		);
 		this._emit({ type: "message_start", message });
 		this._emit({ type: "message_end", message });
+		this._emitBeliefPhase("BeliefsSelected", batch);
+		for (const belief of batch) {
+			this._emit({
+				type: "BeliefUpdated",
+				beliefId: this._beliefNumericId(belief),
+				status: this._guiBeliefStatus(statusOf(belief)),
+				statement: belief.statement,
+			});
+			// Surface the proposed belief to the native GUI's proposals lane.
+			// The belief loop is prose-only (statement/expectation, no
+			// lhs/relation/rhs triple), so the proposal renders as "+ B<n>"
+			// followed by the statement text; the GUI guards the empty fields.
+			this._emit({
+				type: "ProposalCreated",
+				frameId: this._taskId,
+				op: "+",
+				belief: "B" + this._beliefNumericId(belief),
+				lhs: "",
+				relation: "",
+				rhs: "",
+				detail: belief.statement,
+			});
+		}
+		// The belief loop's planner has no structured intent/label/question, so
+		// surface the batch summary as the plan content for the native GUI.
+		this._emit({
+			type: "PlanProduced",
+			frameId: this._taskId,
+			label: `P-${this._taskId}`,
+			question: `Batch of ${batch.length} belief(s): ${ids.join(", ")}`,
+			intent: `Probe batch: ${ids.join(", ")}`,
+		});
+	}
+
+	/** Emit a belief-loop phase event to the event listeners (and hence the native GUI). */
+	private _emitBeliefPhase(
+		type: "BeliefsSelected" | "ExecutionStarted" | "ExecutionCompleted" | "DistillationStarted",
+		beliefs: Belief[],
+	): void {
+		const frameId = this._taskId;
+		if (type === "BeliefsSelected") {
+			this._emit({
+				type,
+				frameId,
+				beliefs: beliefs.map((b) => this._beliefNumericId(b)),
+			});
+			return;
+		}
+		this._emit({ type, frameId });
+	}
+
+	/** Map a belief to the 1-based registry index used by the native GUI (B{n}). */
+	private _beliefNumericId(belief: Belief): number {
+		const idx = this._beliefSet.beliefs.findIndex((x) => x.id === belief.id);
+		return idx >= 0 ? idx + 1 : 0;
+	}
+
+	/** Map the belief-loop status to the native GUI's display status enum.
+	 *  The GUI colors/filters on {open, closed, falsified, revised}; the belief
+	 *  loop uses {proposed, supported, refuted, superseded}. Without this the
+	 *  live-mode belief cards would never get the open/accent coloring. */
+	private _guiBeliefStatus(status: BeliefStatus): string {
+		switch (status) {
+			case "proposed":
+				return "open";
+			case "supported":
+				return "revised";
+			case "refuted":
+				return "falsified";
+			case "superseded":
+				return "closed";
+			default:
+				return "open";
+		}
 	}
 
 	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
@@ -1455,6 +1596,17 @@ export class AgentSession {
 	private _dispatchToFastExecution(route: Belief): { state: LoopState; steer: string } {
 		this._dispatchedFrameIds = new Set();
 		this._fastPathFailure = false;
+		// Surface a minimal plan so the native GUI's plan lane has data on the fast
+		// path, even though the fast path never runs the planner role. The routing
+		// belief carries only routing metadata (no structured intent/question), so
+		// synthesize a single-step plan summary from it.
+		this._emit({
+			type: "PlanProduced",
+			frameId: this._taskId,
+			label: `P-${this._taskId}`,
+			question: `Fast-path: ${route.estimatedSteps ?? 1} step(s), ${route.difficulty ?? "unknown"} difficulty, success p=${route.successProbability ?? "?"}`,
+			intent: `Execute request directly (fast path): ${route.reason ?? route.statement}`,
+		});
 		this._frameOpenHandoff = this._frameOpenHandoffAuthorized(route)
 			? {
 					route,
@@ -1542,6 +1694,17 @@ export class AgentSession {
 			},
 			{ triggerTurn: false },
 		);
+		// Feed the native GUI the distilled observations as a phase event. The
+		// belief loop has no structured inputIds/interpretation, so we surface the
+		// human-readable distilled lines as the interpretation text.
+		this._emit({
+			type: "DistillationProduced",
+			frameId: this._taskId,
+			label: `D-${this._taskId}`,
+			inputIds: [],
+			unexplained: "",
+			interpretation: lines.join("\n"),
+		});
 	}
 
 	/**
