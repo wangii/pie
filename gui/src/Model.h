@@ -197,6 +197,23 @@ public:
     bool inMessageThinking() const { return inMessageThinking_; }
     void setInMessageThinking(bool thinking);
 
+    // Auto-reopen the user instruction pane when the belief loop reaches the
+    // terminal finalAnswer role and its conclusion message ends. The RPC adapter
+    // marks a pending state on CursorChanged(stage=CLOSED) (which only the
+    // finalAnswer transition emits) and requests the reopen on the following
+    // message_end. Consumed once by the render loop, which owns instructionOpen.
+    void markFinalAnswerPending() { finalAnswerPending_ = true; }
+    bool finalAnswerPending() const { return finalAnswerPending_; }
+    void requestAutoOpenInstruction() {
+        autoOpenInstruction_ = true;
+        finalAnswerPending_ = false;
+    }
+    bool consumeAutoOpenInstruction() {
+        bool v = autoOpenInstruction_;
+        autoOpenInstruction_ = false;
+        return v;
+    }
+
 private:
     void openFrame(int id, const std::string& summary, const std::string& openedAt);
     LoopFrame* frame(int id);
@@ -217,6 +234,10 @@ private:
     int nextRpcFrameId_ = 1000;  // auto-increment id for frames opened by the RPC adapter
     std::string inMessage_;      // live streaming assistant reply for the ⌘T pane
     bool inMessageThinking_ = false;  // live message is in the thinking phase
+    // finalAnswer auto-reopen: true while the belief loop is in the terminal
+    // finalAnswer role (set on CursorChanged CLOSED) until its message_end arrives.
+    bool finalAnswerPending_ = false;
+    bool autoOpenInstruction_ = false;  // request flag, consumed by the render loop
 };
 
 // RPC event adapter (live mode). Consumes one runtime JSONL line (an

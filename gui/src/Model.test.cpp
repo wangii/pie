@@ -257,6 +257,31 @@ int main() {
         check(rpc.inMessage() == "seed hello...", "in-message retained after message_end");
     }
 
+    // --- finalAnswer auto-reopen: CursorChanged(CLOSED) (the loop entering the ---
+    // --- terminal finalAnswer role) marks the model pending, and the following ---
+    // --- message_end requests the render loop reopen the user instruction pane. ---
+    // --- Before the CLOSED cursor, a plain message_end must NOT request a reopen. ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        // No CLOSED cursor yet: ordinary mid-loop message_end does not request reopen.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "auto-open: agent_start opens frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: message_end without CLOSED cursor");
+        check(!rpc.consumeAutoOpenInstruction(), "no reopen requested before finalAnswer");
+        // The loop advances to the terminal finalAnswer role -> CursorChanged(CLOSED).
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1,"stage":"CLOSED"})") == pie::gui::RpcApplyResult::Applied, "auto-open: cursor CLOSED marks pending");
+        check(rpc.finalAnswerPending(), "pending set by CursorChanged(CLOSED)");
+        check(!rpc.consumeAutoOpenInstruction(), "reopen not yet requested before message_end");
+        // The finalAnswer role streams its conclusion and the message ends.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"final conclusion"}]}})") == pie::gui::RpcApplyResult::Applied, "auto-open: finalAnswer message_start");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: finalAnswer message_end");
+        check(rpc.inMessage() == "final conclusion", "final answer text retained");
+        check(rpc.consumeAutoOpenInstruction(), "reopen requested after finalAnswer message_end");
+        check(!rpc.consumeAutoOpenInstruction(), "reopen request consumed once");
+        // A later unrelated message_end does not re-trigger.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: later message_end");
+        check(!rpc.consumeAutoOpenInstruction(), "no reopen after pending cleared");
+    }
+
     // --- thinking_start marks the live message as thinking; thinking_end / ---
     // --- text_start clear it. The ⌘T pane renders the accumulated inMessage_ ---
     // --- (including thinking deltas) even during reasoning; it only shows the ---
@@ -271,6 +296,68 @@ int main() {
         check(!rpc.inMessageThinking(), "text_start keeps in-message not thinking");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_start","contentIndex":0}})") == pie::gui::RpcApplyResult::Applied, "second thinking_start applies");
         check(rpc.inMessageThinking(), "in-message thinking again after second thinking_start");
+    }
+
+    // --- Regression: JSON string escapes in message content must decode, not    ---
+    // --- lose the backslash. A newline in JSON is the two-char sequence \n; the ---
+    // --- decoder previously dropped the backslash and emitted 'n', so a model    ---
+    // --- reply containing \n\n became the literal "nn". Verify the fixed decoder  ---
+    // --- turns \n\n into two real newlines, and that plain text, quotes,          ---
+    // --- backslashes, tabs and Unicode escapes still round-trip.                 ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        // Streaming text delta carries the JSON-escaped newline sequence. In a
+        // raw string the backslashes are literal, so "\n" here is the two-char
+        // JSON escape sequence (backslash + 'n'), which must decode to one real
+        // newline -- not to the single letter 'n' as the old decoder did.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":""}]}})") == pie::gui::RpcApplyResult::Applied, "nlit: message_start seeds");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"line1\n\nline2"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with escaped newline applied");
+        check(rpc.inMessage() == "line1\n\nline2", "nlit: escaped newline decodes to two real newlines (not 'nn')");
+
+        // Plain text and a literal backslash are preserved (JSON "\\" -> one backslash).
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"path: C:\\Users\\me\\x"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with escaped backslash applied");
+        check(rpc.inMessage() == "line1\n\nline2path: C:\\Users\\me\\x", "nlit: escaped backslash decodes to one backslash");
+
+        // Escaped quote and tab decode to their literal characters.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"say \"hi\" \tthen go"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with escaped quote/tab applied");
+        check(rpc.inMessage() == "line1\n\nline2path: C:\\Users\\me\\xsay \"hi\" \tthen go", "nlit: escaped quote and tab decode correctly");
+
+        // BMP Unicode escape decodes to UTF-8.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"caf\u00e9"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with unicode escape applied");
+        check(rpc.inMessage().find("caf\xc3\xa9") != std::string::npos, "nlit: unicode escape decodes to UTF-8 e-acute");
+
+        // UTF-16 surrogate pair: \uD83D\uDE00 is U+1F600 (grinning face), which
+        // must become a single 4-byte UTF-8 sequence F0 9F 98 80, not two loose
+        // 3-byte surrogate encodings (invalid UTF-8).
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"emoji:\uD83D\uDE00"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with surrogate pair applied");
+        check(rpc.inMessage().find("emoji:\xf0\x9f\x98\x80") != std::string::npos, "nlit: surrogate pair combined into U+1F600 UTF-8 (F0 9F 98 80)");
+
+        // An isolated high surrogate has no low partner: it must be preserved as
+        // its original escape, never emitted as invalid UTF-8 (a lone 3-byte seq).
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lone:\uD83D"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with isolated high surrogate applied");
+        check(rpc.inMessage().find("lone:\\uD83D") != std::string::npos, "nlit: isolated high surrogate preserved as escape");
+
+        // An isolated low surrogate is likewise preserved, not emitted as UTF-8.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"low-only:\uDE00"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with isolated low surrogate applied");
+        check(rpc.inMessage().find("low-only:\\uDE00") != std::string::npos, "nlit: isolated low surrogate preserved as escape");
+
+        // A high surrogate followed by a non-low code unit must not be combined;
+        // the lone escape is preserved and the next escape decodes normally.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"bad:\uD83D\u0041"}})") == pie::gui::RpcApplyResult::Applied, "nlit: text_delta with high surrogate + non-low applied");
+        check(rpc.inMessage().find("bad:\\uD83DA") != std::string::npos, "nlit: high surrogate retained when next escape is not a low surrogate");
+
+        // message_start content array: the assistant's reply text decodes escapes
+        // before seeding the in-message and folding into the frame summary.
+        pie::gui::NativeGuiModel rpc2;
+        check(pie::gui::applyRpcLine(rpc2, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "nlit: agent_start opens frame");
+        check(pie::gui::applyRpcLine(rpc2, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"head\n\nbody"}]}})") == pie::gui::RpcApplyResult::Applied, "nlit: message_start with escaped newline applied");
+        check(rpc2.inMessage() == "head\n\nbody", "nlit: message_start content decodes escaped newline to two newlines");
+        check(rpc2.frameById(1000) && rpc2.frameById(1000)->summary.find("head") != std::string::npos, "nlit: decoded text folds into frame summary");
+
+        // Structured content (plain token, no escapes) is not mangled.
+        pie::gui::NativeGuiModel rpc3;
+        check(pie::gui::applyRpcLine(rpc3, R"({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"the quick brown fox"}]}})") == pie::gui::RpcApplyResult::Applied, "nlit: plain content applied");
+        check(pie::gui::applyRpcLine(rpc3, R"({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"..."}]}})") == pie::gui::RpcApplyResult::Applied, "nlit: second plain content applied");
     }
 
     if (failures == 0) std::printf("ALL PASS\n");

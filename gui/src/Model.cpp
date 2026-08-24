@@ -33,16 +33,109 @@ bool findKey(const std::string& s, const std::string& key, std::string& raw) {
     return true;
 }
 
-std::string stringValue(const std::string& v) {
-    if (v.size() < 2 || v[0] != '"') return {};
+// Encode a code point as UTF-8. Surrogate values must not reach here: JSON
+// surrogate pairs are combined by decodeEscapes before encoding, so an isolated
+// surrogate is preserved as its original escape instead of yielding invalid
+// UTF-8 (the old BMP-only branch encoded D800-DFFF as a lone 3-byte sequence).
+void appendUtf8(std::string& out, unsigned cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+}
+
+// Decode JSON escape sequences in a raw (unquoted) string body. The previous
+// implementation dropped the leading backslash and blindly appended the escaped
+// character, so "\n\n" collapsed to "nn" instead of the two newlines it
+// encodes. Decode the standard JSON escapes so message content round-trips.
+std::string decodeEscapes(const std::string& body) {
     std::string out;
-    for (size_t i = 1; i < v.size(); ++i) {
-        char c = v[i];
-        if (c == '\\' && i + 1 < v.size()) { out += v[++i]; continue; }
-        if (c == '"') break;
+    for (size_t i = 0; i < body.size(); ++i) {
+        char c = body[i];
+        if (c == '\\' && i + 1 < body.size()) {
+            char e = body[++i];
+            switch (e) {
+                case 'n': out += '\n'; break;
+                case 't': out += '\t'; break;
+                case 'r': out += '\r'; break;
+                case 'b': out += '\b'; break;
+                case 'f': out += '\f'; break;
+                case '\\': out += '\\'; break;
+                case '/': out += '/'; break;
+                case '"': out += '"'; break;
+                case 'u': {
+                    // Parse one \uXXXX escape into a code unit.
+                    auto hex4 = [&](size_t start, unsigned& out4) -> bool {
+                        if (start + 4 > body.size()) return false;
+                        out4 = 0;
+                        for (int k = 0; k < 4; ++k) {
+                            char h = body[start + k];
+                            int d;
+                            if (h >= '0' && h <= '9') d = h - '0';
+                            else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                            else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                            else return false;
+                            out4 = out4 * 16 + d;
+                        }
+                        return true;
+                    };
+                    unsigned first = 0;
+                    if (!hex4(i + 1, first)) { out += '\\'; out += 'u'; break; }
+                    i += 4;  // i now at the last hex digit of the first escape.
+                    if (first >= 0xD800 && first <= 0xDBFF) {
+                        // High surrogate: if a low surrogate \uXXXX follows,
+                        // combine into a single code point; otherwise preserve
+                        // the high surrogate's escape (invalid UTF-8 otherwise).
+                        unsigned second = 0;
+                        if (i + 6 < body.size() && body[i + 1] == '\\' && body[i + 2] == 'u' &&
+                            hex4(i + 3, second) && second >= 0xDC00 && second <= 0xDFFF) {
+                            i += 6;
+                            unsigned cp = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+                            appendUtf8(out, cp);
+                        } else {
+                            out += '\\'; out += 'u';
+                            for (int k = 3; k >= 0; --k) out += body[i - k];
+                        }
+                    } else if (first >= 0xDC00 && first <= 0xDFFF) {
+                        // Isolated low surrogate: preserve its escape.
+                        out += '\\'; out += 'u';
+                        for (int k = 3; k >= 0; --k) out += body[i - k];
+                    } else {
+                        appendUtf8(out, first);
+                    }
+                    break;
+                }
+                // Unknown escapes keep the backslash rather than silently
+                // dropping it, which is closer to the original input.
+                default: out += '\\'; out += e; break;
+            }
+            continue;
+        }
         out += c;
     }
     return out;
+}
+
+std::string stringValue(const std::string& v) {
+    if (v.size() < 2 || v[0] != '"') return {};
+    size_t q = 1;
+    while (q < v.size() && v[q] != '"') {
+        if (v[q] == '\\') ++q;
+        ++q;
+    }
+    if (q >= v.size()) return {};
+    return decodeEscapes(v.substr(1, q - 1));
 }
 
 std::string str(const std::string& s, const std::string& key, const std::string& def = {}) {
@@ -193,7 +286,7 @@ std::string extractMessageText(const std::string& line) {
                 if (content[q] == '\\') ++q;
                 ++q;
             }
-            std::string t = content.substr(p, q - p);
+            std::string t = decodeEscapes(content.substr(p, q - p));
             if (!t.empty()) { if (!out.empty()) out += " "; out += t; }
             p = q + 1;
         }
@@ -338,6 +431,10 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
     if (type == "message_end") {
         model.endInMessage();
+        // If the loop is in the terminal finalAnswer role, this message_end
+        // finalizes the conclusion text. Request the render loop reopen the user
+        // instruction pane so the user can view the answer, even if they closed it.
+        if (model.finalAnswerPending()) model.requestAutoOpenInstruction();
         return RpcApplyResult::Applied;
     }
     if (type == "tool_execution_start") {
@@ -440,6 +537,10 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         model.mutableCursor().stage = st;
         model.mutableCursor().item = str(line, "item");
         if (p && st != FrameStage::NONE) p->stage = st;
+        // The belief loop enters the terminal finalAnswer role by emitting a
+        // CursorChanged with stage CLOSED. Mark the model so the next message_end
+        // (the final conclusion text) can request the auto-reopen of the pane.
+        if (st == FrameStage::CLOSED) model.markFinalAnswerPending();
         return RpcApplyResult::Applied;
     }
     if (type == "turn_end" || type == "agent_settled") {

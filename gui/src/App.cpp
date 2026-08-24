@@ -189,8 +189,8 @@ void writeCommand(SdkProcess& sp, const std::string& cmd) {
     // Trace GUI -> RPC on pie_gui's stdout (never on sp.inFd, so the RPC JSONL
     // protocol on stdin is left untouched).
     if (written > 0) {
-        std::printf("GUI -> RPC: %s\n", cmd.c_str());
-        std::fflush(stdout);
+        // std::printf("GUI -> RPC: %s\n", cmd.c_str());
+        // std::fflush(stdout);
     } else {
         std::printf("GUI -> RPC FAILED: %s\n", cmd.c_str());
         std::fflush(stdout);
@@ -228,9 +228,9 @@ void readerThread(SdkProcess& sp, EventQueue& q, std::atomic<bool>& stop) {
             std::string line = buf.substr(0, pos);
             buf.erase(0, pos + 1);
             if (!line.empty()) {
-                // Trace RPC -> GUI on pie_gui's stdout.
-                std::printf("RPC -> GUI: %s\n", line.c_str());
-                std::fflush(stdout);
+                // // Trace RPC -> GUI on pie_gui's stdout.
+                // std::printf("RPC -> GUI: %s\n", line.c_str());
+                // std::fflush(stdout);
                 q.push(std::move(line));
             }
         }
@@ -663,6 +663,22 @@ static int instructionResizeCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
+inline std::string replace_escaped_newlines(const std::string& s) {
+    std::string result;
+    result.resize(s.size()); // upper bound, we'll shrink after
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == 'n') {
+            result[out++] = '\n';
+            ++i;
+        } else {
+            result[out++] = s[i];
+        }
+    }
+    result.resize(out);
+    return result;
+}
+
 // Render an assistant message as Markdown inside the current ImGui cursor
 // position. imgui_markdown is header-only; we build a MarkdownConfig using the
 // loaded global font for headings (top 3 levels), the italic code font for code
@@ -670,6 +686,10 @@ static int instructionResizeCallback(ImGuiInputTextCallbackData* data) {
 // degrade to plain text rather than crash. The call must occur while a valid
 // Markdown context exists (e.g. inside the "in_message" child window).
 static void renderMarkdownMessage(const std::string& text) {
+
+    // std::printf("renderMD: %s\n", text.c_str());
+    // std::fflush(stdout);
+
     ImGui::MarkdownConfig mdConfig;
     ImFont* font = ImGui::GetIO().Fonts->Fonts.empty()
                        ? nullptr
@@ -689,7 +709,10 @@ static void renderMarkdownMessage(const std::string& text) {
     // line, which made streaming content with \n read as a single block.
     mdConfig.formatFlags = ImGuiMarkdownFormatFlags_None;
     mdConfig.codeFont = gMarkdownCodeFont;
-    ImGui::Markdown(text.c_str(), text.size(), mdConfig);
+
+    const auto nt = replace_escaped_newlines(text);
+    ImGui::Markdown(nt.c_str(), nt.size(), mdConfig);
+    // ImGui::Markdown(text.c_str(), text.size(), mdConfig);
 }
 
 // Render the instruction palette as a standalone floating window (not docked
@@ -937,6 +960,10 @@ int main(int argc, char** argv) {
         if (live) {
             std::string line;
             while (queue.popIfAny(line)) pie::gui::applyRpcLine(model, line);
+            // When the belief loop reaches the terminal finalAnswer role and its
+            // conclusion message ends, auto-reopen the user instruction pane so the
+            // user can view the answer, even if they had closed it.
+            if (model.consumeAutoOpenInstruction()) instructionOpen = true;
         }
 
         auto& io = ImGui::GetIO();
