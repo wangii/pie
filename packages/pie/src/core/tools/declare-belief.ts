@@ -1,5 +1,5 @@
 import { type Static, Type } from "typebox";
-import { type BeliefDelta, type BeliefSet, statusOf } from "../belief-set.ts";
+import { type Belief, type BeliefDelta, type BeliefSet, type BeliefStatus, statusOf } from "../belief-set.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 /**
@@ -250,6 +250,12 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 
 export function createDeclareBeliefToolDefinition(
 	beliefSet: BeliefSet,
+	onDelta?: (
+		delta: BeliefDelta,
+		belief: Belief,
+		previousStatus: BeliefStatus | undefined,
+		priorBelief?: Belief,
+	) => void,
 ): ToolDefinition<typeof declareBeliefSchema, undefined> {
 	return {
 		name: "declare_belief",
@@ -266,7 +272,16 @@ export function createDeclareBeliefToolDefinition(
 		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
 			try {
 				const delta = toDelta(input);
+				// Capture the target belief's status *before* the mutation so the session can
+				// emit a `BeliefUpdated` with a strictly accurate `previousStatus`.
+				const priorBelief = "beliefId" in delta ? beliefSet.get(delta.beliefId) : undefined;
+				const previousStatus = priorBelief ? statusOf(priorBelief) : undefined;
 				const belief = beliefSet.apply(delta);
+				// Notify the session of the mutation so it can emit the right belief-loop
+				// event at the actual mutation point (creation vs a real status change),
+				// rather than conflating it with batch selection. For `refine`/`retract` the
+				// prior record is carried so the session can surface its supersede transition.
+				onDelta?.(delta, belief, previousStatus, priorBelief);
 				return {
 					content: [
 						{

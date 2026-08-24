@@ -858,6 +858,16 @@ Events are streamed to stdout as JSON lines during agent operation. Events do no
 | `summarization_retry_attempt_start` | Retried summarization request starts |
 | `summarization_retry_finished` | Summarization retry loop completes |
 | `extension_error` | Extension threw an error |
+| `entry_appended` | Appended an entry (message, custom, thinking-level change, compaction, branch summary) to the session |
+| `session_info_changed` | Session name changed |
+| `thinking_level_changed` | Conversation thinking level changed |
+| `BeliefsSelected` | The planner selected an open batch of beliefs for an execution frame |
+| `BeliefCreated` | A belief was proposed (created) via `declare_belief` op `propose` or `refine` |
+| `BeliefUpdated` | An existing belief's status changed via `support`/`refute`/`refine`/`retract` |
+| `PlanProduced` | The belief loop produced a plan (batch summary or fast-path plan) |
+| `ProposalCreated` | The belief loop proposed a belief |
+| `CursorChanged` | The belief loop advanced to a new phase (PLANNING/EXECUTING/DISTILLING/PROPOSING/CLOSED) |
+| `DistillationProduced` | The distill role produced a distillation block |
 
 ### agent_start
 
@@ -1155,6 +1165,137 @@ Emitted when an extension throws an error.
   "extensionPath": "/path/to/extension.ts",
   "event": "tool_call",
   "error": "Error message..."
+}
+```
+
+### entry_appended
+
+Emitted when an entry is appended to the session. `entry` is a `SessionEntry` (a message, custom entry, thinking-level change, compaction, or branch-summary record).
+
+```json
+{
+  "type": "entry_appended",
+  "entry": { ... }
+}
+```
+
+### session_info_changed
+
+Emitted when the session's name changes.
+
+```json
+{
+  "type": "session_info_changed",
+  "name": "my-session"
+}
+```
+
+### thinking_level_changed
+
+Emitted when the conversation's thinking level changes.
+
+```json
+{
+  "type": "thinking_level_changed",
+  "level": "high"
+}
+```
+
+### BeliefsSelected
+
+Emitted when the planner selects an open batch of beliefs for an execution frame. `beliefs` are the 1-based `B{n}` numeric ids of the selected beliefs.
+
+```json
+{
+  "type": "BeliefsSelected",
+  "frameId": 1,
+  "beliefs": [1, 2, 3]
+}
+```
+
+### BeliefCreated
+
+Emitted when `declare_belief` op `propose` or `refine` creates a new belief record. Carries the belief's identity and full proposal payload so consumers can render a new belief card without reconstructing state.
+
+```json
+{
+  "type": "BeliefCreated",
+  "beliefId": 1,
+  "statement": "...",
+  "domain": "product",
+  "expectation": "...",
+  "evidenceRounds": 1
+}
+```
+
+### BeliefUpdated
+
+Emitted when an existing belief's observable status changes via `declare_belief` op `support`/`refute`/`refine`/`retract`. `status` and `previousStatus` are one of the belief loop's internal statuses (`proposed`/`supported`/`refuted`/`superseded`), so a consumer can detect a real transition rather than a snapshot.
+
+```json
+{
+  "type": "BeliefUpdated",
+  "beliefId": 1,
+  "status": "refuted",
+  "previousStatus": "proposed",
+  "statement": "..."
+}
+```
+
+### PlanProduced
+
+Emitted when the belief loop produces a plan: a batch summary for a planner-role batch, or a synthesized single-step plan for a fast-path run. `planId` uniquely names the plan so a consumer can correlate it with a batch without relying on the `label`. `intent` describes the frame's goal; `question` carries the batch/step summary.
+
+```json
+{
+  "type": "PlanProduced",
+  "frameId": 1,
+  "planId": "plan-1-...",
+  "label": "P-1",
+  "question": "Batch of 2 belief(s): ...",
+  "intent": "Probe batch: ..."
+}
+```
+
+### ProposalCreated
+
+Emitted when the belief loop proposes a belief. The belief loop is prose-only, so `lhs`/`relation`/`rhs` are empty and `detail` carries the statement; the client renders the proposal as `+ B<n>`.
+
+```json
+{
+  "type": "ProposalCreated",
+  "frameId": 1,
+  "op": "+",
+  "belief": "B1",
+  "lhs": "",
+  "relation": "",
+  "rhs": "",
+  "detail": "statement text"
+}
+```
+
+### CursorChanged
+
+Emitted when the belief loop advances to a new phase. `stage` is one of `PLANNING`/`EXECUTING`/`DISTILLING`/`PROPOSING`/`CLOSED`.
+
+```json
+{
+  "type": "CursorChanged",
+  "frameId": 1,
+  "stage": "PLANNING"
+}
+```
+
+### DistillationProduced
+
+Emitted when the distill role produces a distillation block. `interpretation` carries the human-readable distilled lines.
+
+```json
+{
+  "type": "DistillationProduced",
+  "frameId": 1,
+  "label": "D-1",
+  "interpretation": "distilled line 1\ndistilled line 2"
 }
 ```
 

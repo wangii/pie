@@ -54,7 +54,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { type Belief, BeliefSet, type BeliefStatus, statusOf } from "./belief-set.ts";
+import { type Belief, type BeliefDelta, BeliefSet, type BeliefStatus, statusOf } from "./belief-set.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -195,12 +195,21 @@ export type AgentSessionEvent =
 	// distillation, and execution stage without inferring them from the message log.
 	| { type: "BeliefsSelected"; frameId: number; beliefs: number[] }
 	| {
+			type: "BeliefCreated";
+			beliefId: number;
+			statement: string;
+			domain: string;
+			expectation: string;
+			evidenceRounds: number;
+	  }
+	| {
 			type: "BeliefUpdated";
 			beliefId: number;
-			status: string;
+			status: BeliefStatus;
+			previousStatus: BeliefStatus;
 			statement: string;
 	  }
-	| { type: "PlanProduced"; frameId: number; label: string; question: string; intent: string }
+	| { type: "PlanProduced"; frameId: number; planId: string; label: string; question: string; intent: string }
 	| {
 			type: "ProposalCreated";
 			frameId: number;
@@ -211,22 +220,16 @@ export type AgentSessionEvent =
 			rhs: string;
 			detail: string;
 	  }
-	| { type: "ExecutionStarted"; frameId: number }
-	| { type: "ExecutionCompleted"; frameId: number }
-	| { type: "DistillationStarted"; frameId: number }
 	| {
 			type: "DistillationProduced";
 			frameId: number;
 			label: string;
-			inputIds: string[];
-			unexplained: string;
 			interpretation: string;
 	  }
 	| {
 			type: "CursorChanged";
 			frameId: number;
 			stage: "PLANNING" | "EXECUTING" | "DISTILLING" | "PROPOSING" | "CLOSED";
-			item: string;
 	  };
 
 /** Listener function for agent session events */
@@ -529,6 +532,7 @@ export class AgentSession {
 	private _currentTaskRequestText = "";
 	/** Monotonic counter for the current task's stable id, incremented at each task boundary. */
 	private _taskId = 1;
+	private _planCounter = 0;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -1060,6 +1064,9 @@ export class AgentSession {
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
 		// this task's own and re-enable the "deepen or conclude" steer.
 		this._beliefsAtTaskReset = this._beliefSet.beliefs.length;
+		// The loop reset to propose is a cursor transition; surface it so consumers tracking
+		// phase (rather than inferring it from the message log) observe the reset.
+		this._emitCursorChanged("propose");
 	}
 
 	/** Advance the role from the just-completed turn and project the next role's surface. */
@@ -1114,7 +1121,7 @@ export class AgentSession {
 						: role === "finalAnswer"
 							? "CLOSED"
 							: "PROPOSING";
-		this._emit({ type: "CursorChanged", frameId: this._taskId, stage, item: "" });
+		this._emit({ type: "CursorChanged", frameId: this._taskId, stage });
 	}
 
 	/**
@@ -1475,14 +1482,8 @@ export class AgentSession {
 		);
 		this._emit({ type: "message_start", message });
 		this._emit({ type: "message_end", message });
-		this._emitBeliefPhase("BeliefsSelected", batch);
+		this._emitBeliefPhase(batch);
 		for (const belief of batch) {
-			this._emit({
-				type: "BeliefUpdated",
-				beliefId: this._beliefNumericId(belief),
-				status: this._guiBeliefStatus(statusOf(belief)),
-				statement: belief.statement,
-			});
 			// Surface the proposed belief to the native GUI's proposals lane.
 			// The belief loop is prose-only (statement/expectation, no
 			// lhs/relation/rhs triple), so the proposal renders as "+ B<n>"
@@ -1499,31 +1500,27 @@ export class AgentSession {
 			});
 		}
 		// The belief loop's planner has no structured intent/label/question, so
-		// surface the batch summary as the plan content for the native GUI.
+		// surface the batch summary as the plan content for the native GUI. The
+		// plan id names this batch so a consumer can correlate the batch with its
+		// PlanProduced without relying on the (non-unique) `P-${taskId}` label.
+		const planId = `plan-${this._taskId}-${++this._planCounter}`;
 		this._emit({
 			type: "PlanProduced",
 			frameId: this._taskId,
+			planId,
 			label: `P-${this._taskId}`,
 			question: `Batch of ${batch.length} belief(s): ${ids.join(", ")}`,
 			intent: `Probe batch: ${ids.join(", ")}`,
 		});
 	}
 
-	/** Emit a belief-loop phase event to the event listeners (and hence the native GUI). */
-	private _emitBeliefPhase(
-		type: "BeliefsSelected" | "ExecutionStarted" | "ExecutionCompleted" | "DistillationStarted",
-		beliefs: Belief[],
-	): void {
-		const frameId = this._taskId;
-		if (type === "BeliefsSelected") {
-			this._emit({
-				type,
-				frameId,
-				beliefs: beliefs.map((b) => this._beliefNumericId(b)),
-			});
-			return;
-		}
-		this._emit({ type, frameId });
+	/** Emit the planner's batch-selection phase event to the event listeners (and hence the native GUI). */
+	private _emitBeliefPhase(beliefs: Belief[]): void {
+		this._emit({
+			type: "BeliefsSelected",
+			frameId: this._taskId,
+			beliefs: beliefs.map((b) => this._beliefNumericId(b)),
+		});
 	}
 
 	/** Map a belief to the 1-based registry index used by the native GUI (B{n}). */
@@ -1532,22 +1529,67 @@ export class AgentSession {
 		return idx >= 0 ? idx + 1 : 0;
 	}
 
-	/** Map the belief-loop status to the native GUI's display status enum.
-	 *  The GUI colors/filters on {open, closed, falsified, revised}; the belief
-	 *  loop uses {proposed, supported, refuted, superseded}. Without this the
-	 *  live-mode belief cards would never get the open/accent coloring. */
-	private _guiBeliefStatus(status: BeliefStatus): string {
-		switch (status) {
-			case "proposed":
-				return "open";
-			case "supported":
-				return "revised";
-			case "refuted":
-				return "falsified";
-			case "superseded":
-				return "closed";
-			default:
-				return "open";
+	/**
+	 * Emit the belief-loop mutation events at the actual `declare_belief` mutation point, not at
+	 * batch selection. `belief` is the result `apply` returned and is supplied by the tool
+	 * callback. A `propose`/`refine` that creates a new record records `BeliefCreated`; a
+	 * mutation that changes an existing belief's observable status records `BeliefUpdated`.
+	 * `route` is stored settled and never enters the dispatch frame, so it is not surfaced.
+	 */
+	private _onBeliefDelta(
+		delta: BeliefDelta,
+		belief: Belief,
+		previousStatus: BeliefStatus | undefined,
+		priorBelief?: Belief,
+	): void {
+		switch (delta.op) {
+			case "propose":
+				this._emit({
+					type: "BeliefCreated",
+					beliefId: this._beliefNumericId(belief),
+					statement: belief.statement,
+					domain: belief.domain,
+					expectation: belief.expectation,
+					evidenceRounds: belief.evidenceRounds,
+				});
+				return;
+			case "support":
+			case "refute":
+			case "retract":
+				// Settle/withdraw an existing belief: its observable status changed from the
+				// pre-mutation status (`previousStatus`) to the post-mutation one.
+				this._emit({
+					type: "BeliefUpdated",
+					beliefId: this._beliefNumericId(belief),
+					status: statusOf(belief),
+					previousStatus: previousStatus ?? "proposed",
+					statement: belief.statement,
+				});
+				return;
+			case "refine":
+				// A refine creates a new record and supersedes the prior; the prior's status
+				// change (proposed/supported -> superseded) is observable too.
+				this._emit({
+					type: "BeliefCreated",
+					beliefId: this._beliefNumericId(belief),
+					statement: belief.statement,
+					domain: belief.domain,
+					expectation: belief.expectation,
+					evidenceRounds: belief.evidenceRounds,
+				});
+				if (previousStatus !== undefined && previousStatus !== "superseded" && priorBelief) {
+					// The prior record was superseded in place by `apply`; recompute its status from
+					// the current store (the pre-apply reference is stale and still reads `proposed`).
+					const currentPrior = this._beliefSet.get(priorBelief.id) ?? priorBelief;
+					this._emit({
+						type: "BeliefUpdated",
+						beliefId: this._beliefNumericId(currentPrior),
+						status: statusOf(currentPrior),
+						previousStatus,
+						statement: currentPrior.statement,
+					});
+				}
+				return;
 		}
 	}
 
@@ -1603,6 +1645,7 @@ export class AgentSession {
 		this._emit({
 			type: "PlanProduced",
 			frameId: this._taskId,
+			planId: `plan-${this._taskId}-${++this._planCounter}`,
 			label: `P-${this._taskId}`,
 			question: `Fast-path: ${route.estimatedSteps ?? 1} step(s), ${route.difficulty ?? "unknown"} difficulty, success p=${route.successProbability ?? "?"}`,
 			intent: `Execute request directly (fast path): ${route.reason ?? route.statement}`,
@@ -1701,8 +1744,6 @@ export class AgentSession {
 			type: "DistillationProduced",
 			frameId: this._taskId,
 			label: `D-${this._taskId}`,
-			inputIds: [],
-			unexplained: "",
 			interpretation: lines.join("\n"),
 		});
 	}
@@ -4218,7 +4259,9 @@ export class AgentSession {
 		);
 		this._baseToolDefinitions.set(
 			"declare_belief",
-			createDeclareBeliefToolDefinition(this._beliefSet) as ToolDefinition,
+			createDeclareBeliefToolDefinition(this._beliefSet, (delta, belief, previousStatus, priorBelief) =>
+				this._onBeliefDelta(delta, belief, previousStatus, priorBelief),
+			) as ToolDefinition,
 		);
 		this._baseToolDefinitions.set(
 			"view_beliefs",
