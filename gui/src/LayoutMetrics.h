@@ -20,18 +20,21 @@ struct Rect {
 // `kMinWindowHeight` is derived from a reference row height and the band
 // multipliers used in computeLayout (header 1.2, nav 1.0, summary 2.0) plus
 // the minimum lane height and padding margins.
+//
+// The frame navigator is no longer rendered, so its band (nav 1.0) and one
+// region boundary are omitted from both the height budget and computeLayout;
+// the lanes reclaim that vertical space.
 inline constexpr float kMinLaneWidth = 120.0f;
 inline constexpr float kMinLaneHeight = 100.0f;
 inline constexpr float kPad = 8.0f;
 inline constexpr float kRefRowHeight = 24.0f;  // reference font-row height
 inline constexpr float kMinWindowWidth = kMinLaneWidth * 3.0f + kPad * 2.0f;  // 360 + 16
 inline constexpr float kMinWindowHeight =
-    kRefRowHeight * (1.2f + 1.0f + 2.0f) + kMinLaneHeight + kPad * 5.0f;  // 100.8 + 100 + 40
+    kRefRowHeight * (1.2f + 2.0f) + kMinLaneHeight + kPad * 4.0f;  // 76.8 + 100 + 32
 
 struct LayoutMetrics {
     float pad = 8.0f;
     float headerH = 0.0f;   // status bar
-    float navH = 0.0f;      // frame navigator
     float summaryH = 0.0f;  // current-frame summary
     float laneH = 0.0f;     // lanes (main content)
 
@@ -46,10 +49,9 @@ struct LayoutMetrics {
 inline LayoutMetrics computeLayout(float winW, float winH, float rowH) {
     LayoutMetrics m;
     m.headerH = (rowH * 2.) * 1.2f;
-    m.navH = rowH * 1.0f;
     m.summaryH = rowH * 2.0f;
 
-    float availH = std::max(0.0f, winH - (m.headerH + m.navH + m.summaryH + m.pad * 5));
+    float availH = std::max(0.0f, winH - (m.headerH + m.summaryH + m.pad * 4));
     m.laneH = std::max(m.minLaneH, availH);
     return m;
 }

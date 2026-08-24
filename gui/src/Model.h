@@ -192,6 +192,10 @@ public:
     void appendInMessage(const std::string& delta);
     void endInMessage();
     const std::string& inMessage() const { return inMessage_; }
+    // True while the live assistant message is in the thinking phase (a
+    // thinking_start was received and no thinking_end/text_end closed it yet).
+    bool inMessageThinking() const { return inMessageThinking_; }
+    void setInMessageThinking(bool thinking);
 
 private:
     void openFrame(int id, const std::string& summary, const std::string& openedAt);
@@ -212,6 +216,7 @@ private:
     std::string session_;
     int nextRpcFrameId_ = 1000;  // auto-increment id for frames opened by the RPC adapter
     std::string inMessage_;      // live streaming assistant reply for the ⌘T pane
+    bool inMessageThinking_ = false;  // live message is in the thinking phase
 };
 
 // RPC event adapter (live mode). Consumes one runtime JSONL line (an

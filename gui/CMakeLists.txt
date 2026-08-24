@@ -24,6 +24,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# imgui_markdown: a header-only Markdown renderer for Dear ImGui (single
+# imgui_markdown.h, C++11+). Vendored into gui/include/imgui_markdown and
+# checked in; the pinned upstream commit is copied locally so the gui does not
+# fetch it at configure time. Only its include dir is needed.
+
 add_library(imgui_backend STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -82,6 +87,7 @@ add_test(NAME pi_gui_palette_metrics_test COMMAND pi_gui_palette_metrics_test)
 add_executable(pie_gui src/App.cpp)
 target_include_directories(pie_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(pie_gui PRIVATE pi_gui_model imgui_backend OpenGL::GL)
+target_include_directories(pie_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
 
 if(APPLE)
     target_compile_definitions(pie_gui PRIVATE GL_SILENCE_DEPRECATION)

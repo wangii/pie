@@ -12,6 +12,10 @@ Priority), 30 (Key UX Questions).
 ## Deferred items (from spec §29 "Not Current Priority")
 
 - animation
+  - *Not the stage Pane background highlight*: the PLAN / DISTILLATION /
+    PROPOSALS and EXECUTING pane background already animates (black→kPaneBgDark,
+    sinusoidal, via `paneBg()` in `src/App.cpp`) under an explicit user
+    exception. This deferred item covers other decorative animation only.
 - fancy transitions
 - highly customized visual effects
 - elaborate graph layout

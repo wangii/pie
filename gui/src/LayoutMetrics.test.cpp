@@ -37,22 +37,19 @@ int main() {
                 LayoutMetrics m = computeLayout(winW, winH, rowH);
 
                 check(m.headerH > 0.0f, "header height positive");
-                check(m.navH > 0.0f, "nav height positive");
                 check(m.summaryH > 0.0f, "summary height positive");
                 check(m.laneH > 0.0f, "lane height positive");
 
-                // Vertically stacked regions: top, nav, lanes, summary.
+                // Vertically stacked regions: top, lanes, summary.
                 Rect top{0, 0, winW, m.headerH};
-                Rect nav{0, top.bottom(), winW, m.navH};
-                Rect lanes{0, nav.bottom(), winW, m.laneH};
+                Rect lanes{0, top.bottom(), winW, m.laneH};
                 Rect summary{0, lanes.bottom(), winW, m.summaryH};
 
                 // All within the window height (no out-of-work-area, no negative).
                 check(summary.bottom() <= winH + 1.0f, "all regions fit within window height");
 
                 // Pairwise disjoint vertically.
-                check(disjoint(top, nav), "top vs nav disjoint");
-                check(disjoint(nav, lanes), "nav vs lanes disjoint");
+                check(disjoint(top, lanes), "top vs lanes disjoint");
                 check(disjoint(lanes, summary), "lanes vs summary disjoint");
 
                 // Lane widths: non-negative.

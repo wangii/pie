@@ -14,9 +14,11 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_markdown.h>
 #include <GLFW/glfw3.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +86,17 @@ std::string fontPath() {
     return (std::filesystem::path(executableDirectory()) / "SarasaTermSCNerd.ttc").string();
 }
 
+// Italic face (Sarasa Term SC Nerd Italic, fc-scan index 4) loaded from the same
+// TTC as the global Regular face. Used by the markdown renderer for inline code
+// spans and fenced code blocks in place of the former lighter background box.
+static ImFont* gMarkdownCodeFont = nullptr;
+
+// Bold face (Sarasa Term SC Nerd Bold, fc-scan index 0) loaded from the same
+// TTC. imgui_markdown renders strong emphasis (**__**) and headings (## etc.)
+// with the last headingFormat slot's font, so a real Bold face must be loaded
+// and assigned there for bold content to actually appear bold.
+static ImFont* gMarkdownBoldFont = nullptr;
+
 // ---------------------------------------------------------------------------
 // Colors / small helpers
 // ---------------------------------------------------------------------------
@@ -97,6 +110,19 @@ const ImVec4 kGray(0.62f, 0.62f, 0.62f, 1.0f);
 // PROPOSALS paragraphs in the cognitive lane, or the right execution lane for
 // the EXECUTING stage. Distinct from kGray, which is a text color.
 const ImVec4 kPaneBgDark(0.22f, 0.23f, 0.25f, 1.0f);
+
+// Animated background for the current flow-step pane. The active pane's
+// background oscillates between black and kPaneBgDark following a sinusoidal
+// (non-linear) time relationship, per the user's explicit request overriding
+// the gui no-animation rule for this highlight. The factor cycles smoothly
+// through 0..1 over time and never exceeds that range; inactive panes keep the
+// default child background.
+ImVec4 paneBg(bool active) {
+    if (!active) return ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+    const float kSpeed = 1.0f;  // radians per second; full cycle ~ 6.28 s
+    const float t = 0.5f - 0.5f * std::cos(ImGui::GetTime() * kSpeed);  // 0..1
+    return ImVec4(kPaneBgDark.x * t, kPaneBgDark.y * t, kPaneBgDark.z * t, 1.0f);
+}
 
 const char* historySymbol(pie::gui::LoopFrame::History h) {
     switch (h) {
@@ -380,8 +406,10 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
         if (isChanged) c = kAmber;
         ImGui::PushStyleColor(ImGuiCol_Text, c);
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(c.x, c.y, c.z, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(c.x, c.y, c.z, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(c.x, c.y, c.z, 0.25f));
         bool open = ImGui::CollapsingHeader(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor(4);
 
         if (open) {
             ImGui::Indent();
@@ -421,6 +449,11 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
     ImGui::EndChild();
 }
 
+// Forward declaration so renderCognitiveLane (defined earlier in this file,
+// before renderMarkdownMessage) can route distillation prose through the shared
+// Markdown renderer without the compiler seeing the use before the definition.
+static void renderMarkdownMessage(const std::string& text);
+
 void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
     const auto* f = displayedFrame(m, viewId);
     ImGui::TextUnformatted("COGNITIVE PROCESS");
@@ -436,7 +469,7 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
     // PLAN
     {
         bool active = (stage == pie::gui::FrameStage::PLANNING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, active ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
         ImGui::BeginChild("plan_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
         ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
         ImGui::TextUnformatted("PLAN");
@@ -466,7 +499,7 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
     // DISTILLATION
     {
         bool active = (stage == pie::gui::FrameStage::DISTILLING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, active ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
         ImGui::BeginChild("distillation_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
         ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
         ImGui::TextUnformatted("DISTILLATION");
@@ -477,10 +510,16 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
             for (auto& id : f->distillation.inputIds) {
                 ImGui::BulletText("%s", id.c_str());
             }
-            if (!f->distillation.unexplained.empty())
-                ImGui::TextWrapped(("Unexplained: " + f->distillation.unexplained).c_str());
-            if (!f->distillation.interpretation.empty())
-                ImGui::TextWrapped(("Interpretation: " + f->distillation.interpretation).c_str());
+            if (!f->distillation.unexplained.empty()) {
+                ImGui::TextWrapped("Unexplained:");
+                ImGui::NewLine();
+                renderMarkdownMessage(f->distillation.unexplained);
+            }
+            if (!f->distillation.interpretation.empty()) {
+                ImGui::TextWrapped("Interpretation:");
+                ImGui::NewLine();
+                renderMarkdownMessage(f->distillation.interpretation);
+            }
         } else {
             ImGui::TextDisabled("(no distillation yet)");
         }
@@ -494,7 +533,7 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
     // PROPOSALS
     {
         bool active = (stage == pie::gui::FrameStage::PROPOSING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, active ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
         ImGui::BeginChild("proposals_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
         ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
         ImGui::TextUnformatted("PROPOSALS");
@@ -569,6 +608,10 @@ void renderExecutionLane(const pie::gui::NativeGuiModel& m, int viewId) {
         if (isCurrent) ImGui::PopStyleColor();
         ImGui::PopID();
     }
+
+    // Always keep the execution log scrolled to the bottom so the newest step
+    // stays visible as content is appended.
+    ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 }
 
@@ -620,6 +663,35 @@ static int instructionResizeCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
+// Render an assistant message as Markdown inside the current ImGui cursor
+// position. imgui_markdown is header-only; we build a MarkdownConfig using the
+// loaded global font for headings (top 3 levels), the italic code font for code
+// spans/fenced blocks, and default (no-op) link/image callbacks so links/images
+// degrade to plain text rather than crash. The call must occur while a valid
+// Markdown context exists (e.g. inside the "in_message" child window).
+static void renderMarkdownMessage(const std::string& text) {
+    ImGui::MarkdownConfig mdConfig;
+    ImFont* font = ImGui::GetIO().Fonts->Fonts.empty()
+                       ? nullptr
+                       : ImGui::GetIO().Fonts->Fonts[0];
+    if (font) {
+        for (int i = 0; i < ImGui::MarkdownConfig::NUMHEADINGS; ++i) {
+            // Strong emphasis (**__** ) and headings use the last headingFormat
+            // slot's font, so route them through the Bold face. Heading levels
+            // below the last slot keep the regular (body) font.
+            mdConfig.headingFormats[i].font = gMarkdownBoldFont ? gMarkdownBoldFont : font;
+            mdConfig.headingFormats[i].separator = false;
+        }
+    }
+    // Preserve the real newlines carried in RPC payloads so multiline assistant
+    // content is not collapsed into a single blank line. The prior
+    // DiscardExtraNewLines flag folded consecutive newlines into one blank
+    // line, which made streaming content with \n read as a single block.
+    mdConfig.formatFlags = ImGuiMarkdownFormatFlags_None;
+    mdConfig.codeFont = gMarkdownCodeFont;
+    ImGui::Markdown(text.c_str(), text.size(), mdConfig);
+}
+
 // Render the instruction palette as a standalone floating window (not docked
 // into the main workspace). It no longer reserves layout space; the caller only
 // toggles `open` via the cmd/cmd-T shortcut.
@@ -668,7 +740,8 @@ void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, boo
         const float maxInputH = winSize.y * 0.5f;
         ImGui::InputTextMultiline("##instruction", instrBuf.data(), static_cast<int>(instrBuf.size()) + 1,
                                   ImVec2(-1.0f, std::min(inputH, maxInputH)),
-                                  ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize,
+                                  ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize |
+                                      ImGuiInputTextFlags_WordWrap,
                                   instructionResizeCallback, &instrBuf);
 
         // Submit via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so Enter still
@@ -693,7 +766,14 @@ void renderInstructionPalette(bool& open, const pie::gui::NativeGuiModel& m, boo
         ImGui::BeginChild("in_message", ImVec2(0, 0), true);
         static size_t lastInMsgLen = 0;
         if (!m.inMessage().empty()) {
-            ImGui::TextWrapped("%s", m.inMessage().c_str());
+            // Render the incoming assistant reply (including the finalAnswer
+            // conclusion, which reaches this same buffer) as Markdown. During
+            // the thinking phase the model still accumulates reasoning deltas
+            // into inMessage_, so render that content rather than hiding it.
+            renderMarkdownMessage(m.inMessage());
+        } else if (m.inMessageThinking()) {
+            // No content yet but the live message is still thinking.
+            ImGui::TextDisabled("thinking");
         } else {
             ImGui::TextDisabled("(waiting for a live message...)");
         }
@@ -788,6 +868,23 @@ int main(int argc, char** argv) {
         // FreeType is required for a TTC; fall back to the default font and warn.
         std::fprintf(stderr, "WARNING: failed to load %s; using default font. TTC requires FreeType.\n", ttcPath.c_str());
     }
+    // Load the Italic face (fc-scan index 4) for markdown code spans/fenced blocks.
+    // It replaces the former lighter-than-pane background with an italic glyph slant.
+    ImFontConfig italicFontCfg;
+    italicFontCfg.FontNo = 4;  // Sarasa Term SC Nerd Italic
+    gMarkdownCodeFont = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &italicFontCfg, io.Fonts->GetGlyphRangesChineseFull());
+    if (gMarkdownCodeFont == nullptr) {
+        std::fprintf(stderr, "WARNING: failed to load italic code font (FontNo=4) from %s; code will render without italic.\n", ttcPath.c_str());
+    }
+    // Load the Bold face (fc-scan index 0) for markdown strong emphasis and
+    // headings. It replaces the regular weight used by `**`/`##` so emphasized
+    // content renders visibly bold instead of the same weight as body text.
+    ImFontConfig boldFontCfg;
+    boldFontCfg.FontNo = 0;  // Sarasa Term SC Nerd Bold
+    gMarkdownBoldFont = io.Fonts->AddFontFromFileTTF(ttcPath.c_str(), 18.0f * 1.35f, &boldFontCfg, io.Fonts->GetGlyphRangesChineseFull());
+    if (gMarkdownBoldFont == nullptr) {
+        std::fprintf(stderr, "WARNING: failed to load bold markdown font (FontNo=0) from %s; bold text will render without bold.\n", ttcPath.c_str());
+    }
     // Do NOT call io.Fonts->Build() here. The vendored ImGui v1.92.5 OpenGL3
     // backend sets ImGuiBackendFlags_RendererHasTextures in ImGui_ImplOpenGL3_Init
     // (called below) and manages the font atlas lazily during ImGui::NewFrame().
@@ -863,7 +960,6 @@ int main(int argc, char** argv) {
         float rowH = ImGui::GetFrameHeightWithSpacing();
         pie::gui::LayoutMetrics lm = pie::gui::computeLayout(io.DisplaySize.x, winH, rowH);
         float headerH = lm.headerH;   // status bar
-        float navH = lm.navH;         // frame navigator
         float summaryH = lm.summaryH; // current-frame summary
         const float minLaneH = lm.minLaneH;
         const float minLaneW = lm.minLaneW;
@@ -873,9 +969,9 @@ int main(int argc, char** argv) {
         renderStatusBar(model);
         ImGui::EndChild();
 
-        // ImGui::BeginChild("nav", ImVec2(0, navH), false);
-        // renderNavigator(model, viewId);
-        // ImGui::EndChild();
+        // The frame navigator is no longer rendered; its layout band was removed
+        // from LayoutMetrics, so the lanes below reclaim the vertical space it
+        // used to reserve (previously left empty between status bar and lanes).
 
         // Floating instruction window (cmd/cmd-T), independent of the main layout.
         renderInstructionPalette(instructionOpen, model, live,
@@ -906,7 +1002,7 @@ int main(int argc, char** argv) {
             renderCognitiveLane(model, viewId);
             ImGui::EndChild();
             ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, execActive ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(execActive));
             ImGui::BeginChild("right", ImVec2(0, 0), true);
             renderExecutionLane(model, viewId);
             ImGui::EndChild();
@@ -920,7 +1016,7 @@ int main(int argc, char** argv) {
             renderCognitiveLane(model, viewId);
             ImGui::EndChild();
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, execActive ? kPaneBgDark : ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(execActive));
             ImGui::BeginChild("right", ImVec2(rightW, 0), true);
             renderExecutionLane(model, viewId);
             ImGui::EndChild();

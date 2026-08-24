@@ -257,6 +257,22 @@ int main() {
         check(rpc.inMessage() == "seed hello...", "in-message retained after message_end");
     }
 
+    // --- thinking_start marks the live message as thinking; thinking_end / ---
+    // --- text_start clear it. The ⌘T pane renders the accumulated inMessage_ ---
+    // --- (including thinking deltas) even during reasoning; it only shows the ---
+    // --- "thinking" placeholder when the buffer is still empty. ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_start","contentIndex":0}})") == pie::gui::RpcApplyResult::Applied, "thinking_start applies");
+        check(rpc.inMessageThinking(), "in-message is thinking after thinking_start");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_end","contentIndex":0}})") == pie::gui::RpcApplyResult::Applied, "thinking_end applies");
+        check(!rpc.inMessageThinking(), "in-message no longer thinking after thinking_end");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_start","contentIndex":0}})") == pie::gui::RpcApplyResult::Applied, "text_start applies");
+        check(!rpc.inMessageThinking(), "text_start keeps in-message not thinking");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_update","usage":{},"assistantMessageEvent":{"type":"thinking_start","contentIndex":0}})") == pie::gui::RpcApplyResult::Applied, "second thinking_start applies");
+        check(rpc.inMessageThinking(), "in-message thinking again after second thinking_start");
+    }
+
     if (failures == 0) std::printf("ALL PASS\n");
     else std::printf("%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;

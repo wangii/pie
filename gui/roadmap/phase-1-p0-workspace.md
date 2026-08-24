@@ -120,6 +120,12 @@ The information unit is Belief, LoopFrame, Execution Trajectory, Distillation,
 Proposal — not tokens, turns, or tool calls. Clarity over visual novelty; no
 animation.
 
+- **Exception (user-approved)**: the stage-indicating Pane background (PLAN /
+  DISTILLATION / PROPOSALS paragraphs, or the execution lane for EXECUTING) may
+  animate between black and kPaneBgDark using a sinusoidal time relationship —
+  see `paneBg()` in `src/App.cpp`. This narrow exception does not permit other
+  animation, transitions, or decorative motion.
+
 ## Dependency (from Phase 1 to Phase 2)
 
 Phase 2 (navigation/inspection) reads the frame history and the P0 workspace to

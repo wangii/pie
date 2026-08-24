@@ -44,6 +44,11 @@ Supporting files: `src/DemoEvents.h` (event fixture), `src/InstructionCmd.h`
 - **No animation**: follow the spec's `clarity > visual novelty`. Do not add
   animation, transitions, or decorative motion. Keep highlighting simple and
   static (accent bars, badges, calm backgrounds).
+  - **Exception (user-approved)**: the stage-indicating Pane background (the
+    PLAN / DISTILLATION / PROPOSALS paragraphs, or the execution lane for
+    EXECUTING) may animate between black and kPaneBgDark using a sinusoidal
+    time relationship — see `paneBg()` in `src/App.cpp`. This narrow exception
+    does not permit other animation, transitions, or decorative motion.
 
 ## Tech stack and the SDL3 note
 

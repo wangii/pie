@@ -314,10 +314,21 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         // Streaming assistant delta. toJsonEvent remaps message_update to
         // {type, usage, assistantMessageEvent}; append both text and thinking
         // deltas so the ⌘T pane's in-message stream updates incrementally for
-        // visible content and reasoning alike.
+        // visible content and reasoning alike. thinking_start flags the live
+        // message as being in the thinking phase (the pane renders the
+        // accumulated deltas, falling back to a "thinking" placeholder only
+        // while the buffer is empty), and thinking_end / text_start clear it.
         std::string evt;
         if (rawValue(line, "assistantMessageEvent", evt)) {
             std::string deltaType = str(evt, "type");
+            if (deltaType == "thinking_start") {
+                model.setInMessageThinking(true);
+                return RpcApplyResult::Applied;
+            }
+            if (deltaType == "thinking_end" || deltaType == "text_start") {
+                model.setInMessageThinking(false);
+                return RpcApplyResult::Applied;
+            }
             if (deltaType == "text_delta" || deltaType == "thinking_delta") {
                 model.appendInMessage(str(evt, "delta"));
                 return RpcApplyResult::Applied;
@@ -589,6 +600,10 @@ void NativeGuiModel::appendInMessage(const std::string& delta) {
 void NativeGuiModel::endInMessage() {
     // Finalize. The buffer already holds the accumulated text; nothing more to
     // do but keep it available for the pane until the next message_start.
+}
+
+void NativeGuiModel::setInMessageThinking(bool thinking) {
+    inMessageThinking_ = thinking;
 }
 
 // ---------------------------------------------------------------------------
