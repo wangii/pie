@@ -5,6 +5,7 @@
 
 #include "LayoutMetrics.h"
 
+#include <cmath>
 #include <cstdio>
 
 using pie::gui::LayoutMetrics;
@@ -67,6 +68,19 @@ int main() {
                 }
             }
         }
+    }
+
+    // The proposals pane split must always produce a fixed 35% top region and
+    // a non-negative remainder, and the two must sum exactly to the lane height
+    // (pairwise disjoint: no overlap, no gap).
+    for (float laneH : {0.0f, 100.0f, 360.0f, 1000.0f}) {
+        float proposalsH = 0, beliefH = 0;
+        pie::gui::splitBeliefLane(laneH, proposalsH, beliefH);
+        check(std::abs(proposalsH - laneH * pie::gui::kProposalsLaneFrac) < 0.001f,
+              "proposals pane height is 35% of lane height");
+        check(beliefH >= 0.0f, "belief region height non-negative");
+        check(std::abs((proposalsH + beliefH) - laneH) < 0.001f,
+              "proposals + belief sum to lane height (no overlap/gap)");
     }
 
     if (failures == 0) std::printf("ALL PASS\n");

@@ -103,40 +103,41 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool ena
         ImGui::PopStyleColor(1);
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    // PROPOSALS
-    {
-        bool active = (stage == pie::gui::FrameStage::PROPOSING);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
-        ImGui::BeginChild("proposals_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
-        ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
-        ImGui::TextUnformatted("PROPOSALS");
-        ImGui::PopStyleColor();
-        if (!f->proposals.empty()) {
-            for (auto& p : f->proposals) {
-                ImVec4 c = kGray;
-                if (p.op == '+') c = kGreen;
-                else if (p.op == '~') c = kAmber;
-                else if (p.op == '-') c = kRed;
-                ImGui::PushStyleColor(ImGuiCol_Text, c);
-                std::string line = std::string(1, p.op) + " " + p.belief;
-                ImGui::TextUnformatted(line.c_str());
-                ImGui::PopStyleColor();
-                if (!p.relation.empty())
-                    ImGui::TextDisabled("  %s ──%s──> %s", p.lhs.c_str(), p.relation.c_str(), p.rhs.c_str());
-                if (!p.detail.empty())
-                    ImGui::TextDisabled("  %s", p.detail.c_str());
-            }
-        } else {
-            ImGui::TextDisabled("(no proposals yet)");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(1);
-    }
-
     ImGui::EndChild();
+}
+
+void renderProposalsPane(const pie::gui::NativeGuiModel& m, int viewId, float height) {
+    const auto* f = displayedFrame(m, viewId);
+    const pie::gui::FrameStage stage = m.cursor().valid() ? m.cursor().stage : pie::gui::FrameStage::NONE;
+    const bool active = (stage == pie::gui::FrameStage::PROPOSING);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
+    ImGui::BeginChild("proposals_pane", ImVec2(0, height), false, ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
+    ImGui::TextUnformatted("PROPOSALS");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::BeginChild("proposals_scroll", ImVec2(0, 0), false);
+    if (f && !f->proposals.empty()) {
+        for (auto& p : f->proposals) {
+            ImVec4 c = kGray;
+            if (p.op == '+') c = kGreen;
+            else if (p.op == '~') c = kAmber;
+            else if (p.op == '-') c = kRed;
+            ImGui::PushStyleColor(ImGuiCol_Text, c);
+            std::string line = std::string(1, p.op) + " " + p.belief;
+            ImGui::TextUnformatted(line.c_str());
+            ImGui::PopStyleColor();
+            if (!p.relation.empty())
+                ImGui::TextDisabled("  %s ──%s──> %s", p.lhs.c_str(), p.relation.c_str(), p.rhs.c_str());
+            if (!p.detail.empty())
+                ImGui::TextDisabled("  %s", p.detail.c_str());
+        }
+    } else {
+        ImGui::TextDisabled(f ? "(no proposals yet)" : "(no frame)");
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
+    ImGui::PopStyleColor(1);
 }
 
 } // namespace pie::gui

@@ -371,13 +371,13 @@ int main() {
               "session_status applied");
         const pie::gui::Footer& f = rpc.footer();
         check(f.hasData, "session_status sets hasData");
-        check(f.epistemic.model == "anthropic/claude-sonnet-4-5", "epistemic model provider/id");
+        check(f.epistemic.model == "claude-sonnet-4-5", "epistemic model id");
         check(f.epistemic.cacheHitRate == 42.7f, "epistemic cache hit rate");
-        check(f.planner.model == "google/gemini-2.5-pro", "planner model provider/id");
+        check(f.planner.model == "gemini-2.5-pro", "planner model id");
         check(f.planner.cacheHitRate == 55.0f, "planner cache hit rate");
-        check(f.distillation.model == "openai/o3", "distillation model provider/id");
+        check(f.distillation.model == "o3", "distillation model id");
         check(f.distillation.cacheHitRate == 0.0f, "distillation cache hit rate (0 is valid)");
-        check(f.execution.model == "anthropic/claude-sonnet-4-5", "execution model provider/id");
+        check(f.execution.model == "claude-sonnet-4-5", "execution model id");
         check(f.execution.cacheHitRate == 38.2f, "execution cache hit rate");
         check(f.sessionCost == 0.1234, "session cost parsed");
 
@@ -391,7 +391,7 @@ int main() {
         check(f2.hasData, "sparse sets hasData");
         check(f2.epistemic.model.empty(), "empty model -> empty provider/id");
         check(f2.epistemic.cacheHitRate < 0.0f, "absent cache hit rate -> negative placeholder");
-        check(f2.planner.model == "p/m", "planner model still parsed");
+        check(f2.planner.model == "m", "planner model still parsed");
         check(f2.sessionCost == 0.0, "absent cost -> 0");
     }
 

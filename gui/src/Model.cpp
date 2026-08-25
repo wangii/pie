@@ -365,8 +365,8 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     // Bottom-footer telemetry: per-role model + cache hit rate and session cost.
     if (type == "session_status") {
         // roleStatus is the object under the "roleStatus" key; each phase entry is
-        // { model: { provider, id, ... }, latestCacheHitRate }. Format the model as
-        // "provider/id" like the TUI footer (formatRoleSlotLine).
+        // { model: { provider, id, ... }, latestCacheHitRate }. The footer shows the
+        // bare model id (provider is intentionally not surfaced).
         auto parseRole = [&](const std::string& roleName) -> RoleFooterSlot {
             RoleFooterSlot slot;
             std::string rawStatus;

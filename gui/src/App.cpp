@@ -172,6 +172,8 @@ int main(int argc, char** argv) {
         const float minLaneH = lm.minLaneH;
         const float minLaneW = lm.minLaneW;
         float laneH = lm.laneH;
+        float proposalsH = 0, beliefH = 0;
+        splitBeliefLane(laneH, proposalsH, beliefH);
 
         ImGui::BeginChild("top", ImVec2(0, headerH), false);
         renderStatusBar(app.model);
@@ -190,6 +192,7 @@ int main(int argc, char** argv) {
         const bool execActive = app.model.cursor().valid() && app.model.cursor().stage == FrameStage::EXECUTING;
         if (availW < minLaneW * 3) {
             ImGui::BeginChild("left", ImVec2(0, 0), true);
+            renderProposalsPane(app.model, app.viewId, proposalsH);
             renderBeliefLane(app.model, app.viewId);
             ImGui::EndChild();
             ImGui::Spacing();
@@ -204,6 +207,7 @@ int main(int argc, char** argv) {
             ImGui::PopStyleColor(1);
         } else {
             ImGui::BeginChild("left", ImVec2(leftW, 0), true);
+            renderProposalsPane(app.model, app.viewId, proposalsH);
             renderBeliefLane(app.model, app.viewId);
             ImGui::EndChild();
             ImGui::SameLine();

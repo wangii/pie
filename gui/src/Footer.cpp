@@ -66,12 +66,12 @@ void renderFooter(const pie::gui::NativeGuiModel& m) {
     ImGui::SameLine();
     renderRoleSlot("Execution", f.execution);
 
-    ImGui::SameLine();
-    ImGui::TextUnformatted("Total cost:");
-    ImGui::SameLine();
-    char cost[64];
-    std::snprintf(cost, sizeof(cost), "$%.3f", f.sessionCost);
-    ImGui::TextUnformatted(cost);
+    // ImGui::SameLine();
+    // ImGui::TextUnformatted("Total cost:");
+    // ImGui::SameLine();
+    // char cost[64];
+    // std::snprintf(cost, sizeof(cost), "$%.3f", f.sessionCost);
+    // ImGui::TextUnformatted(cost);
 }
 
 } // namespace pie::gui
