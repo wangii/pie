@@ -101,6 +101,30 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
         // in demo mode this stays empty.
         ImGui::Separator();
         ImGui::BeginChild("in_message", ImVec2(0, 0), true);
+
+        // Cmd/Ctrl+Up/Down scroll the incoming message area one page at a time.
+        // The chord is read while the in_message child is the active window so
+        // GetScrollY/SetScrollY target this child (not the input box).
+        {
+            const float maxScroll = ImGui::GetScrollMaxY();
+            // Page step = the child's visible height (a full page of message).
+            const float pageStep = std::max(ImGui::GetContentRegionAvail().y, 1.0f);
+            if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)) {
+                const float y = paletteScrollByPage(ImGui::GetScrollY(), pageStep, maxScroll, +1);
+                ImGui::SetScrollY(y);
+                // Re-pin to the bottom once the user scrolls down to the end.
+                if (paletteScrollAtBottom(y, maxScroll)) state.inMessagePinned = true;
+            }
+            if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)) {
+                const float y = paletteScrollByPage(ImGui::GetScrollY(), pageStep, maxScroll, -1);
+                ImGui::SetScrollY(y);
+                // Scrolling up unpins so streaming content no longer yanks the
+                // view back to the bottom; stay pinned only when there is no
+                // content above to scroll back through.
+                if (maxScroll > 0.0f) state.inMessagePinned = false;
+            }
+        }
+
         if (!m.inMessage().empty()) {
             // Render the incoming assistant reply (including the finalAnswer
             // conclusion, which reaches this same buffer) as Markdown. During
@@ -113,10 +137,10 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
         } else {
             ImGui::TextDisabled("(waiting for a live message...)");
         }
-        // Auto-scroll to bottom whenever new content arrived. SetScrollHereY
-        // scrolls the current cursor line to the desired fraction (1.0 = bottom)
-        // of the child window.
-        if (m.inMessage().size() != state.lastInMessageLength) {
+        // Auto-scroll to the bottom on new content only while pinned to the
+        // bottom; if the user scrolled up we leave the view where it is. On a
+        // fresh message (or after re-pinning) this snaps back to the tail.
+        if (m.inMessage().size() != state.lastInMessageLength && state.inMessagePinned) {
             ImGui::SetScrollHereY(1.0f);
         }
         state.lastInMessageLength = m.inMessage().size();

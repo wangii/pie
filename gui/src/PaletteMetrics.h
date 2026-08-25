@@ -42,4 +42,22 @@ inline float paletteInputBoxHeight(float wrappedY, float lineH, float framePad, 
     return h;
 }
 
+// Clamp the in-message scroll offset after a one-page manual scroll.
+//   scrollY   - current scroll offset (in [0, maxScroll]).
+//   step      - page height (the child's visible height).
+//   maxScroll - maximum scroll offset (0 when the content fits).
+//   direction - +1 scroll down, -1 scroll up, 0 leaves it unchanged.
+// Returns the clamped offset in [0, maxScroll].
+inline float paletteScrollByPage(float scrollY, float step, float maxScroll, int direction) {
+    if (direction > 0) return std::min(scrollY + step, maxScroll);
+    if (direction < 0) return std::max(scrollY - step, 0.0f);
+    return scrollY;
+}
+
+// True when a scroll offset has reached (or is within epsilon of) the bottom of
+// the region, i.e. the last content line is visible.
+inline bool paletteScrollAtBottom(float scrollY, float maxScroll, float epsilon = 1.0f) {
+    return maxScroll - scrollY <= epsilon;
+}
+
 } // namespace pie::gui

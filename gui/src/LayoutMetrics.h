@@ -18,7 +18,7 @@ struct Rect {
 // Single source of truth for the minimum window size. `kMinWindowWidth` is
 // derived from the minimum lane width (three side-by-side lanes + padding).
 // `kMinWindowHeight` is derived from a reference row height and the band
-// multipliers used in computeLayout (header 1.2, nav 1.0, summary 2.0) plus
+// multipliers used in computeLayout (header 1.2, footer 1.6, summary 2.0) plus
 // the minimum lane height and padding margins.
 //
 // The frame navigator is no longer rendered, so its band (nav 1.0) and one
@@ -30,12 +30,13 @@ inline constexpr float kPad = 8.0f;
 inline constexpr float kRefRowHeight = 24.0f;  // reference font-row height
 inline constexpr float kMinWindowWidth = kMinLaneWidth * 3.0f + kPad * 2.0f;  // 360 + 16
 inline constexpr float kMinWindowHeight =
-    kRefRowHeight * (1.2f + 2.0f) + kMinLaneHeight + kPad * 4.0f;  // 76.8 + 100 + 32
+    kRefRowHeight * (1.2f + 2.0f + 1.6f) + kMinLaneHeight + kPad * 4.0f;  // 115.2 + 100 + 32
 
 struct LayoutMetrics {
     float pad = 8.0f;
     float headerH = 0.0f;   // status bar
     float summaryH = 0.0f;  // current-frame summary
+    float footerH = 0.0f;   // bottom footer (model/cache/cost telemetry)
     float laneH = 0.0f;     // lanes (main content)
 
     float minLaneH = kMinLaneHeight;
@@ -50,8 +51,11 @@ inline LayoutMetrics computeLayout(float winW, float winH, float rowH) {
     LayoutMetrics m;
     m.headerH = (rowH * 2.) * 1.2f;
     m.summaryH = rowH * 2.0f;
+    // Footer is a compact row at the very bottom; budget a couple of font rows
+    // (one per line of the per-phase model/cache summary plus the cost line).
+    m.footerH = rowH * 1.6f;
 
-    float availH = std::max(0.0f, winH - (m.headerH + m.summaryH + m.pad * 4));
+    float availH = std::max(0.0f, winH - (m.headerH + m.summaryH + m.footerH + m.pad * 4));
     m.laneH = std::max(m.minLaneH, availH);
     return m;
 }

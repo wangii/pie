@@ -81,6 +81,25 @@ struct DistillationOutput {
     bool valid() const { return !label.empty(); }
 };
 
+// A single belief-loop-role footer slot: the resolved model and the latest
+// cache hit rate (percentage), populated from the runtime's session_status
+// RPC telemetry event. Undefined values render as "—".
+struct RoleFooterSlot {
+    std::string model;           // "provider/id"
+    float cacheHitRate = -1.0f;  // percentage, or negative when undefined
+};
+
+// The bottom footer telemetry: per-role model + cache hit rate for the four
+// belief-loop phases, and the accumulated session cost.
+struct Footer {
+    RoleFooterSlot epistemic;     // propose
+    RoleFooterSlot planner;       // plan
+    RoleFooterSlot distillation;  // distill
+    RoleFooterSlot execution;     // execution
+    double sessionCost = 0.0;
+    bool hasData = false;         // true once at least one session_status event arrived
+};
+
 // One proposed belief change. op semantics:
 //   '+' create, '~' modify, '-' remove/invalidate, '?' unresolved.
 struct Proposal {
@@ -169,6 +188,11 @@ public:
     const std::string& session() const { return session_; }
     void setSession(std::string s) { session_ = std::move(s); }
 
+    // Bottom footer telemetry (per-role model/cache hit rate + session cost), set
+    // by the RPC adapter from the runtime's session_status event.
+    const Footer& footer() const { return footer_; }
+    void setFooter(Footer f) { footer_ = std::move(f); }
+
     // Determine whether a belief is selected in the active frame.
     bool isSelectedInCurrentFrame(BeliefId b) const;
 
@@ -238,6 +262,7 @@ private:
     // finalAnswer role (set on CursorChanged CLOSED) until its message_end arrives.
     bool finalAnswerPending_ = false;
     bool autoOpenInstruction_ = false;  // request flag, consumed by the render loop
+    Footer footer_;                     // bottom footer telemetry (session_status)
 };
 
 // RPC event adapter (live mode). Consumes one runtime JSONL line (an

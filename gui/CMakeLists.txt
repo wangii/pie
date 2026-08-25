@@ -91,6 +91,7 @@ add_executable(pie_gui
     src/CognitiveLane.cpp
     src/ExecutionLane.cpp
     src/Summary.cpp
+    src/Footer.cpp
     src/InstructionPalette.cpp
     src/Theme.cpp
     src/UiMarkdown.cpp

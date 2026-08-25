@@ -349,6 +349,48 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     if (type == "response")
         return RpcApplyResult::Ignored;
 
+    // Bottom-footer telemetry: per-role model + cache hit rate and session cost.
+    if (type == "session_status") {
+        // roleStatus is the object under the "roleStatus" key; each phase entry is
+        // { model: { provider, id, ... }, latestCacheHitRate }. Format the model as
+        // "provider/id" like the TUI footer (formatRoleSlotLine).
+        auto parseRole = [&](const std::string& roleName) -> RoleFooterSlot {
+            RoleFooterSlot slot;
+            std::string rawStatus;
+            if (rawValue(line, roleName, rawStatus)) {
+                slot.cacheHitRate = doubleVal(rawStatus, "latestCacheHitRate", -1.0f);
+                std::string rawModel;
+                if (rawValue(rawStatus, "model", rawModel)) {
+                    std::string provider = str(rawModel, "provider");
+                    std::string id = str(rawModel, "id");
+                    if (!provider.empty() && !id.empty()) slot.model = provider + "/" + id;
+                }
+            }
+            return slot;
+        };
+        Footer f;
+        // roleStatus is nested under the top-level "roleStatus" key.
+        std::string rawRoleStatus;
+        if (rawValue(line, "roleStatus", rawRoleStatus)) {
+            f.epistemic = parseRole("epistemic");
+            f.planner = parseRole("planner");
+            f.distillation = parseRole("distillation");
+            f.execution = parseRole("execution");
+        }
+        // Fall back to reading the phase keys directly off the top-level line when
+        // roleStatus is not nested (robustness for a plain session_status payload).
+        if (rawRoleStatus.empty()) {
+            f.epistemic = parseRole("epistemic");
+            f.planner = parseRole("planner");
+            f.distillation = parseRole("distillation");
+            f.execution = parseRole("execution");
+        }
+        f.sessionCost = doubleVal(line, "cost", 0.0);
+        f.hasData = true;
+        model.setFooter(std::move(f));
+        return RpcApplyResult::Applied;
+    }
+
     if (type == "agent_start") {
         if (active) return RpcApplyResult::Ignored;
         model.openRpcFrame("");

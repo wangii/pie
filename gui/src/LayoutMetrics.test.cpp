@@ -38,19 +38,22 @@ int main() {
 
                 check(m.headerH > 0.0f, "header height positive");
                 check(m.summaryH > 0.0f, "summary height positive");
+                check(m.footerH > 0.0f, "footer height positive");
                 check(m.laneH > 0.0f, "lane height positive");
 
-                // Vertically stacked regions: top, lanes, summary.
+                // Vertically stacked regions: top, lanes, summary, footer.
                 Rect top{0, 0, winW, m.headerH};
                 Rect lanes{0, top.bottom(), winW, m.laneH};
                 Rect summary{0, lanes.bottom(), winW, m.summaryH};
+                Rect footer{0, summary.bottom(), winW, m.footerH};
 
                 // All within the window height (no out-of-work-area, no negative).
-                check(summary.bottom() <= winH + 1.0f, "all regions fit within window height");
+                check(footer.bottom() <= winH + 1.0f, "all regions fit within window height");
 
                 // Pairwise disjoint vertically.
                 check(disjoint(top, lanes), "top vs lanes disjoint");
                 check(disjoint(lanes, summary), "lanes vs summary disjoint");
+                check(disjoint(summary, footer), "summary vs footer disjoint");
 
                 // Lane widths: non-negative.
                 float left = 0, mid = 0, right = 0;

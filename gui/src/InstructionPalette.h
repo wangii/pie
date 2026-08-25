@@ -21,6 +21,7 @@ using InstructionSender = std::function<void(const std::string&)>;
 struct InstructionPaletteState {
     std::string instrText;         // growable instruction buffer (was `instrBuf`)
     size_t lastInMessageLength = 0; // in-message length since last auto-scroll (was `lastInMsgLen`)
+    bool inMessagePinned = true;    // while pinned, new content auto-scrolls to the bottom
 };
 
 // Render the palette as a floating window. `open` is toggled by the caller via

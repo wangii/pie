@@ -42,6 +42,7 @@
 #include "CognitiveLane.h"
 #include "ExecutionLane.h"
 #include "Summary.h"
+#include "Footer.h"
 #include "InstructionPalette.h"
 #include "Theme.h"
 #include "Paths.h"
@@ -221,6 +222,7 @@ int main(int argc, char** argv) {
         LayoutMetrics lm = computeLayout(io.DisplaySize.x, winH, rowH);
         float headerH = lm.headerH;   // status bar
         float summaryH = lm.summaryH; // current-frame summary
+        float footerH = lm.footerH;   // bottom footer
         const float minLaneH = lm.minLaneH;
         const float minLaneW = lm.minLaneW;
         float laneH = lm.laneH;
@@ -282,6 +284,12 @@ int main(int argc, char** argv) {
 
         ImGui::BeginChild("summary", ImVec2(0, summaryH), false);
         renderSummary(model, viewId);
+        ImGui::EndChild();
+
+        // Bottom footer pinned to the very bottom of the workspace: per-phase
+        // model + cache hit rate and the accumulated session cost.
+        ImGui::BeginChild("footer", ImVec2(0, footerH), true);
+        renderFooter(model);
         ImGui::EndChild();
 
         ImGui::End();
