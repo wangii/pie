@@ -106,10 +106,10 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 
 | 术语 | 含义 | 出处 |
 |------|------|------|
-| **belief loop**（信念循环） | 将"智能体如何回答问题"建模为四阶段状态机：propose/execution/distill/finalAnswer。 | `README.md` |
+| **belief loop**（信念循环） | 将"智能体如何回答问题"建模为四阶段状态机：propose/execution/distill/finalReport。 | `README.md` |
 | **footer 槽名 → 阶段映射** | `Epistemic`=propose、`Planner`=plan、`Distillation`=distill、`Execution`=execution。 | `src/Footer.cpp` |
 | **executionModel / distillationModel** | 分别用于 execution 探测与 distill 蒸馏角色的模型配置。 | `README.md` |
 | **distillationThinkingLevel** | distill 角色的思考级别，默认 `low`。 | `README.md` |
 | **beliefLang** | 信念提示词书写语言，默认 `English`。 | `README.md` |
 | **fastPathModel** | fast-path 执行模型；fast path 与 belief-loop 为两种路由。 | `README.md` |
-| **defaultModel** | 会话主模型，propose 与 finalAnswer 角色始终使用。 | `README.md` |
+| **defaultModel** | 会话主模型，propose 与 finalReport 角色始终使用。 | `README.md` |

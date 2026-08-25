@@ -515,10 +515,10 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
     if (type == "message_end") {
         model.endInMessage();
-        // If the loop is in the terminal finalAnswer role, this message_end
+        // If the loop is in the terminal finalReport role, this message_end
         // finalizes the conclusion text. Request the render loop reopen the user
         // instruction pane so the user can view the answer, even if they closed it.
-        if (model.finalAnswerPending()) model.requestAutoOpenInstruction();
+        if (model.finalReportPending()) model.requestAutoOpenInstruction();
         return RpcApplyResult::Applied;
     }
     if (type == "tool_execution_start") {
@@ -621,10 +621,10 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         model.mutableCursor().stage = st;
         model.mutableCursor().item = str(line, "item");
         if (p && st != FrameStage::NONE) p->stage = st;
-        // The belief loop enters the terminal finalAnswer role by emitting a
+        // The belief loop enters the terminal finalReport role by emitting a
         // CursorChanged with stage CLOSED. Mark the model so the next message_end
         // (the final conclusion text) can request the auto-reopen of the pane.
-        if (st == FrameStage::CLOSED) model.markFinalAnswerPending();
+        if (st == FrameStage::CLOSED) model.markFinalReportPending();
         return RpcApplyResult::Applied;
     }
     if (type == "turn_end" || type == "agent_settled") {

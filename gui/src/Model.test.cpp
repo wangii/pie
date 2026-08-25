@@ -257,8 +257,8 @@ int main() {
         check(rpc.inMessage() == "seed hello...", "in-message retained after message_end");
     }
 
-    // --- finalAnswer auto-reopen: CursorChanged(CLOSED) (the loop entering the ---
-    // --- terminal finalAnswer role) marks the model pending, and the following ---
+    // --- finalReport auto-reopen: CursorChanged(CLOSED) (the loop entering the ---
+    // --- terminal finalReport role) marks the model pending, and the following ---
     // --- message_end requests the render loop reopen the user instruction pane. ---
     // --- Before the CLOSED cursor, a plain message_end must NOT request a reopen. ---
     {
@@ -266,16 +266,16 @@ int main() {
         // No CLOSED cursor yet: ordinary mid-loop message_end does not request reopen.
         check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "auto-open: agent_start opens frame");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: message_end without CLOSED cursor");
-        check(!rpc.consumeAutoOpenInstruction(), "no reopen requested before finalAnswer");
-        // The loop advances to the terminal finalAnswer role -> CursorChanged(CLOSED).
+        check(!rpc.consumeAutoOpenInstruction(), "no reopen requested before finalReport");
+        // The loop advances to the terminal finalReport role -> CursorChanged(CLOSED).
         check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1,"stage":"CLOSED"})") == pie::gui::RpcApplyResult::Applied, "auto-open: cursor CLOSED marks pending");
-        check(rpc.finalAnswerPending(), "pending set by CursorChanged(CLOSED)");
+        check(rpc.finalReportPending(), "pending set by CursorChanged(CLOSED)");
         check(!rpc.consumeAutoOpenInstruction(), "reopen not yet requested before message_end");
-        // The finalAnswer role streams its conclusion and the message ends.
-        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"final conclusion"}]}})") == pie::gui::RpcApplyResult::Applied, "auto-open: finalAnswer message_start");
-        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: finalAnswer message_end");
+        // The finalReport role streams its conclusion and the message ends.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"final conclusion"}]}})") == pie::gui::RpcApplyResult::Applied, "auto-open: finalReport message_start");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: finalReport message_end");
         check(rpc.inMessage() == "final conclusion", "final answer text retained");
-        check(rpc.consumeAutoOpenInstruction(), "reopen requested after finalAnswer message_end");
+        check(rpc.consumeAutoOpenInstruction(), "reopen requested after finalReport message_end");
         check(!rpc.consumeAutoOpenInstruction(), "reopen request consumed once");
         // A later unrelated message_end does not re-trigger.
         check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "auto-open: later message_end");

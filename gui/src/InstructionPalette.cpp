@@ -126,7 +126,7 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
         }
 
         if (!m.inMessage().empty()) {
-            // Render the incoming assistant reply (including the finalAnswer
+            // Render the incoming assistant reply (including the finalReport
             // conclusion, which reaches this same buffer) as Markdown. During
             // the thinking phase the model still accumulates reasoning deltas
             // into inMessage_, so render that content rather than hiding it.
