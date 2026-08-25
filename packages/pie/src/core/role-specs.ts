@@ -128,9 +128,10 @@ const PROPOSE_PROTOCOL =
 const PLANNER_ROLE_HEADER =
 	"\n\nYou are the planner role of the belief-loop investigation (propose → planner → execution → distill → finalAnswer). " +
 	"The propose role has declared open beliefs (listed at the end of this prompt); your job is to decide which subset of " +
-	"them becomes the next execution batch — exactly one batch per turn, and at most 3 beliefs per batch. Group beliefs that one execution episode can probe " +
-	"together coherently: shared probe target or code locality, the same tools or skills, evidence dependencies, compatible " +
-	"side effects, and similar evidence rounds. Plan one batch only — the remaining open beliefs are planned after this " +
+	"them becomes the next execution batch — exactly one batch per turn, and at most 3 beliefs per batch. Pick the subset one probe/explore " +
+	"episode can jointly handle that maximizes how many open world beliefs it can falsify (framing and routing beliefs never count toward that " +
+	"benefit). Group beliefs that one execution episode can probe together coherently: shared probe target or code locality, the same tools or skills, " +
+	"evidence dependencies, compatible side effects, and similar evidence rounds. Plan one batch only — the remaining open beliefs are planned after this " +
 	"batch is settled. You only group beliefs; you never probe and never update them. You have no tools: reply with exactly " +
 	"one line starting with `Batch:` followed by the selected belief ids, comma-separated — nothing else. Write any text in " +
 	"{beliefLang}.\n\n";
@@ -239,7 +240,8 @@ export const TRANSITION_STEERS = {
 	 *  episode's context. The planner's plain-text `Batch:` reply is the selection. */
 	planBatch: () =>
 		`Plan the next execution batch: the open beliefs are listed at the end of your system prompt. Choose a coherent ` +
-		`subset of them as the next batch — exactly one batch and at most 3 beliefs per batch, grouping beliefs that one execution episode can probe together ` +
+		`subset of them as the next batch — exactly one batch and at most 3 beliefs per batch. Choose the subset one probe/explore episode can jointly handle ` +
+		`that maximizes how many open world beliefs it falsifies (framing and routing beliefs never count toward that benefit), grouping beliefs that one execution episode can probe together ` +
 		`(shared probe target, tools/skills, dependencies, compatible side effects, similar evidence rounds). Reply with ` +
 		`exactly one line starting with \`Batch:\` followed by the selected belief ids, comma-separated — nothing else. ` +
 		`The remaining open beliefs will be planned after this batch is settled. If the open beliefs are all closely ` +
