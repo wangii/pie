@@ -355,17 +355,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribe = session.subscribe((event) => {
 			output(toJsonEvent(event));
 
-			// Push footer telemetry (per-belief-loop-role model + cache hit rate and
-			// session cost) to the native GUI. getRoleStatus() resolves the model per
-			// the documented fallback chain and latestCacheHitRate from the in-memory
-			// per-role snapshot; getSessionStats().cost is the accumulated session
-			// cost. Emitted after every event so the footer stays current.
+			// Push footer telemetry (per-belief-loop-role model + cache hit rate,
+			// per-role context usage, and session cost) to the native GUI.
+			// getRoleStatus() resolves the model per the documented fallback chain and
+			// latestCacheHitRate from the in-memory per-role snapshot;
+			// getRoleContextUsage() is the per-role “current context length” (epistemic
+			// vs execution projections); getSessionStats().cost is the accumulated
+			// session cost. Emitted after every event so the footer/status stays current.
 			const roleStatus = session.getRoleStatus();
 			if (roleStatus) {
 				const stats = session.getSessionStats();
 				output({
 					type: "session_status",
 					roleStatus,
+					roleUsage: session.getRoleContextUsage(),
 					cost: stats.cost,
 					tokens: {
 						input: stats.tokens.input,
