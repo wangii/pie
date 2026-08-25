@@ -51,8 +51,11 @@ void renderFooter(const pie::gui::NativeGuiModel& m) {
     }
 
     renderRoleSlot("Epistemic", f.epistemic);
+    ImGui::SameLine();
     renderRoleSlot("Planner", f.planner);
+    ImGui::SameLine();
     renderRoleSlot("Distillation", f.distillation);
+    ImGui::SameLine();
     renderRoleSlot("Execution", f.execution);
 
     ImGui::SameLine();

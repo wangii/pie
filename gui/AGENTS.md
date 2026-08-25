@@ -12,6 +12,9 @@ cognitive feedback-loop debugger. It is NOT the harness runtime: it does no
 planning, distillation, belief update, or epistemic inference. All such state is
 provided explicitly by the runtime through the event stream.
 
+## Terminology
+Terminologies are documented in `terminology.md`
+
 ## Architecture and file responsibilities
 
 The source is split into three layers. Keep new code in the matching layer.

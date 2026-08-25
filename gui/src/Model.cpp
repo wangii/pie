@@ -361,9 +361,9 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
                 slot.cacheHitRate = doubleVal(rawStatus, "latestCacheHitRate", -1.0f);
                 std::string rawModel;
                 if (rawValue(rawStatus, "model", rawModel)) {
-                    std::string provider = str(rawModel, "provider");
+                    // std::string provider = str(rawModel, "provider");
                     std::string id = str(rawModel, "id");
-                    if (!provider.empty() && !id.empty()) slot.model = provider + "/" + id;
+                    if (!id.empty()) slot.model = id;
                 }
             }
             return slot;
