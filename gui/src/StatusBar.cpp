@@ -69,9 +69,9 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
             }
             return std::to_string(tokens);
         };
-        std::string ctx = "ctx ";
+        std::string ctx = "ctx [Epi]";
         ctx += fmt(rcu.epistemic.tokens);
-        ctx += " · ";
+        ctx += " · [Exec]";
         ctx += fmt(rcu.execution.tokens);
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Text, kGray);

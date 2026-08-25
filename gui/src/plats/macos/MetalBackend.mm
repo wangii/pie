@@ -104,12 +104,32 @@ using pie::gui::PieMetalState;
     [win makeKeyAndOrderFront:nil];
 
     // Blocking Cocoa event loop; MTKViewDelegate drives frames.
+    // Ctrl+Command+F toggles native fullscreen (the macOS convention), matching
+    // the green-button / View menu behavior. Intercept it so ImGui_ImplOSX
+    // never sees the F keypress (F is otherwise unused by the UI).
     while (!_state->shouldShutdown) {
         NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                             untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]
                                                inMode:NSDefaultRunLoopMode
                                               dequeue:YES];
-        if (event) [NSApp sendEvent:event];
+        if (event) {
+            if (event.type == NSEventTypeKeyDown) {
+                NSEventModifierFlags mods = event.modifierFlags;
+                // kVK_ANSI_F == 0x03; Ctrl+Cmd (Control | Command) is checked.
+                if ((mods & NSEventModifierFlagControl) && (mods & NSEventModifierFlagCommand) &&
+                    event.keyCode == 0x03) {
+                    [win toggleFullScreen:nil];
+                } else if ((mods & NSEventModifierFlagCommand) &&
+                           !(mods & (NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift)) &&
+                           event.keyCode == 0x0C) { // kVK_ANSI_Q == 0x0C; Cmd+Q quits
+                    _state->shouldShutdown = true;
+                } else {
+                    [NSApp sendEvent:event];
+                }
+            } else {
+                [NSApp sendEvent:event];
+            }
+        }
         [view draw];
     }
 

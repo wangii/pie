@@ -32,6 +32,10 @@ inline constexpr float kMinWindowWidth = kMinLaneWidth * 3.0f + kPad * 2.0f;  //
 inline constexpr float kMinWindowHeight =
     kRefRowHeight * (1.2f + 2.0f + 1.6f) + kMinLaneHeight + kPad * 4.0f;  // 115.2 + 100 + 32
 
+// Fraction of the left (belief set) lane's height taken by the proposals pane,
+// rendered at the top of that lane; the belief set fills the remainder below.
+inline constexpr float kProposalsLaneFrac = 0.35f;
+
 struct LayoutMetrics {
     float pad = 8.0f;
     float headerH = 0.0f;   // status bar
@@ -70,6 +74,14 @@ inline bool laneRects(const LayoutMetrics& m, float winW, float& left, float& mi
     right = std::max(0.0f, availW - left - mid);
     stacked = availW < m.minLaneW * 3;
     return !stacked;
+}
+
+// Split the left (belief set) lane height into the proposals pane (top, fixed
+// kProposalsLaneFrac of laneH) and the remaining belief set region (bottom).
+// Both are non-negative and sum to laneH.
+inline void splitBeliefLane(float laneH, float& proposalsH, float& beliefH) {
+    proposalsH = laneH * kProposalsLaneFrac;
+    beliefH = std::max(0.0f, laneH - proposalsH);
 }
 
 } // namespace pie::gui

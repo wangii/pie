@@ -49,8 +49,36 @@ int runPlatform(const AppConfig& cfg, AppLogic logic) {
         return 1;
     }
 
+    // Fullscreen toggle state (Ctrl+Super+F).
+    bool fullscreen = false;
+    bool prevFPressed = false;
+    int savedX = 0, savedY = 0, savedW = 0, savedH = 0;
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        // Ctrl+Super+F toggles fullscreen (Super is the non-mac OS/"cmd" key).
+        // Edge-triggered so a held F doesn't flip repeatedly. Keyboard focus is
+        // captured by ImGui_ImplGlfw, but polling here is symmetric with the
+        // macOS Ctrl+Cmd+F handling in MetalBackend.mm.
+        bool ctrl = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                    glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+        bool super = glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS ||
+                     glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS;
+        bool f = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+        if (f && ctrl && super && !prevFPressed) {
+            if (fullscreen) {
+                glfwSetWindowMonitor(window, nullptr, savedX, savedY, savedW, savedH, 0);
+            } else {
+                glfwGetWindowPos(window, &savedX, &savedY);
+                glfwGetWindowSize(window, &savedW, &savedH);
+                GLFWmonitor* mon = glfwGetPrimaryMonitor();
+                const GLFWvidmode* mode = glfwGetVideoMode(mon);
+                glfwSetWindowMonitor(window, mon, 0, 0, mode->width, mode->height, mode->refreshRate);
+            }
+            fullscreen = !fullscreen;
+        }
+        prevFPressed = f;
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
