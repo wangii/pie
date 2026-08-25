@@ -9,12 +9,12 @@ import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "
  * The operating role the prompt is assembled for. The default `"coding"` role renders
  * the file/command-agent preamble plus the pi-docs index and file-path guideline. The
  * belief-loop roles render a narrower scientific preamble and omit the pi-docs block:
- * `"propose"`, `"distill"`, and `"finalAnswer"` have no `read`/`bash`/`edit`/`write`
+ * `"propose"`, `"distill"`, and `"finalReport"` have no `read`/`bash`/`edit`/`write`
  * (advertising them would only mislead the model), while `"execution"` holds those probe
  * tools but must not be distracted by the pi-docs block, which is unrelated to the belief
  * it is probing.
  */
-export type SystemPromptRole = "coding" | "propose" | "planner" | "distill" | "execution" | "finalAnswer";
+export type SystemPromptRole = "coding" | "propose" | "planner" | "distill" | "execution" | "finalReport";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -146,7 +146,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 				? "You are the batching planner of a belief-loop investigation: you group the open beliefs into the next execution batch."
 				: role === "execution"
 					? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."
-					: role === "finalAnswer"
+					: role === "finalReport"
 						? "You are a scientific mind concluding an investigation and answering the user's task."
 						: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 

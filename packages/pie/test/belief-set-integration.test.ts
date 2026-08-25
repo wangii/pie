@@ -228,7 +228,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("finalAnswer role prompt follows pie.beliefLang in the conclusion instruction", async () => {
+	test("finalReport role prompt follows pie.beliefLang in the conclusion instruction", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -276,18 +276,18 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"the conclusion",
 			],
 		});
 		try {
 			await harness.session.prompt("hi");
 
-			const finalAnswerContexts = harness.faux.contexts.filter((c) =>
+			const finalReportContexts = harness.faux.contexts.filter((c) =>
 				(c.systemPrompt ?? "").includes("writing the conclusion"),
 			);
-			expect(finalAnswerContexts.length).toBeGreaterThan(0);
-			for (const c of finalAnswerContexts) {
+			expect(finalReportContexts.length).toBeGreaterThan(0);
+			for (const c of finalReportContexts) {
 				expect(c.systemPrompt).toContain("in Chinese");
 				expect(c.systemPrompt).not.toContain("{beliefLang}");
 			}
@@ -343,7 +343,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"the cache survives logout for 30s",
 			],
 		});
@@ -407,7 +407,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -473,7 +473,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -548,7 +548,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -580,12 +580,12 @@ describe("declare_belief integration", () => {
 			expect(distillContexts.some((c) => contextText(c).includes("RAW_SENSITIVE_OUTPUT"))).toBe(true);
 			expect(distillContexts.some((c) => contextText(c).includes("the value persisted"))).toBe(true);
 
-			// finalAnswer semantics are unchanged: no thinking and no belief tool calls.
-			const finalAnswerContexts = harness.faux.contexts.filter((c) =>
+			// finalReport semantics are unchanged: no thinking and no belief tool calls.
+			const finalReportContexts = harness.faux.contexts.filter((c) =>
 				(c.systemPrompt ?? "").includes("writing the conclusion"),
 			);
-			expect(finalAnswerContexts.length).toBeGreaterThan(0);
-			for (const c of finalAnswerContexts) {
+			expect(finalReportContexts.length).toBeGreaterThan(0);
+			for (const c of finalReportContexts) {
 				expect(contextThinking(c)).toBe("");
 				expect(contextToolCalls(c).some((t) => t.name === "declare_belief")).toBe(false);
 			}
@@ -792,7 +792,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -902,7 +902,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1007,7 +1007,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1093,7 +1093,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1255,7 +1255,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"the conclusion",
 			],
 		});
@@ -1344,7 +1344,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"the conclusion",
 			],
 		});
@@ -1442,7 +1442,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1577,7 +1577,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("finalAnswer distills the probe role's thinking and tool arguments", async () => {
+	test("finalReport distills the probe role's thinking and tool arguments", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -1626,7 +1626,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"the conclusion",
 			],
 		});
@@ -1634,22 +1634,22 @@ describe("declare_belief integration", () => {
 			await harness.session.prompt("hi");
 
 			const lastContext = harness.faux.contexts[harness.faux.contexts.length - 1];
-			// finalAnswer: no tools, and the probe role's internal reasoning is distilled.
+			// finalReport: no tools, and the probe role's internal reasoning is distilled.
 			expect(contextToolNames(lastContext)).toEqual([]);
 			expect(contextThinking(lastContext)).not.toContain("EXEC_THINKING");
 			// The echo tool-call is elided entirely: dropping it (rather than renaming it to a
-			// placeholder) is what stops the finalAnswer role from imitating it — and keeps the
+			// placeholder) is what stops the finalReport role from imitating it — and keeps the
 			// transcript free of a tool-call name the provider would reject.
 			expect(contextToolCalls(lastContext).some((t) => t.name === "[probe]")).toBe(false);
 			// The real tool name never leaks into the distilled projection.
 			expect(contextToolCalls(lastContext).some((t) => t.name === "echo")).toBe(false);
 			// The distilled text report survives, but the belief tools' echo is masked: the
-			// finalAnswer role reads the explicit final-answer context instead of incidental
+			// finalReport role reads the explicit final-report context instead of incidental
 			// declare_belief/view_beliefs results.
 			expect(contextText(lastContext)).toContain("the value persisted");
 			expect(contextText(lastContext)).not.toContain("Applied support");
 			expect(contextText(lastContext)).toContain("[belief bookkeeping omitted]");
-			expect(contextText(lastContext)).toContain("<final_answer_context>");
+			expect(contextText(lastContext)).toContain("<final_report_context>");
 			expect(contextText(lastContext)).toContain("the cache survives logout");
 
 			// The execution role itself still sees its own raw reasoning (the probe turn's
@@ -1708,7 +1708,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1791,7 +1791,7 @@ describe("declare_belief integration", () => {
 				// Conclude again — now valid.
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1810,7 +1810,7 @@ describe("declare_belief integration", () => {
 			expect(contextToolNames(afterRejectedConclude)).toContain("declare_belief");
 			expect(contextText(afterRejectedConclude)).toContain("Concluding is premature");
 
-			// The final turn is finalAnswer (no tools), and the loop completed.
+			// The final turn is finalReport (no tools), and the loop completed.
 			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
 			expect(contextToolNames(last)).toEqual([]);
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
@@ -1941,7 +1941,7 @@ describe("declare_belief integration", () => {
 				// Epistemic: conclude again — now valid.
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -1963,7 +1963,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("conclude transitions to finalAnswer with no tools", async () => {
+	test("conclude transitions to finalReport with no tools", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -2011,7 +2011,7 @@ describe("declare_belief integration", () => {
 				// Epistemic: explicitly conclude — the signal that ends the investigation.
 				conclude,
 				conclude,
-				// finalAnswer: conclusion with no tools.
+				// finalReport: conclusion with no tools.
 				"the conclusion",
 			],
 		});
@@ -2020,14 +2020,14 @@ describe("declare_belief integration", () => {
 
 			expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
 
-			// The last turn ran in the finalAnswer role: no tools, and its context redacts the
+			// The last turn ran in the finalReport role: no tools, and its context redacts the
 			// raw probe output and the belief tools' echo, replacing them with the explicit
-			// final-answer context.
+			// final-report context.
 			const lastContext = harness.faux.contexts[harness.faux.contexts.length - 1];
 			expect(contextToolNames(lastContext)).toEqual([]);
 			expect(contextText(lastContext)).not.toContain("echoed");
 			expect(contextText(lastContext)).not.toContain("Applied support");
-			expect(contextText(lastContext)).toContain("<final_answer_context>");
+			expect(contextText(lastContext)).toContain("<final_report_context>");
 			expect(contextText(lastContext)).toContain("the cache survives logout");
 
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
@@ -2037,7 +2037,7 @@ describe("declare_belief integration", () => {
 		}
 	});
 
-	test("a settled conclude reflects once on the belief set before finalAnswer", async () => {
+	test("a settled conclude reflects once on the belief set before finalReport", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -2111,10 +2111,10 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// First conclude: settled, so it does not reach finalAnswer yet — it fires the
+				// First conclude: settled, so it does not reach finalReport yet — it fires the
 				// one-round reflection steer and stays epistemic.
 				conclude,
-				// Reflection finds nothing to add: conclude again — now finalAnswer.
+				// Reflection finds nothing to add: conclude again — now finalReport.
 				conclude,
 				"the conclusion",
 			],
@@ -2131,7 +2131,7 @@ describe("declare_belief integration", () => {
 			// Coverage now also resolves user-named concepts (atomic / decomposed / excluded), not just paths.
 			expect(contextText(reflectionContext)).toContain("user-named concept");
 
-			// The final turn is finalAnswer (no tools), and the conclusion was written.
+			// The final turn is finalReport (no tools), and the conclusion was written.
 			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
 			expect(contextToolNames(last)).toEqual([]);
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
@@ -2184,7 +2184,7 @@ describe("declare_belief integration", () => {
 					stopReason: "toolUse",
 				},
 				// One conclude: a single settled belief is below the reflection threshold, so the
-				// loop goes straight to finalAnswer instead of firing the reflection round.
+				// loop goes straight to finalReport instead of firing the reflection round.
 				conclude,
 				"the conclusion",
 			],
@@ -2197,7 +2197,7 @@ describe("declare_belief integration", () => {
 				expect(contextText(ctx)).not.toContain("reflect on the belief set");
 			}
 
-			// The final turn is finalAnswer (no tools), and the conclusion was written.
+			// The final turn is finalReport (no tools), and the conclusion was written.
 			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
 			expect(contextToolNames(last)).toEqual([]);
 			const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(messageText);
@@ -2240,7 +2240,7 @@ describe("declare_belief integration", () => {
 				{ toolCalls: [{ name: "echo", args: { text: "probe" } }], stopReason: "toolUse" },
 				"the value persisted",
 				// Settle and conclude in the SAME turn — the transition honors the conclude and
-				// hands straight to finalAnswer without a redundant "deepen or conclude" round.
+				// hands straight to finalReport without a redundant "deepen or conclude" round.
 				{
 					toolCalls: [
 						{
@@ -2257,7 +2257,7 @@ describe("declare_belief integration", () => {
 		try {
 			await harness.session.prompt("hi");
 
-			// The settle+conclude turn moved straight to finalAnswer (no tools on the last turn),
+			// The settle+conclude turn moved straight to finalReport (no tools on the last turn),
 			// and the conclusion was written.
 			const last = harness.faux.contexts[harness.faux.contexts.length - 1];
 			expect(contextToolNames(last)).toEqual([]);
@@ -2370,7 +2370,7 @@ describe("declare_belief integration", () => {
 					],
 					stopReason: "toolUse",
 				},
-				// Second conclude: already reflected, so finalAnswer.
+				// Second conclude: already reflected, so finalReport.
 				conclude,
 				"done",
 			],
@@ -2468,7 +2468,7 @@ describe("declare_belief integration", () => {
 			await harness.session.prompt("hi");
 
 			// The turn right after settling belief-1 (index 4 = the belief-2 propose) is still the
-			// epistemic role — `declare_belief` present — not finalAnswer (empty tools).
+			// epistemic role — `declare_belief` present — not finalReport (empty tools).
 			const afterSettle = harness.faux.contexts[4];
 			expect(contextToolNames(afterSettle)).toContain("declare_belief");
 			expect(contextToolNames(afterSettle)).toContain("conclude");
@@ -2530,7 +2530,7 @@ describe("declare_belief integration", () => {
 				},
 				conclude,
 				conclude,
-				// finalAnswer.
+				// finalReport.
 				"done",
 			],
 		});
@@ -2538,7 +2538,7 @@ describe("declare_belief integration", () => {
 			await harness.session.prompt("hi");
 
 			// The turn right after `view_beliefs` must still be the epistemic role — belief
-			// tools present so it can propose — not finalAnswer (empty tools).
+			// tools present so it can propose — not finalReport (empty tools).
 			const proposeContext = harness.faux.contexts[1];
 			expect(contextToolNames(proposeContext)).toContain("declare_belief");
 			expect(contextToolNames(proposeContext)).toContain("view_beliefs");

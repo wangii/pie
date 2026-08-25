@@ -8,21 +8,21 @@
  * `_steerStrayToolCall`, `_transition`, `_concludeTransition`).
  *
  * Naming: the loop has four phases — `propose` (decide what to test), `execution` (probe
- * the code/product), `distill` (account for the observation), `finalAnswer` (write the
+ * the code/product), `distill` (account for the observation), `finalReport` (write the
  * conclusion). The old role names — the single `epistemic` role and the "two-role" model — are
  * retired as phase labels; `epistemic` survives only as a deprecated compatibility key in
  * `getRoleContextUsage` and in the protocol phrase "epistemic residual" in the distill
  * instruction.
  */
 
-export type LoopRole = "propose" | "planner" | "distill" | "execution" | "finalAnswer";
+export type LoopRole = "propose" | "planner" | "distill" | "execution" | "finalReport";
 
 /** Which model the role runs on: the session's main model, the configured execution model, the
  *  configured planner model, the fast-path model, or the distillation model. */
 export type ModelPolicy = "default" | "execution" | "distillation" | "planner" | "fastPath";
 
 /** Which message projection the role's context uses (see `_projectMessage`). */
-export type ProjectionKind = "belief" | "distill" | "execution" | "finalAnswer";
+export type ProjectionKind = "belief" | "distill" | "execution" | "finalReport";
 
 export interface RoleToolContext {
 	/** The full active tool names, independent of the role's projected subset. */
@@ -35,7 +35,7 @@ export interface RoleSpec {
 	/** Instruction for propose turns after the task's first (routing) turn, when set. */
 	continuationInstruction?: string;
 	/**
-	 * The tools the role may call. Static lists for the belief-side roles and finalAnswer;
+	 * The tools the role may call. Static lists for the belief-side roles and finalReport;
 	 * a function for execution, which derives its probe surface from the full active set.
 	 */
 	tools: readonly string[] | ((ctx: RoleToolContext) => string[]);
@@ -49,7 +49,7 @@ export interface RoleSpec {
 
 /** Shared propose role header: who the role is, its tools, and the belief language. */
 const PROPOSE_ROLE_HEADER =
-	"\n\nYou are the propose role of the four-phase investigation loop (propose → planner → execution → distill → finalAnswer). You work entirely through beliefs: " +
+	"\n\nYou are the propose role of the four-phase investigation loop (propose → planner → execution → distill → finalReport). You work entirely through beliefs: " +
 	"you decide what to test and what to conclude, while a separate execution role performs the actual " +
 	"probing and a separate distill role turns each probe's report into belief updates. Your only tools " +
 	"are declare_belief, view_beliefs, and conclude — exactly these three, and nothing else. " +
@@ -126,7 +126,7 @@ const PROPOSE_PROTOCOL =
  *  are handed to the planner in its system prompt (role-scoped, so their statements never leak into
  *  other roles' transcripts) — it has no tools, so its plain-text reply *is* the batch selection. */
 const PLANNER_ROLE_HEADER =
-	"\n\nYou are the planner role of the belief-loop investigation (propose → planner → execution → distill → finalAnswer). " +
+	"\n\nYou are the planner role of the belief-loop investigation (propose → planner → execution → distill → finalReport). " +
 	"The propose role has declared open beliefs (listed at the end of this prompt); your job is to decide which subset of " +
 	"them becomes the next execution batch — exactly one batch per turn, and at most 3 beliefs per batch. Pick the subset one probe/explore " +
 	"episode can jointly handle that maximizes how many open world beliefs it can falsify (framing and routing beliefs never count toward that " +
@@ -161,7 +161,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	},
 	distill: {
 		instruction:
-			"\n\nYou are the distill role of the four-phase investigation loop (propose → planner → execution → distill → finalAnswer). The execution role has just probed " +
+			"\n\nYou are the distill role of the four-phase investigation loop (propose → planner → execution → distill → finalReport). The execution role has just probed " +
 			"and reported its raw observation; your job is the prediction-error distillation that turns that " +
 			"observation into what the belief set must update on. Your only tools are declare_belief, " +
 			"view_beliefs, and conclude — exactly these three, and nothing else. Write every belief in {beliefLang}.\n\n" +
@@ -217,15 +217,15 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			`observations only; belief updates and concluding happen in separate roles after you report. ` +
 			`Report your observation in plain text instead.`,
 	},
-	finalAnswer: {
+	finalReport: {
 		instruction:
 			"\n\nYou are a scientific mind writing the conclusion: answer the original task directly and " +
 			"concisely, grounded in the beliefs you have settled. Write your conclusion in {beliefLang}.",
 		tools: [],
 		modelPolicy: "fastPath",
-		projection: "finalAnswer",
+		projection: "finalReport",
 		strayToolSteer: (names) =>
-			`You tried to call ${names}, but the finalAnswer role has no tools. Write your conclusion in plain text.`,
+			`You tried to call ${names}, but the finalReport role has no tools. Write your conclusion in plain text.`,
 	},
 };
 
@@ -284,7 +284,7 @@ export const TRANSITION_STEERS = {
 	concludePremature: (reasons: string) =>
 		`Concluding is premature — ${reasons}. Use declare_belief to support, refute, refine, or retract each before concluding.`,
 	/**
-	 * propose/distill → finalAnswer, run once just before the handoff. It makes the belief
+	 * propose/distill → finalReport, run once just before the handoff. It makes the belief
 	 * set itself the object of one last test, mirroring the residual protocol at one level
 	 * up: the epistemic residual isolates what a single observation does not explain, this
 	 * isolates what the *whole set* does not name. Three falsifiable checks — coverage,
@@ -307,6 +307,6 @@ export const TRANSITION_STEERS = {
 		"(3) Completeness — every belief that calls something consistent or free of drift treated it as complete; " +
 		"check its own internals and the reverse direction (does the contract lag the code, does one document lag another). " +
 		"If all three pass with nothing to add, conclude again.",
-	/** propose/distill → finalAnswer: the terminal handoff. */
+	/** propose/distill → finalReport: the terminal handoff. */
 	writeConclusion: "Write your conclusion.",
 } as const;

@@ -55,7 +55,7 @@ describe("belief-loop event family", () => {
 			]),
 			// Propose concludes.
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			// finalAnswer writes the conclusion.
+			// finalReport writes the conclusion.
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 
@@ -151,7 +151,7 @@ describe("belief-loop event family", () => {
 			]),
 			// Propose concludes.
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			// finalAnswer writes the conclusion.
+			// finalReport writes the conclusion.
 			fauxAssistantMessage("the cache survives logout for 30s"),
 		]);
 

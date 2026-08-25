@@ -109,7 +109,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage("Summary: failed at boom."),
 			// Handed back to propose: conclude the same task in the belief loop.
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			// finalAnswer writes the conclusion.
+			// finalReport writes the conclusion.
 			fauxAssistantMessage("belief loop took over"),
 		]);
 
@@ -193,7 +193,7 @@ describe("AgentSession fast path", () => {
 			]),
 			// Propose concludes.
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			// finalAnswer writes the conclusion.
+			// finalReport writes the conclusion.
 			fauxAssistantMessage("the cache survives logout for 30s"),
 		]);
 
@@ -533,7 +533,7 @@ describe("AgentSession fast path", () => {
 
 		await harness.session.prompt("is the cache persistent?");
 		// Task 1 concluded via the belief loop: ephemera are still present until the next
-		// task's reset (no prune at conclude — the finalAnswer snapshot needs them).
+		// task's reset (no prune at conclude — the finalReport snapshot needs them).
 		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(1);
 
 		await harness.session.prompt("please echo hi");

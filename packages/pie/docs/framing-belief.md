@@ -97,7 +97,7 @@ their original semantics; the rule applies only to `support`.
 5. Eventually world beliefs establish both mechanisms. The model `support`s F2 with
    `evidenceBeliefIds: [W1, W2, W3]` — the now-supported world beliefs that establish both
    mechanisms — which the harness accepts as the structured discharge.
-6. No framing belief is `proposed` anymore. `conclude` is now valid → finalAnswer.
+6. No framing belief is `proposed` anymore. `conclude` is now valid → finalReport.
 
 ## Reframing vs filling (the falsifiability asymmetry)
 
@@ -138,11 +138,11 @@ all cheap:
 - **1–3 live framing beliefs, typically 1.** A set is a schema; a single revisable frame is not.
 - **Structural-only validation.** Same `validateBelief` rule as world beliefs: non-empty,
   valid domain. No content heuristic, no "must mention evidence" rule.
-- **finalAnswer consumes an explicit snapshot, not the transcript.** At the handoff the
-  harness injects a `<final_answer_context>` block — settled world beliefs with their evidence,
-  framing outcomes with their status, refuted beliefs — and the finalAnswer projection masks
+- **finalReport consumes an explicit snapshot, not the transcript.** At the handoff the
+  harness injects a `<final_report_context>` block — settled world beliefs with their evidence,
+  framing outcomes with their status, refuted beliefs — and the finalReport projection masks
   raw operational detail plus the belief bookkeeping (epistemic thinking/tool calls and the
-  `declare_belief`/`view_beliefs`/`conclude` echoes), so framing data reaches finalAnswer only
+  `declare_belief`/`view_beliefs`/`conclude` echoes), so framing data reaches finalReport only
   as completion metadata, never as an outline to write from.
 
 Accept mild drift; prevent reification.
@@ -157,9 +157,9 @@ Accept mild drift; prevent reification.
   - dispatch: exclude `domain === "framing"` from `undispatched` (Rule 1).
   - `_advanceRole`: on `concluded`, reject into a steer-back if any `proposed()` belief has
     `domain === "framing"` (Rule 2).
-  - `_concludeTransition`: on the terminal handoff, append the `<final_answer_context>` block
-    rendered by `_formatFinalAnswerContext` (settled world beliefs + framing outcomes + refuted
-    beliefs); the finalAnswer projection masks belief-tool echoes via `_maskBeliefEchoes` and
+  - `_concludeTransition`: on the terminal handoff, append the `<final_report_context>` block
+    rendered by `_formatFinalReportContext` (settled world beliefs + framing outcomes + refuted
+    beliefs); the finalReport projection masks belief-tool echoes via `_maskBeliefEchoes` and
     distills epistemic assistant turns via `_maskEpistemicAssistant`.
 - `belief-set.ts`: `_adjudicate` requires `evidenceBeliefIds` (≥1, all existing, product/code,
   supported) when supporting a framing belief; `refute`/`refine`/`retract` are unchanged.

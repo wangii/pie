@@ -6,7 +6,7 @@ import type { ToolDefinition } from "../extensions/types.ts";
  *
  * The belief loop must not infer completion from the belief set's open count: a settled
  * belief does not mean the task is answered. Completion is the model's call, expressed by
- * invoking this tool, which hands the loop to the finalAnswer role to write the conclusion.
+ * invoking this tool, which hands the loop to the finalReport role to write the conclusion.
  */
 
 const concludeSchema = Type.Object({});
@@ -24,7 +24,7 @@ export function createConcludeToolDefinition(): ToolDefinition<typeof concludeSc
 				content: [{ type: "text", text: "Investigation concluded." }],
 				details: undefined,
 				// Terminate the tool-call loop: concluding is the terminal action, so the harness
-				// hands off to the finalAnswer role on the next turn via a steering message.
+				// hands off to the finalReport role on the next turn via a steering message.
 				terminate: true,
 			};
 		},

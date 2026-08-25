@@ -373,7 +373,7 @@ const REFLECTION_MIN_SETTLED_BELIEFS = 3;
  * The belief loop's phase, as a discriminated union. Each variant carries only the
  * transient state meaningful to that phase — the execution phase owns its probe lease
  * (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while propose,
- * distill, or finalAnswer. The old single `epistemic` role is split into two steps that
+ * distill, or finalReport. The old single `epistemic` role is split into two steps that
  * run on different models: `propose` decides what to test and whether to conclude, and
  * `distill` turns each probe's report into belief updates. Task-scoped bookkeeping
  * (`_reflected`, `_dispatchedFrameIds`, `_evidenceWatermark`, `_beliefsAtTaskReset`)
@@ -385,7 +385,7 @@ type LoopState =
 	| { role: "planner" }
 	| { role: "distill" }
 	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
-	| { role: "finalAnswer" };
+	| { role: "finalReport" };
 
 /**
  * One belief-loop status slot: the model the role runs on and the cache hit rate of its most
@@ -401,7 +401,7 @@ export interface RoleStatusSlot {
 /**
  * The belief-loop status slots. `epistemic` covers the propose role only; the planner,
  * distillation, and execution slots map to the planner, distill, and execution roles. The
- * finalAnswer role and requests outside the belief loop never update a slot (see `getRoleStatus`).
+ * finalReport role and requests outside the belief loop never update a slot (see `getRoleStatus`).
  */
 export interface RoleStatus {
 	epistemic: RoleStatusSlot;
@@ -469,7 +469,7 @@ export class AgentSession {
 	private _reflected = false;
 	/**
 	 * Latest cache hit rate per belief-loop role, captured at message_end while the producing role
-	 * is still current. Only propose/distill/execution are kept — the finalAnswer role and requests
+	 * is still current. Only propose/distill/execution are kept — the finalReport role and requests
 	 * outside the belief loop never update a slot. In-memory only: session entries carry no role, so
 	 * after a reload every slot is empty until the loop produces new assistant messages.
 	 */
@@ -486,14 +486,14 @@ export class AgentSession {
 	 * bash output) has already been shown to the distill role. The distill role sees each
 	 * execution episode's raw evidence exactly once — the turn after execution produces it — then
 	 * that detail is masked so its context does not accumulate stale raw output. The propose and
-	 * finalAnswer roles mask operational detail unconditionally (their projections are append-only
+	 * finalReport roles mask operational detail unconditionally (their projections are append-only
 	 * and cacheable); only the distill role consults this marker. Advances when the frame is
 	 * dispatched (moves on to the next episode).
 	 */
 	private _evidenceWatermark = 0;
 	/**
 	 * Set when a follow-up user message is queued while the previous loop is concluding
-	 * (`_role === "finalAnswer"`). Consumed on delivery in `_advanceRole` to reset the loop
+	 * (`_role === "finalReport"`). Consumed on delivery in `_advanceRole` to reset the loop
 	 * for the new task; the idle path resets inline in `prompt()` instead.
 	 */
 	private _pendingNewTask = false;
@@ -778,7 +778,7 @@ export class AgentSession {
 	 * - execution: the belief *mutation* echo (declare_belief) is masked so the probe role is
 	 *   not tempted to propose/update beliefs, but the read-only `view_beliefs` stays visible so
 	 *   it can recall the belief it is testing; raw operational detail stays.
-	 * - finalAnswer: raw operational detail is discarded; the settled beliefs remain.
+	 * - finalReport: raw operational detail is discarded; the settled beliefs remain.
 	 */
 	private _projectContextMessages(): AgentMessage[] {
 		if (!this._beliefSetUsable) {
@@ -788,7 +788,7 @@ export class AgentSession {
 	}
 
 	/** Project the full transcript for an explicit role (used to size each role's context). */
-	private _projectMessagesFor(role: "propose" | "planner" | "distill" | "execution" | "finalAnswer"): AgentMessage[] {
+	private _projectMessagesFor(role: "propose" | "planner" | "distill" | "execution" | "finalReport"): AgentMessage[] {
 		const elidedProbeToolCalls = this._elidedProbeToolCallIds();
 		return this.agent.state.messages
 			.map((message, index) => this._projectMessage(message, index, role, elidedProbeToolCalls))
@@ -800,7 +800,7 @@ export class AgentSession {
 	private _projectMessage(
 		message: AgentMessage,
 		index: number,
-		role: "propose" | "planner" | "distill" | "execution" | "finalAnswer",
+		role: "propose" | "planner" | "distill" | "execution" | "finalReport",
 		elidedProbeToolCalls: Set<string>,
 	): AgentMessage | undefined {
 		// The projection per role is declared in ROLE_SPECS; the masking helpers below implement
@@ -819,14 +819,14 @@ export class AgentSession {
 				return this._maskOperationalDetail(message, index < this._evidenceWatermark, elidedProbeToolCalls, true);
 			case "execution":
 				return this._maskBeliefBookkeeping(message);
-			case "finalAnswer": {
+			case "finalReport": {
 				// Raw operational detail is discarded, and the belief tools' echoes are masked too:
-				// the finalAnswer role reads the explicit final-answer context injected at the
+				// the finalReport role reads the explicit final-report context injected at the
 				// handoff instead of whatever declare_belief/view_beliefs results happen to survive.
 				const masked = this._maskOperationalDetail(message, true, elidedProbeToolCalls);
 				if (masked === undefined) return undefined;
 				// Epistemic assistant turns are distilled too (thinking + every belief tool call
-				// dropped, text kept): finalAnswer has no tools and grounds on the snapshot, so the
+				// dropped, text kept): finalReport has no tools and grounds on the snapshot, so the
 				// propose/distill bookkeeping — including a read-only `view_beliefs` call whose result
 				// `_maskBeliefEchoes` masks — must not survive as a dangling tool call.
 				const stripped = masked.role === "assistant" ? this._maskEpistemicAssistant(masked, false) : masked;
@@ -867,7 +867,7 @@ export class AgentSession {
 	 *   age-independent;
 	 * - a tool result whose call was elided (a probe tool, or a belief tool called inside a probe
 	 *   turn) is folded into a plain text note — masked to a placeholder only when `maskResult` is
-	 *   true. The propose/finalAnswer roles pass `true` unconditionally (append-only, cacheable);
+	 *   true. The propose/finalReport roles pass `true` unconditionally (append-only, cacheable);
 	 *   the distill role passes `index < watermark` so it sees the current episode's raw evidence
 	 *   once, then it is masked.
 	 */
@@ -899,7 +899,7 @@ export class AgentSession {
 				return maskResult ? { ...message, output: "[output omitted]" } : message;
 			case "assistant":
 				// The probe (execution) role's assistant turns carry raw operational detail the
-				// epistemic/finalAnswer roles must not accumulate: its internal reasoning
+				// epistemic/finalReport roles must not accumulate: its internal reasoning
 				// (thinking) and its tool calls. Drop those, but keep the textual report — that is
 				// the distilled uplink the epistemic role updates on. The propose/distill views
 				// additionally strip the epistemic roles' own plaintext thinking (their belief
@@ -926,7 +926,7 @@ export class AgentSession {
 		return message.content.some((block) => block.type === "toolCall" && this._isProbeTool(block.name));
 	}
 
-	/** Distill a probe-role assistant turn for the epistemic/finalAnswer view: drop its
+	/** Distill a probe-role assistant turn for the epistemic/finalReport view: drop its
 	 *  thinking blocks and its tool calls entirely, keeping only the textual report. Eliding the
 	 *  call (rather than renaming it) is what stops a role from imitating the probe — and what
 	 *  keeps the transcript free of tool-call names the provider may reject. */
@@ -999,7 +999,7 @@ export class AgentSession {
 	 *  the call (rather than renaming it) is what stops the role from imitating the bookkeeping —
 	 *  and what keeps the transcript free of tool-call names the provider may reject. The
 	 *  read-only `view_beliefs` call is kept for the execution role (`keepViewBeliefs`, the
-	 *  default), which needs it to recall the frame it is probing; finalAnswer drops it too,
+	 *  default), which needs it to recall the frame it is probing; finalReport drops it too,
 	 *  since it has no tools and its `view_beliefs` result is masked to a note. */
 	private _maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = true): AssistantMessage | undefined {
 		const content: AssistantMessage["content"] = [];
@@ -1019,7 +1019,7 @@ export class AgentSession {
 		return content.length > 0 ? { ...message, content } : undefined;
 	}
 
-	/** Mask the belief tools' echo from a finalAnswer message: the explicit final-answer context
+	/** Mask the belief tools' echo from a finalReport message: the explicit final-report context
 	 *  injected at the handoff replaces incidental `declare_belief`/`view_beliefs`/`conclude`
 	 *  results, which may be stale or partial, so they are dropped here rather than left to be read
 	 *  as facts. `conclude` is included so its "Investigation concluded." result does not orphan
@@ -1118,7 +1118,7 @@ export class AgentSession {
 					? "EXECUTING"
 					: role === "distill"
 						? "DISTILLING"
-						: role === "finalAnswer"
+						: role === "finalReport"
 							? "CLOSED"
 							: "PROPOSING";
 		this._emit({ type: "CursorChanged", frameId: this._taskId, stage });
@@ -1209,7 +1209,7 @@ export class AgentSession {
 				if (!ranTools) {
 					// Accept a direct answer without steering — unlike the `conclude` path, the
 					// answer already exists, so "Write your conclusion." would be redundant.
-					return { state: { role: "finalAnswer" } };
+					return { state: { role: "finalReport" } };
 				}
 				// No beliefs yet, but the model just acted (e.g. `view_beliefs` on an empty set):
 				// stay propose — it is bootstrapping, not concluding.
@@ -1352,7 +1352,7 @@ export class AgentSession {
 				}
 				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
 			}
-			case "finalAnswer":
+			case "finalReport":
 				return { state };
 		}
 	}
@@ -1390,24 +1390,24 @@ export class AgentSession {
 			this._reflected = true;
 			return { state, steer: TRANSITION_STEERS.reflection };
 		}
-		// The terminal handoff: the finalAnswer role has no tools and the belief set is never
+		// The terminal handoff: the finalReport role has no tools and the belief set is never
 		// injected into the system prompt, so it must receive an explicit, current snapshot of
 		// what it is to ground the conclusion on — instead of whatever declare_belief/view_beliefs
 		// echoes happen to survive in the masked transcript.
 		return {
-			state: { role: "finalAnswer" },
-			steer: `${TRANSITION_STEERS.writeConclusion}\n\n${this._formatFinalAnswerContext()}`,
+			state: { role: "finalReport" },
+			steer: `${TRANSITION_STEERS.writeConclusion}\n\n${this._formatFinalReportContext()}`,
 		};
 	}
 
-	/** Render the explicit final-answer context: the settled world beliefs (with their evidence),
+	/** Render the explicit final-report context: the settled world beliefs (with their evidence),
 	 *  the framing outcomes, and the refuted beliefs the answer must not treat as facts. */
-	private _formatFinalAnswerContext(): string {
+	private _formatFinalReportContext(): string {
 		const beliefs = this._beliefSet.beliefs;
 		const settledWorld = beliefs.filter((b) => statusOf(b) === "supported" && b.domain !== "framing");
 		const framingOutcomes = beliefs.filter((b) => b.domain === "framing" && statusOf(b) !== "proposed");
 		const refuted = beliefs.filter((b) => statusOf(b) === "refuted");
-		const lines: string[] = ["<final_answer_context>"];
+		const lines: string[] = ["<final_report_context>"];
 		if (settledWorld.length > 0) {
 			lines.push("Settled world beliefs:");
 			for (const b of settledWorld) {
@@ -1436,7 +1436,7 @@ export class AgentSession {
 				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
 			}
 		}
-		lines.push("</final_answer_context>");
+		lines.push("</final_report_context>");
 		return lines.join("\n");
 	}
 
@@ -1941,18 +1941,18 @@ export class AgentSession {
 	 * models from settings: the execution (probe) role on `pie.executionModel`, the distill
 	 * (prediction-error) role on `pie.distillationModel` (defaulting to `defaultModel`, so the
 	 * distillation stays on the strong default model even when the probe runs on a cheaper one),
-	 * the planner on `pie.plannerModel`, and the finalAnswer (conclusion) role on
+	 * the planner on `pie.plannerModel`, and the finalReport (conclusion) role on
 	 * `pie.fastPathModel`. The propose role — and any turn outside the belief loop — uses the
 	 * session's main model (`defaultModel`). Only the next request's model is overridden —
 	 * `state.model` is left untouched so footer/compaction/context-window keep the main model
 	 * as their baseline.
 	 */
 	private _roleModelFor(
-		role: "propose" | "planner" | "distill" | "execution" | "finalAnswer",
+		role: "propose" | "planner" | "distill" | "execution" | "finalReport",
 	): Model<any> | undefined {
 		if (this._beliefSetUsable) {
 			// The model policy per role is declared in ROLE_SPECS; execution, distill, the planner,
-			// and finalAnswer may run on separately configured models from settings. The fast path
+			// and finalReport may run on separately configured models from settings. The fast path
 			// runs the execution role on `pie.fastPathModel`; the first propose turn of a task (its
 			// routing turn) runs on the configured `defaultModel` rather than the session model.
 			const policy = ROLE_SPECS[role].modelPolicy;
@@ -2215,10 +2215,10 @@ export class AgentSession {
 			if (event.message.role === "assistant") {
 				// Capture the latest cache hit rate under the role that produced this request.
 				// `_role` is still the producing role here — `_advanceRole` only runs in the next
-				// turn's prepareNextTurnWithContext. finalAnswer and non-belief-loop requests
+				// turn's prepareNextTurnWithContext. finalReport and non-belief-loop requests
 				// (idle/plain turns keep `_role` at the initial "propose") never update a slot.
 				const role = this._role;
-				if (this._beliefSetUsable && role !== "finalAnswer") {
+				if (this._beliefSetUsable && role !== "finalReport") {
 					const usage = (event.message as AssistantMessage).usage;
 					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 					if (promptTokens > 0) {
@@ -2743,7 +2743,7 @@ export class AgentSession {
 			// while the previous loop is concluding must reset the loop when it is delivered, so
 			// mark it here; `_advanceRole` consumes the flag on delivery.
 			if (this.isStreaming) {
-				if (this._role === "finalAnswer") {
+				if (this._role === "finalReport") {
 					this._pendingNewTask = true;
 				}
 				if (!options?.streamingBehavior) {
@@ -2839,10 +2839,10 @@ export class AgentSession {
 				this._systemPromptOverride = undefined;
 			}
 			// A fresh user task after the previous loop concluded re-runs the belief loop
-			// from the epistemic role instead of staying parked in the no-tools finalAnswer
+			// from the epistemic role instead of staying parked in the no-tools finalReport
 			// role. The belief set is retained as session knowledge — the task-end prune
 			// keeps only settled product/code records — and the loop resets.
-			if (this._role === "finalAnswer") {
+			if (this._role === "finalReport") {
 				this._resetLoopForNewTask();
 			}
 			this._applyRoleSurface();
@@ -4907,7 +4907,7 @@ export class AgentSession {
 	 * the footer and the `/session` panel. Models resolve per the documented fallback chain
 	 * (`pie.executionModel`/`pie.distillationModel`, defaulting to the session's main model); cache
 	 * hit rates come from the in-memory snapshot captured at message_end under the producing role.
-	 * The finalAnswer role and requests outside the belief loop never update a slot, and after a
+	 * The finalReport role and requests outside the belief loop never update a slot, and after a
 	 * reload all rates are undefined until the loop produces new requests. Returns undefined when
 	 * the belief loop is not usable, mirroring `getRoleContextUsage`.
 	 */

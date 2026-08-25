@@ -4,7 +4,7 @@
 > `role-specs.ts`, `belief-set.ts`, and the belief tools.
 
 The belief loop has four phases plus a batching planner step between propose and
-execution (propose → planner → execution → distill → finalAnswer). Their policy is
+execution (propose → planner → execution → distill → finalReport). Their policy is
 declared centrally in `src/core/role-specs.ts` (`ROLE_SPECS` + `TRANSITION_STEERS`)
 so prompts, tool surfaces, model selection, and message projections cannot drift
 apart.
@@ -64,11 +64,11 @@ apart.
 | `two-role loop` | four-phase loop | the loop has four phases, not two |
 | — | `planner` | groups the open beliefs into one execution batch per turn (direct `Batch:` output; no tools); a single open belief or a failed selection falls back to the whole-frame dispatch |
 | — | `execution` | probes by observation or minimal intervention and reports raw observations |
-| — | `finalAnswer` | writes the conclusion from the injected snapshot |
+| — | `finalReport` | writes the conclusion from the injected snapshot |
 
 ## The five roles
 
-| | `propose` | `planner` | `execution` | `distill` | `finalAnswer` |
+| | `propose` | `planner` | `execution` | `distill` | `finalReport` |
 |---|---|---|---|---|---|
 | job | decide what to test; open/close framing obligations | group the open beliefs into the next execution batch (one batch per turn) | probe the belief's referent; intervene minimally when the intended outcome requires an actual change | turn the observation into belief updates | write the conclusion |
 | tools | `declare_belief` `view_beliefs` `conclude` | none (open beliefs injected directly) | all active tools except `declare_belief`/`conclude` + `view_beliefs` | `declare_belief` `view_beliefs` `conclude` | none |
@@ -111,22 +111,22 @@ The state machine lives in `_transition`; every steer text lives in `TRANSITION_
   residual."). The execution lease is `ceil(sum(evidenceRounds) × 1.3)` tool results; at
   exhaustion it nudges once (`leaseNudge`), then forces the return.
 - distill → propose: `deepenOrConclude`, or `openBeliefs` while any belief is still open.
-- propose/distill → finalAnswer (via `conclude`): gated — open framing obligations or open
+- propose/distill → finalReport (via `conclude`): gated — open framing obligations or open
   world beliefs block it (`concludePremature`); a one-time `reflection` steer (coverage /
   composition / completeness) fires when the task produced beliefs; the second `conclude`
-  delivers `writeConclusion` plus the `<final_answer_context>` snapshot.
+  delivers `writeConclusion` plus the `<final_report_context>` snapshot.
 
-## FinalAnswerContext
+## FinalReportContext
 
-The finalAnswer role has no tools and the belief set is never injected into the system
+The finalReport role has no tools and the belief set is never injected into the system
 prompt, so the terminal handoff injects an explicit snapshot
-(`_formatFinalAnswerContext` in `agent-session.ts`):
+(`_formatFinalReportContext` in `agent-session.ts`):
 
 - settled world beliefs (statement, expectation, evidence),
 - framing outcomes (statement, status, discharge evidence),
 - refuted beliefs (to be treated as non-facts).
 
-The finalAnswer projection (`projection: "finalAnswer"`) masks raw operational detail, distills
+The finalReport projection (`projection: "finalReport"`) masks raw operational detail, distills
 epistemic assistant turns (`_maskEpistemicAssistant` — thinking and every belief tool call
 dropped, text kept), and masks every belief-tool echo (`_maskBeliefEchoes`, now including
 `conclude`), so the conclusion is grounded in the snapshot, not in whatever tool results or
