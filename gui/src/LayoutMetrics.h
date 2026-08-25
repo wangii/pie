@@ -50,10 +50,11 @@ struct LayoutMetrics {
 inline LayoutMetrics computeLayout(float winW, float winH, float rowH) {
     LayoutMetrics m;
     m.headerH = (rowH * 2.) * 1.2f;
-    m.summaryH = rowH * 2.0f;
+    m.summaryH = rowH;
+
     // Footer is a compact row at the very bottom; budget a couple of font rows
     // (one per line of the per-phase model/cache summary plus the cost line).
-    m.footerH = rowH * 1.6f;
+    m.footerH = rowH * 1.2f;
 
     float availH = std::max(0.0f, winH - (m.headerH + m.summaryH + m.footerH + m.pad * 4));
     m.laneH = std::max(m.minLaneH, availH);

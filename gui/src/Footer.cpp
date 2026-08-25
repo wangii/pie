@@ -1,6 +1,7 @@
 // PIE Native GUI - bottom footer component.
 #include "Footer.h"
 
+#include <cstring>
 #include <imgui.h>
 
 #include <string>
@@ -15,7 +16,14 @@ namespace {
 // Undefined model / cache hit rate render as the em-dash placeholder, matching
 // the TUI footer (formatRoleSlotLine).
 void renderRoleSlot(const char* label, const RoleFooterSlot& slot) {
-    ImGui::TextUnformatted(label);
+
+    char name[6];
+    name[0] = '[';
+    name[4] = ']';
+    name[5] = 0;
+    std::strncpy(&name[1], label, 3);
+
+    ImGui::TextUnformatted(name);
     ImGui::SameLine();
     ImGui::TextUnformatted(":");
     ImGui::SameLine();

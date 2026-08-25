@@ -12,10 +12,10 @@ namespace pie::gui {
 
 void renderSummary(const pie::gui::NativeGuiModel& m, int viewId) {
     const auto* f = displayedFrame(m, viewId);
-    ImGui::TextUnformatted("CURRENT FRAME");
-    ImGui::SameLine();
-    if (f) ImGui::TextDisabled("#%d", f->id);
-    ImGui::Separator();
+    // ImGui::TextUnformatted("CURRENT FRAME");
+    // ImGui::SameLine();
+    // if (f) ImGui::TextDisabled("#%d", f->id);
+    // ImGui::Separator();
     if (!f) { ImGui::TextDisabled("(no frame)"); return; }
 
     // B42 + B47 -> intent -> N steps -> distillation -> {proposals}
