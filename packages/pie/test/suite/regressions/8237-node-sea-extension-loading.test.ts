@@ -45,6 +45,6 @@ describe("Node SEA extension loading", () => {
 		expect(options.tryNative).toBe(false);
 		expect(options.alias).toBeUndefined();
 		expect(options.virtualModules?.typebox).toBeDefined();
-		expect(options.virtualModules?.["@earendil-works/pi-pie"]).toBeDefined();
+		expect(options.virtualModules?.["@wangii/pie"]).toBeDefined();
 	});
 });

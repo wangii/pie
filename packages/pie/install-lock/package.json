@@ -1,10 +1,10 @@
 {
-	"name": "@earendil-works/pi-pie-install",
+	"name": "@wangii/pie-install",
 	"version": "0.84.2",
 	"private": true,
 	"description": "Lockfile root used by the Pi installer and updater.",
 	"dependencies": {
-		"@earendil-works/pi-pie": "0.84.2"
+		"@wangii/pie": "0.84.2"
 	},
 	"overrides": {
 		"protobufjs": "7.6.5",

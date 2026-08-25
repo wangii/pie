@@ -31,7 +31,7 @@ Extensions can register either a complete pi-ai `Provider` or use the legacy pro
 
 ```typescript
 import { createProvider, openAICompletionsApi } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-pie";
+import type { ExtensionAPI } from "@wangii/pie";
 
 export default function (pi: ExtensionAPI) {
   pi.registerProvider(createProvider({
@@ -122,7 +122,7 @@ To add a completely new provider, specify `models` along with the required confi
 If the model list comes from a remote endpoint, use an async extension factory:
 
 ```typescript
-import type { ExtensionAPI } from "@earendil-works/pi-pie";
+import type { ExtensionAPI } from "@wangii/pie";
 
 export default async function (pi: ExtensionAPI) {
   const response = await fetch("http://localhost:1234/v1/models");

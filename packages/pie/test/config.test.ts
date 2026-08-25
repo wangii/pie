@@ -152,8 +152,8 @@ describe("detectInstallMethod", () => {
 		);
 
 		expect(detectInstallMethod()).toBe("pnpm");
-		expect(getUpdateInstruction("@earendil-works/pi-pie")).toBe(
-			"Run: pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @earendil-works/pi-pie",
+		expect(getUpdateInstruction("@wangii/pie")).toBe(
+			"Run: pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @wangii/pie",
 		);
 	});
 
@@ -161,53 +161,37 @@ describe("detectInstallMethod", () => {
 		setExecPath("/usr/local/bin/node");
 
 		expect(detectInstallMethod()).toBe("unknown");
-		expect(getSelfUpdateCommand("@earendil-works/pi-pie")).toBeUndefined();
-		expect(getUpdateInstruction("@earendil-works/pi-pie")).toBe(
-			"Update @earendil-works/pi-pie using the package manager, wrapper, or source checkout that provides this installation.",
+		expect(getSelfUpdateCommand("@wangii/pie")).toBeUndefined();
+		expect(getUpdateInstruction("@wangii/pie")).toBe(
+			"Update @wangii/pie using the package manager, wrapper, or source checkout that provides this installation.",
 		);
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-pie");
+		const command = getSelfUpdateCommand("@wangii/pie");
 
 		expect(detectInstallMethod()).toBe("npm");
 		expect(command).toEqual({
 			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@earendil-works/pi-pie",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-pie`,
+			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "@wangii/pie"],
+			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @wangii/pie`,
 		});
 	});
 
 	test("self-updates exact npm versions without uninstalling the current package", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-pie", undefined, {
-			packageName: "@earendil-works/pi-pie",
-			installSpec: "@earendil-works/pi-pie@1.2.3",
+		const command = getSelfUpdateCommand("@wangii/pie", undefined, {
+			packageName: "@wangii/pie",
+			installSpec: "@wangii/pie@1.2.3",
 		});
 
 		expect(command).toEqual({
 			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@earendil-works/pi-pie@1.2.3",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-pie@1.2.3`,
+			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "@wangii/pie@1.2.3"],
+			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @wangii/pie@1.2.3`,
 		});
 	});
 
@@ -238,27 +222,19 @@ describe("detectInstallMethod", () => {
 	test("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-pie", ["npm", "--prefix", prefix]);
+		const command = getSelfUpdateCommand("@wangii/pie", ["npm", "--prefix", prefix]);
 
 		expect(command).toEqual({
 			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@earendil-works/pi-pie",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-pie`,
+			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "@wangii/pie"],
+			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @wangii/pie`,
 		});
 	});
 
 	test("self-update treats empty npmCommand as unset", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-pie", []);
+		const command = getSelfUpdateCommand("@wangii/pie", []);
 
 		expect(command?.args).toEqual([
 			"--prefix",
@@ -267,17 +243,17 @@ describe("detectInstallMethod", () => {
 			"-g",
 			"--ignore-scripts",
 			"--min-release-age=0",
-			"@earendil-works/pi-pie",
+			"@wangii/pie",
 		]);
 	});
 
 	test("quotes npm self-update display paths", () => {
 		const { prefix } = createNpmPrefixInstall("pi prefix ");
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-pie");
+		const command = getSelfUpdateCommand("@wangii/pie");
 
 		expect(command?.display).toBe(
-			`npm --prefix "${prefix}" install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-pie`,
+			`npm --prefix "${prefix}" install -g --ignore-scripts --min-release-age=0 @wangii/pie`,
 		);
 	});
 
@@ -287,21 +263,21 @@ describe("detectInstallMethod", () => {
 		setExecPath(`${packageDir}\\dist\\cli.js`);
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(getUpdateInstruction("@earendil-works/pi-pie")).toBe(
-			"Run: npm install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-pie",
+		expect(getUpdateInstruction("@wangii/pie")).toBe(
+			"Run: npm install -g --ignore-scripts --min-release-age=0 @wangii/pie",
 		);
 	});
 
 	test("self-updates bun global installs from bun pm bin", () => {
 		createBunGlobalInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-pie");
+		const command = getSelfUpdateCommand("@wangii/pie");
 
 		expect(detectInstallMethod()).toBe("bun");
 		expect(command).toEqual({
 			command: "bun",
-			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@earendil-works/pi-pie"],
-			display: "bun install -g --ignore-scripts --minimum-release-age=0 @earendil-works/pi-pie",
+			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@wangii/pie"],
+			display: "bun install -g --ignore-scripts --minimum-release-age=0 @wangii/pie",
 		});
 	});
 
@@ -335,7 +311,7 @@ describe("detectInstallMethod", () => {
 		const temp = mkdtempSync(join(tmpdir(), "pi-pnpm11-"));
 		const binDir = join(temp, "bin");
 		const root = join(temp, "Library", "pnpm", "global", "v11");
-		const packageName = "@earendil-works/pi-pie";
+		const packageName = "@wangii/pie";
 		const globalPackageDir = join(root, "11e9a", "node_modules", "@earendil-works", "pi-coding-agent");
 		const storePackageDir = join(
 			temp,
@@ -429,9 +405,7 @@ describe("detectInstallMethod", () => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 
-		expect(getSelfUpdateCommand("@earendil-works/pi-pie")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("@earendil-works/pi-pie")).toContain(
-			"the install path is not writable",
-		);
+		expect(getSelfUpdateCommand("@wangii/pie")).toBeUndefined();
+		expect(getSelfUpdateUnavailableInstruction("@wangii/pie")).toContain("the install path is not writable");
 	});
 });

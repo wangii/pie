@@ -1,11 +1,11 @@
 {
-	"name": "@earendil-works/pi-pie",
+	"name": "@wangii/pie",
 	"version": "0.84.2",
 	"lockfileVersion": 3,
 	"requires": true,
 	"packages": {
 		"": {
-			"name": "@earendil-works/pi-pie",
+			"name": "@wangii/pie",
 			"version": "0.84.2",
 			"license": "MIT",
 			"dependencies": {

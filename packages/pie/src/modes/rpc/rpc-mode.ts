@@ -354,6 +354,28 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
 			output(toJsonEvent(event));
+
+			// Push footer telemetry (per-belief-loop-role model + cache hit rate and
+			// session cost) to the native GUI. getRoleStatus() resolves the model per
+			// the documented fallback chain and latestCacheHitRate from the in-memory
+			// per-role snapshot; getSessionStats().cost is the accumulated session
+			// cost. Emitted after every event so the footer stays current.
+			const roleStatus = session.getRoleStatus();
+			if (roleStatus) {
+				const stats = session.getSessionStats();
+				output({
+					type: "session_status",
+					roleStatus,
+					cost: stats.cost,
+					tokens: {
+						input: stats.tokens.input,
+						output: stats.tokens.output,
+						cacheRead: stats.tokens.cacheRead,
+						cacheWrite: stats.tokens.cacheWrite,
+					},
+				});
+			}
+
 			if (event.type === "agent_settled") {
 				void checkShutdownRequested();
 			}
