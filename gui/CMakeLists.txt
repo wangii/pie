@@ -1,26 +1,44 @@
 cmake_minimum_required(VERSION 3.24)
-project(pi_gui LANGUAGES CXX C)
+# OBJC and OBJCXX both enabled: CMake maps .m -> OBJC (Objective-C) and .mm /
+# App.cpp -> OBJCXX (Objective-C++) by extension, so GLFW's .m files compile as
+# Objective-C (lenient void* conversions) while the OSX backend and App.cpp
+# compile as Objective-C++.
+project(pi_gui LANGUAGES CXX C OBJC OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# GLFW (system pkg-config lacks glfw3; vendor exactly like coach-desktop)
-FetchContent_Declare(
-    glfw
-    URL https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
-)
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(glfw)
+# GLFW (system pkg-config lacks glfw3; vendor exactly like coach-desktop).
+# Only needed on non-Apple (the GLFW/OpenGL3 path); the Apple build is a native
+# Cocoa/MTKView shell with OSX + Metal and does not use GLFW.
+if(NOT APPLE)
+    FetchContent_Declare(
+        glfw
+        URL https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
+    )
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glfw)
+endif()
 
-# Dear ImGui (glfw + opengl3 backends), exact coach-desktop version
+# Do NOT enable OBJCXX at project scope: with OBJC unset, CMake maps GLFW's .m
+# sources to the OBJCXX compiler, breaking cocoa_monitor.m's implicit void* ->
+# typed-pointer casts. Only App.cpp needs Objective-C++ (see below); the OSX .mm
+# maps to OBJCXX automatically.
+#
+# On Apple the ImGui backend is the OSX + Metal pair with a native Cocoa shell,
+# so GLFW and the OpenGL renderer are only needed on non-Apple platforms.
+# Fetch GLFW unconditionally is harmless but wasteful; keep it for the non-Apple
+# branch below.
+
+# Dear ImGui (glfw + opengl3 backends, plus OSX on Apple), exact coach-desktop version
 FetchContent_Declare(
     imgui
-    URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.5.zip
+    URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9.zip
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -34,22 +52,38 @@ add_library(imgui_backend STATIC
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
     ${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp
 )
+if(APPLE)
+    # macOS: native Cocoa/MTKView shell; OSX is the ImGui platform backend and
+    # Metal is the renderer. No GLFW/OpenGL here.
+    target_sources(imgui_backend PRIVATE
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_osx.mm
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm)
+    target_link_libraries(imgui_backend PUBLIC
+        "-framework Cocoa" "-framework Metal" "-framework MetalKit"
+        "-framework QuartzCore" "-framework GameController" "-framework Carbon")
+else()
+    # Non-Apple: GLFW is the ImGui platform backend; OpenGL3 is the renderer.
+    target_sources(imgui_backend PRIVATE
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_link_libraries(imgui_backend PUBLIC glfw)
+endif()
 target_compile_definitions(imgui_backend PUBLIC IMGUI_ENABLE_FREETYPE)
 target_include_directories(imgui_backend PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
-target_link_libraries(imgui_backend PUBLIC glfw)
 
 # FreeType is required to load the TTC (Sarasa Term SC Nerd) font collection.
 find_package(Freetype REQUIRED)
 target_link_libraries(imgui_backend PUBLIC Freetype::Freetype)
 
-find_package(OpenGL REQUIRED)
+# OpenGL is only required on non-Apple (the GLFW/OpenGL3 renderer path).
+if(NOT APPLE)
+    find_package(OpenGL REQUIRED)
+endif()
 
 # ---------------------------------------------------------------------------
 # Model layer: headless, no ImGui dependency. Unit-testable without a window.
@@ -99,13 +133,20 @@ add_executable(pie_gui
     src/Paths.cpp
     src/RuntimeClient.cpp
 )
-target_include_directories(pie_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(pie_gui PRIVATE pi_gui_model imgui_backend OpenGL::GL)
-target_include_directories(pie_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
-
 if(APPLE)
+    target_sources(pie_gui PRIVATE src/plats/macos/MetalBackend.mm)
+    set_source_files_properties(src/plats/macos/MetalBackend.mm PROPERTIES LANGUAGE OBJCXX)
+    # Native Cocoa shell + Metal renderer: no OpenGL/GLFW on the Apple path.
+    target_link_libraries(pie_gui PRIVATE
+        "-framework Cocoa" "-framework Metal" "-framework MetalKit" "-framework QuartzCore")
+else()
+    target_sources(pie_gui PRIVATE src/plats/glfw/GLFWPlatform.cpp)
+    target_link_libraries(pie_gui PRIVATE OpenGL::GL)
     target_compile_definitions(pie_gui PRIVATE GL_SILENCE_DEPRECATION)
 endif()
+target_include_directories(pie_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(pie_gui PRIVATE pi_gui_model imgui_backend)
+target_include_directories(pie_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
 
 # SDK entry: repo root is one level above this gui/ dir.
 add_compile_definitions(

@@ -395,6 +395,52 @@ int main() {
         check(f2.sessionCost == 0.0, "absent cost -> 0");
     }
 
+    // ---------------------------------------------------------------------
+    // Per-role context length: session_status roleUsage -> roleContext on the model.
+    // ---------------------------------------------------------------------
+    {
+        pie::gui::NativeGuiModel rpc;
+        const char* usageLine =
+            R"({"type":"session_status","roleStatus":{},"roleUsage":{"epistemic":{"tokens":4321,"contextWindow":200000,"percent":2.16},"execution":{"tokens":51234,"contextWindow":200000,"percent":25.62}},"cost":0})";
+        check(pie::gui::applyRpcLine(rpc, usageLine) == pie::gui::RpcApplyResult::Applied,
+              "session_status roleUsage applied");
+        const pie::gui::RoleContextUsagePair& rc = rpc.roleContext();
+        check(rc.hasData, "roleUsage sets hasData");
+        check(rc.epistemic.tokens == 4321, "epistemic tokens parsed");
+        check(rc.epistemic.contextWindow == 200000, "epistemic context window");
+        check(rc.execution.tokens == 51234, "execution tokens parsed");
+        check(rc.execution.percent == 25.62, "execution percent parsed");
+        check(rc.epistemic.valid() && rc.execution.valid(), "both roles valid");
+
+        // A roleUsage with null tokens (unknown) leaves the negative placeholder.
+        pie::gui::NativeGuiModel rpc2;
+        const char* nullLine =
+            R"({"type":"session_status","roleStatus":{},"roleUsage":{"epistemic":{"tokens":null,"contextWindow":200000,"percent":null},"execution":{"tokens":51234,"contextWindow":200000,"percent":25.62}},"cost":0})";
+        check(pie::gui::applyRpcLine(rpc2, nullLine) == pie::gui::RpcApplyResult::Applied,
+              "null-token roleUsage applied");
+        const pie::gui::RoleContextUsagePair& rc2 = rpc2.roleContext();
+        check(rc2.hasData, "null-token sets hasData");
+        check(!rc2.epistemic.valid() && rc2.epistemic.tokens < 0, "null epistemic tokens -> placeholder");
+        check(rc2.execution.valid(), "execution still valid");
+
+        // A later session_status without roleUsage must clear (not retain) the
+        // previously cached role context, so the status bar shows no stale value.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"session_status","roleStatus":{},"cost":0})") ==
+                  pie::gui::RpcApplyResult::Applied,
+              "absence: roleUsage-less session_status applied");
+        check(!rpc.roleContext().hasData, "absence: roleUsage cleared after missing roleUsage");
+        // Reset also clears the cached role context (seed with a fresh, valid pair
+        // rather than the reference aliasing the model's own field).
+        pie::gui::RoleContextUsagePair seeded;
+        seeded.epistemic.tokens = 100;
+        seeded.execution.tokens = 200;
+        seeded.hasData = true;
+        rpc.setRoleContext(seeded);
+        check(rpc.roleContext().hasData, "seeded roleContext before reset");
+        rpc.reset();
+        check(!rpc.roleContext().hasData, "reset clears roleContext");
+    }
+
     if (failures == 0) std::printf("ALL PASS\n");
     else std::printf("%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;

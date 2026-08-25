@@ -56,12 +56,15 @@ GLFW / OpenGL (current); SDL3/SDL_GPU (future)
 ### Technology stack (spec 25)
 
 - Language: C++20.
-- GUI: Dear ImGui (v1.92.5, `glfw`/`opengl3` backends).
-- Window / input: GLFW.
-- Rendering: OpenGL.
-- Build: CMake (FetchContent vendors GLFW 3.4 and ImGui).
+- GUI: Dear ImGui (v1.92.9).
+- ImGui platform backend: on macOS the official `imgui_impl_osx` backend; on
+  other platforms the `glfw` backend.
+- ImGui renderer: on macOS `imgui_impl_metal`; on other platforms `imgui_impl_opengl3`.
+- Window / input: on macOS a native NSWindow + MTKView; on other platforms GLFW.
+- Build: CMake (FetchContent vendors GLFW 3.4 and ImGui). Platform sources live
+  in `src/plats/` (macOS Metal backend, GLFW backend), selected by APPLE.
 - macOS is the primary target; Windows/Linux are kept cross-platform via the
-  conditional compile path. A thin Objective-C++/AppKit shell is a future option.
+  conditional compile path.
 
 ### Font asset and FreeType (foundational)
 

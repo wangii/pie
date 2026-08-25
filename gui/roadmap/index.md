@@ -46,8 +46,10 @@ spec sections and source files.
   log. All such state comes only from the runtime event stream.
 - `Proposal != BeliefUpdate`: `ProposalCreated` appends a proposal; only
   `BeliefUpdated` mutates belief state. Closed-frame history is immutable.
-- The GUI keeps the GLFW + Dear ImGui + OpenGL3 backend (per spec §25 this stack
-  is a recommendation, not a hard requirement; SDL3/SDL_GPU is a future option).
+- The GUI keeps a platform layer (`src/plats/`): a native Cocoa/MTKView shell
+  with `imgui_impl_osx` + `imgui_impl_metal` on macOS, and the `glfw`/`opengl3`
+  backend on other platforms (per spec §25 this stack is a recommendation, not a
+  hard requirement; SDL3/SDL_GPU is a future option).
 
 ## Navigation
 

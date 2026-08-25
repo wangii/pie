@@ -89,6 +89,24 @@ struct RoleFooterSlot {
     float cacheHitRate = -1.0f;  // percentage, or negative when undefined
 };
 
+// Per-role context usage (the "current context length" for one belief-loop
+// role), populated from the runtime's session_status "roleUsage" field.
+// tokens/percent are negative when the runtime reports null (unknown).
+struct RoleContextUsage {
+    long tokens = -1;        // estimated context tokens, or negative when unknown
+    long contextWindow = 0;  // model context window
+    double percent = -1.0;   // percent of window, or negative when unknown
+    bool valid() const { return tokens >= 0; }
+};
+
+// The two belief-loop roles the status bar shows its context length for:
+// epistemic (propose) and execution. Populated from session_status "roleUsage".
+struct RoleContextUsagePair {
+    RoleContextUsage epistemic;
+    RoleContextUsage execution;
+    bool hasData = false;  // true once at least one roleUsage event arrived
+};
+
 // The bottom footer telemetry: per-role model + cache hit rate for the four
 // belief-loop phases, and the accumulated session cost.
 struct Footer {
@@ -193,6 +211,11 @@ public:
     const Footer& footer() const { return footer_; }
     void setFooter(Footer f) { footer_ = std::move(f); }
 
+    // Per-role context usage (epistemic + execution "current context length"),
+    // set by the RPC adapter from the runtime's session_status roleUsage field.
+    const RoleContextUsagePair& roleContext() const { return roleContext_; }
+    void setRoleContext(RoleContextUsagePair r) { roleContext_ = std::move(r); }
+
     // Determine whether a belief is selected in the active frame.
     bool isSelectedInCurrentFrame(BeliefId b) const;
 
@@ -263,6 +286,7 @@ private:
     bool finalAnswerPending_ = false;
     bool autoOpenInstruction_ = false;  // request flag, consumed by the render loop
     Footer footer_;                     // bottom footer telemetry (session_status)
+    RoleContextUsagePair roleContext_;  // per-role context length (session_status roleUsage)
 };
 
 // RPC event adapter (live mode). Consumes one runtime JSONL line (an

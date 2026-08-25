@@ -55,11 +55,14 @@ Supporting files: `src/DemoEvents.h` (event fixture), `src/InstructionCmd.h`
 
 ## Tech stack and the SDL3 note
 
-The current backend is GLFW + Dear ImGui (v1.92.5, `glfw`/`opengl3` backends) +
-OpenGL, built with CMake (FetchContent vendors GLFW 3.4 and ImGui). Per the spec
-§25, SDL3/SDL_GPU is recommended but is a future option, not a requirement. Do
-not migrate the backend without an explicit request, and preserve the
-macOS/Windows/Linux conditional compile path.
+The GUI is split into a platform layer under `src/plats/` and a common App in
+`src/App.cpp`. On macOS the platform uses a native Cocoa shell (NSApp/NSWindow
+with an MTKView), `imgui_impl_osx` as the ImGui platform backend and
+`imgui_impl_metal` as the renderer. On other platforms it uses the `glfw`/
+`opengl3` backends. Dear ImGui is v1.92.9 (FetchContent vendors GLFW 3.4 and
+ImGui). Per the spec §25, SDL3/SDL_GPU is recommended but is a future option,
+not a requirement. Do not migrate the backend without an explicit request, and
+preserve the macOS/Windows/Linux conditional compile path.
 
 ## Font asset and FreeType / TTC constraint
 

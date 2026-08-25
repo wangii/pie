@@ -156,6 +156,19 @@ double doubleVal(const std::string& s, const std::string& key, double def = -1.0
     return std::strtod(raw.c_str(), nullptr);
 }
 
+// Like doubleVal, but a literal JSON null is treated as the default (-> the
+// unknown placeholder) rather than strtod's 0.0. The runtime reports context
+// usage tokens/percent as null when unknown, e.g. right after compaction.
+double nullableDoubleVal(const std::string& s, const std::string& key, double def = -1.0) {
+    std::string raw;
+    if (!findKey(s, key, raw)) return def;
+    std::string t = trim(raw);
+    if (t.empty()) return def;
+    if (t[0] == '\"') return doubleVal(s, key, def);  // quoted string value
+    if (std::strncmp(t.c_str(), "null", 4) == 0) return def;
+    return std::strtod(t.c_str(), nullptr);
+}
+
 char charVal(const std::string& s, const std::string& key, char def = '?') {
     std::string raw;
     if (!findKey(s, key, raw)) return def;
@@ -388,6 +401,35 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         f.sessionCost = doubleVal(line, "cost", 0.0);
         f.hasData = true;
         model.setFooter(std::move(f));
+
+        // Per-role context length (epistemic vs execution projections).
+        // roleUsage is {epistemic: {tokens, contextWindow, percent}, execution: {...}};
+        // tokens/percent are null when unknown. The GUI renders an em-dash when a
+        // role's tokens are unavailable (negative placeholder).
+        std::string rawRoleUsage;
+        if (rawValue(line, "roleUsage", rawRoleUsage)) {
+            auto parseUsage = [&](const std::string& role) -> RoleContextUsage {
+                RoleContextUsage u;
+                std::string raw;
+                if (rawValue(rawRoleUsage, role, raw)) {
+                    u.tokens = static_cast<long>(nullableDoubleVal(raw, "tokens", -1.0));
+                    u.contextWindow = static_cast<long>(nullableDoubleVal(raw, "contextWindow", 0.0));
+                    u.percent = nullableDoubleVal(raw, "percent", -1.0);
+                }
+                return u;
+            };
+            RoleContextUsagePair rcu;
+            rcu.epistemic = parseUsage("epistemic");
+            rcu.execution = parseUsage("execution");
+            rcu.hasData = true;
+            model.setRoleContext(std::move(rcu));
+        } else {
+            // The runtime emits no roleUsage when the belief loop is not usable
+            // (e.g. after a reload, before new projections exist). Clear any
+            // previously cached role context so the status bar does not keep
+            // showing a stale context length.
+            model.setRoleContext(RoleContextUsagePair{});
+        }
         return RpcApplyResult::Applied;
     }
 
@@ -607,6 +649,7 @@ void NativeGuiModel::reset() {
     beliefs_.clear();
     cursor_ = FrameCursor{};
     nextRpcFrameId_ = 1000;
+    roleContext_ = RoleContextUsagePair{};
 }
 
 LoopFrame* NativeGuiModel::frame(int id) {

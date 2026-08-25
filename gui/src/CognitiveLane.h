@@ -5,6 +5,6 @@
 
 namespace pie::gui {
 
-void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId);
+void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool enableScroll);
 
 } // namespace pie::gui

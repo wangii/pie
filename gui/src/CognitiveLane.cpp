@@ -3,19 +3,38 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <string>
 
+#include "PaletteMetrics.h"
 #include "Theme.h"
 #include "UiMarkdown.h"
 #include "UiShared.h"
 
 namespace pie::gui {
 
-void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId) {
+void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool enableScroll) {
     const auto* f = displayedFrame(m, viewId);
     ImGui::TextUnformatted("COGNITIVE PROCESS");
     ImGui::Separator();
     ImGui::BeginChild("cog_scroll", ImVec2(0, 0), false);
+    // Cmd/Ctrl+Up/Down (macOS Cmd, elsewhere Ctrl) page-scroll the cognitive
+    // lane, mirroring the instruction palette's in-message scroll. Read while
+    // the cog_scroll child is the current window so GetScrollY/SetScrollY target
+    // this region, not any other. `enableScroll` is false while the user-
+    // instruction pane is open (the palette then owns the chord), preserving its
+    // own Cmd/Ctrl+Up/Down behavior.
+    if (enableScroll) {
+        auto& io = ImGui::GetIO();
+        const float maxScroll = ImGui::GetScrollMaxY();
+        const float pageStep = std::max(ImGui::GetContentRegionAvail().y, 1.0f);
+        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)) {
+            ImGui::SetScrollY(paletteScrollByPage(ImGui::GetScrollY(), pageStep, maxScroll, +1));
+        }
+        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)) {
+            ImGui::SetScrollY(paletteScrollByPage(ImGui::GetScrollY(), pageStep, maxScroll, -1));
+        }
+    }
     if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
 
     // The CursorChanged stage of the active frame drives which paragraph in the
