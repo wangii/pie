@@ -1,8 +1,8 @@
-// Pure, ImGui-free helpers for the instruction palette input box autogrow
+// Pure, ImGui-free helpers for the user prompt palette input box autogrow
 // height and the belief lane color legend. Headless so they can be unit-tested
 // without a window or ImGui.
 //
-// The instruction input box is an ImGui::InputTextMultiline. Its height must
+// The user prompt input box is an ImGui::InputTextMultiline. Its height must
 // grow as the buffer soft-wraps past the available width. ImGui::CalcTextSize
 // measures the wrapped text height but its `y` ignores a trailing newline, so
 // the palette must reserve one extra line when the buffer ends in a newline
@@ -27,7 +27,7 @@ inline int paletteTrailingEmptyLines(const char* buf) {
     return 0;
 }
 
-// Compute the auto-grow height of the instruction input box.
+// Compute the auto-grow height of the user prompt input box.
 //   wrappedY   - wrapped text height measured by ImGui::CalcTextSize at the
 //                widget width (its `y` ignores a trailing newline).
 //   lineH      - height of one text line.

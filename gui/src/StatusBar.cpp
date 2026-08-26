@@ -20,12 +20,12 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
 
     if (c.valid()) {
         ImGui::TextUnformatted(("Task #" + std::to_string(c.frameId)).c_str());
-        // ImGui::SameLine();
-        // ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-        // ImGui::TextUnformatted(pie::gui::frameStageToString(c.stage));
-        // ImGui::PopStyleColor();
-        // ImGui::SameLine();
-        // ImGui::Separator();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+        ImGui::TextUnformatted(pie::gui::frameStageToString(c.stage));
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::Separator();
 
         // if (const auto* f = m.frameById(c.frameId); f && !f->selectedBeliefs.empty()) {
         //     std::string sel = "Selected: ";
@@ -75,7 +75,7 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
         ctx += " · [Exec]";
         ctx += fmt(rcu.execution.tokens);
 
-        ImGui::SameLine();
+        // ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Text, kGray);
         ImGui::TextUnformatted(ctx.c_str());
         ImGui::SameLine();

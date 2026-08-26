@@ -232,7 +232,7 @@ public:
     Belief& upsertBeliefRpc(BeliefId id) { return upsertBelief(id); }
 
     // Live in-message stream (the assistant's streaming reply shown in the
-    // ⌘T instruction palette). Populated by the RPC event adapter from
+    // ⌘T user prompt palette). Populated by the RPC event adapter from
     // message_start / message_update / message_end. ImGui-free so it can be
     // unit-tested without a window.
     void beginInMessage(const std::string& text);
@@ -244,20 +244,20 @@ public:
     bool inMessageThinking() const { return inMessageThinking_; }
     void setInMessageThinking(bool thinking);
 
-    // Auto-reopen the user instruction pane when the belief loop reaches the
+    // Auto-reopen the user prompt pane when the belief loop reaches the
     // terminal finalReport role and its conclusion message ends. The RPC adapter
     // marks a pending state on CursorChanged(stage=CLOSED) (which only the
     // finalReport transition emits) and requests the reopen on the following
-    // message_end. Consumed once by the render loop, which owns instructionOpen.
+    // message_end. Consumed once by the render loop, which owns promptOpen.
     void markFinalReportPending() { finalReportPending_ = true; }
     bool finalReportPending() const { return finalReportPending_; }
-    void requestAutoOpenInstruction() {
-        autoOpenInstruction_ = true;
+    void requestAutoOpenPrompt() {
+        autoOpenPrompt_ = true;
         finalReportPending_ = false;
     }
-    bool consumeAutoOpenInstruction() {
-        bool v = autoOpenInstruction_;
-        autoOpenInstruction_ = false;
+    bool consumeAutoOpenPrompt() {
+        bool v = autoOpenPrompt_;
+        autoOpenPrompt_ = false;
         return v;
     }
 
@@ -284,7 +284,7 @@ private:
     // finalReport auto-reopen: true while the belief loop is in the terminal
     // finalReport role (set on CursorChanged CLOSED) until its message_end arrives.
     bool finalReportPending_ = false;
-    bool autoOpenInstruction_ = false;  // request flag, consumed by the render loop
+    bool autoOpenPrompt_ = false;  // request flag, consumed by the render loop
     Footer footer_;                     // bottom footer telemetry (session_status)
     RoleContextUsagePair roleContext_;  // per-role context length (session_status roleUsage)
 };

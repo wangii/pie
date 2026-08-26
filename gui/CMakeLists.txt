@@ -108,17 +108,17 @@ target_link_libraries(pi_gui_model_test PRIVATE pi_gui_model)
 target_include_directories(pi_gui_model_test PRIVATE src)
 add_test(NAME pi_gui_model_test COMMAND pi_gui_model_test)
 
-# Instruction command serialization + outbound pipe test (headless).
-add_executable(pi_gui_instruction_test src/InstructionCmd.test.cpp)
-target_include_directories(pi_gui_instruction_test PRIVATE src)
-add_test(NAME pi_gui_instruction_test COMMAND pi_gui_instruction_test)
+# User prompt command serialization + outbound pipe test (headless).
+add_executable(pi_gui_prompt_test src/PromptCmd.test.cpp)
+target_include_directories(pi_gui_prompt_test PRIVATE src)
+add_test(NAME pi_gui_prompt_test COMMAND pi_gui_prompt_test)
 
 # Layout geometry (no-overlap) test (headless).
 add_executable(pi_gui_layout_test src/LayoutMetrics.test.cpp)
 target_include_directories(pi_gui_layout_test PRIVATE src)
 add_test(NAME pi_gui_layout_test COMMAND pi_gui_layout_test)
 
-# Instruction palette input autogrow height (pure logic; headless).
+# User prompt palette input autogrow height (pure logic; headless).
 add_executable(pi_gui_palette_metrics_test src/PaletteMetrics.test.cpp)
 target_include_directories(pi_gui_palette_metrics_test PRIVATE src)
 add_test(NAME pi_gui_palette_metrics_test COMMAND pi_gui_palette_metrics_test)
@@ -139,7 +139,7 @@ add_executable(pie_gui
     src/ExecutionLane.cpp
     src/Summary.cpp
     src/Footer.cpp
-    src/InstructionPalette.cpp
+    src/PromptPalette.cpp
     src/Theme.cpp
     src/UiMarkdown.cpp
     src/UiShared.cpp

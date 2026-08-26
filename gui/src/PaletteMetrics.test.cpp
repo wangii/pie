@@ -1,4 +1,4 @@
-// Headless tests for the instruction palette input box autogrow height logic
+// Headless tests for the user prompt palette input box autogrow height logic
 // in PaletteMetrics.h. No window, no ImGui.
 
 #include "PaletteMetrics.h"

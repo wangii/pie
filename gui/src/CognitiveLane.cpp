@@ -19,10 +19,10 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool ena
     ImGui::Separator();
     ImGui::BeginChild("cog_scroll", ImVec2(0, 0), false);
     // Cmd/Ctrl+Up/Down (macOS Cmd, elsewhere Ctrl) page-scroll the cognitive
-    // lane, mirroring the instruction palette's in-message scroll. Read while
+    // lane, mirroring the user prompt palette's in-message scroll. Read while
     // the cog_scroll child is the current window so GetScrollY/SetScrollY target
     // this region, not any other. `enableScroll` is false while the user-
-    // instruction pane is open (the palette then owns the chord), preserving its
+    // prompt pane is open (the palette then owns the chord), preserving its
     // own Cmd/Ctrl+Up/Down behavior.
     if (enableScroll) {
         auto& io = ImGui::GetIO();

@@ -1,8 +1,8 @@
-// Pure, ImGui-free helpers for the instruction palette's "@" file/folder
+// Pure, ImGui-free helpers for the user prompt palette's "@" file/folder
 // completion: detecting an active "@" mention and enumerating matching paths.
 // Headless so they can be unit-tested without a window or ImGui.
 //
-// The user instruction input box is an ImGui::InputTextMultiline. When the
+// The user prompt input box is an ImGui::InputTextMultiline. When the
 // cursor sits inside a whitespace-delimited token that begins with "@", the
 // text right after "@" (up to the cursor) is a path prefix to complete against
 // the working directory. These helpers isolate the parse and enumeration so the

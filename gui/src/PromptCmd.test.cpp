@@ -1,11 +1,11 @@
-// Tests for the instruction serialization and the runtime-client outbound pipe.
+// Tests for the user prompt serialization and the runtime-client outbound pipe.
 // This is headless: it does not require a window, ImGui, or a node subprocess.
 // The runtime parses the `prompt` command with Node's strict JSON.parse, so the
 // serialized command must be a valid JSON string literal. We validate that here
 // with a small strict JSON parser (no node subprocess) and round-trip the
 // `message` field byte-for-byte.
 
-#include "InstructionCmd.h"
+#include "PromptCmd.h"
 
 #include <cstdio>
 #include <cstring>
@@ -13,7 +13,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-using pie::gui::serializeInstructionCommand;
+using pie::gui::serializePromptCommand;
 
 static int failures = 0;
 static void check(bool cond, const char* what) {
@@ -133,29 +133,33 @@ static void writeToFd(int fd, const std::string& cmd) {
 int main() {
     // --- schema shape (normal) ---
     {
-        std::string s = serializeInstructionCommand("p-ins", "explain current frame");
-        check(s == "{\"type\":\"prompt\",\"id\":\"p-ins\",\"message\":\"explain current frame\"}", "normal instruction schema");
+        std::string s = serializePromptCommand("req_0", "explain current frame");
+        check(s == "{\"type\":\"prompt\",\"id\":\"req_0\",\"message\":\"explain current frame\",\"streamingBehavior\":\"steer\"}", "normal prompt schema");
         std::string msg;
         check(cmdMessage(s, msg) && msg == "explain current frame", "normal command is strict JSON and message round-trips");
+    }
+    // --- unique per-send id ---
+    {
+        check(pie::gui::nextPromptId() != pie::gui::nextPromptId(), "nextPromptId yields a unique id per call");
     }
     // --- quote escaping ---
     {
         std::string msg = "say \"hi\"";
-        std::string s = serializeInstructionCommand("i2", msg);
+        std::string s = serializePromptCommand("i2", msg);
         std::string decoded;
         check(cmdMessage(s, decoded) && decoded == msg, "double quote escaped and round-trips");
     }
     // --- backslash escaping ---
     {
         std::string msg = "a\\b";
-        std::string s = serializeInstructionCommand("i3", msg);
+        std::string s = serializePromptCommand("i3", msg);
         std::string decoded;
         check(cmdMessage(s, decoded) && decoded == msg, "backslash escaped and round-trips");
     }
     // --- newline/control characters are escaped into valid JSON ---
     {
         std::string msg = "line1\nline2\r\t\b\f\x01end";
-        std::string s = serializeInstructionCommand("i4", msg);
+        std::string s = serializePromptCommand("i4", msg);
         bool noRawCtrl = true;
         for (char c : s) if (static_cast<unsigned char>(c) < 0x20u) { noRawCtrl = false; break; }
         check(noRawCtrl, "no raw control byte in serialized command");
@@ -163,12 +167,12 @@ int main() {
         check(cmdMessage(s, decoded), "escaped multiline command is strict JSON");
         check(decoded == msg, "message round-trips byte-for-byte after escape");
     }
-    // --- long multiline instruction is not truncated (growable storage) ---
+    // --- long multiline prompt is not truncated (growable storage) ---
     {
         std::string msg;
         for (int i = 0; i < 80; ++i) msg += "line " + std::to_string(i) + " 内容\n";
-        check(msg.size() > 1024, "multiline instruction exceeds a 1024-byte buffer");
-        std::string s = serializeInstructionCommand("p-long", msg);
+        check(msg.size() > 1024, "multiline prompt exceeds a 1024-byte buffer");
+        std::string s = serializePromptCommand("p-long", msg);
         std::string decoded;
         check(cmdMessage(s, decoded), "long multiline command is strict JSON");
         check(decoded == msg, "long multiline message round-trips byte-for-byte");
@@ -179,7 +183,7 @@ int main() {
     {
         int p[2];
         if (pipe(p) != 0) { check(false, "pipe creation"); return 1; }
-        std::string cmd = serializeInstructionCommand("p-ins", "stop execution");
+        std::string cmd = serializePromptCommand("req_9", "stop execution");
         writeToFd(p[1], cmd);
         close(p[1]);
         char buf[128] = {};

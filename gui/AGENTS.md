@@ -23,14 +23,14 @@ The source is split into three layers. Keep new code in the matching layer.
   `NativeGuiModel` consumes the runtime event/state stream and holds the belief
   snapshot, active loop frame, frame history, execution trace, and frame cursor.
   This layer must stay ImGui-free so it can be unit-tested without a window.
-- **Runtime client (transport + RPC event adapter)** — in `src/App.cpp` + `src/Model.cpp`. Spawns the PI CLI in RPC mode, reads JSONL events, writes instructions back (`instruction`→`prompt` via `serializeInstructionCommand`), and in live mode feeds each event line through `applyRpcLine` into `NativeGuiModel`. It must not mutate the model directly except by feeding events through `NativeGuiModel`, and must not infer epistemic meaning.
+- **Runtime client (transport + RPC event adapter)** — in `src/App.cpp` + `src/Model.cpp`. Spawns the PI CLI in RPC mode, reads JSONL events, writes user prompts back as a `prompt` command via `serializePromptCommand`, and in live mode feeds each event line through `applyRpcLine` into `NativeGuiModel`. It must not mutate the model directly except by feeding events through `NativeGuiModel`, and must not infer epistemic meaning.
 - **UI (ImGui)** — `src/App.cpp` render functions (the three lanes, status bar,
-  navigator, summary, instruction palette). The UI reads model state; it never
+  navigator, summary, user prompt palette). The UI reads model state; it never
   decides stage, cursor, or belief semantics.
 
-Supporting files: `src/DemoEvents.h` (event fixture), `src/InstructionCmd.h`
-(instruction serialization, inline and unit-testable), and the test files
-`src/Model.test.cpp`, `src/InstructionCmd.test.cpp`.
+Supporting files: `src/DemoEvents.h` (event fixture), `src/PromptCmd.h`
+(user prompt serialization, inline and unit-testable), and the test files
+`src/Model.test.cpp`, `src/PromptCmd.test.cpp`.
 
 ## Runtime/model/UI boundary invariants
 
@@ -95,10 +95,10 @@ ImGui backend).
   minimum lane width. When the window is too narrow for three side-by-side
   lanes, the lanes stack vertically inside a scrollable region instead of
   overlapping.
-- The instruction palette is a floating overlay window toggled by ⌘T/Ctrl-T,
+- The user prompt palette is a floating overlay window toggled by ⌘T/Ctrl-T,
   independent of the main workspace layout. When open it is rendered as its own
   ImGui window; text is submitted with Cmd/Ctrl+Enter (Enter inserts a newline,
-  so a multiline instruction is preserved end to end). It does not reserve any
+  so a multiline prompt is preserved end to end). It does not reserve any
   band in the layout, so it never overlaps the status bar, navigator, lanes, or
   summary. The geometry of the remaining (status bar, navigator, lanes, summary)
   regions is computed by `LayoutMetrics` (`computeLayout`/`laneRects`) and
@@ -133,8 +133,8 @@ ctest --preset release
 # Run the model test (headless)
 ./build/pi_gui_model_test
 
-# Run the instruction serialization + pipe test
-./build/pi_gui_instruction_test
+# Run the user prompt serialization + pipe test
+./build/pi_gui_prompt_test
 ```
 
 Notes:
@@ -158,7 +158,7 @@ Notes:
 - Reconfigure CMake after changing `CMakeLists.txt` (new `find_package`).
 - `cmake --build build -j` must succeed.
 - Launch `./build/pie_gui` (default: `--live`, spawns the RPC child so the ⌘T
-  pane can submit instructions) and verify: no crash, no "Could not load font
+  pane can submit prompts) and verify: no crash, no "Could not load font
   file" warning, status/navigator/lanes/summary do not overlap.
 - The demo mode is explicit: `./build/pie_gui --demo` injects the formal
   `DemoEvents.h` event stream instead of live mode.
@@ -172,7 +172,7 @@ Notes:
   grep snippets for broad edits.
 - Keep the model layer ImGui-free and the UI layer free of model mutation.
 - After code (not doc) changes, build and run both headless tests
-  (`pi_gui_model_test`, `pi_gui_instruction_test`); iterate until they pass.
+  (`pi_gui_model_test`, `pi_gui_prompt_test`); iterate until they pass.
 - Do not delete intended functionality without asking. In particular, the
   tracked legacy `gui/main.cpp` (an older standalone viewer) is retained and NOT
   part of the `pie_gui` target; it is kept to avoid removing intentional code.

@@ -3,7 +3,7 @@
 // Application orchestration only. Window/event/ImGui-backend/present lifecycle
 // is owned by the platform layer in `plats/` and driven through `runPlatform()`;
 // this file only provides the common ImGui setup, the app session/runtime, and
-// the per-frame UI callbacks (status bar / lanes / summary / instruction
+// the per-frame UI callbacks (status bar / lanes / summary / user prompt
 // palette). Platform-specific types (GLFW, Cocoa, Metal, OpenGL) never appear
 // here.
 //
@@ -29,7 +29,7 @@
 
 #include "Model.h"
 #include "DemoEvents.h"
-#include "InstructionCmd.h"
+#include "PromptCmd.h"
 #include "LayoutMetrics.h"
 #include "StatusBar.h"
 #include "BeliefLane.h"
@@ -37,7 +37,7 @@
 #include "ExecutionLane.h"
 #include "Summary.h"
 #include "Footer.h"
-#include "InstructionPalette.h"
+#include "PromptPalette.h"
 #include "Theme.h"
 #include "Paths.h"
 #include "RuntimeClient.h"
@@ -59,8 +59,8 @@ struct AppSession {
     std::thread reader;
     bool live = true;
     int viewId = -1;
-    bool instructionOpen = false;
-    InstructionPaletteState instrState;
+    bool promptOpen = false;
+    PromptPaletteState promptState;
 };
 
 int main(int argc, char** argv) {
@@ -143,11 +143,11 @@ int main(int argc, char** argv) {
         if (app.live) {
             std::string line;
             while (app.queue.popIfAny(line)) applyRpcLine(app.model, line);
-            if (app.model.consumeAutoOpenInstruction()) app.instructionOpen = true;
+            if (app.model.consumeAutoOpenPrompt()) app.promptOpen = true;
         }
         auto& io = ImGui::GetIO();
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_T, false))
-            app.instructionOpen = !app.instructionOpen;
+            app.promptOpen = !app.promptOpen;
     };
 
     // Build one ImGui frame's widgets.
@@ -177,10 +177,10 @@ int main(int argc, char** argv) {
         renderStatusBar(app.model);
         ImGui::EndChild();
 
-        renderInstructionPalette(app.instructionOpen, app.instrState, app.model, app.live,
-                                 [&app](const std::string& msg) {
-                                     writeCommand(app.sdk, serializeInstructionCommand("p-ins", msg));
-                                 });
+        renderPromptPalette(app.promptOpen, app.promptState, app.model, app.live,
+                            [&app](const std::string& msg) {
+                                writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
+                            });
 
         ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
         float availW = std::max(0.0f, winW - pad * 2);
@@ -197,7 +197,7 @@ int main(int argc, char** argv) {
             ImGui::PopStyleColor(1);
             ImGui::Spacing();
             ImGui::BeginChild("mid", ImVec2(0, 0), true);
-            renderCognitiveLane(app.model, app.viewId, !app.instructionOpen);
+            renderCognitiveLane(app.model, app.viewId, !app.promptOpen);
             ImGui::EndChild();
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(execActive));
@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
             ImGui::PopStyleColor(1);
             ImGui::SameLine();
             ImGui::BeginChild("mid", ImVec2(midW, 0), true);
-            renderCognitiveLane(app.model, app.viewId, !app.instructionOpen);
+            renderCognitiveLane(app.model, app.viewId, !app.promptOpen);
             ImGui::EndChild();
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(execActive));

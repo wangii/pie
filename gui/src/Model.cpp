@@ -449,13 +449,13 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         // Fast-path distillation custom message: sendCustomMessage emits
         // message_start/message_end with role="custom" and a customType
         // (e.g. "fast_path_distillation"); its content is the distillation
-        // summary. Project it into the user instruction pane's incoming-message
+        // summary. Project it into the user prompt pane's incoming-message
         // area (the in-message stream) so it is visible there, rather than
         // fabricating a DistillationOutput (the fast path never emits a
         // DistillationProduced phase event).
         std::string customType = str(line, "customType");
         if (role == "custom" && customType == "fast_path_distillation") {
-            // Fast-path distillation summary: surface it in the user instruction
+            // Fast-path distillation summary: surface it in the user prompt
             // pane's incoming-message area (the in-message stream) rather than
             // the distillation lane. The fast path never emits a
             // DistillationProduced phase event, so projecting here keeps the
@@ -516,8 +516,8 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         model.endInMessage();
         // If the loop is in the terminal finalReport role, this message_end
         // finalizes the conclusion text. Request the render loop reopen the user
-        // instruction pane so the user can view the answer, even if they closed it.
-        if (model.finalReportPending()) model.requestAutoOpenInstruction();
+        // prompt pane so the user can view the answer, even if they closed it.
+        if (model.finalReportPending()) model.requestAutoOpenPrompt();
         return RpcApplyResult::Applied;
     }
     if (type == "tool_execution_start") {
