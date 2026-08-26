@@ -257,6 +257,22 @@ int main() {
         check(rpc.inMessage() == "seed hello...", "in-message retained after message_end");
     }
 
+    // --- fast_path_distillation custom message projects content into the ---
+    // --- incoming-message area, not the distillation lane. ---
+    {
+        pie::gui::NativeGuiModel rpc;
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "fast_path: agent_start opens frame");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"custom","customType":"fast_path_distillation","content":[{"type":"text","text":"dep confirmed"}]}})") == pie::gui::RpcApplyResult::Applied, "fast_path: message_start applied");
+        check(rpc.inMessage() == "dep confirmed", "fast_path: content projected into incoming-message area");
+        const auto* f = rpc.frameById(rpc.cursor().frameId);
+        check(f != nullptr, "fast_path: frame exists");
+        check(f && !f->distillation.valid(), "fast_path: no DistillationOutput fabricated");
+        check(f && f->distillation.label.empty(), "fast_path: distillation label empty");
+        // A following message_end must not clobber the projected content.
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end"})") == pie::gui::RpcApplyResult::Applied, "fast_path: message_end applied");
+        check(rpc.inMessage() == "dep confirmed", "fast_path: in-message retained after message_end");
+    }
+
     // --- finalReport auto-reopen: CursorChanged(CLOSED) (the loop entering the ---
     // --- terminal finalReport role) marks the model pending, and the following ---
     // --- message_end requests the render loop reopen the user instruction pane. ---

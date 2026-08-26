@@ -449,26 +449,25 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         // Fast-path distillation custom message: sendCustomMessage emits
         // message_start/message_end with role="custom" and a customType
         // (e.g. "fast_path_distillation"); its content is the distillation
-        // summary. Map it onto the frame's distillation output so the live
-        // cognitive-process pane shows the fast-path result, even though the
-        // fast path never emits a DistillationProduced phase event.
+        // summary. Project it into the user instruction pane's incoming-message
+        // area (the in-message stream) so it is visible there, rather than
+        // fabricating a DistillationOutput (the fast path never emits a
+        // DistillationProduced phase event).
         std::string customType = str(line, "customType");
         if (role == "custom" && customType == "fast_path_distillation") {
-            LoopFrame* f = model.mutableFrame(model.cursor().frameId);
-            if (f) {
-                std::string distText;
-                std::string rawContent;
-                if (rawValue(line, "content", rawContent)) {
-                    std::string v = stringValue(rawContent);
-                    if (!v.empty()) distText = v;
-                }
-                if (distText.empty()) distText = text;
-                f->distillation.label = "D-" + std::to_string(f->id);
-                f->distillation.interpretation = distText;
-                f->distillation.inputIds = {};
-                f->distillation.unexplained = "";
-                model.beginInMessage("");
+            // Fast-path distillation summary: surface it in the user instruction
+            // pane's incoming-message area (the in-message stream) rather than
+            // the distillation lane. The fast path never emits a
+            // DistillationProduced phase event, so projecting here keeps the
+            // content visible without fabricating a DistillationOutput.
+            std::string distText;
+            std::string rawContent;
+            if (rawValue(line, "content", rawContent)) {
+                std::string v = stringValue(rawContent);
+                if (!v.empty()) distText = v;
             }
+            if (distText.empty()) distText = text;
+            model.beginInMessage(distText);
             return RpcApplyResult::Applied;
         }
         // Live in-message for the ⌘T pane is independent of any frame, but the

@@ -12,21 +12,79 @@
 #include <imgui.h>
 
 #include "PaletteMetrics.h"
+#include "PathComplete.h"
 #include "UiMarkdown.h"
 
 namespace pie::gui {
 
-// ImGui input-text resize callback backing state.instrText. On CallbackResize
-// ImGui wants the buffer to hold BufTextLen bytes; grow the std::string to that
-// length and hand back a writable, null-terminated pointer. This lets a
-// multiline instruction exceed a fixed-size stack buffer without truncation.
-static int instructionResizeCallback(ImGuiInputTextCallbackData* data) {
+// Unified input callback backing state.instrText. It handles three events:
+//   CallbackResize    - ImGui wants the buffer to hold BufTextLen bytes; grow
+//                       the std::string and hand back a writable, null-\n
+//                       terminated pointer (multiline exceeds a stack buffer).
+//   CallbackEdit      - text changed; recompute the `@` mention candidate list
+//                       against state.workDir.
+//   CallbackCompletion- Tab pressed; cycle the highlighted candidate and insert
+//                       it into the buffer, or fall back to a literal tab when
+//                       there is no active mention / no candidate (preserving
+//                       the previous AllowTabInput behavior).
+//
+// NOTE: with AllowTabInput removed, ImGui forbids combining it with
+// CallbackCompletion (asserted in imgui_widgets.cpp), so the completion event
+// owns the Tab key. The candidate list is recomputed on CallbackEdit; after a
+// Tab insertion we sync instrText back from the callback buffer so the render
+// height calc and the submit read the current text.
+static int instructionInputCallback(ImGuiInputTextCallbackData* data) {
+    auto* state = static_cast<InstructionPaletteState*>(data->UserData);
+
     if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
-        auto* s = static_cast<std::string*>(data->UserData);
-        s->resize(data->BufTextLen);
-        data->Buf = const_cast<char*>(s->data());
-        data->BufSize = static_cast<int>(s->size()) + 1;
+        state->instrText.resize(static_cast<size_t>(data->BufTextLen));
+        data->Buf = const_cast<char*>(state->instrText.data());
+        data->BufSize = static_cast<int>(state->instrText.size()) + 1;
+        return 0;
     }
+
+    std::string buf(data->Buf, static_cast<size_t>(data->BufTextLen));
+    const int cursor = data->CursorPos;
+
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackEdit) {
+        const MentionContext ctx = findMention(buf, cursor);
+        state->mentionCandidates =
+            ctx.active ? completePaths(state->workDir, ctx.query)
+                       : std::vector<std::string>{};
+        state->mentionActiveIndex = -1;
+        return 0;
+    }
+
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
+        const MentionContext ctx = findMention(buf, cursor);
+        if (!ctx.active || state->mentionCandidates.empty()) {
+            // No candidate to complete: keep the previous behavior where a
+            // Tab inserts a literal tab character.
+            data->InsertChars(cursor, "\t");
+            data->CursorPos = cursor + 1;
+            data->BufDirty = true;
+            return 0;
+        }
+        const int n = static_cast<int>(state->mentionCandidates.size());
+        const int next = (state->mentionActiveIndex + 1) % n;
+        const int start = ctx.ampPos + 1;
+        // Replace the query region [ampPos+1, cursor) with the next candidate.
+        // applyMention mirrors DeleteChars/InsertChars (which are the ImGui-
+        // sanctioned buffer edits that keep BufTextLen/undo history correct).
+        const MentionCompletion mc =
+            applyMention(buf, ctx, state->mentionCandidates, next);
+        if (static_cast<int>(ctx.query.size()) > 0)
+            data->DeleteChars(start, static_cast<int>(ctx.query.size()));
+        data->InsertChars(start, state->mentionCandidates[static_cast<size_t>(next)].c_str());
+        data->CursorPos = mc.cursor;
+        state->mentionActiveIndex = next;
+        data->BufDirty = true;
+        // Keep the external std::string in sync with the callback buffer so the
+        // autogrow height and the submit read the completed text.
+        state->instrText.assign(data->Buf, static_cast<size_t>(data->BufTextLen));
+        return 0;
+    }
+
     return 0;
 }
 
@@ -34,6 +92,14 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
                               const pie::gui::NativeGuiModel& m, bool canSend,
                               InstructionSender send) {
     if (!open) return;
+
+    // Close on Escape BEFORE rendering the input widget. The focused
+    // InputTextMultiline would otherwise see the Escape and run its
+    // is_cancel/revert_edit path (EscapeClearsAll is not set), which reverts
+    // instrText to the pre-edit snapshot (TextToRevertTo) and discards the
+    // user's un-submitted typing. Handling Escape here keeps the caller-owned
+    // instrText intact so re-opening (Cmd/Ctrl-T) restores the draft.
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; return; }
 
     // Growable instruction text. Enter inserts a newline (no EnterReturnsTrue);
     // submission is via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so a
@@ -52,6 +118,7 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
     bool close = false;
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+    state.workDir = m.session();
     if (ImGui::Begin("User Instruction", &close, flags)) {
         // Keep the input box focused the entire time the window is visible so the
         // user can keep typing without clicking.
@@ -77,9 +144,28 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
         const float maxInputH = winSize.y * 0.5f;
         ImGui::InputTextMultiline("##instruction", instrBuf.data(), static_cast<int>(instrBuf.size()) + 1,
                                   ImVec2(-1.0f, std::min(inputH, maxInputH)),
-                                  ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize |
-                                      ImGuiInputTextFlags_WordWrap,
-                                  instructionResizeCallback, &instrBuf);
+                                  ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_CallbackEdit |
+                                      ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_WordWrap,
+                                  instructionInputCallback, &state);
+
+        // `@` mention candidate list. Tab (handled in the completion callback)
+        // cycles the active index and inserts the candidate; here we only render
+        // the list and highlight the active entry. Clicking sets the active
+        // index but does not insert (Tab is the select mechanism).
+        if (ImGui::IsItemActive() && !state.mentionCandidates.empty()) {
+            const int n = static_cast<int>(state.mentionCandidates.size());
+            const float rowH = ImGui::GetTextLineHeightWithSpacing();
+            const float maxListH = std::min(winSize.y * 0.30f, rowH * std::min(n, 8));
+            if (ImGui::BeginChild("mention_list", ImVec2(0, maxListH), true)) {
+                for (int i = 0; i < n; ++i) {
+                    const bool sel = (i == state.mentionActiveIndex);
+                    if (ImGui::Selectable(state.mentionCandidates[static_cast<size_t>(i)].c_str(), sel)) {
+                        state.mentionActiveIndex = i;
+                    }
+                }
+            }
+            ImGui::EndChild();
+        }
 
         // Submit via Cmd/Ctrl+Enter (macOS Cmd, elsewhere Ctrl) so Enter still
         // inserts a newline and a multiline instruction is preserved end to end.
@@ -148,7 +234,7 @@ void renderInstructionPalette(bool& open, InstructionPaletteState& state,
     }
     ImGui::End();
 
-    if (close || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; }
+    if (close) { open = false; }
     ImGui::SetNextFrameWantCaptureKeyboard(true);
 }
 

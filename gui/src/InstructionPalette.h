@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "Model.h"
 
@@ -22,6 +23,13 @@ struct InstructionPaletteState {
     std::string instrText;         // growable instruction buffer (was `instrBuf`)
     size_t lastInMessageLength = 0; // in-message length since last auto-scroll (was `lastInMsgLen`)
     bool inMessagePinned = true;    // while pinned, new content auto-scrolls to the bottom
+
+    // "@" file/folder completion state, populated by the input callback each
+    // frame and rendered as a candidate list below the input box. The working
+    // directory is the base for enumerating candidates.
+    std::string workDir;                     // base dir for path completion (model session)
+    std::vector<std::string> mentionCandidates; // matches for the current `@` query
+    int mentionActiveIndex = -1;             // highlighted candidate (-1 = none)
 };
 
 // Render the palette as a floating window. `open` is toggled by the caller via

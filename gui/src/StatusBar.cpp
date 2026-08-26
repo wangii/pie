@@ -19,7 +19,7 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
     ImGui::Separator();
 
     if (c.valid()) {
-        // ImGui::TextUnformatted(("Task #" + std::to_string(c.frameId)).c_str());
+        ImGui::TextUnformatted(("Task #" + std::to_string(c.frameId)).c_str());
         // ImGui::SameLine();
         // ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
         // ImGui::TextUnformatted(pie::gui::frameStageToString(c.stage));

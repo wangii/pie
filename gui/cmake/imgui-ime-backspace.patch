@@ -1,0 +1,50 @@
+--- a/backends/imgui_impl_osx.mm
++++ b/backends/imgui_impl_osx.mm
+@@ -133,6 +133,7 @@
+     float _posX;
+     float _posY;
+     NSRect _imeRect;
++    BOOL _markedText;
+ }
+ 
+ #pragma mark - Public
+@@ -163,8 +164,15 @@
+ 
+ - (void)keyDown:(NSEvent*)event
+ {
+-    if (!ImGui_ImplOSX_HandleEvent(event, self))
+-        [super keyDown:event];
++    // During IME composition the marked text is owned by the macOS input
++    // manager; forwarding Backspace/Delete to ImGui also deletes a committed
++    // character from the input field, so leave the key to the input manager only.
++    const bool compositionKey = _markedText && (event.keyCode == kVK_Delete || event.keyCode == kVK_ForwardDelete);
++    if (!compositionKey)
++    {
++        if (!ImGui_ImplOSX_HandleEvent(event, self))
++            [super keyDown:event];
++    }
+ 
+     // Call to the macOS input manager system.
+     [self interpretKeyEvents:@[event]];
+@@ -215,7 +223,7 @@
+ 
+ - (BOOL)hasMarkedText
+ {
+-    return NO;
++    return _markedText;
+ }
+ 
+ - (NSRange)markedRange
+@@ -230,10 +238,12 @@
+ 
+ - (void)setMarkedText:(nonnull id)string selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange
+ {
++    _markedText = YES;
+ }
+ 
+ - (void)unmarkText
+ {
++    _markedText = NO;
+ }
+ 
+ - (nonnull NSArray<NSAttributedStringKey>*)validAttributesForMarkedText

@@ -39,6 +39,14 @@ endif()
 FetchContent_Declare(
     imgui
     URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9.zip
+    # Vendored single-file patch: macOS IME composition state. The OSX backend
+    # never told ImGui about marked text, so Backspace during Chinese IME
+    # composition was forwarded to ImGui (deleting a committed char) AND to the
+    # input manager (deleting the candidate). The patch tracks marked text and
+    # suppresses the Backspace/Delete key from ImGui's queue during composition.
+    # Tracked so a clean build reproduces it (the imgui source is a build-time
+    # FetchContent download, not stored in the repo).
+    PATCH_COMMAND patch -p1 -i "${CMAKE_CURRENT_SOURCE_DIR}/cmake/imgui-ime-backspace.patch"
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -114,6 +122,11 @@ add_test(NAME pi_gui_layout_test COMMAND pi_gui_layout_test)
 add_executable(pi_gui_palette_metrics_test src/PaletteMetrics.test.cpp)
 target_include_directories(pi_gui_palette_metrics_test PRIVATE src)
 add_test(NAME pi_gui_palette_metrics_test COMMAND pi_gui_palette_metrics_test)
+
+# "@" mention parsing + path completion (pure logic; headless).
+add_executable(pi_gui_path_complete_test src/PathComplete.test.cpp)
+target_include_directories(pi_gui_path_complete_test PRIVATE src)
+add_test(NAME pi_gui_path_complete_test COMMAND pi_gui_path_complete_test)
 
 # ---------------------------------------------------------------------------
 # GUI app: UI + runtime client, links the model layer + ImGui backend.
