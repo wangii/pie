@@ -2,6 +2,7 @@
 // Run: ./pi_gui_model_test   (returns non-zero on failure).
 
 #include "Model.h"
+#include "graph/GraphModel.h"
 
 #include <cstdio>
 
@@ -511,6 +512,97 @@ int main() {
             check(fl[0].op == "read" && fl[0].path == "src/x.cpp", "live read path from args.path");
             check(fl[1].op == "edit" && fl[1].path == "src/y.cpp", "live edit path from args.file_path");
         }
+    }
+
+    // --- Regression: two live turns with distinct runtime frameIds must each  ---
+    // --- produce their own frame, Plan node, and Distillation node. Before the  ---
+    // --- fix, turn_start ignored a new turn because activeFrame() still pointed  ---
+    // --- at the (closed) prior frame, so the second turn overwrote the first,  ---
+    // --- collapsing all Plans and all Distillations into a single node each.    ---
+    {
+        pie::gui::NativeGuiModel rpc2;
+        auto ev2 = [&](const char* s) { return pie::gui::applyRpcLine(rpc2, s); };
+        // Turn 1 (runtime frameId 1).
+        check(ev2(R"({"type":"turn_start"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn1 start opens frame");
+        check(ev2(R"({"type":"PlanProduced","frameId":1,"label":"P-1-0","question":"q1","intent":"i1"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn1 plan");
+        check(ev2(R"({"type":"DistillationProduced","frameId":1,"label":"D-1","interpretation":"x1"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn1 distill");
+        check(ev2(R"({"type":"CursorChanged","frameId":1,"stage":"CLOSED","item":""})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn1 close cursor");
+        check(ev2(R"({"type":"turn_end"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn1 end closes frame");
+        // Turn 2 (runtime frameId 2) must open a NEW frame, not overwrite turn 1.
+        check(ev2(R"({"type":"turn_start"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn2 start opens a new frame");
+        check(ev2(R"({"type":"PlanProduced","frameId":2,"label":"P-2-0","question":"q2","intent":"i2"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn2 plan");
+        check(ev2(R"({"type":"DistillationProduced","frameId":2,"label":"D-2","interpretation":"x2"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn2 distill");
+        check(ev2(R"({"type":"CursorChanged","frameId":2,"stage":"CLOSED","item":""})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn2 close cursor");
+        check(ev2(R"({"type":"turn_end"})") == pie::gui::RpcApplyResult::Applied, "multi-turn: turn2 end closes frame");
+        // Two distinct frames, both queryable.
+        auto fs = rpc2.frames();
+        check(fs.size() == 2, "multi-turn: two frames produced");
+        const pie::gui::LoopFrame* f1 = rpc2.frameById(1);
+        const pie::gui::LoopFrame* f2 = rpc2.frameById(2);
+        check(f1 != nullptr && f2 != nullptr, "multi-turn: both frames still queryable");
+        check(f1 && f1->plan.label == "P-1-0" && f1->distillation.label == "D-1", "multi-turn: frame1 retains its plan/distill");
+        check(f2 && f2->plan.label == "P-2-0" && f2->distillation.label == "D-2", "multi-turn: frame2 retains its plan/distill");
+        // Projection must yield two distinct Plan nodes and two distinct Distill nodes.
+        pie::gui::GraphTaskState st = pie::gui::projectGraphTask(rpc2);
+        int plans = 0, dists = 0;
+        std::string p1, p2, d1, d2;
+        for (const auto& n : st.nodes) {
+            if (n.family == pie::gui::NodeFamily::Plan) {
+                ++plans;
+                if (p1.empty()) p1 = n.id.value; else p2 = n.id.value;
+            } else if (n.family == pie::gui::NodeFamily::Distill) {
+                ++dists;
+                if (d1.empty()) d1 = n.id.value; else d2 = n.id.value;
+            }
+        }
+        check(plans == 2, "multi-turn: two distinct Plan nodes");
+        check(dists == 2, "multi-turn: two distinct Distillation nodes");
+        check(!p1.empty() && p2 != p1, "multi-turn: Plan node ids are distinct");
+        check(!d1.empty() && d2 != d1, "multi-turn: Distill node ids are distinct");
+    }
+
+    // --- Regression: multiple PlanProduced / DistillationProduced within ONE  ---
+    // --- frameId (e.g. several belief batches in one task) must each yield a  ---
+    // --- distinct Plan and Distillation node, not collapse to a single node.   ---
+    {
+        pie::gui::NativeGuiModel multi;
+        auto evm = [&](const char* s) { return pie::gui::applyRpcLine(multi, s); };
+        check(evm(R"({"type":"turn_start"})") == pie::gui::RpcApplyResult::Applied, "same-frame: start opens frame");
+        check(evm(R"({"type":"PlanProduced","frameId":5,"planId":"plan-5-1","label":"P-5-1","question":"q1","intent":"i1"})") == pie::gui::RpcApplyResult::Applied, "same-frame: plan occurrence 1");
+        check(evm(R"({"type":"PlanProduced","frameId":5,"planId":"plan-5-2","label":"P-5-2","question":"q2","intent":"i2"})") == pie::gui::RpcApplyResult::Applied, "same-frame: plan occurrence 2");
+        check(evm(R"({"type":"DistillationProduced","frameId":5,"label":"D-5-1","interpretation":"x1"})") == pie::gui::RpcApplyResult::Applied, "same-frame: distill occurrence 1");
+        check(evm(R"({"type":"DistillationProduced","frameId":5,"label":"D-5-2","interpretation":"x2"})") == pie::gui::RpcApplyResult::Applied, "same-frame: distill occurrence 2");
+        check(evm(R"({"type":"CursorChanged","frameId":5,"stage":"CLOSED","item":""})") == pie::gui::RpcApplyResult::Applied, "same-frame: close cursor");
+        check(evm(R"({"type":"turn_end"})") == pie::gui::RpcApplyResult::Applied, "same-frame: end closes frame");
+
+        auto mfs = multi.frames();
+        check(mfs.size() == 1, "same-frame: a single frame is produced");
+        const pie::gui::LoopFrame* mf = multi.frameById(5);
+        check(mf != nullptr, "same-frame: frame queryable");
+        check(mf && mf->plans.size() == 2, "same-frame: two plan occurrences accumulated");
+        check(mf && mf->distillations.size() == 2, "same-frame: two distill occurrences accumulated");
+        // The single-value fields hold the latest/representative occurrence.
+        check(mf && mf->plan.label == "P-5-2", "same-frame: single plan field is latest");
+        check(mf && mf->distillation.label == "D-5-2", "same-frame: single distill field is latest");
+
+        pie::gui::GraphTaskState mst = pie::gui::projectGraphTask(multi);
+        int mplans = 0, mdists = 0;
+        std::string mp1, mp2, md1, md2;
+        for (const auto& n : mst.nodes) {
+            if (n.family == pie::gui::NodeFamily::Plan) {
+                ++mplans;
+                if (mp1.empty()) mp1 = n.id.value; else mp2 = n.id.value;
+            } else if (n.family == pie::gui::NodeFamily::Distill) {
+                ++mdists;
+                if (md1.empty()) md1 = n.id.value; else md2 = n.id.value;
+            }
+        }
+        check(mplans == 2, "same-frame: two Plan nodes from two occurrences");
+        check(mdists == 2, "same-frame: two Distillation nodes from two occurrences");
+        check(!mp1.empty() && mp2 != mp1, "same-frame: Plan node ids are distinct");
+        check(!md1.empty() && md2 != md1, "same-frame: Distill node ids are distinct");
+        // Plan node ids use the authoritative planId when present.
+        check(mp1 == "plan-5-1" && mp2 == "plan-5-2", "same-frame: Plan node id uses planId");
     }
 
     if (failures == 0) std::printf("ALL PASS\n");

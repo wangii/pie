@@ -1,9 +1,7 @@
 # Phase 2 — P0 Node Graph View
 
 A second main view for the PIE Native GUI, beside the existing three-lane
-column/text view. This phase is set to **immediate priority**: it is the next P0
-deliverable. No implementation exists yet (`src/` has no graph module, Cmd+G
-toggle, or node-editor integration).
+column/text view. **M0-M9 are implemented** (see the Deliverables table).
 
 ## Purpose
 
@@ -24,15 +22,34 @@ Ontology, Proposal Projection, Edges, Selection, View Switch, Live, Layout
 Engine, Runtime Contract, Module Structure, Milestones, Non-Goals, P1
 Candidates, Success Criterion).
 
-## Deliverables (planned)
+## Deliverables
 
 | Graph View item | Expected location | Status |
 |-----------------|-------------------|--------|
-| `Cmd+G` Text/Graph view toggle | shared main window (same runtime model) | Planned |
-| `graph/` module (`graph_*`) + `graph_view`, `graph_model`, `graph_projection`, `graph_renderer`, `graph_node_renderer`, `graph_link_renderer`, `graph_interaction`, `pie_graph_layout`, `graph_minimap`, `graph_style`) | `gui/src/graph/` | Planned |
-| Read-only node-editor canvas (hidden pins, no drag/create/delete, no library layout persistence) | `imgui-node-editor` (vendored, pinned) | Planned |
-| PIE layout engine (`PieGraphLayout`) | `gui/src/graph/pie_graph_layout.*` | Planned |
-| Runtime contract (`GraphNode`/`GraphEdge`/`GraphTaskState`) | `gui/src/graph/graph_model.*` | Planned |
+| `Cmd+G` Text/Graph view toggle | shared main window (same runtime model) | Implemented (M0) `src/App.cpp` |
+| `graph/` module (`graph_*`) + `graph_view`, `graph_model`, `graph_projection`, `graph_renderer`, `graph_node_renderer`, `graph_link_renderer`, `graph_interaction`, `pie_graph_layout`, `graph_minimap`, `graph_style`) | `gui/src/graph/` | Implemented (M0-M9): `GraphModel.*`, `PieGraphLayout.*`, `GraphView.*`, `GraphRouting.*`, `GraphInteraction.*`, `GraphLive.*` (the renderer/node/link and `graph_renderer`/`graph_node_renderer`/`graph_link_renderer` duties fold into `GraphView`), plus `GraphMinimap.*` (M7 navigation), `GraphCache.*` (M8 caches), and the `GraphStyle` config (M9 style) |
+| Read-only node-editor canvas (hidden pins, no drag/create/delete, no library layout persistence) | custom `GraphView` canvas (see deviation below) | Implemented (M0/M2) `src/graph/GraphView.*` |
+| PIE layout engine (`PieGraphLayout`) | `gui/src/graph/pie_graph_layout.*` | Implemented (M3) `src/graph/PieGraphLayout.*` |
+| Runtime contract (`GraphNode`/`GraphEdge`/`GraphTaskState`) | `gui/src/graph/graph_model.*` | Implemented (M1) `src/graph/GraphModel.*` |
+
+### Implementation deviation: custom canvas instead of vendored node-editor
+
+The original plan pinned `imgui-node-editor` (vendored). That dependency does
+not compile against the project's pinned Dear ImGui 1.92.9:
+
+- `imgui_extra_math.inl` unconditionally defines ImVec2 `operator==`/`!=`/`*`,
+  which collide with the operators ImGui 1.92.9 provides when
+  `IMGUI_DEFINE_MATH_OPERATORS` is defined (hard redefinition errors).
+- v0.9.3 also calls the removed `ImRect::Floor()` and `ImGui::GetKeyIndex()`.
+- master drops those, but still conflicts on the operators and on the changed
+  `ImCubicBezierDt` signature.
+
+To stay on the pinned ImGui while delivering M0/M2, the canvas is a custom
+`src/graph/GraphView.*` that renders the same read-only affordances
+(pan/zoom/select/hidden-pins-suppressed editing/current/selected highlight,
+tooltip) directly with ImGui draw primitives. It keeps the repo convention of
+not defining `IMGUI_DEFINE_MATH_OPERATORS` (offsets are field-wise ImVec2
+construction, as in `BeliefLane.cpp`).
 
 ## Key elements
 
@@ -123,40 +140,40 @@ reconnect, frame move, and semantic mutation are forbidden. The GUI never
 infers cognition; `GraphNode`/`GraphEdge`/`GraphTaskState` semantic edges are
 runtime-supplied.
 
-### PIE-specific layout engine (disambiguation)
+### PIE-specific layout engine (Graphviz auto-layout)
 
-P0 implements `PieGraphLayout`, which serves only the PIE cognition ontology
-(Belief grid by creation order; frames by produce order; Plan upper region;
-Execution right region; Distill lower region with return-flow). It deliberately
-does NOT introduce Graphviz, a generic Sugiyama engine, or force-directed
-layout.
+P0 implements `PieGraphLayout`, which projects the PIE cognition ontology
+(nodes/edges) into a Graphviz directed graph and runs the DOT automatic layout
+engine to position nodes. The layout is deterministic for an identical
+`GraphTaskState` (same input graph and Graphviz version). The GUI never infers
+cognition: node/edge semantic types are runtime-supplied; only positions come
+from the engine.
 
-This must be reconciled with two other roadmap/spec mentions of "graph
-layout":
+- **Dependency**: Graphviz is a hard build dependency. CMake finds it via
+  pkg-config modules `libcgraph` / `libgvc` (note: not `graphviz`/`gvc`),
+  propagates it to the model library and app, and errors with an explicit
+  install hint (`brew install graphviz` / `apt-get install libgraphviz-dev`)
+  if missing. There is no silent fallback to a hand-rolled layout.
+- **Geometry**: post-layout node positions/sizes are read via the C API macros
+  `ND_coord` / `ND_width` / `ND_height` (accessing `Agnodeinfo_t` through
+  `AGDATA`); sizes are in inches and are scaled by 72 points/inch. The Graphviz
+  `bb` graph bounding box is space-separated (`xmin ymin xmax ymax`) and is
+  used to translate/flip coordinates from Graphviz's bottom-left origin to the
+  viewer's top-left y-down space.
+- **Contract**: the general layout contract is that every node gets a
+  positive-size rectangle, node rectangles do not overlap, the canvas size is
+  positive, and each frame has a container rectangle. The previous per-region
+  directional ordering (Belief left-of-Plan, Distill return-leftward) is NOT
+  guaranteed by the DOT engine and is deliberately not asserted; the
+  auto-layout is top-down by edge direction.
 
-- **P0 non-goal `Generic auto layout`** (Node Graph View spec §28 / §22): the
-  same rejection of generic auto-layout engines, now resolved by
-  `PieGraphLayout`.
-- **spec §29 "Not Current Priority": `elaborate graph layout`** (tracked under
-  Phase 4 Future Integrations, still deferred): this refers to further
-  decorative/general graph-layout polish beyond the PIE-specific engine, and
-  remains out of current scope.
+### Per-region layout (superseded)
 
-Both stay true: this phase owns the PIE-specific `PieGraphLayout`; generic and
-"elaborate" layout remain non-goals / deferred.
-
-### Per-region layout rules (PieGraphLayout sub-layouts)
-
-- **§22.2 Belief Region**: creation-order grid (B01 B02 B03 ...); new beliefs
-  append, existing beliefs never auto-move.
-- **§22.3 Plan upper region**: ordered left→right by semantic dependency with a
-  creation-order fallback on cycle / undecidable stratification; the goal is
-  stability and determinism, not generic optimal layout.
-- **§22.4 Execution right region**: stacked vertically by runtime execution
-  order; this is position only and never creates temporal edges.
-- **§22.5 Distill lower region**: laid out right→left (return flow back toward
-  the Belief Region), so a frame reads `Belief → Plan → Execution → Distill →
-  Belief`.
+The prior hand-rolled `PieGraphLayout` placed a Belief creation-order grid, Plan
+upper region, Execution right region, and Distill lower right→left return flow.
+Under the Graphviz auto-layout those per-region directional rules are replaced
+by the engine's general placement; tests assert only the general contract
+(valid, non-overlapping, framed, positive canvas) enumerated above.
 
 ### Runtime contract (to be supplied by the runtime)
 
@@ -194,25 +211,31 @@ struct GraphTaskState {
 
 ```text
 M0 Canvas        node-editor integration spike (Cmd+G toggle, pan/zoom/select,
-                 hidden pins, editing suppressed, no layout persistence, mock nodes)
+                 hidden pins, editing suppressed, no layout persistence, mock nodes)   [implemented]
 M1 Graph Model   runtime data -> GraphTaskState projection (no Proposal/Observation
-                 node; tool+result merged; no ExecutionStep wrapper; runtime-supplied edges)
+                 node; tool+result merged; no ExecutionStep wrapper; runtime-supplied edges)  [implemented]
 M2 Nodes         belief/plan/execution/distill card renderers (status/result colors,
-                 hidden pins, current/selected highlight, tooltip, "..." popup)
-M3 Layout v1     PieGraphLayout (Belief grid, frames left->right, Plan top,
-                 Exec right, Distill bottom, frame sizing) -> reads as feedback loop
+                 hidden pins, current/selected highlight, tooltip, "..." popup)  [implemented]
+M3 Layout v1     PieGraphLayout -> Graphviz dot auto-layout (project nodes/edges,
+                 run DOT, ND_coord/ND_width/ND_height -> nodeRects/frameRects);
+                 general contract: valid, non-overlapping, framed, positive canvas  [implemented]
 M4 Edge Routing  local semantic edges + long Belief->Plan (top) / Distill->Belief
-                 (bottom) routes, default dim, +/- operation glyphs
+                 (bottom) routes, default dim, +/- operation glyphs  [implemented]
 M5 Selection     click node -> ancestor + descendant dependency path (cycle-safe
-                 visited set, cached adjacency), emphasize related, dim rest
+                 visited set, cached adjacency), emphasize related, dim rest  [implemented]
 M6 Live          runtime events (node/edge added, belief created/updated, current
                  changed, frame opened/closed); active relayout, closed freeze,
-                 belief stable, no auto-follow
+                 belief stable, no auto-follow  [implemented]
 M7 Navigation    first-entry Focus Current, explicit Focus Current, Graph session
                  state preserved across Text<->Graph, custom minimap overlay
+                 (GraphMinimap.* + GraphView overlay + GraphViewState.hasFocusedOnce)  [implemented]
 M8 Performance   50 frames / 500 nodes: layout cache, adjacency cache, render
-                 cache, dirty flags, long-route cache
+                 cache, dirty flags, long-route cache (GraphCache.* with content
+                 fingerprint invalidation + GraphCacheMetrics; 500-node x 50-frame
+                 reuse/invalidation test)  [implemented]
 M9 Polish        spacing, typography, borders, dim ratios, arrows, padding, sizes
+                 (centralized GraphStyle config consumed by GraphView / layout /
+                 routing)  [implemented]
 ```
 
 Implementation order is M0 → M9; the real technical risk concentrates in M3+M4
@@ -248,8 +271,16 @@ runtime → graph model; `pie_graph_layout` maps graph model → positions;
 positions + model → ImGui/node-editor; `graph_interaction` handles selection /
 dependency path / focus; `graph_minimap` handles overview navigation;
 `graph_model` holds the runtime contract types
-(`GraphNode`/`GraphEdge`/`GraphTaskState`). This is the P0 planned module layout
-under `gui/src/graph/` (no code exists yet).
+(`GraphNode`/`GraphEdge`/`GraphTaskState`). M0-M9 implement the core of this
+layout under `gui/src/graph/`: `GraphModel` holds the runtime contract types and
+the runtime->graph projection (`graph_projection`), `PieGraphLayout` is the
+`pie_graph_layout` positions pass, `GraphView` is the graph renderer + node
+renderer + canvas (and the M7 minimap overlay + M9 style consumer), `GraphRouting`
+is the m4 edge-routing pass, `GraphInteraction` is the `graph_interaction`
+selection / dependency-path pass, `GraphLive` is the m6 live-layout stability
+pass, `GraphMinimap` is the `graph_minimap` M7 navigation geometry, `GraphCache`
+is the M8 cache / invalidation pass, and `GraphStyle` is the `graph_style` M9
+central config.
 
 ### Final mental model
 

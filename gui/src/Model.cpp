@@ -434,12 +434,18 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
 
     if (type == "agent_start") {
-        if (active) return RpcApplyResult::Ignored;
+        // A new turn begins: only block if there is an *open* frame. A frame
+        // closed by the previous turn_end must not swallow the new turn's
+        // records (it would overwrite the prior frame's plan/distillation,
+        // collapsing multiple turns into one node in the Graph View).
+        if (active && !active->closed) return RpcApplyResult::Ignored;
         model.openRpcFrame("");
         return RpcApplyResult::Applied;
     }
     if (type == "turn_start") {
-        if (model.activeFrame()) return RpcApplyResult::Ignored;
+        // Same rule as agent_start: ignore only while a frame is still open.
+        const LoopFrame* act = model.activeFrame();
+        if (act && !act->closed) return RpcApplyResult::Ignored;
         model.openRpcFrame("");
         return RpcApplyResult::Applied;
     }
@@ -591,9 +597,16 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     if (type == "PlanProduced") {
         LoopFrame* p = phaseFrame();
         if (!p) return RpcApplyResult::Ignored;
-        p->plan.label = str(line, "label");
-        p->plan.question = str(line, "question");
-        p->plan.intent = str(line, "intent");
+        // Accumulate every plan occurrence so the Graph View can render one node
+        // per batch; the single-value `plan` stays as the latest/representative
+        // occurrence for the text-view lanes.
+        PlannerOutput po;
+        po.id = str(line, "planId");
+        po.label = str(line, "label");
+        po.question = str(line, "question");
+        po.intent = str(line, "intent");
+        if (!po.label.empty()) p->plans.push_back(po);
+        p->plan = std::move(po);
         return RpcApplyResult::Applied;
     }
     if (type == "DistillationProduced") {
@@ -601,8 +614,11 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         // runtime never emits inputIds/unexplained, so those stay empty.
         LoopFrame* p = phaseFrame();
         if (!p) return RpcApplyResult::Ignored;
-        p->distillation.label = str(line, "label");
-        p->distillation.interpretation = str(line, "interpretation");
+        DistillationOutput do_;
+        do_.label = str(line, "label");
+        do_.interpretation = str(line, "interpretation");
+        if (!do_.label.empty()) p->distillations.push_back(do_);
+        p->distillation = std::move(do_);
         return RpcApplyResult::Applied;
     }
     if (type == "ProposalCreated") {

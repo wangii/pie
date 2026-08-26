@@ -60,6 +60,7 @@ struct Belief {
 // Frame contents
 // ---------------------------------------------------------------------------
 struct PlannerOutput {
+    std::string id;      // authoritative runtime planId (live); empty in demo/headless
     std::string label;   // "P-128"
     std::string question;
     std::string intent;  // the epistemic intent, not the full prompt
@@ -139,8 +140,15 @@ struct LoopFrame {
 
     std::vector<BeliefId> selectedBeliefs;
     PlannerOutput plan;
+    // Every plan occurrence emitted for this frame (live mode can emit several
+    // batches per task). Kept alongside the single-value `plan` (which is the
+    // latest/representative occurrence used by the text-view lanes) so the Graph
+    // View can render one node per occurrence without changing existing UI.
+    std::vector<PlannerOutput> plans;
     std::vector<ToolCall> trajectory;
     DistillationOutput distillation;
+    // Every distillation occurrence emitted for this frame (analogous to plans).
+    std::vector<DistillationOutput> distillations;
     std::vector<Proposal> proposals;
 
     std::string summary;     // for frame navigator chips

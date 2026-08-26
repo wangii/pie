@@ -42,6 +42,10 @@
 #include "Theme.h"
 #include "Paths.h"
 #include "RuntimeClient.h"
+#include "graph/GraphModel.h"
+#include "graph/PieGraphLayout.h"
+#include "graph/GraphView.h"
+#include "graph/GraphLive.h"
 #include "plats/Platform.h"
 
 #ifndef PI_CLI
@@ -63,6 +67,14 @@ struct AppSession {
     bool promptOpen = false;
     PromptPaletteState promptState;
     bool fileListOpen = false;
+    // Phase 2 (M0) Graph View: a Text<->Graph switch beside the three-lane
+    // workspace. The graph session state (pan/zoom/selection) is preserved
+    // across toggles within a session.
+    bool graphOpen = false;
+    GraphViewState graphView;
+    // Phase 2 (M6): persistent live-layout state so closed-frame / belief nodes
+    // stay frozen while the active frame relays out.
+    GraphLiveState graphLive;
 };
 
 int main(int argc, char** argv) {
@@ -152,6 +164,8 @@ int main(int argc, char** argv) {
             app.promptOpen = !app.promptOpen;
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_F, false))
             app.fileListOpen = !app.fileListOpen;
+        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_G, false))
+            app.graphOpen = !app.graphOpen;
     };
 
     // Build one ImGui frame's widgets.
@@ -163,6 +177,30 @@ int main(int argc, char** argv) {
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoScrollbar);
+
+        // The floating overlays (user prompt palette, file list) are independent
+        // ImGui windows and must render in BOTH the text workspace and the Graph
+        // View mode. They are drawn before the Graph View early-return so that
+        // GraphView mode never affects them.
+        renderPromptPalette(app.promptOpen, app.promptState, app.model, app.live,
+                            [&app](const std::string& msg) {
+                                writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
+                            });
+        renderFileList(app.fileListOpen, app.model);
+
+        // Phase 2 (M0) Graph View: when active, render the projected node graph
+        // instead of the three-lane text workspace. Cmd+G toggles back.
+        if (app.graphOpen) {
+            GraphTaskState graphState = projectGraphTask(app.model);
+            PieGraphLayout freshLayout = computeGraphLayout(graphState);
+            // M6: freeze settled (closed-frame / belief) nodes across live
+            // updates; active frame takes fresh positions.
+            PieGraphLayout layout = stabilizeLiveLayout(graphState, freshLayout, app.graphLive);
+            ImGui::Text("Node Graph View — (Cmd/Ctrl+G to return to Text View)");
+            renderGraphView(app.graphView, graphState, layout);
+            ImGui::End();
+            return;
+        }
 
         float winW = io.DisplaySize.x;
         float winH = io.DisplaySize.y;
@@ -180,13 +218,6 @@ int main(int argc, char** argv) {
         ImGui::BeginChild("top", ImVec2(0, headerH), false);
         renderStatusBar(app.model);
         ImGui::EndChild();
-
-        renderPromptPalette(app.promptOpen, app.promptState, app.model, app.live,
-                            [&app](const std::string& msg) {
-                                writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
-                            });
-
-        renderFileList(app.fileListOpen, app.model);
 
         ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
         float availW = std::max(0.0f, winW - pad * 2);

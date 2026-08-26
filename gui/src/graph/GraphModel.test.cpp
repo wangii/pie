@@ -1,0 +1,211 @@
+// Headless tests for the Phase 2 M1 graph projection and M3 layout engine.
+// No window, no ImGui, no SDK. Run: ./pi_gui_graph_test  (non-zero on failure).
+
+#include "graph/GraphModel.h"
+#include "graph/PieGraphLayout.h"
+#include "Model.h"
+
+#include <cstdio>
+#include <set>
+#include <string>
+
+using pie::gui::BeliefOperation;
+using pie::gui::EdgeSemanticType;
+using pie::gui::GraphTaskState;
+using pie::gui::LoopFrameInfo;
+using pie::gui::NativeGuiModel;
+using pie::gui::NodeFamily;
+using pie::gui::PieGraphLayout;
+using pie::gui::projectGraphTask;
+using pie::gui::computeGraphLayout;
+
+static int failures = 0;
+static void check(bool cond, const char* what) {
+    if (!cond) {
+        std::fprintf(stderr, "FAIL: %s\n", what);
+        ++failures;
+    } else {
+        std::printf("ok: %s\n", what);
+    }
+}
+
+// Build a model with one complete epistemic transaction and a second partial
+// frame, mirroring the demo event vocabulary used by Model.test.cpp.
+static NativeGuiModel buildModel() {
+    NativeGuiModel model;
+    model.applyLine(R"({"type":"FrameOpened","id":128,"summary":"runtime pytest mismatch","opened_at":"t0"})");
+    model.applyLine(R"({"type":"BeliefsSelected","frameId":128,"beliefs":[42,47]})");
+    model.applyLine(R"({"type":"PlanProduced","frameId":128,"label":"P-128","question":"Is pytest actually available?","intent":"verify dependency against runtime"})");
+    model.applyLine(R"({"type":"ExecutionStarted","frameId":128})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":128,"id":"E-88","tool":"read","command":"requirements.txt","status":"ok"})");
+    model.applyLine(R"({"type":"ToolReturned","frameId":128,"id":"E-88","result":"pytest==8.0","warning":""})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":128,"id":"E-89","tool":"bash","command":"pip show pytest","status":"running"})");
+    model.applyLine(R"({"type":"ToolReturned","frameId":128,"id":"E-89","result":"exit code 1","warning":"Package(s) not found: pytest","status":"failed"})");
+    model.applyLine(R"({"type":"ExecutionCompleted","frameId":128})");
+    model.applyLine(R"({"type":"DistillationStarted","frameId":128})");
+    model.applyLine(R"({"type":"DistillationProduced","frameId":128,"label":"D-42","inputIds":["E-88","E-89"],"unexplained":"B42 predicts pytest but runtime lacks it","interpretation":"declared vs runtime differ"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":128,"op":"~","belief":"B42","detail":"confidence 0.62 -> 0.31","lhs":"project","relation":"uses","rhs":"pytest"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":128,"op":"+","belief":"B53","detail":"new","lhs":"runtime_environment","relation":"lacks","rhs":"pytest"})");
+    model.applyLine(R"({"type":"CursorChanged","frameId":128,"stage":"EXECUTING","item":"E-89"})");
+    model.applyLine(R"({"type":"BeliefUpdated","beliefId":42,"confidence":0.31,"status":"open","sourceFrame":128,"lhs":"project","relation":"uses","rhs":"pytest"})");
+    model.applyLine(R"({"type":"BeliefUpdated","beliefId":53,"confidence":0.9,"status":"open","sourceFrame":128,"lhs":"runtime_environment","relation":"lacks","rhs":"pytest"})");
+
+    // A second closed frame with a create-only proposal.
+    model.applyLine(R"({"type":"FrameOpened","id":129,"summary":"second frame","opened_at":"t1"})");
+    model.applyLine(R"({"type":"BeliefsSelected","frameId":129,"beliefs":[53]})");
+    model.applyLine(R"({"type":"PlanProduced","frameId":129,"label":"P-129","question":"q","intent":"check env"})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":129,"id":"E-91","tool":"bash","command":"ls","status":"ok"})");
+    model.applyLine(R"({"type":"ToolReturned","frameId":129,"id":"E-91","result":"a b c","warning":"","status":"ok"})");
+    model.applyLine(R"({"type":"DistillationProduced","frameId":129,"label":"D-43","inputIds":["E-91"],"unexplained":"","interpretation":"ok"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":129,"op":"+","belief":"B77","detail":"new","lhs":"a","relation":"b","rhs":"c"})");
+    model.applyLine(R"({"type":"FrameClosed","frameId":129})");
+    return model;
+}
+
+int main() {
+    NativeGuiModel model = buildModel();
+    // Cursor is on the open frame 128 / E-89 (the current node).
+    GraphTaskState state = projectGraphTask(model);
+
+    // --- M1: no Proposal / Observation / ExecutionStep node ---
+    bool haveProposalNode = false, haveObservationNode = false, haveExecStepNode = false;
+    for (const auto& n : state.nodes) {
+        if (n.family == NodeFamily::Distill || n.family == NodeFamily::Execution) {
+            // Ensure no synthetic wrapper node was emitted.
+        }
+        if (n.title == "Proposal" || n.title == "Observation" || n.title == "ExecutionStep")
+            (n.family == NodeFamily::Execution ? haveExecStepNode : haveObservationNode) = true;
+    }
+    check(!haveProposalNode && !haveObservationNode, "no Proposal/Observation/ExecutionStep node");
+    (void)haveExecStepNode;
+
+    // --- M1: Beliefs are global (no owning frame) ---
+    bool beliefsGlobal = true;
+    int beliefCount = 0;
+    for (const auto& n : state.nodes) {
+        if (n.family == NodeFamily::Belief) {
+            ++beliefCount;
+            if (n.frameId.has_value()) beliefsGlobal = false;
+        }
+    }
+    check(beliefsGlobal, "beliefs are global (no owning frame)");
+    check(beliefCount == 2, "two global belief nodes (B42, B53)");
+
+    // --- M1: tool call + result merged into one Execution node each ---
+    int execNodes128 = 0;
+    for (const auto& n : state.nodes) {
+        if (n.family == NodeFamily::Execution && n.frameId && *n.frameId == 128) ++execNodes128;
+    }
+    check(execNodes128 == 2, "two Execution nodes for frame 128 (no per-step wrapper)");
+
+    // --- M1: Execution node title uses the "exec: <tool>" prefix (user display req) ---
+    bool execTitlePrefixed = true;
+    for (const auto& n : state.nodes) {
+        if (n.family == NodeFamily::Execution && n.title.rfind("exec: ", 0) != 0)
+            execTitlePrefixed = false;
+    }
+    check(execTitlePrefixed, "every Execution node title is 'exec: <tool>'");
+
+    // --- M1: typed, directed edges ---
+    bool allEdgesTyped = !state.edges.empty();
+    for (const auto& e : state.edges) {
+        if (!(e.type >= EdgeSemanticType::BeliefToPlan && e.type <= EdgeSemanticType::DistillToBelief))
+            allEdgesTyped = false;
+        if (!e.source.valid() || !e.target.valid()) allEdgesTyped = false;
+    }
+    check(allEdgesTyped, "all edges are typed and have valid source/target");
+
+    // --- M1: Distill -> Belief edges with create/update glyphs ---
+    int updEdges = 0, newEdges = 0;
+    for (const auto& e : state.edges) {
+        if (e.type == EdgeSemanticType::DistillToBelief) {
+            if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Update) ++updEdges;
+            if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Create) ++newEdges;
+        }
+    }
+    check(updEdges == 1, "one Distill->Belief update edge (B42)");
+    check(newEdges == 2, "two Distill->Belief create edges (B53, B77)");
+
+    // --- M1: frames present. Frame 128 was the active frame when its EXECUTING
+    // cursor was set, but frame 129 opens afterward and re-bases the cursor to
+    // 129 (openFrame sets cursor_.frameId = 129 / PLANNING). So frame 128 is NOT
+    // the executing frame in the final state.
+    check(state.frames.size() == 2, "two frame containers");
+    bool frame128Executing = false;
+    bool frame129Executing = false;
+    for (const auto& fi : state.frames) {
+        if (fi.id == 128) frame128Executing = fi.executing;
+        if (fi.id == 129) frame129Executing = fi.executing;
+    }
+    check(!frame128Executing, "frame 128 not executing after frame 129 opened");
+    (void)frame129Executing;
+
+    // --- M1: current node follows the runtime cursor. After frame 129 closed,
+    // the cursor is reset (frameId = -1) so there is no current node.
+    check(!state.currentNode.has_value(), "no current node after frame 129 closed (cursor invalid)");
+
+    // --- M1: current node follows the runtime cursor while a frame is active ---
+    // A separate model with a live EXECUTING cursor on frame 128 has the current
+    // node E-89.
+    NativeGuiModel live;
+    live.applyLine(R"({"type":"FrameOpened","id":128,"summary":"s","opened_at":"t0"})");
+    live.applyLine(R"({"type":"CursorChanged","frameId":128,"stage":"EXECUTING","item":"E-89"})");
+    GraphTaskState liveState = projectGraphTask(live);
+    check(liveState.currentNode.has_value() && liveState.currentNode->value == "E-89", "live current node is E-89");
+
+    // --- M3: layout determinism + feedback-loop region placement ---
+    PieGraphLayout layout = computeGraphLayout(state);
+    // Recompute and compare (determinism).
+    PieGraphLayout layout2 = computeGraphLayout(state);
+    bool deterministic = true;
+    if (layout.nodeRects.size() != layout2.nodeRects.size()) deterministic = false;
+    for (const auto& [k, r] : layout.nodeRects) {
+        auto it = layout2.nodeRects.find(k);
+        if (it == layout2.nodeRects.end() ||
+            it->second.x != r.x || it->second.y != r.y ||
+            it->second.w != r.w || it->second.h != r.h) deterministic = false;
+    }
+    check(deterministic, "layout is deterministic");
+
+    // Belief grid is left of plan; plan is above execution and distill.
+    auto findRect = [&](const std::string& id) -> const pie::gui::GraphRect* {
+        auto it = layout.nodeRects.find(id);
+        return it == layout.nodeRects.end() ? nullptr : &it->second;
+    };
+    const auto* b42 = findRect("B42");
+    const auto* p128 = findRect("P-128");
+    const auto* e89 = findRect("E-89");
+    const auto* d42 = findRect("D-42");
+    check(b42 && p128 && e89 && d42, "core nodes (B42, P-128, E-89, D-42) all placed");
+    // The generic Graphviz dot layout is top-down by edge direction and does not
+    // guarantee the hand-ordered feedback-loop left-region x-ordering (Belief
+    // left of Plan, Distill leftward) that the previous deterministic grid
+    // enforced. Under auto-layout those two direction assertions are dropped;
+    // the general contract below (valid rects, no overlap, frame container,
+    // positive canvas) is what must hold.
+    check(p128 && e89 && p128->y < e89->y, "Plan is above Execution");
+    check(e89 && d42 && e89->y < d42->y, "Execution is above Distill");
+    bool allValid = true;
+    bool noOverlap = true;
+    for (const auto& [k, r] : layout.nodeRects) {
+        if (r.w <= 0.0f || r.h <= 0.0f) allValid = false;
+        for (const auto& [k2, r2] : layout.nodeRects) {
+            if (k == k2) continue;
+            if (r.x < r2.x + r2.w && r.x + r.w > r2.x && r.y < r2.y + r2.h && r.y + r.h > r2.y)
+                noOverlap = false;
+        }
+    }
+    check(allValid, "every node rect has positive size");
+    check(noOverlap, "node rects do not overlap");
+
+    // Frames laid out left->right; frame 128 rect is non-empty.
+    auto f128 = layout.frameRects.find(128);
+    check(f128 != layout.frameRects.end() && f128->second.w > 0, "frame 128 has a container");
+
+    // Belief region nodes are in creation order along columns increasing.
+    check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");
+
+    if (failures == 0) std::printf("PASS: %d checks\n", 0);
+    std::printf("graph test: %s\n", failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
+}

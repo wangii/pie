@@ -93,11 +93,29 @@ if(NOT APPLE)
     find_package(OpenGL REQUIRED)
 endif()
 
+# Graphviz is used by the graph layout engine (PieGraphLayout) to auto-layout
+# the node graph. The Homebrew Graphviz install exposes the C API via pkg-config
+# modules named 'libcgraph' and 'libgvc' (note: not 'graphviz'/'gvc'/'cgraph').
+# We require both so the layout engine can call dot/gvc; fail clearly if absent.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GRAPHVIZ IMPORTED_TARGET libgvc libcgraph)
+if(NOT GRAPHVIZ_FOUND)
+    message(FATAL_ERROR
+        "Graphviz (libcgraph/libgvc) not found. Install it with:\n"
+        "  brew install graphviz   (macOS)   or   apt-get install libgraphviz-dev (Debian/Ubuntu)")
+endif()
+
 # ---------------------------------------------------------------------------
 # Model layer: headless, no ImGui dependency. Unit-testable without a window.
 # ---------------------------------------------------------------------------
-add_library(pi_gui_model STATIC src/Model.cpp src/FileList.cpp)
+add_library(pi_gui_model STATIC src/Model.cpp src/FileList.cpp
+    src/graph/GraphModel.cpp src/graph/PieGraphLayout.cpp
+    src/graph/GraphRouting.cpp src/graph/GraphInteraction.cpp src/graph/GraphLive.cpp
+    src/graph/GraphMinimap.cpp src/graph/GraphCache.cpp)
 target_include_directories(pi_gui_model PUBLIC src)
+# The graph layout engine (PieGraphLayout) calls the Graphviz C API for
+# automatic layout, so the headless model target links libgvc/libcgraph.
+target_link_libraries(pi_gui_model PUBLIC PkgConfig::GRAPHVIZ)
 
 # ---------------------------------------------------------------------------
 # Model unit tests (headless; no window, no SDK).
@@ -107,6 +125,25 @@ add_executable(pi_gui_model_test src/Model.test.cpp)
 target_link_libraries(pi_gui_model_test PRIVATE pi_gui_model)
 target_include_directories(pi_gui_model_test PRIVATE src)
 add_test(NAME pi_gui_model_test COMMAND pi_gui_model_test)
+
+# Phase 2 M1 graph projection + M3 layout test (headless).
+add_executable(pi_gui_graph_test src/graph/GraphModel.test.cpp)
+target_link_libraries(pi_gui_graph_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_graph_test PRIVATE src)
+add_test(NAME pi_gui_graph_test COMMAND pi_gui_graph_test)
+
+# Phase 2 M4/M5/M6 routing + selection + live-stability test (headless).
+add_executable(pi_gui_graph_m456_test src/graph/GraphM456.test.cpp)
+target_link_libraries(pi_gui_graph_m456_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_graph_m456_test PRIVATE src)
+add_test(NAME pi_gui_graph_m456_test COMMAND pi_gui_graph_m456_test)
+
+# Phase 2 M7/M8/M9 minimap geometry + cache reuse/invalidation + style structure
+# test (headless, links pi_gui_model; no ImGui).
+add_executable(pi_gui_graph_m789_test src/graph/GraphM789.test.cpp)
+target_link_libraries(pi_gui_graph_m789_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_graph_m789_test PRIVATE src)
+add_test(NAME pi_gui_graph_m789_test COMMAND pi_gui_graph_m789_test)
 
 # User prompt command serialization + outbound pipe test (headless).
 add_executable(pi_gui_prompt_test src/PromptCmd.test.cpp)
@@ -146,6 +183,7 @@ add_executable(pie_gui
     src/UiShared.cpp
     src/Paths.cpp
     src/RuntimeClient.cpp
+    src/graph/GraphView.cpp
 )
 if(APPLE)
     target_sources(pie_gui PRIVATE src/plats/macos/MetalBackend.mm)
