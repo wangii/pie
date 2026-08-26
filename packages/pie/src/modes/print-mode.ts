@@ -8,7 +8,7 @@
 
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
-import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
+import { flushRawStdout, isStdoutBroken, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { toJsonEvent } from "./json-event.ts";
 
@@ -165,5 +165,10 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 		await disposeRuntime();
 		await flushRawStdout();
+		// The consumer closed the pipe (e.g. `pi | head`): output was truncated, so
+		// report it as a controlled failure rather than a silent success.
+		if (isStdoutBroken()) {
+			return 1;
+		}
 	}
 }

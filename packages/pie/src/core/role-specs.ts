@@ -84,9 +84,9 @@ const PROPOSE_PROTOCOL =
 	"1. Propose beliefs with declare_belief. A world belief (domain product/code) names a relation about " +
 	"the product or code, states what you would observe if it were true (its falsifiable expectation), and " +
 	"how many evidence rounds it needs. Tag each referent in the statement with one of four kinds — " +
-	"[code] (implementation: symbol/file/logic), [prod] (product behavior or documented claim), " +
-	"[user] (user intent/requirement), [convention] (repo idiom/naming/pattern) — tagging only the " +
-	"referents the relation points at, not every noun (e.g. `_projectMessagesFor[code]` 计算 `status[prod]` " +
+	"{code} (implementation: symbol/file/logic), {prod} (product behavior or documented claim), " +
+	"{user} (user intent/requirement), {convention} (repo idiom/naming/pattern) — tagging only the " +
+	"referents the relation points at, not every noun (e.g. `_projectMessagesFor{code}` 计算 `status{prod}` " +
 	"的 context 统计规则). A framing belief (domain framing) states what the final answer " +
 	"must establish — an obligation, not a probe target. When the task asks you to examine, review, or " +
 	"audit something, the framing obligation must include surfacing any inconsistency between what the " +

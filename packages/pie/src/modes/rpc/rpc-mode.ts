@@ -21,6 +21,7 @@ import type {
 } from "../../core/extensions/index.ts";
 import {
 	flushRawStdout,
+	isStdoutBroken,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
@@ -761,6 +762,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		process.stdin.pause();
 		if (signal !== "SIGTERM") {
 			await flushRawStdout();
+			// The consumer closed the pipe (e.g. `pi | head`): output was truncated, so
+			// report it as a controlled failure rather than a silent success.
+			if (isStdoutBroken()) {
+				exitCode = 1;
+			}
 		}
 		process.exit(exitCode);
 	}
