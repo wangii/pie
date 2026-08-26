@@ -525,7 +525,15 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         if (!active) return RpcApplyResult::Ignored;
         std::string args;
         rawValue(line, "args", args);
-        model.addRpcToolCall(active->id, str(line, "toolCallId"), str(line, "toolName"), args);
+        std::string tool = str(line, "toolName");
+        model.addRpcToolCall(active->id, str(line, "toolCallId"), tool, args);
+        // Session file list: read/write/edit tool calls carry a path (or
+        // file_path) in args; record it normalized relative to the session cwd.
+        if (tool == "read" || tool == "write" || tool == "edit") {
+            std::string p = str(args, "path");
+            if (p.empty()) p = str(args, "file_path");
+            model.recordFileOp(tool, p);
+        }
         return RpcApplyResult::Applied;
     }
     if (type == "tool_execution_end") {
@@ -649,6 +657,7 @@ void NativeGuiModel::reset() {
     cursor_ = FrameCursor{};
     nextRpcFrameId_ = 1000;
     roleContext_ = RoleContextUsagePair{};
+    clearFileList();
 }
 
 LoopFrame* NativeGuiModel::frame(int id) {
@@ -849,6 +858,12 @@ void NativeGuiModel::applyLine(const std::string& line) {
         t.tool = str(line, "tool");
         t.command = str(line, "command");
         t.status = str(line, "status", "pending");
+        // Session file list: demo read/write/edit tool calls carry the path in
+        // the `command` field; record it normalized relative to the session cwd.
+        // Record BEFORE the move: std::move leaves t.tool/t.command moved-from.
+        if (t.tool == "read" || t.tool == "write" || t.tool == "edit") {
+            recordFileOp(t.tool, t.command);
+        }
         f->trajectory.push_back(std::move(t));
         return;
     }

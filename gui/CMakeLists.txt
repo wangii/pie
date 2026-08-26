@@ -96,7 +96,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Model layer: headless, no ImGui dependency. Unit-testable without a window.
 # ---------------------------------------------------------------------------
-add_library(pi_gui_model STATIC src/Model.cpp)
+add_library(pi_gui_model STATIC src/Model.cpp src/FileList.cpp)
 target_include_directories(pi_gui_model PUBLIC src)
 
 # ---------------------------------------------------------------------------
@@ -140,6 +140,7 @@ add_executable(pie_gui
     src/Summary.cpp
     src/Footer.cpp
     src/PromptPalette.cpp
+    src/FileListWindow.cpp
     src/Theme.cpp
     src/UiMarkdown.cpp
     src/UiShared.cpp

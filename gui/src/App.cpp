@@ -38,6 +38,7 @@
 #include "Summary.h"
 #include "Footer.h"
 #include "PromptPalette.h"
+#include "FileListWindow.h"
 #include "Theme.h"
 #include "Paths.h"
 #include "RuntimeClient.h"
@@ -61,6 +62,7 @@ struct AppSession {
     int viewId = -1;
     bool promptOpen = false;
     PromptPaletteState promptState;
+    bool fileListOpen = false;
 };
 
 int main(int argc, char** argv) {
@@ -148,6 +150,8 @@ int main(int argc, char** argv) {
         auto& io = ImGui::GetIO();
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_T, false))
             app.promptOpen = !app.promptOpen;
+        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_F, false))
+            app.fileListOpen = !app.fileListOpen;
     };
 
     // Build one ImGui frame's widgets.
@@ -181,6 +185,8 @@ int main(int argc, char** argv) {
                             [&app](const std::string& msg) {
                                 writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
                             });
+
+        renderFileList(app.fileListOpen, app.model);
 
         ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
         float availW = std::max(0.0f, winW - pad * 2);

@@ -10,10 +10,13 @@
 
 #pragma once
 
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <map>
+
+#include "FileList.h"
 
 namespace pie::gui {
 
@@ -206,6 +209,23 @@ public:
     const std::string& session() const { return session_; }
     void setSession(std::string s) { session_ = std::move(s); }
 
+    // Session-level read/write/edit file list. Each entry is a path normalized
+    // relative to the session cwd, deduped by (op, path). Populated from the
+    // runtime's tool-call events (live tool_execution_start / demo ToolCalled).
+    void recordFileOp(const std::string& op, const std::string& rawPath) {
+        if (rawPath.empty()) return;
+        std::string display = normalizeDisplayPath(session_, rawPath);
+        std::string key = op + "\n" + display;
+        if (fileOpSeen_.insert(key).second) {
+            fileList_.push_back(FileEntry{display, op});
+        }
+    }
+    const std::vector<FileEntry>& fileList() const { return fileList_; }
+    void clearFileList() {
+        fileList_.clear();
+        fileOpSeen_.clear();
+    }
+
     // Bottom footer telemetry (per-role model/cache hit rate + session cost), set
     // by the RPC adapter from the runtime's session_status event.
     const Footer& footer() const { return footer_; }
@@ -276,6 +296,8 @@ private:
     // updates the same object the viewer iterates.
     std::map<int, int> beliefById_;
     std::vector<Belief> beliefs_;  // first-inserted order
+    std::vector<FileEntry> fileList_;     // session read/write/edit files (insertion order)
+    std::set<std::string> fileOpSeen_;    // (op, display-path) dedup set
     FrameCursor cursor_;
     std::string session_;
     int nextRpcFrameId_ = 1000;  // auto-increment id for frames opened by the RPC adapter

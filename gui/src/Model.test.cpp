@@ -457,6 +457,62 @@ int main() {
         check(!rpc.roleContext().hasData, "reset clears roleContext");
     }
 
+    {
+        // --- Session file list: normalization, dedupe, op grouping ---
+        using pie::gui::normalizeDisplayPath;
+        check(normalizeDisplayPath("/a/b", "c.txt") == "c.txt", "rel path under cwd -> relative");
+        check(normalizeDisplayPath("/a/b", "/a/b/c.txt") == "c.txt", "abs path under cwd -> relative");
+        check(normalizeDisplayPath("/a/b", "/a/b/../b/c.txt") == "c.txt", "parent segments normalize");
+        check(normalizeDisplayPath("/a/b", "/a/x.txt") == "/a/x.txt", "path outside cwd -> absolute");
+        check(normalizeDisplayPath("/a/b", "") == "", "empty raw stays empty");
+
+        // Demo path: read/write/edit carried in `command`, deduped by (op, path).
+        pie::gui::NativeGuiModel dm;
+        dm.setSession("/a/b");
+        dm.applyLine(R"({"type":"FrameOpened","id":1,"summary":"s","opened_at":"t0"})");
+        dm.applyLine(R"({"type":"ToolCalled","frameId":1,"id":"t1","tool":"read","command":"c.txt","status":"ok"})");
+        dm.applyLine(R"({"type":"ToolCalled","frameId":1,"id":"t2","tool":"read","command":"c.txt","status":"ok"})");
+        dm.applyLine(R"({"type":"ToolCalled","frameId":1,"id":"t3","tool":"edit","command":"/a/b/c.txt","status":"ok"})");
+        dm.applyLine(R"({"type":"ToolCalled","frameId":1,"id":"t4","tool":"write","command":"../x.txt","status":"ok"})");
+        dm.applyLine(R"({"type":"ToolCalled","frameId":1,"id":"t5","tool":"bash","command":"ls","status":"ok"})");
+        {
+            const auto& fl = dm.fileList();
+            check(fl.size() == 3, "file list has 3 unique (op,path) entries");
+            // The three entries are: read c.txt, edit c.txt, write /a/x.txt.
+            bool hasReadC = false, hasEditC = false, hasWriteAbs = false;
+            for (const auto& e : fl) {
+                if (e.op == "read" && e.path == "c.txt") hasReadC = true;
+                if (e.op == "edit" && e.path == "c.txt") hasEditC = true;
+                if (e.op == "write" && e.path == "/a/x.txt") hasWriteAbs = true;
+            }
+            check(hasReadC, "read c.txt recorded");
+            check(hasEditC, "edit c.txt recorded (op separate from read)");
+            check(hasWriteAbs, "write ../x.txt normalized to absolute /a/x.txt");
+            check(dm.fileList()[0].op == "read" && dm.fileList()[0].path == "c.txt", "first entry read c.txt");
+        }
+        // Reset clears the file list.
+        dm.reset();
+        check(dm.fileList().empty(), "reset clears file list");
+
+        // Live path: tool_execution_start supplies args with path/file_path.
+        pie::gui::NativeGuiModel lm;
+        lm.setSession("/a/b");
+        check(pie::gui::applyRpcLine(lm, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied,
+              "agent_start opens live frame");
+        check(pie::gui::applyRpcLine(lm, R"({"type":"tool_execution_start","toolCallId":"c1","toolName":"read","args":{"path":"src/x.cpp"}})") ==
+                  pie::gui::RpcApplyResult::Applied,
+              "tool_execution_start applied");
+        check(pie::gui::applyRpcLine(lm, R"({"type":"tool_execution_start","toolCallId":"c2","toolName":"edit","args":{"file_path":"/a/b/src/y.cpp"}})") ==
+                  pie::gui::RpcApplyResult::Applied,
+              "tool_execution_start file_path applied");
+        {
+            const auto& fl = lm.fileList();
+            check(fl.size() == 2, "live file list size 2");
+            check(fl[0].op == "read" && fl[0].path == "src/x.cpp", "live read path from args.path");
+            check(fl[1].op == "edit" && fl[1].path == "src/y.cpp", "live edit path from args.file_path");
+        }
+    }
+
     if (failures == 0) std::printf("ALL PASS\n");
     else std::printf("%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;
