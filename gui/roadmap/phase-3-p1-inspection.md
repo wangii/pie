@@ -1,4 +1,4 @@
-# Phase 2 — P1 Inspection / Navigation
+# Phase 3 — P1 Inspection / Navigation
 
 Post-P0 inspection and navigation capabilities. The spec lists these as P1
 ("subsequently implement"), so they are not required to satisfy the P0 scope.
@@ -49,5 +49,5 @@ frame is opened that references the contradiction.
 
 ## Dependency
 
-Phase 2 depends on Phase 1 (frame history + P0 workspace). It is not a phase-gate
+Phase 3 depends on Phase 1 (frame history + P0 workspace). It is not a phase-gate
 for P0.

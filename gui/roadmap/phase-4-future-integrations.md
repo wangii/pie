@@ -1,4 +1,4 @@
-# Phase 3 — Future Integrations
+# Phase 4 — Future Integrations
 
 Deferred / future-scope items. The spec marks these as "Not Current Priority"
 or as future considerations, so they are not part of the P0 or P1 deliverable.

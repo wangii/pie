@@ -76,8 +76,11 @@ per-component `PushFont` calls.
 ### LoopFrame boundary (spec 2.2)
 
 A frame is a complete epistemic transaction, not a tool call, LLM turn, execution
-step, or time window. It can span multiple execution actions and closes only when
-distillation produces a proposal.
+step, or time window. It can span multiple execution actions. At the cognitive
+level a frame's run produces exactly one proposal, which is the epistemic boundary
+of that turn; the model itself closes a frame only on an explicit close event:
+`FrameClosed`, `CursorChanged(stage=CLOSED)`, or `turn_end` / `agent_settled`.
+`ProposalCreated` only appends to `frame.proposals` and never closes the frame.
 
 ### Selected beliefs (spec 9)
 
