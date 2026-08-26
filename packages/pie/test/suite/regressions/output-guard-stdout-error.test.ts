@@ -15,8 +15,17 @@ import {
  * writeRawStdout/flushRawStdout code paths.
  */
 function stubStdoutWriteWithCallbackError(error?: Error | null): void {
-	vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
-		const cb = typeof encodingOrCallback === "function" ? encodingOrCallback : typeof callback === "function" ? callback : undefined;
+	vi.spyOn(process.stdout, "write").mockImplementation(((
+		chunk: unknown,
+		encodingOrCallback?: unknown,
+		callback?: unknown,
+	) => {
+		const cb =
+			typeof encodingOrCallback === "function"
+				? encodingOrCallback
+				: typeof callback === "function"
+					? callback
+					: undefined;
 		if (cb) {
 			// Report success or failure asynchronously, like a real async write.
 			void Promise.resolve().then(() => (cb as (err?: Error | null) => void)(error));

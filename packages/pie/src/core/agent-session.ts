@@ -533,6 +533,7 @@ export class AgentSession {
 	/** Monotonic counter for the current task's stable id, incremented at each task boundary. */
 	private _taskId = 1;
 	private _planCounter = 0;
+	private _distillCounter = 0;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -1503,12 +1504,13 @@ export class AgentSession {
 		// surface the batch summary as the plan content for the native GUI. The
 		// plan id names this batch so a consumer can correlate the batch with its
 		// PlanProduced without relying on the (non-unique) `P-${taskId}` label.
-		const planId = `plan-${this._taskId}-${++this._planCounter}`;
+		const planCounter = ++this._planCounter;
+		const planId = `plan-${this._taskId}-${planCounter}`;
 		this._emit({
 			type: "PlanProduced",
 			frameId: this._taskId,
 			planId,
-			label: `P-${this._taskId}`,
+			label: `P-${this._taskId}-${planCounter}`,
 			question: `Batch of ${batch.length} belief(s): ${ids.join(", ")}`,
 			intent: `Probe batch: ${ids.join(", ")}`,
 		});
@@ -1662,11 +1664,12 @@ export class AgentSession {
 		// path, even though the fast path never runs the planner role. The routing
 		// belief carries only routing metadata (no structured intent/question), so
 		// synthesize a single-step plan summary from it.
+		const planCounter = ++this._planCounter;
 		this._emit({
 			type: "PlanProduced",
 			frameId: this._taskId,
-			planId: `plan-${this._taskId}-${++this._planCounter}`,
-			label: `P-${this._taskId}`,
+			planId: `plan-${this._taskId}-${planCounter}`,
+			label: `P-${this._taskId}-${planCounter}`,
 			question: `Fast-path: ${route.estimatedSteps ?? 1} step(s), ${route.difficulty ?? "unknown"} difficulty, success p=${route.successProbability ?? "?"}`,
 			intent: `Execute request directly (fast path): ${route.reason ?? route.statement}`,
 		});
@@ -1763,7 +1766,7 @@ export class AgentSession {
 		this._emit({
 			type: "DistillationProduced",
 			frameId: this._taskId,
-			label: `D-${this._taskId}`,
+			label: `D-${this._taskId}-${++this._distillCounter}`,
 			interpretation: lines.join("\n"),
 		});
 	}
