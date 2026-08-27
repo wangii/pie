@@ -15,6 +15,7 @@ const char* nodeFamilyToString(NodeFamily f) {
         case NodeFamily::Plan: return "Plan";
         case NodeFamily::Execution: return "Execution";
         case NodeFamily::Distill: return "Distill";
+        case NodeFamily::Propose: return "Propose";
     }
     return "?";
 }
@@ -35,6 +36,8 @@ const char* edgeSemanticTypeToString(EdgeSemanticType t) {
         case EdgeSemanticType::PlanToExecution: return "Plan->Execution";
         case EdgeSemanticType::ExecutionToDistill: return "Execution->Distill";
         case EdgeSemanticType::DistillToBelief: return "Distill->Belief";
+        case EdgeSemanticType::DistillToPropose: return "Distill->Propose";
+        case EdgeSemanticType::ProposeToBelief: return "Propose->Belief";
     }
     return "?";
 }
@@ -91,6 +94,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     GraphTaskState state;
 
     // --- Global Belief nodes (creation-order stable, no owning frame) ---
+    std::set<std::string> projectedBeliefIds;
     uint64_t beliefOrder = 1;
     for (const Belief& b : model.beliefs()) {
         GraphNode node;
@@ -98,6 +102,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         // Proposal events (e.g. "B42"). If the belief id has no string label,
         // synthesize one from the numeric id for display stability.
         node.id = makeNodeId("B" + std::to_string(b.id.value >= 0 ? b.id.value : beliefOrder));
+        projectedBeliefIds.insert(node.id.value);
         node.family = NodeFamily::Belief;
         node.displayType = b.status.empty() ? "belief" : b.status;
         node.domain = b.domain;
@@ -293,7 +298,13 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         // demo/headless path instead emits explicit ProposalCreated events, so we
         // also consume f.proposals. Both sources are deduped by (distill label, belief)
         // so a belief written back by both is not double-linked.
+        // Distill -> Propose -> Belief write-back. A ProposalCreated occurrence is a
+        // hypothesis-formation step between the distillation and the belief it
+        // writes back, so it projects as a Propose node on the chain
+        // Distill -> Propose -> Belief. The node id is deterministic per frame and
+        // proposal index. The create/update operation rides on Propose -> Belief.
         std::set<std::pair<std::string, std::string>> writtenBack;
+        uint64_t proposalIdx = 0;
         for (const Proposal& proposal : f.proposals) {
             if (proposal.belief.empty()) continue;
             std::string distillationLabel = proposal.distillationLabel;
@@ -301,15 +312,47 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
                 distillationLabel = distillations.front()->label;
             }
             if (distillationLabel.empty()) continue;
+            // Drop proposals whose target belief is not in the projected belief set:
+            // a Distill -> Propose -> Belief chain to a missing belief node would
+            // leave a dangling edge (the proposal was never materialized as a
+            // BeliefCreated / BeliefUpdated in the runtime).
+            if (!projectedBeliefIds.count(proposal.belief)) continue;
             writtenBack.insert({distillationLabel, proposal.belief});
-            GraphEdge edge;
-            edge.source = makeNodeId(distillationLabel);
-            edge.target = makeNodeId(proposal.belief);
-            edge.type = EdgeSemanticType::DistillToBelief;
-            edge.beliefOperation = proposal.op == '+'
-                ? BeliefOperation::Create
-                : BeliefOperation::Update;
-            state.edges.push_back(std::move(edge));
+
+            const std::string proposeId = "PR-" + std::to_string(f.id) + "-" + std::to_string(proposalIdx);
+            GraphNode proposeNode;
+            proposeNode.id = makeNodeId(proposeId);
+            proposeNode.family = NodeFamily::Propose;
+            proposeNode.frameId = f.id;
+            proposeNode.displayType = "propose";
+            proposeNode.title = "Propose " + proposal.belief;
+            proposeNode.compactText = proposal.detail;
+            proposeNode.fullText = proposal.detail;
+            if (!proposal.lhs.empty()) {
+                proposeNode.fullText += "\n" + proposal.lhs + " " + proposal.relation + " " + proposal.rhs;
+            }
+            proposeNode.creationOrder = static_cast<std::uint64_t>(f.id) * 1000 + 400 + proposalIdx;
+            proposeNode.state = NodeVisualState::Default;
+            state.nodes.push_back(std::move(proposeNode));
+            ++proposalIdx;
+
+            GraphEdge distillToPropose;
+            distillToPropose.source = makeNodeId(distillationLabel);
+            distillToPropose.target = makeNodeId(proposeId);
+            distillToPropose.type = EdgeSemanticType::DistillToPropose;
+            state.edges.push_back(std::move(distillToPropose));
+
+            GraphEdge proposeToBelief;
+            proposeToBelief.source = makeNodeId(proposeId);
+            proposeToBelief.target = makeNodeId(proposal.belief);
+            proposeToBelief.type = EdgeSemanticType::ProposeToBelief;
+            switch (proposal.op) {
+                case '+': proposeToBelief.beliefOperation = BeliefOperation::Create; break;
+                case '-': proposeToBelief.beliefOperation = BeliefOperation::Remove; break;
+                case '?': proposeToBelief.beliefOperation = BeliefOperation::Unresolved; break;
+                default:  proposeToBelief.beliefOperation = BeliefOperation::Update; break;  // '~' and unknown
+            }
+            state.edges.push_back(std::move(proposeToBelief));
         }
 
         // Live-path provenance: a belief created or updated while this frame was the

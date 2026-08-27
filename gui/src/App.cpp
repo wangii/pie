@@ -70,7 +70,7 @@ struct AppSession {
     // Phase 2 (M0) Graph View: a Text<->Graph switch beside the three-lane
     // workspace. The graph session state (pan/zoom/selection) is preserved
     // across toggles within a session.
-    bool graphOpen = false;
+    bool graphOpen = true;  // default view: Node Graph View (Cmd/Ctrl+G toggles to Text View)
     GraphViewState graphView;
     // Phase 2 (M6): persistent live-layout state so closed-frame / belief nodes
     // stay frozen while the active frame relays out.

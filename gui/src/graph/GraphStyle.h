@@ -59,6 +59,7 @@ struct GraphStyle {
     Rgb cardExecFailed{120, 48, 48};
     Rgb cardExecRunning{104, 76, 30};
     Rgb cardDistill{96, 66, 116};
+    Rgb cardPropose{64, 104, 112};  // hypothesis-formation (propose) node
     Rgb cardDefault{60, 65, 78};
     Rgb borderSelected{255, 176, 50};
     Rgb borderCurrent{150, 90, 240};
@@ -82,6 +83,8 @@ struct GraphStyle {
     Rgb edgePlanToExecution{190, 198, 208};
     Rgb edgeExecutionToDistill{190, 198, 208};
     Rgb edgeDistillToBelief{220, 140, 220};
+    Rgb edgeDistillToPropose{150, 190, 210};
+    Rgb edgeProposeToBelief{220, 180, 140};
     Rgb edgeMuted{90, 95, 100};
     float arrowheadSize = 8.0f;   // base length along the direction
     float arrowheadHalf = 4.0f;   // half-width across the direction
@@ -132,6 +135,8 @@ struct GraphStyle {
     Rgb planRegionLabel{104, 168, 238};
     Rgb distillRegionLabel{190, 126, 224};
     Rgb executionRegionLabel{238, 184, 74};
+    Rgb proposeRegionFill{64, 104, 112};   // matches cardPropose
+    Rgb proposeRegionLabel{150, 190, 210}; // matches edgeDistillToPropose
 
     // --- Routing / Framing belief placement (reserved slots in the layout) ---
     // Routing beliefs guide the decision process; framing beliefs (the current

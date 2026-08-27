@@ -30,6 +30,7 @@ static void check(bool cond, const char* what) {
 }
 
 static void testExecSummary();
+static void testProposeOps();
 
 // Build a model with one complete epistemic transaction and a second partial
 // frame, mirroring the demo event vocabulary used by Model.test.cpp.
@@ -73,16 +74,16 @@ int main() {
     GraphTaskState state = projectGraphTask(model);
 
     // --- M1: no Proposal / Observation / ExecutionStep node ---
-    bool haveProposalNode = false, haveObservationNode = false, haveExecStepNode = false;
+    // --- M1: ProposalCreated occurrences project as Propose nodes on the chain
+    // Distill -> Propose -> Belief (never a synthetic wrapper). ---
+    int proposeNodes128 = 0, proposeNodes129 = 0;
     for (const auto& n : state.nodes) {
-        if (n.family == NodeFamily::Distill || n.family == NodeFamily::Execution) {
-            // Ensure no synthetic wrapper node was emitted.
-        }
-        if (n.title == "Proposal" || n.title == "Observation" || n.title == "ExecutionStep")
-            (n.family == NodeFamily::Execution ? haveExecStepNode : haveObservationNode) = true;
+        if (n.family != NodeFamily::Propose) continue;
+        if (n.frameId && *n.frameId == 128) ++proposeNodes128;
+        if (n.frameId && *n.frameId == 129) ++proposeNodes129;
     }
-    check(!haveProposalNode && !haveObservationNode, "no Proposal/Observation/ExecutionStep node");
-    (void)haveExecStepNode;
+    check(proposeNodes128 == 2, "two Propose nodes for frame 128 (B42, B53)");
+    check(proposeNodes129 == 0, "no Propose node for frame 129 (B77 dropped as dangling target)");
 
     // --- M1: Beliefs are global (no owning frame) ---
     bool beliefsGlobal = true;
@@ -135,8 +136,13 @@ int main() {
     // --- M1: typed, directed edges ---
     bool allEdgesTyped = !state.edges.empty();
     for (const auto& e : state.edges) {
-        if (!(e.type >= EdgeSemanticType::BeliefToPlan && e.type <= EdgeSemanticType::DistillToBelief))
-            allEdgesTyped = false;
+        const bool known = e.type == EdgeSemanticType::BeliefToPlan ||
+                           e.type == EdgeSemanticType::PlanToExecution ||
+                           e.type == EdgeSemanticType::ExecutionToDistill ||
+                           e.type == EdgeSemanticType::DistillToBelief ||
+                           e.type == EdgeSemanticType::DistillToPropose ||
+                           e.type == EdgeSemanticType::ProposeToBelief;
+        if (!known) allEdgesTyped = false;
         if (!e.source.valid() || !e.target.valid()) allEdgesTyped = false;
     }
     check(allEdgesTyped, "all edges are typed and have valid source/target");
@@ -144,13 +150,13 @@ int main() {
     // --- M1: Distill -> Belief edges encode create/update operations ---
     int updEdges = 0, newEdges = 0;
     for (const auto& e : state.edges) {
-        if (e.type == EdgeSemanticType::DistillToBelief) {
+        if (e.type == EdgeSemanticType::ProposeToBelief) {
             if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Update) ++updEdges;
             if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Create) ++newEdges;
         }
     }
-    check(updEdges == 1, "one Distill->Belief update edge (B42)");
-    check(newEdges == 2, "two Distill->Belief create edges (B53, B77)");
+    check(updEdges == 1, "one Propose->Belief update edge (B42)");
+    check(newEdges == 1, "one Propose->Belief create edge (B53); B77 dropped as dangling target");
 
     // --- M1: frames present. Frame 128 was the active frame when its EXECUTING
     // cursor was set, but frame 129 opens afterward and re-bases the cursor to
@@ -204,6 +210,10 @@ int main() {
     const auto* e89 = findRect("E-89");
     const auto* d42 = findRect("D-42");
     check(b42 && p128 && e89 && d42, "core nodes (B42, P-128, E-89, D-42) all placed");
+    const auto* pr10 = findRect("PR-128-0");
+    const auto* pr11 = findRect("PR-128-1");
+    check(pr10 && pr11, "Propose nodes (PR-128-0, PR-128-1) are placed");
+    check(pr10 && d42 && pr10->y < d42->y, "Propose sits above the distillation in the middle region");
     check(b42 && p128 && b42->x + b42->w < p128->x,
           "Belief column is left of Plan");
     check(p128 && e88 && p128->x + p128->w < e88->x,
@@ -251,6 +261,9 @@ int main() {
     // Belief region nodes are in creation order along columns increasing.
     check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");
 
+    // Propose op semantics + dangling-target drop.
+    testProposeOps();
+
     // execSummary dedup + fallback behavior (read / bash grep / grep-dup / unknown).
     testExecSummary();
 
@@ -289,4 +302,47 @@ static void testExecSummary() {
     expect("E-3", "grep pytest .");
     expect("E-4", "aws s3 ls");
     expect("E-5", "grep");
+}
+
+// --- M1: Propose op semantics + dangling-target drop ---
+// A ProposalCreated op maps to a Create/Update/Remove/Unresolved Propose->Belief
+// edge (not degraded to Update), and a proposal whose target belief is not in the
+// projected belief set is dropped instead of leaving a dangling edge.
+static void testProposeOps() {
+    NativeGuiModel model;
+    model.applyLine(R"({"type":"FrameOpened","id":700,"summary":"s","opened_at":"t0"})");
+    // The demo applyLine path registers beliefs via BeliefUpdated (upsertBelief);
+    // BeliefCreated is ignored there.
+    model.applyLine(R"({"type":"BeliefUpdated","beliefId":1,"lhs":"a","relation":"b","rhs":"c","status":"proposed"})");
+    model.applyLine(R"({"type":"BeliefUpdated","beliefId":2,"lhs":"a","relation":"b","rhs":"c","status":"proposed"})");
+    model.applyLine(R"({"type":"BeliefUpdated","beliefId":3,"lhs":"a","relation":"b","rhs":"c","status":"proposed"})");
+    model.applyLine(R"({"type":"DistillationProduced","frameId":700,"label":"D-700","interpretation":"i"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":700,"op":"+","belief":"B1","detail":"create"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":700,"op":"~","belief":"B2","detail":"update"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":700,"op":"-","belief":"B3","detail":"remove"})");
+    model.applyLine(R"({"type":"ProposalCreated","frameId":700,"op":"?","belief":"B2","detail":"unresolved"})");
+    // No BeliefCreated for 99: this proposal must be dropped (no dangling edge).
+    model.applyLine(R"({"type":"ProposalCreated","frameId":700,"op":"+","belief":"B99","detail":"dangling"})");
+
+    GraphTaskState st = projectGraphTask(model);
+    int create = 0, update = 0, remove = 0, unres = 0;
+    for (const auto& e : st.edges) {
+        if (e.type != EdgeSemanticType::ProposeToBelief) continue;
+        if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Create) ++create;
+        if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Update) ++update;
+        if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Remove) ++remove;
+        if (e.beliefOperation && *e.beliefOperation == BeliefOperation::Unresolved) ++unres;
+    }
+    check(create == 1 && update == 1, "propose ops: one Create (B1) and one Update (B2) edge");
+    check(remove == 1, "propose ops: '-' maps to a Remove edge (B3)");
+    check(unres == 1, "propose ops: '?' maps to an Unresolved edge (B2)");
+
+    bool b99Dropped = true;
+    for (const auto& n : st.nodes) {
+        if (n.family == NodeFamily::Propose && n.title.find("B99") != std::string::npos) b99Dropped = false;
+    }
+    for (const auto& e : st.edges) {
+        if (e.target.value == "B99") b99Dropped = false;
+    }
+    check(b99Dropped, "propose ops: dangling B99 proposal is dropped");
 }

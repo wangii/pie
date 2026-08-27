@@ -3,8 +3,9 @@
 // Headless, ImGui-free, unit-testable. It projects the PIE cognition ontology
 // (nodes/edges) into a deterministic custom layout: LoopFrames are stacked as
 // vertical rows, Beliefs occupy a fixed left column ordered by creation order,
-// Plan / Distillation occupy the middle (top / bottom) regions, and Execution
-// occupies the right column ordered by execution order. It does not infer
+// Plan / Propose / Distillation occupy the middle (top / middle / bottom)
+// regions, and Execution occupies the right column ordered by execution order.
+// It does not infer
 // cognition: node/edge semantic types and creation/execution orders are
 // runtime-supplied, only positions come from the engine.
 //
@@ -37,6 +38,7 @@ struct PieGraphLayout {
     std::map<int, GraphRect> frameRects;          // keyed by frame id
     std::map<int, GraphRect> beliefRegionRects;   // newly-created Beliefs, keyed by frame id
     std::map<int, GraphRect> planRegionRects;     // upper middle band, keyed by frame id
+    std::map<int, GraphRect> proposeRegionRects;  // middle band, keyed by frame id
     std::map<int, GraphRect> distillRegionRects;  // lower middle band, keyed by frame id
     std::map<int, GraphRect> executionRegionRects;// right column, keyed by frame id
     GraphRect beliefColumnRect;                   // global left column

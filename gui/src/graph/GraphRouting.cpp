@@ -52,7 +52,15 @@ std::vector<EdgeRoute> computeEdgeRoutes(const GraphTaskState& state,
                             {(source.first + target.first) * 0.5f,
                              (source.second + target.second) * 0.5f},
                             target};
+        } else if (edge.type == EdgeSemanticType::ProposeToBelief) {
+            // Propose (middle) writes back to the belief column: a direct long
+            // cross-region return line, isomorphic to Distill -> Belief.
+            const auto source = left(*sourceRect);
+            const auto target = right(*targetRect);
+            route.points = {source, target};
+            route.longRoute = true;
         } else {
+            // Local Plan -> Execution / Execution -> Distill / Distill -> Propose.
             const auto source = left(*sourceRect);
             const auto target = right(*targetRect);
             route.points = {source,

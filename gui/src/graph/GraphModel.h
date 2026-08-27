@@ -8,12 +8,15 @@
 // runtime, it does not fabricate epistemic meaning.
 //
 // Contract invariants (see roadmap/phase-2-node-graph-contract.md):
-//  - No Proposal node and no synthetic Observation/ExecutionStep wrapper.
+//  - A ProposalCreated occurrence (a distillation's belief write-back) is
+//    projected as a Propose node on the chain Distill -> Propose -> Belief.
+//    Old data without a Proposal record keeps the direct Distill -> Belief edge.
+//  - No synthetic Observation/ExecutionStep wrapper.
 //  - A tool call and its result are merged into a single Execution node.
 //  - Beliefs are global (no owning frame); frames do not own Belief nodes.
 //  - All edges are typed, directed, explicit, and runtime-supplied.
-//  - Distill -> Belief encodes the epistemic result as a create/update edge
-//    (a create edge is drawn dashed; no on-link operation glyph is rendered).
+//  - The epistemic result is encoded as Distill -> Propose -> Propose -> Belief,
+//    or as the Distill -> Belief fallback; a create edge is drawn dashed.
 
 #pragma once
 
@@ -36,6 +39,7 @@ enum class NodeFamily {
     Plan,
     Execution,
     Distill,
+    Propose,  // hypothesis-formation step written back by a distillation
 };
 const char* nodeFamilyToString(NodeFamily f);
 
@@ -51,18 +55,23 @@ const char* nodeVisualStateToString(NodeVisualState s);
 
 // Edge semantic type. All edges are directed and explicit.
 enum class EdgeSemanticType {
-    BeliefToPlan,      // a frame expressed these beliefs to its plan
-    PlanToExecution,   // the plan drove execution
-    ExecutionToDistill,// execution results entered cognition
-    DistillToBelief,   // distillation updated / created a belief (epistemic result)
+    BeliefToPlan,       // a frame expressed these beliefs to its plan
+    PlanToExecution,    // the plan drove execution
+    ExecutionToDistill, // execution results entered cognition
+    DistillToBelief,    // distillation updated / created a belief (epistemic result)
+    DistillToPropose,   // distillation produced a proposal (hypothesis formation)
+    ProposeToBelief,    // proposal added / revised a belief (epistemic result)
 };
 const char* edgeSemanticTypeToString(EdgeSemanticType t);
 
-// The operation a Distill -> Belief edge encodes: a belief was created (+) or
-// updated (~). Undefined when the edge is not a Distill -> Belief edge.
+// The operation a Distill -> Belief / Propose -> Belief edge encodes: a belief
+// was created (+), updated (~), removed/invalidated (-), or is unresolved (?).
+// Undefined for other edge types.
 enum class BeliefOperation {
     Create,
     Update,
+    Remove,
+    Unresolved,
 };
 
 // A unique node identifier. Value is the runtime label ("B42", "P-128",
@@ -92,14 +101,14 @@ struct GraphNode {
     NodeVisualState state = NodeVisualState::Default;
     uint64_t creationOrder = 0;      // stable, creation-order key (Belief grid)
     std::optional<uint64_t> executionOrder;  // runtime execution order (Execution)
-    std::optional<BeliefOperation> beliefOperation;  // Distill->Belief create/update (drives dashed styling)
+    std::optional<BeliefOperation> beliefOperation;  // Distill->Belief / Propose->Belief create/update (drives dashed styling)
 };
 
 struct GraphEdge {
     NodeId source;
     NodeId target;
     EdgeSemanticType type = EdgeSemanticType::BeliefToPlan;
-    std::optional<BeliefOperation> beliefOperation;  // set only for Distill->Belief
+    std::optional<BeliefOperation> beliefOperation;  // set only for Distill->Belief / Propose->Belief
 };
 
 // Container summary for a LoopFrame in the graph, used by the frame container
@@ -119,10 +128,11 @@ struct GraphTaskState {
     std::optional<NodeId> currentNode;  // the single CURRENT node
 };
 
-// Project the runtime model into a GraphTaskState (Phase 2 M1). Believes are
-// global; each frame's plan/execution/distillation become nodes; proposals are
-// folded into Distill -> Belief edges (never a Proposal node). Tool call +
-// result are merged into one Execution node.
+// Project the runtime model into a GraphTaskState (Phase 2 M1). Beliefs are
+// global; each frame's plan/execution/distillation become nodes; each
+// ProposalCreated occurrence becomes a Propose node on the chain
+// Distill -> Propose -> Belief. Tool call + result are merged into one
+// Execution node.
 GraphTaskState projectGraphTask(const NativeGuiModel& model);
 
 } // namespace pie::gui

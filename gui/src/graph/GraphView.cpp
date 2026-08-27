@@ -83,6 +83,7 @@ ImU32 cardColor(NodeFamily f, const GraphNode& n, bool selected, bool current) {
             if (n.displayType == "ok") return IM_COL32(st.cardExecOk.r, st.cardExecOk.g, st.cardExecOk.b, 255);
             return IM_COL32(st.cardExecRunning.r, st.cardExecRunning.g, st.cardExecRunning.b, 255);
         case NodeFamily::Distill: return IM_COL32(st.cardDistill.r, st.cardDistill.g, st.cardDistill.b, 255);
+        case NodeFamily::Propose: return IM_COL32(st.cardPropose.r, st.cardPropose.g, st.cardPropose.b, 255);
     }
     return IM_COL32(st.cardDefault.r, st.cardDefault.g, st.cardDefault.b, 255);
 }
@@ -104,6 +105,8 @@ ImU32 edgeColor(EdgeSemanticType t, float alpha) {
         case EdgeSemanticType::PlanToExecution: return IM_COL32(st.edgePlanToExecution.r, st.edgePlanToExecution.g, st.edgePlanToExecution.b, 255);
         case EdgeSemanticType::ExecutionToDistill: return IM_COL32(st.edgeExecutionToDistill.r, st.edgeExecutionToDistill.g, st.edgeExecutionToDistill.b, 255);
         case EdgeSemanticType::DistillToBelief: return IM_COL32(st.edgeDistillToBelief.r, st.edgeDistillToBelief.g, st.edgeDistillToBelief.b, 255);
+        case EdgeSemanticType::DistillToPropose: return IM_COL32(st.edgeDistillToPropose.r, st.edgeDistillToPropose.g, st.edgeDistillToPropose.b, 255);
+        case EdgeSemanticType::ProposeToBelief: return IM_COL32(st.edgeProposeToBelief.r, st.edgeProposeToBelief.g, st.edgeProposeToBelief.b, 255);
     }
     return IM_COL32(st.edgeMuted.r, st.edgeMuted.g, st.edgeMuted.b, 255);
 }
@@ -206,31 +209,13 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         (void)frameId;
         drawSurface(rect, st.distillRegionFill);
     }
+    for (const auto& [frameId, rect] : layout.proposeRegionRects) {
+        (void)frameId;
+        drawSurface(rect, st.proposeRegionFill);
+    }
     for (const auto& [frameId, rect] : layout.executionRegionRects) {
         (void)frameId;
         drawSurface(rect, st.executionRegionFill);
-    }
-
-    // Column headings sit in the reserved header band and remain aligned with
-    // the semantic columns while the canvas pans and zooms.
-    const float headerY = st.canvasPad + st.columnHeaderHeight * 0.15f;
-    dl->AddText(toScreen(layout.beliefColumnRect.x, headerY),
-                IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
-                         st.beliefRegionLabel.b, 255), "Belief Set (global)");
-    if (!layout.planRegionRects.empty()) {
-        const GraphRect& rect = layout.planRegionRects.begin()->second;
-        dl->AddText(toScreen(rect.x, headerY),
-                    IM_COL32(st.planRegionLabel.r, st.planRegionLabel.g,
-                             st.planRegionLabel.b, 255), "Plan (upper)");
-        dl->AddText(toScreen(rect.x, headerY + 16.0f),
-                    IM_COL32(st.distillRegionLabel.r, st.distillRegionLabel.g,
-                             st.distillRegionLabel.b, 255), "Distillation (lower)");
-    }
-    if (!layout.executionRegionRects.empty()) {
-        const GraphRect& rect = layout.executionRegionRects.begin()->second;
-        dl->AddText(toScreen(rect.x, headerY),
-                    IM_COL32(st.executionRegionLabel.r, st.executionRegionLabel.g,
-                             st.executionRegionLabel.b, 255), "Execution Blocks");
     }
 
     // --- LoopFrame row boundaries ---
@@ -292,7 +277,8 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                                   : (onPath ? st.edgeAlphaPath : st.edgeAlphaOffPath);
         ImU32 col = edgeColor(route.type, alpha);
         if (route.longRoute) {
-            const bool dashedCreate = route.type == EdgeSemanticType::DistillToBelief &&
+            const bool dashedCreate = (route.type == EdgeSemanticType::DistillToBelief ||
+                                      route.type == EdgeSemanticType::ProposeToBelief) &&
                                       route.beliefOperation == BeliefOperation::Create;
             for (size_t i = 0; i + 1 < route.points.size(); ++i) {
                 ImVec2 a = toPx(route.points[i].first, route.points[i].second);
@@ -356,8 +342,10 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             if (n.displayType == "ok") execGlyph = "✓";
             else if (n.displayType == "failed") execGlyph = "✗";
             else execGlyph = "●";
+        } else if (n.family == NodeFamily::Propose) {
+            title = n.title.empty() ? n.id.value : n.title;
         } else {
-            title = std::string("Distill ") + n.id.value;
+            title = n.id.value;  // no "Distill " prefix; status shown by dot color
         }
 
         // Indicator dot, vertically centered at the node's left edge; the
@@ -411,19 +399,23 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             "Belief -> Plan   (read)",
             "Plan -> Execution",
             "Execution -> Distillation",
-            "Distillation -> Belief   (write back)",
+            "Distillation -> Propose",
+            "Propose -> Belief   (write back)",
             "Distillation -> Belief   (create)",
+            "Propose -> Belief   (create)",
         };
         const EdgeSemanticType types[] = {
             EdgeSemanticType::BeliefToPlan,
             EdgeSemanticType::PlanToExecution,
             EdgeSemanticType::ExecutionToDistill,
+            EdgeSemanticType::DistillToPropose,
+            EdgeSemanticType::ProposeToBelief,
             EdgeSemanticType::DistillToBelief,
-            EdgeSemanticType::DistillToBelief,
+            EdgeSemanticType::ProposeToBelief,
         };
-        const char* glyphs[] = {"", "", "", "", ""};
+        const char* glyphs[] = {"", "", "", "", "", "", ""};
         const float lgPad = 8.0f, lgLineH = 20.0f, lgRowGap = 6.0f;
-        const float lgW = 310.0f;
+        const float lgW = 330.0f;
         const float lgH = lgPad * 2.0f + (int)(sizeof(labels) / sizeof(labels[0])) * (lgLineH + lgRowGap);
         ImVec2 lg0(origin.x + lgPad,
                    origin.y + gridSize.y - lgH - lgPad);
@@ -434,7 +426,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             ImU32 col = edgeColor(types[i], 1.0f);
             ImVec2 sampleStart(lg0.x + lgPad, ly + lgLineH * 0.5f);
             ImVec2 sampleEnd(lg0.x + lgPad + 28.0f, ly + lgLineH * 0.5f);
-            if (i == 4) drawDashedLine(dl, sampleStart, sampleEnd, col, 2.0f, 1.0f);
+            if (i == 5 || i == 6) drawDashedLine(dl, sampleStart, sampleEnd, col, 2.0f, 1.0f);
             else dl->AddLine(sampleStart, sampleEnd, col, 2.0f);
             // Arrowhead toward the right end of the sample line.
             dl->AddTriangleFilled(ImVec2(lg0.x + lgPad + 32.0f, ly + lgLineH * 0.5f),

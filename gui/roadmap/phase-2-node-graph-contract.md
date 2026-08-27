@@ -87,20 +87,24 @@ label (not a card wrapping its text).
 - **Distill**: indicator dot + label; family = DISTILL, subtype is runtime display
   metadata.
 
-No Proposal node and no synthetic Observation/ExecutionStep wrapper: the
-epistemic result is `Distill → Belief` as a create/update edge (create
-write-backs dashed, update solid; no on-link operation glyph), and is
-runtime-provided, not inferred by the GUI.
+No synthetic Observation/ExecutionStep wrapper: a ProposalCreated occurrence is
+projected as a Propose node on the chain `Distill → Propose → Belief` (`+` =
+create, `~` = update, `-` = remove, `?` = unresolved; create write-backs dashed,
+the rest solid; no on-link operation glyph), and is runtime-provided, not
+inferred by the GUI. Old data without a Proposal record keeps the direct
+`Distill → Belief` edge. A proposal whose target belief is not in the projected
+belief set is dropped rather than leaving a dangling edge.
 
 ### Edges and cross-frame semantics
 
 All edges are typed, directed, explicit. The UI includes a compact legend but
 does not put labels on individual edges. Cross-frame cognition passes only
 through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
-`Belief → Plan` uses an orthogonal cross-region route; `Distill → Belief` is a
-direct two-point line (the write-back returns to the belief column as a single
-straight segment). `Plan → Execution` and `Execution → Distill` remain local
-curves. Create write-backs are dashed and update write-backs are solid.
+`Belief → Plan` uses an orthogonal cross-region route; `Distill → Belief` and
+`Propose → Belief` are direct two-point lines (the write-back returns to the
+belief column as a single straight segment). `Plan → Execution`, `Execution →
+Distill`, and `Distill → Propose` remain local curves. Create write-backs are
+dashed and the rest are solid.
 
 ### LoopFrame boundary (entering propose is the delimiter)
 
@@ -135,11 +139,13 @@ Each row has subtle Plan, Distillation, and Execution region surfaces plus a
 dashed LoopFrame boundary. Its label is the logical order `LoopFrame #<n>`; it
 shows no summary, selected-belief list, or proposal count.
 
-Routing and framing belief cards are laid out in reserved slots directly above
-(routing) the whole loop-frame area and below (framing) the current (active)
-LoopFrame, in distinct domain colors, so the belief element itself carries the
-domain role. Beliefs without a routing/framing domain stay in the global
-creation-order left column.
+Routing and framing belief cards are laid out in reserved slots that hug a
+boundary: routing sits directly above the whole loop-frame area; framing (the
+current "target") hugs the NEXT loopframe's top border when one follows the
+current frame, else the loop-frame area top border. Neither is fixed to the
+current frame. They use distinct domain colors, so the belief element itself
+carries the domain role. Beliefs without a routing/framing domain stay in the
+global creation-order left column.
 
 ### CURRENT vs SELECTED
 
