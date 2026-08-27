@@ -16,7 +16,7 @@ import {
  */
 function stubStdoutWriteWithCallbackError(error?: Error | null): void {
 	vi.spyOn(process.stdout, "write").mockImplementation(((
-		chunk: unknown,
+		_chunk: unknown,
 		encodingOrCallback?: unknown,
 		callback?: unknown,
 	) => {

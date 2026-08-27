@@ -154,21 +154,20 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				}
 			}
 		}
-
-		return exitCode;
 	} catch (error: unknown) {
 		console.error(error instanceof Error ? error.message : String(error));
-		return 1;
+		exitCode = 1;
 	} finally {
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
 		await disposeRuntime();
 		await flushRawStdout();
-		// The consumer closed the pipe (e.g. `pi | head`): output was truncated, so
-		// report it as a controlled failure rather than a silent success.
-		if (isStdoutBroken()) {
-			return 1;
-		}
 	}
+	// The consumer closed the pipe (e.g. `pi | head`): output was truncated, so
+	// report it as a controlled failure rather than a silent success.
+	if (isStdoutBroken()) {
+		exitCode = 1;
+	}
+	return exitCode;
 }
