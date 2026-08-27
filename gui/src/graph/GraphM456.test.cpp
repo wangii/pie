@@ -125,12 +125,8 @@ static void testRouting(const GraphTaskState& s, const PieGraphLayout& layout) {
                   "M4: Belief->Plan stays inside its semantic row");
         } else if (r.type == EdgeSemanticType::DistillToBelief) {
             haveReturn = true;
-            check(r.longRoute, "M4: Distill->Belief uses an orthogonal return route");
-            check(r.points.size() == 4, "M4: Distill->Belief route has two elbows");
-            check(r.points[0].second == r.points[1].second &&
-                  r.points[1].first == r.points[2].first &&
-                  r.points[2].second == r.points[3].second,
-                  "M4: Distill->Belief stays inside its semantic row");
+            check(r.longRoute, "M4: Distill->Belief is a long cross-region return route");
+            check(r.points.size() == 2, "M4: Distill->Belief is a direct line, not a polyline");
         } else {
             haveLocal = true;
             check(!r.longRoute, "M4: local edge is not a long route");

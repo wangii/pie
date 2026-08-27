@@ -29,6 +29,8 @@ static void check(bool cond, const char* what) {
     }
 }
 
+static void testExecSummary();
+
 // Build a model with one complete epistemic transaction and a second partial
 // frame, mirroring the demo event vocabulary used by Model.test.cpp.
 static NativeGuiModel buildModel() {
@@ -41,6 +43,9 @@ static NativeGuiModel buildModel() {
     model.applyLine(R"({"type":"ToolReturned","frameId":128,"id":"E-88","result":"pytest==8.0","warning":""})");
     model.applyLine(R"({"type":"ToolCalled","frameId":128,"id":"E-89","tool":"bash","command":"pip show pytest","status":"running"})");
     model.applyLine(R"({"type":"ToolReturned","frameId":128,"id":"E-89","result":"exit code 1","warning":"Package(s) not found: pytest","status":"failed"})");
+    // A declare_belief call is a belief-surface tool, not an execution probe.
+    model.applyLine(R"({"type":"ToolCalled","frameId":128,"id":"E-92","tool":"declare_belief","command":"{\"op\":\"propose\",\"statement\":\"x\"}","status":"ok"})");
+    model.applyLine(R"({"type":"ToolReturned","frameId":128,"id":"E-92","result":"ok","warning":"","status":"ok"})");
     model.applyLine(R"({"type":"ExecutionCompleted","frameId":128})");
     model.applyLine(R"({"type":"DistillationStarted","frameId":128})");
     model.applyLine(R"({"type":"DistillationProduced","frameId":128,"label":"D-42","inputIds":["E-88","E-89"],"unexplained":"B42 predicts pytest but runtime lacks it","interpretation":"declared vs runtime differ"})");
@@ -98,13 +103,34 @@ int main() {
     }
     check(execNodes128 == 2, "two Execution nodes for frame 128 (no per-step wrapper)");
 
-    // --- M1: Execution node title uses the "exec: <tool>" prefix (user display req) ---
-    bool execTitlePrefixed = true;
+    // --- declare_belief is a belief-surface tool, not an execution probe: it must
+    // not be projected as an Execution node nor become a Plan->Execution target. ---
+    bool declareExecMissing = true;
+    bool declareEdgeMissing = true;
     for (const auto& n : state.nodes) {
-        if (n.family == NodeFamily::Execution && n.title.rfind("exec: ", 0) != 0)
-            execTitlePrefixed = false;
+        if (n.family == NodeFamily::Execution &&
+            (n.id.value == "E-92" || n.title.find("declare_belief") != std::string::npos))
+            declareExecMissing = false;
     }
-    check(execTitlePrefixed, "every Execution node title is 'exec: <tool>'");
+    for (const auto& e : state.edges) {
+        if (e.type == EdgeSemanticType::PlanToExecution && e.target.value == "E-92")
+            declareEdgeMissing = false;
+    }
+    check(declareExecMissing, "declare_belief is not projected as an Execution node");
+    check(declareEdgeMissing, "declare_belief produces no Plan->Execution edge");
+
+    // --- M1: Execution node title is a simplified "<tool> <command>" summary
+    // (no "exec:" prefix) so it reads as one concise line on the graph. ---
+    bool execTitleSimplified = true;
+    for (const auto& n : state.nodes) {
+        if (n.family != NodeFamily::Execution) continue;
+        if (n.title.rfind("exec: ", 0) == 0) execTitleSimplified = false;
+        if (n.title.empty()) execTitleSimplified = false;
+        if (n.title.rfind("read ", 0) != 0 && n.title.rfind("bash ", 0) != 0 &&
+            n.title.rfind("write ", 0) != 0 && n.title.rfind("edit ", 0) != 0)
+            execTitleSimplified = false;
+    }
+    check(execTitleSimplified, "every Execution node title is a simplified '<tool> <command>' summary");
 
     // --- M1: typed, directed edges ---
     bool allEdgesTyped = !state.edges.empty();
@@ -115,7 +141,7 @@ int main() {
     }
     check(allEdgesTyped, "all edges are typed and have valid source/target");
 
-    // --- M1: Distill -> Belief edges with create/update glyphs ---
+    // --- M1: Distill -> Belief edges encode create/update operations ---
     int updEdges = 0, newEdges = 0;
     for (const auto& e : state.edges) {
         if (e.type == EdgeSemanticType::DistillToBelief) {
@@ -225,7 +251,42 @@ int main() {
     // Belief region nodes are in creation order along columns increasing.
     check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");
 
+    // execSummary dedup + fallback behavior (read / bash grep / grep-dup / unknown).
+    testExecSummary();
+
     if (failures == 0) std::printf("PASS: %d checks\n", 0);
     std::printf("graph test: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
+}
+
+// --- M1: execSummary dedup + fallback behavior ---
+// The exec node label is a simplified "<tool> <command>" summary: the tool verb
+// is not duplicated when the command already begins with it (tool="grep"
+// command="grep pytest ." -> "grep pytest ."), and an empty command falls back to
+// the bare tool name. Unknown tools keep the "<tool> <command>" form.
+static void testExecSummary() {
+    NativeGuiModel model;
+    model.applyLine(R"({"type":"FrameOpened","id":300,"summary":"s","opened_at":"t0"})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":300,"id":"E-1","tool":"read","command":"config.yaml","status":"ok"})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":300,"id":"E-2","tool":"bash","command":"grep foo .","status":"ok"})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":300,"id":"E-3","tool":"grep","command":"grep pytest .","status":"ok"})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":300,"id":"E-4","tool":"aws","command":"s3 ls","status":"ok"})");
+    model.applyLine(R"({"type":"ToolCalled","frameId":300,"id":"E-5","tool":"grep","command":"","status":"ok"})");
+
+    GraphTaskState st = projectGraphTask(model);
+    auto title = [&](const std::string& id) -> const std::string* {
+        for (const auto& n : st.nodes) {
+            if (n.family == NodeFamily::Execution && n.id.value == id) return &n.title;
+        }
+        return nullptr;
+    };
+    auto expect = [&](const char* id, const char* want) {
+        const std::string* got = title(id);
+        check(got && *got == want, (std::string("execSummary: ") + id + " -> " + want).c_str());
+    };
+    expect("E-1", "read config.yaml");
+    expect("E-2", "bash grep foo .");
+    expect("E-3", "grep pytest .");
+    expect("E-4", "aws s3 ls");
+    expect("E-5", "grep");
 }

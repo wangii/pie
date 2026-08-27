@@ -588,6 +588,7 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         if (!id.valid()) return RpcApplyResult::Ignored;
         Belief& b = model.upsertBeliefRpc(id);
         b.status = str(line, "status", "proposed");
+        b.domain = str(line, "domain", b.domain);
         b.statement = str(line, "statement", b.statement);
         const LoopFrame* current = model.activeFrame();
         if (current && b.createdInFrame < 0) b.createdInFrame = current->id;

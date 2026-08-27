@@ -27,7 +27,7 @@ Candidates, Success Criterion).
 | Graph View item | Expected location | Status |
 |-----------------|-------------------|--------|
 | `Cmd+G` Text/Graph view toggle | shared main window (same runtime model) | Implemented (M0) `src/App.cpp` |
-| `graph/` module (`graph_*`) + `graph_view`, `graph_model`, `graph_projection`, `graph_renderer`, `graph_node_renderer`, `graph_link_renderer`, `graph_interaction`, `pie_graph_layout`, `graph_minimap`, `graph_style`) | `gui/src/graph/` | Implemented (M0-M9): `GraphModel.*`, `PieGraphLayout.*`, `GraphView.*`, `GraphRouting.*`, `GraphInteraction.*`, `GraphLive.*` (the renderer/node/link and `graph_renderer`/`graph_node_renderer`/`graph_link_renderer` duties fold into `GraphView`), plus `GraphMinimap.*` (M7 navigation), `GraphCache.*` (M8 caches), and the `GraphStyle` config (M9 style) |
+| `graph/` module (`graph_*`) + `graph_view`, `graph_model`, `graph_projection`, `graph_renderer`, `graph_node_renderer`, `graph_link_renderer`, `graph_interaction`, `pie_graph_layout`, `graph_navigation`, `graph_style`) | `gui/src/graph/` | Implemented (M0-M9): `GraphModel.*`, `PieGraphLayout.*`, `GraphView.*`, `GraphRouting.*`, `GraphInteraction.*`, `GraphLive.*` (the renderer/node/link and `graph_renderer`/`graph_node_renderer`/`graph_link_renderer` duties fold into `GraphView`), plus `GraphNavigation.*` (M7 Focus Current pan), `GraphCache.*` (M8 caches), and the `GraphStyle` config (M9 style); the M7 stage indicator lives in `GraphView` |
 | Read-only node-editor canvas (hidden pins, no drag/create/delete, no library layout persistence) | custom `GraphView` canvas (see deviation below) | Implemented (M0/M2) `src/graph/GraphView.*` |
 | PIE layout engine (`PieGraphLayout`) | `gui/src/graph/pie_graph_layout.*` | Implemented (M3) `src/graph/PieGraphLayout.*` |
 | Runtime contract (`GraphNode`/`GraphEdge`/`GraphTaskState`) | `gui/src/graph/graph_model.*` | Implemented (M1) `src/graph/GraphModel.*` |
@@ -74,26 +74,33 @@ the task's accumulated history down the canvas.
 
 ### Node ontology
 
-- **Belief**: compact relationship card, status by color, globally unique,
+A node is a small family/status indicator dot followed by a free-standing text
+label (not a card wrapping its text).
+
+- **Belief**: indicator dot + label, status by color, globally unique,
   creation-order stable (mutable content/color, immutable identity/position).
-- **Plan**: intent/reasoning card; family = PLAN, subtype is runtime display
+- **Plan**: indicator dot + label; family = PLAN, subtype is runtime display
   metadata. Selected beliefs are expressed only by incoming edges.
 - **Execution / Tool**: tool call + result merged into one node; no separate
-  Observation node; success/failure by color.
-- **Distill**: family = DISTILL, subtype is runtime display metadata.
+  Observation node; success/failure by color; the label is a simplified
+  `<tool> <command>` summary (e.g. `read requirements.txt`, `bash pip show pytest`).
+- **Distill**: indicator dot + label; family = DISTILL, subtype is runtime display
+  metadata.
 
 No Proposal node and no synthetic Observation/ExecutionStep wrapper: the
-epistemic result is `Distill → Belief` with `~` (update) / `+` (create) glyphs,
-and is runtime-provided, not inferred by the GUI.
+epistemic result is `Distill → Belief` as a create/update edge (create
+write-backs dashed, update solid; no on-link operation glyph), and is
+runtime-provided, not inferred by the GUI.
 
 ### Edges and cross-frame semantics
 
 All edges are typed, directed, explicit. The UI includes a compact legend but
 does not put labels on individual edges. Cross-frame cognition passes only
 through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
-`Belief → Plan` and `Distill → Belief` use orthogonal cross-region routes;
-`Plan → Execution` and `Execution → Distill` remain local curves. Create
-write-backs are dashed and update write-backs are solid.
+`Belief → Plan` uses an orthogonal cross-region route; `Distill → Belief` is a
+direct two-point line (the write-back returns to the belief column as a single
+straight segment). `Plan → Execution` and `Execution → Distill` remain local
+curves. Create write-backs are dashed and update write-backs are solid.
 
 ### LoopFrame boundary (entering propose is the delimiter)
 
@@ -111,20 +118,28 @@ frame. Frames do not own Belief nodes: beliefs are global, with separate
 creation provenance used only to align a newly created belief with the row that
 produced it.
 
-### Node visual language (single card family)
+### Node visual language (indicator + label)
 
-All nodes share one card family. Different node types use light structural
-variation, never classic flowchart shapes: no diamond, no hexagon, no UML-style
-shape grammar. Belief = relationship-first card (color = belief status); Plan =
-intent/reasoning card (neutral cognitive styling); Tool/Execution = code-like
-structure (color = execution result); Distill = semantic-statement card, with
-inputs/outputs expressed by edges.
+All nodes share one visual family: a small indicator dot (color = family/status,
+with the execution status mark drawn inside for Execution nodes) preceding a
+free-standing text label. No differential cards, no classic flowchart shapes: no
+diamond, no hexagon, no UML-style shape grammar. Belief = status-colored dot +
+label (or the routing/framing domain color when the runtime supplies a domain);
+Plan = neutral dot + label; Tool/Execution = result-colored dot + simplified
+`<tool> <command>` label; Distill = dot + label, with inputs/outputs expressed by
+edges.
 
 ### LoopFrame container header
 
 Each row has subtle Plan, Distillation, and Execution region surfaces plus a
 dashed LoopFrame boundary. Its label is the logical order `LoopFrame #<n>`; it
 shows no summary, selected-belief list, or proposal count.
+
+Routing and framing belief cards are laid out in reserved slots directly above
+(routing) the whole loop-frame area and below (framing) the current (active)
+LoopFrame, in distinct domain colors, so the belief element itself carries the
+domain role. Beliefs without a routing/framing domain stay in the global
+creation-order left column.
 
 ### CURRENT vs SELECTED
 
@@ -135,8 +150,8 @@ extra-highlighted, and no animation is used.
 
 ### Read-only contract
 
-P0 is read-only: pan, zoom, select, tooltip, temp popup, minimap, and Focus
-Current are allowed; node drag, link create/delete, node create, belief edit,
+P0 is read-only: pan, zoom, select, tooltip, temp popup, and Focus Current are
+allowed; the M7 stage indicator is drawn by the Graph View; node drag, link create/delete, node create, belief edit,
 reconnect, frame move, and semantic mutation are forbidden. The GUI never
 infers cognition; `GraphNode`/`GraphEdge`/`GraphTaskState` semantic edges are
 runtime-supplied.
@@ -196,20 +211,22 @@ M0 Canvas        node-editor integration spike (Cmd+G toggle, pan/zoom/select,
                  hidden pins, editing suppressed, no layout persistence, mock nodes)   [implemented]
 M1 Graph Model   runtime data -> GraphTaskState projection (no Proposal/Observation
                  node; tool+result merged; no ExecutionStep wrapper; runtime-supplied edges)  [implemented]
-M2 Nodes         belief/plan/execution/distill card renderers (status/result colors,
-                 hidden pins, current/selected highlight, tooltip, "..." popup)  [implemented]
+M2 Nodes         belief/plan/execution/distill indicator+label renderers (status/result
+                 colors, hidden pins, current/selected highlight, tooltip, "..." popup)  [implemented]
 M3 Layout v1     deterministic three-column semantic layout; LoopFrame rows
                  stacked top-to-bottom; valid, non-overlapping region geometry  [implemented]
-M4 Edge Routing  local semantic curves + orthogonal Belief read/write routes,
-                 default dim, dashed-create/solid-update glyphs  [implemented]
+M4 Edge Routing  local curves + orthogonal Belief->Plan route; direct
+                 Distill->Belief line, default dim, dashed-create/solid-update
+                 styling (no on-link operation glyph)  [implemented]
 M5 Selection     click node -> ancestor + descendant dependency path (cycle-safe
                  visited set, cached adjacency), emphasize related, dim rest  [implemented]
 M6 Live          runtime events (node/edge added, belief created/updated, current
                  changed, frame opened/closed); active relayout, closed freeze,
                  belief stable, no auto-follow  [implemented]
 M7 Navigation    first-entry Focus Current, explicit Focus Current, Graph session
-                 state preserved across Text<->Graph, custom minimap overlay
-                 (GraphMinimap.* + GraphView overlay + GraphViewState.hasFocusedOnce)  [implemented]
+                 state preserved across Text<->Graph, Stage indicator
+                 (GraphView draws it from the runtime stage; Focus Current pan in
+                 GraphNavigation.* + GraphViewState.hasFocusedOnce)  [implemented]
 M8 Performance   50 frames / 500 nodes: layout cache, adjacency cache, render
                  cache, dirty flags, long-route cache (GraphCache.* with content
                  fingerprint invalidation + GraphCacheMetrics; 500-node x 50-frame
@@ -221,7 +238,7 @@ M9 Polish        spacing, typography, borders, dim ratios, arrows, padding, size
 
 Implementation order is M0 → M9; the real technical risk concentrates in M3+M4
 (keeping a feedback loop legible under "global beliefs + horizontally growing
-frames"). Do not over-invest in card detail before M3/M4.
+frames"). Do not over-invest in node label detail before M3/M4.
 
 ### P0 non-goals
 
@@ -250,16 +267,16 @@ Runtime and responsibilities are strictly separated: `graph_projection` maps
 runtime → graph model; `pie_graph_layout` maps graph model → positions;
 `graph_renderer` (with `graph_node_renderer` / `graph_link_renderer`) turns
 positions + model → ImGui/node-editor; `graph_interaction` handles selection /
-dependency path / focus; `graph_minimap` handles overview navigation;
+dependency path / focus; `graph_navigation` handles the Focus Current pan;
 `graph_model` holds the runtime contract types
 (`GraphNode`/`GraphEdge`/`GraphTaskState`). M0-M9 implement the core of this
 layout under `gui/src/graph/`: `GraphModel` holds the runtime contract types and
 the runtime->graph projection (`graph_projection`), `PieGraphLayout` is the
 `pie_graph_layout` positions pass, `GraphView` is the graph renderer + node
-renderer + canvas (and the M7 minimap overlay + M9 style consumer), `GraphRouting`
+renderer + canvas (and the M7 stage indicator + M9 style consumer), `GraphRouting`
 is the m4 edge-routing pass, `GraphInteraction` is the `graph_interaction`
 selection / dependency-path pass, `GraphLive` is the m6 live-layout stability
-pass, `GraphMinimap` is the `graph_minimap` M7 navigation geometry, `GraphCache`
+pass, `GraphNavigation` is the `graph_navigation` M7 Focus Current pan geometry, `GraphCache`
 is the M8 cache / invalidation pass, and `GraphStyle` is the `graph_style` M9
 central config.
 

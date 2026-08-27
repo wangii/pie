@@ -33,18 +33,27 @@ struct GraphStyle {
     Rgb gridLine{50, 52, 60};
     int gridLineAlpha = 70;
 
-    // --- Node card ---
+    // --- Node indicator + label (a node is a dot + free text, not a card) ---
     float cardRadius = 4.0f;
-    float cardBorderWidth = 1.5f;   // drawn width scaled by zoom
+    float cardBorderWidth = 1.5f;   // drawn width scaled by zoom (indicator ring width)
     float cardTextPadX = 8.0f;
     float cardTextPadY = 6.0f;
     float currentBarWidth = 4.0f;
+    float indicatorRadius = 7.0f;  // node indicator dot radius (dot precedes the label)
+    float indicatorGap = 8.0f;     // blank gap between the indicator dot and its text label
     Rgb cardSelected{60, 90, 135};
     Rgb cardCurrent{80, 60, 140};
     Rgb cardBelief{58, 88, 96};
     Rgb cardBeliefFalsified{120, 50, 50};
     Rgb cardBeliefRevised{110, 95, 50};
     Rgb cardBeliefClosed{70, 70, 76};
+    Rgb cardBeliefSupported{72, 108, 60};   // validated belief (supported)
+    Rgb cardBeliefSuperseded{110, 80, 60};  // replaced belief (superseded/supercede)
+    // Routing / framing belief cards get distinct domain colors (the label
+    // colors above are for the (now removed) side tags; these color the cards
+    // themselves so the element, not a legend, carries the domain).
+    Rgb cardBeliefRouting{96, 70, 26};    // dark amber
+    Rgb cardBeliefFraming{86, 62, 118};   // dark violet
     Rgb cardPlan{52, 78, 108};
     Rgb cardExecOk{118, 82, 28};
     Rgb cardExecFailed{120, 48, 48};
@@ -123,6 +132,17 @@ struct GraphStyle {
     Rgb planRegionLabel{104, 168, 238};
     Rgb distillRegionLabel{190, 126, 224};
     Rgb executionRegionLabel{238, 184, 74};
+
+    // --- Routing / Framing belief placement (reserved slots in the layout) ---
+    // Routing beliefs guide the decision process; framing beliefs (the current
+    // "target") state the obligations the final answer must discharge. Both get
+    // distinct card colors (cardBeliefRouting / cardBeliefFraming above) and are
+    // re-anchored by PieGraphLayout rather than kept with their creating frame:
+    // routing directly above the whole loop-frame area, framing directly below
+    // the current (active) frame. These two label colors are legacy remnants of
+    // the removed side-tag legend and are not used by the card renderer.
+    Rgb beliefRoutingLabel{240, 176, 52};   // amber (legacy, unused)
+    Rgb beliefFramingLabel{156, 120, 240};  // violet (legacy, unused)
 };
 
 // The single default style instance. Shared by the headless layout / routing

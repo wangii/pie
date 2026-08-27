@@ -1,15 +1,16 @@
 // GraphView.cpp: custom read-only ImGui node canvas (Phase 2 M0 + M2).
 //
 // Draws the GraphTaskState nodes/edges onto the current ImGui window using a
-// pan/zoom transform. Node cards follow the PIE single-card-family visual
-// language (status/result color, current/selected highlight, tooltip). The
-// canvas is read-only: no drag, no link create/delete, no semantic mutation.
+// pan/zoom transform. A node is a small family/status indicator dot followed by
+// a free-standing text label (status/result color, current/selected ring and
+// accent, tooltip) -- it is not a card wrapping its text. The canvas is
+// read-only: no drag, no link create/delete, no semantic mutation.
 //
-// Phase 2 M7/M8/M9 integration: the minimap overlay and Focus Current navigation
-// are drawn here (view layer) over the headless geometry from GraphMinimap; the
-// dependency set and edge routes come from the GraphCache; and every visual
-// constant comes from the centralized GraphStyle (kGraphStyle) instead of being
-// inlined as literals.
+// Phase 2 M8/M9 integration plus the M7 Focus Current navigation and the Stage
+// indicator are drawn here (view layer); the Focus Current pan geometry comes
+// from GraphNavigation; the dependency set and edge routes come from the
+// GraphCache; and every visual constant comes from the centralized GraphStyle
+// (kGraphStyle) instead of being inlined as literals.
 
 #include "graph/GraphView.h"
 
@@ -17,11 +18,14 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <imgui.h>
 
+#include "Model.h"
 #include "graph/GraphStyle.h"
-#include "graph/GraphMinimap.h"
+#include "graph/GraphNavigation.h"
 #include "graph/GraphRouting.h"
 
 namespace pie::gui {
@@ -30,15 +34,48 @@ namespace {
 
 constexpr const GraphStyle& st = kGraphStyle;  // single style entry point
 
+// The Stage indicator label / color for the runtime's explicit frame stage. The
+// stage comes only from the runtime (model.cursor().stage), never inferred here.
+const char* stageLabel(FrameStage s) {
+    switch (s) {
+        case FrameStage::PROPOSING: return "Propose";
+        case FrameStage::PLANNING: return "Plan";
+        case FrameStage::EXECUTING: return "Execution";
+        case FrameStage::DISTILLING: return "Distillation";
+        case FrameStage::CLOSED: return "Close";
+        case FrameStage::NONE: break;
+    }
+    return "Idle";
+}
+
+ImU32 stageColor(FrameStage s) {
+    auto rgb = [](const GraphStyle::Rgb& c) { return IM_COL32(c.r, c.g, c.b, 255); };
+    switch (s) {
+        case FrameStage::PROPOSING: return rgb(st.beliefRegionLabel);
+        case FrameStage::PLANNING: return rgb(st.planRegionLabel);
+        case FrameStage::EXECUTING: return rgb(st.executionRegionLabel);
+        case FrameStage::DISTILLING: return rgb(st.distillRegionLabel);
+        case FrameStage::CLOSED: return rgb(st.frameBorder);
+        case FrameStage::NONE: break;
+    }
+    return rgb(st.textBody);
+}
+
 // Card colors by family. Result color for Execution is derived from status.
 ImU32 cardColor(NodeFamily f, const GraphNode& n, bool selected, bool current) {
     if (selected) return IM_COL32(st.cardSelected.r, st.cardSelected.g, st.cardSelected.b, 255);
     if (current) return IM_COL32(st.cardCurrent.r, st.cardCurrent.g, st.cardCurrent.b, 255);
     switch (f) {
         case NodeFamily::Belief:
+            // Domain wins over status for routing / framing cards so the belief
+            // element itself, not a side tag, carries the domain color.
+            if (n.domain == "routing") return IM_COL32(st.cardBeliefRouting.r, st.cardBeliefRouting.g, st.cardBeliefRouting.b, 255);
+            if (n.domain == "framing") return IM_COL32(st.cardBeliefFraming.r, st.cardBeliefFraming.g, st.cardBeliefFraming.b, 255);
             if (n.displayType == "falsified") return IM_COL32(st.cardBeliefFalsified.r, st.cardBeliefFalsified.g, st.cardBeliefFalsified.b, 255);
             if (n.displayType == "revised") return IM_COL32(st.cardBeliefRevised.r, st.cardBeliefRevised.g, st.cardBeliefRevised.b, 255);
             if (n.displayType == "closed") return IM_COL32(st.cardBeliefClosed.r, st.cardBeliefClosed.g, st.cardBeliefClosed.b, 255);
+            if (n.displayType == "supported") return IM_COL32(st.cardBeliefSupported.r, st.cardBeliefSupported.g, st.cardBeliefSupported.b, 255);
+            if (n.displayType == "superseded" || n.displayType == "supercede" || n.displayType == "supersede") return IM_COL32(st.cardBeliefSuperseded.r, st.cardBeliefSuperseded.g, st.cardBeliefSuperseded.b, 255);
             return IM_COL32(st.cardBelief.r, st.cardBelief.g, st.cardBelief.b, 255);
         case NodeFamily::Plan: return IM_COL32(st.cardPlan.r, st.cardPlan.g, st.cardPlan.b, 255);
         case NodeFamily::Execution:
@@ -110,7 +147,7 @@ void drawDashedLine(ImDrawList* dl, const ImVec2& a, const ImVec2& b,
 }
 } // namespace
 
-bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout) {
+bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx) {
     bool selectionChanged = false;
 
     ImGuiIO& io = ImGui::GetIO();
@@ -286,16 +323,12 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             dl->AddTriangleFilled(t, ImVec2(base.x + n.x * st.arrowheadHalf, base.y + n.y * st.arrowheadHalf),
                                   ImVec2(base.x - n.x * st.arrowheadHalf, base.y - n.y * st.arrowheadHalf), col);
         }
-        // Operation glyph on Distill->Belief edges.
-        if (route.type == EdgeSemanticType::DistillToBelief && route.beliefOperation) {
-            const char* g = (*route.beliefOperation == BeliefOperation::Create) ? "+" : "~";
-            ImVec2 gpos((s.x + t.x) * 0.5f, (s.y + t.y) * 0.5f);
-            dl->AddCircleFilled(gpos, st.opGlyphRadius, IM_COL32(st.opGlyphFill.r, st.opGlyphFill.g, st.opGlyphFill.b, st.opGlyphFillAlpha));
-            dl->AddText(ImVec2(gpos.x - 3.0f, gpos.y - 7.0f), IM_COL32(st.opGlyphText.r, st.opGlyphText.g, st.opGlyphText.b, 255), g);
-        }
     }
 
-    // --- Nodes: single card family ---
+    // --- Nodes: an indicator glyph in front of a free-standing text label. The
+    // node is no longer a card that wraps its text; it is a small family/status
+    // indicator (colored dot, or the execution status mark) followed by the
+    // label. The node rect still anchors edges, the hit-test and the tooltip. ---
     for (const auto& n : state.nodes) {
         auto it = layout.nodeRects.find(n.id.value);
         if (it == layout.nodeRects.end()) continue;
@@ -307,21 +340,47 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         ImVec2 p0 = toScreen(r.x, r.y);
         ImVec2 p1 = toScreen(r.x + r.w, r.y + r.h);
         ImU32 fill = cardColor(n.family, n, selected, current);
-        ImU32 border = selected ? IM_COL32(st.borderSelected.r, st.borderSelected.g, st.borderSelected.b, 255)
-                       : current ? IM_COL32(st.borderCurrent.r, st.borderCurrent.g, st.borderCurrent.b, 255)
-                       : IM_COL32(st.borderDefault.r, st.borderDefault.g, st.borderDefault.b, st.borderDefaultAlpha);
-        dl->AddRectFilled(p0, p1, IM_COL32(fill >> 24 & 0xFF, fill >> 16 & 0xFF, fill >> 8 & 0xFF, (int)(255 * alpha)));
-        dl->AddRect(p0, p1, IM_COL32(border >> 24 & 0xFF, border >> 16 & 0xFF, border >> 8 & 0xFF, (int)(255 * alpha)), st.cardRadius, 0, st.cardBorderWidth * view.zoom);
-
-        // Title (family badge), compact text. The node body carries only the
-        // ID badge; the descriptive content (compactText + fullText) is shown
-        // via the tooltip so the richer information is preserved off-card.
         ImU32 textCol = IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, (int)(255 * alpha));
-        std::string title = n.family == NodeFamily::Belief ? std::string("Belief ") + n.id.value
-                            : n.family == NodeFamily::Plan ? std::string("Plan ") + n.id.value
-                            : n.family == NodeFamily::Execution ? (n.title.empty() ? std::string("Exec ") + n.id.value : n.title)
-                            : std::string("Distill ") + n.id.value;
-        dl->AddText(ImVec2(p0.x + st.cardTextPadX, p0.y + st.cardTextPadY), textCol, title.c_str());
+
+        std::string title;
+        const char* execGlyph = nullptr;
+        if (n.family == NodeFamily::Belief) {
+            if (n.domain == "framing") title = std::string("Target ") + n.id.value;
+            else if (n.domain == "routing") title = std::string("Routing ") + n.id.value;
+            else title = n.id.value;  // no "Belief " prefix; status shown by dot color
+        } else if (n.family == NodeFamily::Plan) {
+            title = n.id.value;  // no "Plan " prefix
+        } else if (n.family == NodeFamily::Execution) {
+            // Simplified "<tool> <command>" label (no "exec:" prefix, no wrap).
+            title = n.title.empty() ? n.id.value : n.title;
+            if (n.displayType == "ok") execGlyph = "✓";
+            else if (n.displayType == "failed") execGlyph = "✗";
+            else execGlyph = "●";
+        } else {
+            title = std::string("Distill ") + n.id.value;
+        }
+
+        // Indicator dot, vertically centered at the node's left edge; the
+        // execution status mark is drawn inside the dot for Execution nodes.
+        const float cy = (p0.y + p1.y) * 0.5f;
+        const float cxp = p0.x + st.indicatorRadius;
+        dl->AddCircleFilled(ImVec2(cxp, cy), st.indicatorRadius, fill);
+        if (execGlyph) {
+            ImU32 gtext = IM_COL32(st.opGlyphText.r, st.opGlyphText.g, st.opGlyphText.b, (int)(255 * alpha));
+            ImVec2 gts = ImGui::CalcTextSize(execGlyph);
+            dl->AddText(ImVec2(cxp - gts.x * 0.5f, cy - gts.y * 0.5f), gtext, execGlyph);
+        }
+        // Selection / current ring around the indicator.
+        ImU32 ring = selected ? IM_COL32(st.borderSelected.r, st.borderSelected.g, st.borderSelected.b, 255)
+                     : current ? IM_COL32(st.borderCurrent.r, st.borderCurrent.g, st.borderCurrent.b, 255)
+                     : IM_COL32(st.borderDefault.r, st.borderDefault.g, st.borderDefault.b, (int)(st.borderDefaultAlpha * alpha));
+        dl->AddCircle(ImVec2(cxp, cy), st.indicatorRadius, ring, 0, st.cardBorderWidth * view.zoom);
+
+        // Free-standing text label to the right of the indicator (not wrapped by
+        // a card box).
+        const float labelX = cxp + st.indicatorRadius + st.indicatorGap;
+        ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+        dl->AddText(ImVec2(labelX, cy - ts.y * 0.5f), textCol, title.c_str());
 
         // Current stage indicator (small accent bar) for the CURRENT node.
         if (current) {
@@ -335,9 +394,11 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             selectionChanged = true;
         }
 
-        // Tooltip on hover: the ID badge plus the previously-visible compact
-        // content and the expanded text, so nothing descriptive is lost.
-        if (ImGui::IsMouseHoveringRect(p0, p1)) {
+        // Tooltip on hover: the indicator label plus the previously-visible
+        // compact content and the expanded text, so nothing descriptive is lost.
+        // Plan and Distill nodes intentionally have no tooltip (user request).
+        if (n.family != NodeFamily::Plan && n.family != NodeFamily::Distill &&
+            ImGui::IsMouseHoveringRect(p0, p1)) {
             ImGui::BeginTooltip();
             ImGui::TextUnformatted((title + "\n" + n.compactText + "\n" + n.fullText).c_str());
             ImGui::EndTooltip();
@@ -360,7 +421,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             EdgeSemanticType::DistillToBelief,
             EdgeSemanticType::DistillToBelief,
         };
-        const char* glyphs[] = {"", "", "", "~", "+"};
+        const char* glyphs[] = {"", "", "", "", ""};
         const float lgPad = 8.0f, lgLineH = 20.0f, lgRowGap = 6.0f;
         const float lgW = 310.0f;
         const float lgH = lgPad * 2.0f + (int)(sizeof(labels) / sizeof(labels[0])) * (lgLineH + lgRowGap);
@@ -389,50 +450,86 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         }
     }
 
-    // --- Minimap overlay (M7): a scaled projection of the whole graph with a
-    // viewport rectangle; clicking / dragging pans the main view. ---
-    if (view.minimapVisible && !layout.nodeRects.empty()) {
-        const float mmW = 200.0f, mmH = 140.0f, mmPad = 12.0f;
-        GraphMinimapLayout mini = computeGraphMinimap(state, layout, mmW, mmH);
-        if (mini.width > 0.0f && mini.height > 0.0f) {
-            ImVec2 mmOrigin(origin.x + gridSize.x - mini.width - mmPad,
-                            origin.y + gridSize.y - mini.height - mmPad);
-            dl->AddRectFilled(mmOrigin, ImVec2(mmOrigin.x + mini.width, mmOrigin.y + mini.height),
-                              IM_COL32(22, 24, 28, 230));
-            dl->AddRect(mmOrigin, ImVec2(mmOrigin.x + mini.width, mmOrigin.y + mini.height),
-                        IM_COL32(90, 100, 115, 180), 2.0f, 0, 1.0f);
-            // Frames as subtle boxes, nodes as filled dots.
-            for (const auto& [fid, mr] : mini.frameRects) {
-                (void)fid;
-                dl->AddRect(ImVec2(mmOrigin.x + mr.x, mmOrigin.y + mr.y),
-                            ImVec2(mmOrigin.x + mr.x + mr.w, mmOrigin.y + mr.y + mr.h),
-                            IM_COL32(80, 90, 110, 130), 2.0f, 0, 1.0f);
-            }
-            for (const auto& [id, mr] : mini.nodeRects) {
-                (void)id;
-                dl->AddRectFilled(ImVec2(mmOrigin.x + mr.x, mmOrigin.y + mr.y),
-                                  ImVec2(mmOrigin.x + mr.x + mr.w, mmOrigin.y + mr.y + mr.h),
-                                  IM_COL32(150, 160, 175, 200));
-            }
-            // Viewport rectangle (the currently visible graph area).
-            GraphViewport vp = computeViewport(view.panX, view.panY, view.zoom, gridSize.x, gridSize.y);
-            float vx = mmOrigin.x + vp.x * mini.scale;
-            float vy = mmOrigin.y + vp.y * mini.scale;
-            float vw = std::clamp(vp.w * mini.scale, 4.0f, mini.width);
-            float vh = std::clamp(vp.h * mini.scale, 4.0f, mini.height);
-            dl->AddRect(ImVec2(vx, vy), ImVec2(vx + vw, vy + vh), IM_COL32(255, 200, 90, 240), 1.0f, 0, 1.0f);
+    // --- Current Stage indicator (replaces the M7 minimap overlay): a compact
+    // badge in the top-right showing the runtime's explicit frame stage. The
+    // stage comes only from the runtime; the GUI never infers it. ---
+    {
+        const char* label = stageLabel(stage);
+        ImU32 col = stageColor(stage);
+        const float pad = 10.0f;
+        const char* title = "Stage";
+        ImVec2 ts = ImGui::CalcTextSize(title);
+        ImVec2 ls = ImGui::CalcTextSize(label);
+        float w = std::max(ts.x, ls.x) + pad * 2.0f;
+        float h = ts.y + ls.y + pad * 2.0f + 6.0f;
+        ImVec2 bg0(origin.x + gridSize.x - w - 12.0f,
+                   origin.y + 12.0f);
+        dl->AddRectFilled(bg0, ImVec2(bg0.x + w, bg0.y + h), IM_COL32(22, 24, 28, 230));
+        dl->AddRect(bg0, ImVec2(bg0.x + w, bg0.y + h), col, st.frameRadius, 0, 1.0f);
+        dl->AddText(ImVec2(bg0.x + pad, bg0.y + pad),
+                    IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255), title);
+        dl->AddText(ImVec2(bg0.x + pad, bg0.y + pad + ts.y + 2.0f), col, label);
+    }
 
-            // Minimap interaction: click / drag pans the main view so the
-            // clicked graph point is centered.
-            ImVec2 mouse = io.MousePos;
-            bool overMinimap = mouse.x >= mmOrigin.x && mouse.x <= mmOrigin.x + mini.width &&
-                               mouse.y >= mmOrigin.y && mouse.y <= mmOrigin.y + mini.height;
-            if (overMinimap && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                float gx = (mouse.x - mmOrigin.x) / mini.scale;
-                float gy = (mouse.y - mmOrigin.y) / mini.scale;
-                view.panX = gridSize.x * 0.5f - gx * view.zoom;
-                view.panY = gridSize.y * 0.5f - gy * view.zoom;
+    // --- Session telemetry overlay (bottom-right): current context length for
+    // the two belief-loop roles plus the per-role cache hit rate for the four
+    // belief-loop phases. Reads only explicit runtime telemetry (footer + role
+    // context); undefined values render as an em-dash placeholder. Mirrors the
+    // Stage badge (top-right) and legend (bottom-left) style convention. ---
+    {
+        auto fmtTokens = [](long tokens) -> std::string {
+            if (tokens < 0) return "\xe2\x80\x94";  // em-dash
+            if (tokens >= 1000000) return std::to_string(tokens / 1000000) + "M";
+            if (tokens >= 1000) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%.1fk", tokens / 1000.0);
+                return buf;
             }
+            return std::to_string(tokens);
+        };
+        auto fmtCH = [](const char* label, const RoleFooterSlot& s) -> std::string {
+            char buf[96];
+            if (s.cacheHitRate < 0.0f) {
+                std::snprintf(buf, sizeof(buf), "%s CH \xe2\x80\x94", label);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%s CH %.1f%%", label, s.cacheHitRate);
+            }
+            return buf;
+        };
+
+        std::vector<std::string> lines;
+        std::vector<ImU32> lineCols;
+        if (roleCtx.hasData) {
+            lines.push_back("ctx [Epi] " + fmtTokens(roleCtx.epistemic.tokens));
+            lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
+            lines.push_back("ctx [Exec] " + fmtTokens(roleCtx.execution.tokens));
+            lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
+        }
+        lines.push_back(fmtCH("Epi", footer.epistemic));
+        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
+        lines.push_back(fmtCH("Plan", footer.planner));
+        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
+        lines.push_back(fmtCH("Distill", footer.distillation));
+        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
+        lines.push_back(fmtCH("Exec", footer.execution));
+        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
+
+        const float pad = 10.0f;
+        const float lineH = ImGui::GetTextLineHeight();
+        float maxW = 0.0f;
+        for (const auto& l : lines) maxW = std::max(maxW, ImGui::CalcTextSize(l.c_str()).x);
+        float w = maxW + pad * 2.0f;
+        float h = lines.size() * lineH + pad * 2.0f;
+        ImVec2 bg0(origin.x + gridSize.x - w - 12.0f,
+                   origin.y + gridSize.y - h - 12.0f);
+        dl->AddRectFilled(bg0, ImVec2(bg0.x + w, bg0.y + h), IM_COL32(22, 24, 28, 230));
+        dl->AddRect(bg0, ImVec2(bg0.x + w, bg0.y + h),
+                    IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, 120),
+                    st.frameRadius, 0, 1.0f);
+        float ly = bg0.y + pad;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            dl->AddText(ImVec2(bg0.x + pad, ly), lineCols[i], lines[i].c_str());
+            ly += lineH;
         }
     }
 

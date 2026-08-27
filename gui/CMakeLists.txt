@@ -103,7 +103,7 @@ endif()
 add_library(pi_gui_model STATIC src/Model.cpp src/FileList.cpp
     src/graph/GraphModel.cpp src/graph/PieGraphLayout.cpp
     src/graph/GraphRouting.cpp src/graph/GraphInteraction.cpp src/graph/GraphLive.cpp
-    src/graph/GraphMinimap.cpp src/graph/GraphCache.cpp)
+    src/graph/GraphNavigation.cpp src/graph/GraphCache.cpp)
 target_include_directories(pi_gui_model PUBLIC src)
 
 # ---------------------------------------------------------------------------
@@ -127,8 +127,8 @@ target_link_libraries(pi_gui_graph_m456_test PRIVATE pi_gui_model)
 target_include_directories(pi_gui_graph_m456_test PRIVATE src)
 add_test(NAME pi_gui_graph_m456_test COMMAND pi_gui_graph_m456_test)
 
-# Phase 2 M7/M8/M9 minimap geometry + cache reuse/invalidation + style structure
-# test (headless, links pi_gui_model; no ImGui).
+# Phase 2 M7 Focus Current navigation + M8 cache reuse/invalidation + M9 style
+# structure test (headless, links pi_gui_model; no ImGui).
 add_executable(pi_gui_graph_m789_test src/graph/GraphM789.test.cpp)
 target_link_libraries(pi_gui_graph_m789_test PRIVATE pi_gui_model)
 target_include_directories(pi_gui_graph_m789_test PRIVATE src)

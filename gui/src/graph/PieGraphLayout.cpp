@@ -95,6 +95,7 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     std::map<int, std::vector<const GraphNode*>> distillationsByFrame;
     std::map<std::string, int> nodeFrames;
     std::vector<const GraphNode*> beliefs;
+    std::vector<const GraphNode*> columnBeliefs;  // beliefs without a routing/framing domain
 
     for (std::size_t i = 0; i < state.frames.size(); ++i) {
         frameOrder[state.frames[i].id] = i;
@@ -102,6 +103,10 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     for (const GraphNode& node : state.nodes) {
         if (node.family == NodeFamily::Belief || !node.frameId) {
             beliefs.push_back(&node);
+            if (node.family == NodeFamily::Belief &&
+                node.domain != "routing" && node.domain != "framing") {
+                columnBeliefs.push_back(&node);
+            }
             continue;
         }
         const int frameId = *node.frameId;
@@ -123,14 +128,12 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     // Assign each global Belief to the row where it first appeared. Beliefs
     // without creation provenance form the initial group in the first row.
     std::map<int, std::vector<const GraphNode*>> beliefsByFrame;
-    std::map<int, std::vector<const GraphNode*>> createdBeliefsByFrame;
     std::vector<const GraphNode*> unanchoredBeliefs;
     for (const GraphNode* belief : beliefs) {
         std::optional<int> created = inferredCreationFrame(
             *belief, nodeFrames, frameOrder, state.edges);
         if (created && frameOrder.count(*created)) {
             beliefsByFrame[*created].push_back(belief);
-            createdBeliefsByFrame[*created].push_back(belief);
         } else {
             unanchoredBeliefs.push_back(belief);
         }
@@ -152,7 +155,46 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     const float middleW = std::max(sequenceWidth(maxPlanCount), sequenceWidth(maxDistillCount));
     const float executionX = middleX + middleW + st.regionGap;
     const float contentTop = st.canvasPad + st.columnHeaderHeight;
-    float rowTop = contentTop;
+
+    // Routing / framing beliefs are anchored to the loop-frame area as a whole,
+    // not to the frame that created them. Routing is the fixed "guide" slot
+    // directly above the entire loop-frame area; framing is the current "target"
+    // slot directly below the current (active) frame. Both keep their belief
+    // identity and dependency semantics -- only their position is re-anchored.
+    std::vector<const GraphNode*> globalRouting;
+    std::vector<const GraphNode*> globalFraming;
+    for (const LoopFrameInfo& frame : state.frames) {
+        for (const GraphNode* b : beliefsByFrame[frame.id]) {
+            if (b->domain == "routing") globalRouting.push_back(b);
+            else if (b->domain == "framing") globalFraming.push_back(b);
+        }
+    }
+    sortByOrder(globalRouting, [](const GraphNode& node) { return node.creationOrder; });
+    sortByOrder(globalFraming, [](const GraphNode& node) { return node.creationOrder; });
+
+    // The current frame is the one the runtime is working in: the frame marked
+    // executing, else the last open (non-closed) frame, else the last frame.
+    const LoopFrameInfo* currentFrame = nullptr;
+    for (const LoopFrameInfo& frame : state.frames) {
+        if (frame.executing) { currentFrame = &frame; break; }
+    }
+    if (!currentFrame) {
+        for (auto it = state.frames.rbegin(); it != state.frames.rend(); ++it) {
+            if (!it->closed) { currentFrame = &*it; break; }
+        }
+    }
+    if (!currentFrame && !state.frames.empty()) currentFrame = &state.frames.back();
+
+    const float routingH = globalRouting.empty()
+        ? 0.0f
+        : stackHeight(globalRouting.size()) + st.framePad;
+    const float framingH = globalFraming.empty()
+        ? 0.0f
+        : stackHeight(globalFraming.size()) + st.framePad;
+    // The loop-frame area begins below the routing slot; that slot is the
+    // union-top anchor for all routing beliefs.
+    const float loopAreaTop = contentTop + routingH;
+    float rowTop = loopAreaTop;
 
     for (const LoopFrameInfo& frame : state.frames) {
         const auto& planNodes = plansByFrame[frame.id];
@@ -160,19 +202,38 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         const auto& distillNodes = distillationsByFrame[frame.id];
         const auto& beliefNodes = beliefsByFrame[frame.id];
 
+        // Partition this frame's beliefs. Routing / framing cards are NOT laid
+        // out per frame: they are collected globally and anchored above the whole
+        // loop-frame area (routing) / below the current frame (framing). Only the
+        // plain column beliefs stay in the global creation-order left column.
+        std::vector<const GraphNode*> column;
+        for (const GraphNode* b : beliefNodes) {
+            if (b->domain != "routing" && b->domain != "framing") column.push_back(b);
+        }
+
         const float planH = planNodes.empty() ? 0.0f : st.nodeH;
         const float distillH = distillNodes.empty() ? 0.0f : st.nodeH;
         const float middleH = planH + distillH +
             ((planH > 0.0f && distillH > 0.0f) ? st.phaseBandGap : 0.0f);
+        // The frame block grows to fit the middle bands, the execution stack, and
+        // the column beliefs of this frame -- NOT the routed/framing cards, which
+        // occupy the global routing slot above / the current-frame framing slot
+        // below.
         const float contentH = std::max({st.nodeH, middleH,
                                          stackHeight(executionNodes.size()),
-                                         stackHeight(beliefNodes.size())});
-        const float rowH = contentH + st.framePad * 2.0f;
-        const float nodeTop = rowTop + st.framePad;
-        const float distillY = rowTop + rowH - st.framePad - st.nodeH;
+                                         stackHeight(column.size())});
+        const float blockH = contentH + st.framePad * 2.0f;
 
-        for (std::size_t i = 0; i < beliefNodes.size(); ++i) {
-            out.nodeRects[beliefNodes[i]->id.value] = GraphRect{
+        const float frameTop = rowTop;
+        const float frameBottom = frameTop + blockH;
+        const float nodeTop = frameTop + st.framePad;
+        const float distillY = frameTop + blockH - st.framePad - st.nodeH;
+        const bool isCurrent = currentFrame && currentFrame->id == frame.id;
+        const float framingSlotH = (isCurrent && !globalFraming.empty()) ? framingH : 0.0f;
+
+        // Column beliefs of this frame.
+        for (std::size_t i = 0; i < column.size(); ++i) {
+            out.nodeRects[column[i]->id.value] = GraphRect{
                 beliefX,
                 nodeTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
                 st.nodeW,
@@ -206,50 +267,72 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
 
         out.frameRects[frame.id] = GraphRect{
             middleX - st.framePad,
-            rowTop,
+            frameTop,
             executionX + st.nodeW - middleX + st.framePad * 2.0f,
-            rowH,
+            blockH,
         };
         out.planRegionRects[frame.id] = GraphRect{
             middleX - st.framePad * 0.5f,
-            rowTop + st.framePad * 0.5f,
+            frameTop + st.framePad * 0.5f,
             middleW + st.framePad,
-            rowH * 0.5f - st.framePad * 0.5f,
+            blockH * 0.5f - st.framePad * 0.5f,
         };
         out.distillRegionRects[frame.id] = GraphRect{
             middleX - st.framePad * 0.5f,
-            rowTop + rowH * 0.5f,
+            frameTop + blockH * 0.5f,
             middleW + st.framePad,
-            rowH * 0.5f - st.framePad * 0.5f,
+            blockH * 0.5f - st.framePad * 0.5f,
         };
         out.executionRegionRects[frame.id] = GraphRect{
             executionX - st.framePad * 0.5f,
-            rowTop + st.framePad * 0.5f,
+            frameTop + st.framePad * 0.5f,
             st.nodeW + st.framePad,
-            rowH - st.framePad,
+            blockH - st.framePad,
         };
 
-        const auto& created = createdBeliefsByFrame[frame.id];
-        GraphRect createdBounds = paddedBounds(created, out.nodeRects, st.framePad * 0.5f);
+        // The belief region marks the plain column beliefs created in this frame;
+        // routing / framing cards are anchored elsewhere and must not inflate it.
+        GraphRect createdBounds = paddedBounds(column, out.nodeRects, st.framePad * 0.5f);
         if (createdBounds.w > 0.0f) out.beliefRegionRects[frame.id] = createdBounds;
 
-        rowTop += rowH + st.rowGap;
+        rowTop = frameBottom + framingSlotH + st.rowGap;
+    }
+
+    // Global routing slot: routing beliefs anchor above the loop-frame area top
+    // (the union top), regardless of which frame created them.
+    {
+        float ry = contentTop;
+        for (const GraphNode* b : globalRouting) {
+            out.nodeRects[b->id.value] = GraphRect{beliefX, ry, st.nodeW, st.nodeH};
+            ry += st.nodeH + st.nodeGapV;
+        }
+    }
+    // Global framing slot: framing beliefs anchor below the current frame.
+    if (currentFrame) {
+        auto frIt = out.frameRects.find(currentFrame->id);
+        if (frIt != out.frameRects.end()) {
+            float fy = frIt->second.y + frIt->second.h + st.framePad;
+            for (const GraphNode* b : globalFraming) {
+                out.nodeRects[b->id.value] = GraphRect{beliefX, fy, st.nodeW, st.nodeH};
+                fy += st.nodeH + st.nodeGapV;
+            }
+        }
     }
 
     // A belief-only state still has a useful layout before the first frame.
     if (state.frames.empty()) {
-        for (std::size_t i = 0; i < beliefs.size(); ++i) {
-            out.nodeRects[beliefs[i]->id.value] = GraphRect{
+        for (std::size_t i = 0; i < columnBeliefs.size(); ++i) {
+            out.nodeRects[columnBeliefs[i]->id.value] = GraphRect{
                 beliefX,
                 contentTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
                 st.nodeW,
                 st.nodeH,
             };
         }
-        rowTop = contentTop + stackHeight(beliefs.size());
+        rowTop = contentTop + stackHeight(columnBeliefs.size());
     }
 
-    out.beliefColumnRect = paddedBounds(beliefs, out.nodeRects, st.framePad * 0.5f);
+    out.beliefColumnRect = paddedBounds(columnBeliefs, out.nodeRects, st.framePad * 0.5f);
     if (out.beliefColumnRect.w <= 0.0f) {
         out.beliefColumnRect = GraphRect{beliefX - st.framePad * 0.5f,
                                          contentTop,

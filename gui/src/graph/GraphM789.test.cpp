@@ -1,9 +1,9 @@
-// Headless tests for Phase 2 M7 (minimap geometry / navigation), M8 (cache
-// reuse + precise invalidation / 500-node x 50-frame), and M9 (centralized
-// graph_style structure). No window, no ImGui, no SDK.
+// Headless tests for Phase 2 M7 (Focus Current pan navigation), M8 (cache reuse
+// + precise invalidation / 500-node x 50-frame), and M9 (centralized graph_style
+// structure). No window, no ImGui, no SDK.
 // Run: ./pi_gui_graph_m789_test  (non-zero on failure).
 
-#include "graph/GraphMinimap.h"
+#include "graph/GraphNavigation.h"
 #include "graph/GraphCache.h"
 #include "graph/GraphStyle.h"
 
@@ -135,37 +135,132 @@ static void testStyle() {
     // RGB triples are typed uint8_t by construction; assert a few known defaults.
     check(g.cardBelief.r == 58 && g.cardBelief.g == 88 && g.cardBelief.b == 96, "M9: belief card color default matches");
     check(g.edgeDistillToBelief.r == 220 && g.edgeDistillToBelief.g == 140 && g.edgeDistillToBelief.b == 220, "M9: distill edge color default matches");
+    // Routing / framing domain colors are distinct from the plain belief card and
+    // from each other, so the belief element itself carries the domain role.
+    bool rfDistinct = (g.cardBeliefRouting.r != g.cardBelief.r ||
+                       g.cardBeliefRouting.g != g.cardBelief.g ||
+                       g.cardBeliefRouting.b != g.cardBelief.b) &&
+                      (g.cardBeliefFraming.r != g.cardBelief.r ||
+                       g.cardBeliefFraming.g != g.cardBelief.g ||
+                       g.cardBeliefFraming.b != g.cardBelief.b) &&
+                      (g.cardBeliefRouting.r != g.cardBeliefFraming.r ||
+                       g.cardBeliefRouting.g != g.cardBeliefFraming.g ||
+                       g.cardBeliefRouting.b != g.cardBeliefFraming.b);
+    check(rfDistinct, "M9: routing/framing domain colors are distinct from plain belief");
     (void)g;
 }
 
-// --- M7: minimap geometry, viewport mapping, Focus Current pan ---
-static void testMinimap() {
+// --- Routing / Framing card placement (PieGraphLayout domain reparenting) ---
+static void testRoutingFramingPlacement() {
+    GraphTaskState s = buildSmallState();  // frames 10, 20; beliefs B1, B2 (no domain)
+    for (GraphNode& n : s.nodes) {
+        if (n.id.value == "B1") { n.domain = "routing"; n.createdInFrame = 10; }
+        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = 10; }
+    }
+    PieGraphLayout layout = computeGraphLayout(s);
+    auto fr10 = layout.frameRects.find(10);
+    auto fr20 = layout.frameRects.find(20);
+    auto r1 = layout.nodeRects.find("B1");
+    auto r2 = layout.nodeRects.find("B2");
+    check(fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end(),
+          "RF: frames 10/20 have containers");
+    if (fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end() &&
+        r1 != layout.nodeRects.end() && r2 != layout.nodeRects.end()) {
+        const GraphRect& f10 = fr10->second;
+        const GraphRect& f20 = fr20->second;
+        const GraphRect& rb = r1->second;
+        const GraphRect& rf = r2->second;
+        // Routing anchors to the union top of the loop-frame area: it sits above
+        // the topmost frame (frame 10), not above its creating frame.
+        check(rb.y + rb.h <= f10.y + 1e-3f, "RF: routing card sits above the loop-frame area top");
+        // Framing anchors below the CURRENT (open) frame (frame 20), not the frame
+        // that created it (frame 10).
+        check(rf.y >= f20.y + f20.h - 1e-3f, "RF: framing card sits below the current frame");
+        check(rf.y >= f10.y + f10.h + 1e-3f, "RF: framing card is not below its creating frame");
+    } else {
+        check(false, "RF: routing/framing cards were placed");
+    }
+
+    // No two node rects overlap after domain reparenting.
+    bool noOverlap = true;
+    for (const auto& [k, r] : layout.nodeRects) {
+        for (const auto& [k2, r2] : layout.nodeRects) {
+            if (k == k2) continue;
+            if (r.x < r2.x + r2.w && r2.x < r.x + r.w &&
+                r.y < r2.y + r2.h && r2.y < r.y + r.h) noOverlap = false;
+        }
+    }
+    check(noOverlap, "RF: no node overlap after routing/framing placement");
+
+    // A plain belief (no domain) still lays out in the global belief column.
+    GraphTaskState s2 = buildSmallState();
+    PieGraphLayout l2 = computeGraphLayout(s2);
+    check(l2.nodeRects.count("B1") == 1, "RF: plain belief remains laid out");
+}
+
+// --- Current-frame selection paths for the framing/target anchor ---
+// computeGraphLayout chooses the frame the framing belief anchors below via the
+// order: executing frame -> last non-closed frame -> last frame. These three
+// paths must all place the framing card below that chosen frame.
+static void testCurrentFrameSelection() {
+    auto make = [](bool f10closed, bool f20closed, bool f20exec) {
+        GraphTaskState s = buildSmallState();
+        for (GraphNode& n : s.nodes) {
+            if (n.id.value == "B1") {
+                n.domain = "routing";
+            } else if (n.id.value == "B2") {
+                n.domain = "framing";
+                n.createdInFrame = 10;
+            }
+        }
+        s.frames[0].closed = f10closed;
+        s.frames[1].closed = f20closed;
+        s.frames[1].executing = f20exec;
+        return s;
+    };
+    auto bottom = [](const GraphRect& r) { return r.y + r.h; };
+
+    // Path 1: an executing frame is the current frame.
+    {
+        PieGraphLayout layout = computeGraphLayout(make(true, false, true));
+        auto f20 = layout.frameRects.find(20);
+        auto rf = layout.nodeRects.find("B2");
+        check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
+              "CUR: executing path places the framing card");
+        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
+            check(rf->second.y >= bottom(f20->second) - 1e-3f,
+                  "CUR: framing anchors below the executing frame");
+    }
+    // Path 2: no executing -> the last non-closed frame.
+    {
+        PieGraphLayout layout = computeGraphLayout(make(true, false, false));
+        auto f20 = layout.frameRects.find(20);
+        auto rf = layout.nodeRects.find("B2");
+        check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
+              "CUR: last-open path places the framing card");
+        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
+            check(rf->second.y >= bottom(f20->second) - 1e-3f,
+                  "CUR: framing anchors below the last open frame");
+    }
+    // Path 3: all frames closed -> the last frame.
+    {
+        PieGraphLayout layout = computeGraphLayout(make(true, true, false));
+        auto f20 = layout.frameRects.find(20);
+        auto rf = layout.nodeRects.find("B2");
+        check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
+              "CUR: all-closed path places the framing card");
+        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
+            check(rf->second.y >= bottom(f20->second) - 1e-3f,
+                  "CUR: framing anchors below the last frame when all closed");
+    }
+}
+
+// --- M7: Focus Current pan (the surviving navigation geometry; the minimap
+// overlay was removed and replaced by the Stage indicator) ---
+static void testFocusNavigation() {
     GraphTaskState s = buildSmallState();
     PieGraphLayout layout = computeGraphLayout(s);
     check(!layout.nodeRects.empty(), "M7: layout produced");
-
-    // Minimap projection fits the box and preserves aspect ratio.
-    const float maxW = 200.0f, maxH = 140.0f;
-    GraphMinimapLayout mini = computeGraphMinimap(s, layout, maxW, maxH);
-    check(mini.width > 0.0f && mini.height > 0.0f, "M7: minimap has positive size");
-    check(mini.width <= maxW + 1e-3f && mini.height <= maxH + 1e-3f, "M7: minimap fits its target box");
-    float arWorld = layout.canvasWidth / layout.canvasHeight;
-    float arMini = mini.width / mini.height;
-    check(std::fabs(arWorld - arMini) < 1e-2f, "M7: minimap preserves aspect ratio");
-    check(mini.nodeRects.size() == layout.nodeRects.size(), "M7: every laid-out node has a minimap rect");
-    bool allIn = true;
-    for (const auto& [id, mr] : mini.nodeRects) {
-        (void)id;
-        if (mr.x < -1e-3f || mr.y < -1e-3f || mr.x + mr.w > mini.width + 1e-3f || mr.y + mr.h > mini.height + 1e-3f) allIn = false;
-    }
-    check(allIn, "M7: all node minimap rects lie inside the minimap box");
-
-    // Viewport mapping: pan/zoom -> graph-coords visible rectangle.
-    GraphViewport vp = computeViewport(100.0f, -20.0f, 1.25f, 800.0f, 600.0f);
-    check(std::fabs(vp.x + 100.0f / 1.25f) < 1e-3f, "M7: viewport x = -panX/zoom");
-    check(std::fabs(vp.y - 20.0f / 1.25f) < 1e-3f, "M7: viewport y = -panY/zoom");
-    check(std::fabs(vp.w - 800.0f / 1.25f) < 1e-3f, "M7: viewport w = viewW/zoom");
-    check(std::fabs(vp.h - 600.0f / 1.25f) < 1e-3f, "M7: viewport h = viewH/zoom");
 
     // Focus Current pan centers the node in the viewport.
     const std::string nodeId = "P20";
@@ -251,8 +346,10 @@ static void testCache() {
 
 int main() {
     testStyle();
-    testMinimap();
+    testFocusNavigation();
     testCache();
+    testRoutingFramingPlacement();
+    testCurrentFrameSelection();
 
     std::printf("graph m789 test: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

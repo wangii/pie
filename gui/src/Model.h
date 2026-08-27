@@ -51,6 +51,10 @@ struct Belief {
     std::string rhs;       // e.g. "pytest"
     double confidence = -1.0;
     std::string status;    // open / closed / falsified / revised ...
+    // Belief domain (world / routing / framing) from the runtime. Carried on
+    // the live BeliefCreated event (propose/route/refine) so the graph can
+    // render routing and framing beliefs distinctly.
+    std::string domain;
     // Prose assertion (the runtime's belief statement). Populated by the live
     // belief_updated event; lhs/relation/rhs remain for the demo/headless fixture.
     std::string statement;

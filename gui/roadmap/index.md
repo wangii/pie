@@ -31,9 +31,10 @@ spec sections and source files.
   `src/graph/` gains `GraphModel` (runtime contract), `PieGraphLayout` (layout
   engine), `GraphView` (a read-only custom ImGui canvas), `GraphRouting`
   (m4 edge routing), `GraphInteraction` (m5 selection dependency path),
-  `GraphLive` (m6 live-layout stability), `GraphMinimap` (m7 navigation),
-  `GraphCache` (m8 caches), and the `GraphStyle` config (m9 style); a Cmd/Ctrl+G
-  Text<->Graph toggle lives in `App.cpp`; and the headless `pi_gui_graph_test`
+  `GraphLive` (m6 live-layout stability), `GraphNavigation` (m7 Focus Current
+  pan), `GraphCache` (m8 caches), and the `GraphStyle` config (m9 style); the
+  m7 stage indicator lives in `GraphView`; a Cmd/Ctrl+G Text<->Graph toggle
+  lives in `App.cpp`; and the headless `pi_gui_graph_test`
   (M1 projection + M3 layout), `pi_gui_graph_m456_test` (m4/m5/m6), and
   `pi_gui_graph_m789_test` (m7/m8/m9) cover the implementation. LoopFrames are
   logical propose cycles within a task, stacked top-to-bottom in the fixed

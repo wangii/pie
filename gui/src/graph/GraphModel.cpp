@@ -56,6 +56,35 @@ NodeId distillNodeId(const DistillationOutput& d) {
     return makeNodeId(d.label);
 }
 
+// Belief-mutation / belief-read surface tools are not execution probes. The
+// runtime classifies declare_belief / view_beliefs / conclude as the belief
+// surface (not probe/execution tools), so they must not project as Execution
+// nodes nor produce Plan->Execution edges.
+bool isBeliefSurfaceTool(const std::string& tool) {
+    return tool == "declare_belief" || tool == "view_beliefs" || tool == "conclude";
+}
+
+// Simplified Execution-node label: "<tool> <command>" (no "exec:" prefix), so an
+// Execution node reads as one concise line ("read requirements.txt",
+// "bash pip show pytest"). The command is trimmed and the tool verb is not
+// duplicated when the command already begins with it (tool="grep" command=
+// "grep pytest ." -> "grep pytest ."). Falls back to the bare tool name when the
+// command is empty. Belief-surface tools are filtered out before this point.
+std::string execSummary(const ToolCall& t) {
+    std::string cmd = t.command;
+    auto trim = [](std::string& s) {
+        const std::size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) { s.clear(); return; }
+        const std::size_t e = s.find_last_not_of(" \t\r\n");
+        s = s.substr(b, e - b + 1);
+    };
+    trim(cmd);
+    if (cmd.empty()) return t.tool;
+    // Do not repeat the tool verb if the command already starts with it.
+    if (cmd.rfind(t.tool, 0) == 0 || cmd.rfind(t.tool + " ", 0) == 0) return cmd;
+    return t.tool + " " + cmd;
+}
+
 } // namespace
 
 GraphTaskState projectGraphTask(const NativeGuiModel& model) {
@@ -71,6 +100,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         node.id = makeNodeId("B" + std::to_string(b.id.value >= 0 ? b.id.value : beliefOrder));
         node.family = NodeFamily::Belief;
         node.displayType = b.status.empty() ? "belief" : b.status;
+        node.domain = b.domain;
         node.title = b.statement.empty()
             ? (b.lhs + " " + b.relation + " " + b.rhs)
             : b.statement;
@@ -95,7 +125,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         const LoopFrame& f = frames[frameIndex];
         LoopFrameInfo info;
         info.id = f.id;
-        info.label = "LoopFrame #" + std::to_string(frameIndex + 1);
+        info.label = "#" + std::to_string(frameIndex + 1);
         // The active (open) frame shows the EXECUTING marker when the cursor is
         // executing within it, matching the runtime's current frame.
         info.executing = model.activeFrame() && model.activeFrame()->id == f.id &&
@@ -141,12 +171,15 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         // node per call; no Observation / ExecutionStep wrapper. ---
         uint64_t execOrder = 1;
         for (const ToolCall& t : f.trajectory) {
+            // Belief-surface tools (declare_belief / view_beliefs / conclude) are
+            // not execution probes; skip them so they never render as Execution.
+            if (isBeliefSurfaceTool(t.tool)) continue;
             GraphNode exec;
             exec.id = makeNodeId(t.id);
             exec.family = NodeFamily::Execution;
             exec.frameId = f.id;
             exec.displayType = t.status.empty() ? "execution" : t.status;
-            exec.title = "exec: " + t.tool;
+            exec.title = execSummary(t);
             exec.compactText = t.command;
             exec.fullText = t.result;
             if (!t.warning.empty()) exec.fullText += "\n" + t.warning;
@@ -221,7 +254,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         // A ToolCall records the plan occurrence active when it was dispatched.
         // Fall back to the latest plan for older/demo events.
         for (const ToolCall& call : f.trajectory) {
-            if (call.id.empty() || plans.empty()) continue;
+            if (call.id.empty() || plans.empty() || isBeliefSurfaceTool(call.tool)) continue;
             GraphEdge edge;
             edge.source = !call.planId.empty() ? makeNodeId(call.planId) : planNodeId(*plans.back());
             edge.target = makeNodeId(call.id);

@@ -38,11 +38,12 @@ std::vector<EdgeRoute> computeEdgeRoutes(const GraphTaskState& state,
                             {midX, target.second}, target};
             route.longRoute = true;
         } else if (edge.type == EdgeSemanticType::DistillToBelief) {
+            // Distill -> Belief is a direct line, not a two-elbow orthogonal
+            // polyline: the write-back returns to the belief column as a single
+            // straight segment so it reads as a direct epistemic result.
             const auto source = left(*sourceRect);
             const auto target = right(*targetRect);
-            const float midX = (source.first + target.first) * 0.5f;
-            route.points = {source, {midX, source.second},
-                            {midX, target.second}, target};
+            route.points = {source, target};
             route.longRoute = true;
         } else if (edge.type == EdgeSemanticType::PlanToExecution) {
             const auto source = right(*sourceRect);
