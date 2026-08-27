@@ -5,10 +5,15 @@
 ### Added
 
 - Added RPC `clear_queue` to retrieve and remove queued steering and follow-up messages ([#8432](https://github.com/earendil-works/pi/issues/8432)).
+- Added environment variables and advanced settings for overriding auto-detected terminal hyperlink, image, and truecolor capabilities ([#8665](https://github.com/earendil-works/pi/issues/8665)).
 
 ### Fixed
 
+- Fixed toggling thinking visibility clearing partial output from running Bash tools ([#8611](https://github.com/earendil-works/pi/issues/8611)).
+- Fixed Windows shell aborts crashing Pi when `taskkill.exe` is unavailable on `PATH` ([#6596](https://github.com/earendil-works/pi/issues/6596)).
+- Fixed resumed sessions corrupting the next appended entry when their JSONL file lacks a trailing newline ([#8345](https://github.com/earendil-works/pi/issues/8345)).
 - Fixed extension messages sent with `triggerTurn: false` while the agent is running being inserted between a tool call and its result, which made providers that validate message order reject the replayed history. They are now appended once the turn's tool results are in ([#8537](https://github.com/earendil-works/pi/issues/8537)).
+- Fixed compaction and branch summaries forcing `toolChoice: "none"` ([#8649](https://github.com/earendil-works/pi/issues/8649), [#8638](https://github.com/earendil-works/pi/issues/8638)).
 
 ## [0.84.3] - 2026-08-24
 
