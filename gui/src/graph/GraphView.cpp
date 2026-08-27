@@ -315,9 +315,14 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
     // node is no longer a card that wraps its text; it is a small family/status
     // indicator (colored dot, or the execution status mark) followed by the
     // label. The node rect still anchors edges, the hit-test and the tooltip. ---
-    for (const auto& n : state.nodes) {
+    // The framing / "Target" belief nodes render LAST (they are drawn after every
+    // other node) so the target kind is always the final node on the canvas. Node
+    // positions come from computeGraphLayout, so this draw order does not change
+    // the geometric alignment to the next loopframe's top border -- it only makes
+    // the target the last-drawn element.
+    auto drawNode = [&](const GraphNode& n) {
         auto it = layout.nodeRects.find(n.id.value);
-        if (it == layout.nodeRects.end()) continue;
+        if (it == layout.nodeRects.end()) return;
         GraphRect r = it->second;
         bool selected = (view.selectedNode == n.id.value);
         bool current = (state.currentNode && state.currentNode->value == n.id.value);
@@ -391,6 +396,17 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             ImGui::TextUnformatted((title + "\n" + n.compactText + "\n" + n.fullText).c_str());
             ImGui::EndTooltip();
         }
+    };
+
+    // Pass 1: every non-framing node, in model order.
+    for (const auto& n : state.nodes) {
+        if (n.family == NodeFamily::Belief && n.domain == "framing") continue;
+        drawNode(n);
+    }
+    // Pass 2: the framing / "Target" belief nodes, drawn LAST.
+    for (const auto& n : state.nodes) {
+        if (n.family != NodeFamily::Belief || n.domain != "framing") continue;
+        drawNode(n);
     }
 
     // --- Legend: the five edge-semantic encodings (top-left overlay). ---
