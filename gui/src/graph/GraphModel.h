@@ -77,6 +77,9 @@ struct GraphNode {
     NodeFamily family = NodeFamily::Belief;
     // The owning frame, or nullopt for a global Belief node.
     std::optional<int> frameId;
+    // Creation provenance for a global Belief. This positions the Belief in the
+    // corresponding LoopFrame row without making the frame its owner.
+    std::optional<int> createdInFrame;
     std::string displayType;
     std::string title;        // short card title
     std::string compactText;  // first line / compact content

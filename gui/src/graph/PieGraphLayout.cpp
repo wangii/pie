@@ -1,143 +1,270 @@
-// PieGraphLayout.cpp: automatic graph layout via Graphviz (Phase 2 M3).
+// PieGraphLayout.cpp: deterministic semantic Graph View layout.
 //
-// Headless, ImGui-free, unit-testable. It maps a GraphTaskState to node
-// positions (and frame container rectangles) by projecting the nodes/edges into
-// a Graphviz (gvc/dot) directed graph, running the DOT automatic layout engine,
-// and converting the resulting coordinates back into the PieGraphLayout
-// nodeRects / frameRects contract. The GraphView consumer is unchanged: it still
-// reads nodeRects/frameRects keyed by NodeId / frame id.
-//
-// Determinism: an identical GraphTaskState yields an identical layout because
-// the DOT engine is deterministic for the same input graph and version.
+// LoopFrames are stacked as rows. Beliefs stay in one global left column;
+// Plan and Distillation occupy the upper/lower middle bands; Execution occupies
+// the right column. A row grows to fit every region, including the beliefs first
+// created in that frame, so regions never overlap across frame boundaries.
 
 #include "graph/PieGraphLayout.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <cstring>
-
-#include <gvc.h>
+#include <map>
+#include <optional>
+#include <vector>
 
 #include "graph/GraphStyle.h"
 
 namespace pie::gui {
 
 namespace {
-// Sizes come from the centralized GraphStyle (M9) so the layout geometry is a
-// single governable entry point, not a set of scattered literals.
 constexpr const GraphStyle& st = kGraphStyle;
 
+float sequenceWidth(std::size_t count) {
+    if (count == 0) return 0.0f;
+    return static_cast<float>(count) * st.nodeW +
+           static_cast<float>(count - 1) * st.nodeGapH;
+}
+
+float stackHeight(std::size_t count) {
+    if (count == 0) return 0.0f;
+    return static_cast<float>(count) * st.nodeH +
+           static_cast<float>(count - 1) * st.nodeGapV;
+}
+
+template <typename Order>
+void sortByOrder(std::vector<const GraphNode*>& nodes, Order order) {
+    std::stable_sort(nodes.begin(), nodes.end(), [&](const GraphNode* a, const GraphNode* b) {
+        return order(*a) < order(*b);
+    });
+}
+
+std::optional<int> inferredCreationFrame(
+    const GraphNode& belief,
+    const std::map<std::string, int>& nodeFrames,
+    const std::map<int, std::size_t>& frameOrder,
+    const std::vector<GraphEdge>& edges) {
+    if (belief.createdInFrame) return belief.createdInFrame;
+
+    std::optional<int> result;
+    std::size_t bestOrder = frameOrder.size();
+    for (const GraphEdge& edge : edges) {
+        if (edge.type != EdgeSemanticType::DistillToBelief ||
+            edge.beliefOperation != BeliefOperation::Create ||
+            edge.target.value != belief.id.value) {
+            continue;
+        }
+        auto source = nodeFrames.find(edge.source.value);
+        if (source == nodeFrames.end()) continue;
+        auto order = frameOrder.find(source->second);
+        if (order != frameOrder.end() && order->second < bestOrder) {
+            result = source->second;
+            bestOrder = order->second;
+        }
+    }
+    return result;
+}
+
+GraphRect paddedBounds(const std::vector<const GraphNode*>& nodes,
+                       const std::map<std::string, GraphRect>& rects,
+                       float pad) {
+    float minX = 1e30f;
+    float minY = 1e30f;
+    float maxX = -1e30f;
+    float maxY = -1e30f;
+    for (const GraphNode* node : nodes) {
+        auto it = rects.find(node->id.value);
+        if (it == rects.end()) continue;
+        minX = std::min(minX, it->second.x);
+        minY = std::min(minY, it->second.y);
+        maxX = std::max(maxX, it->second.x + it->second.w);
+        maxY = std::max(maxY, it->second.y + it->second.h);
+    }
+    if (maxX < minX || maxY < minY) return {};
+    return GraphRect{minX - pad, minY - pad,
+                     maxX - minX + pad * 2.0f,
+                     maxY - minY + pad * 2.0f};
+}
 } // namespace
 
 PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     PieGraphLayout out;
 
-    // Build a Graphviz directed graph from the task state.
-    GVC_t* gvc = gvContext();
-    if (!gvc) return out;
-    Agraph_t* g = agopen(const_cast<char*>("pie"), Agdirected, nullptr);
-    if (!g) { gvFreeContext(gvc); return out; }
+    std::map<int, std::size_t> frameOrder;
+    std::map<int, std::vector<const GraphNode*>> plansByFrame;
+    std::map<int, std::vector<const GraphNode*>> executionsByFrame;
+    std::map<int, std::vector<const GraphNode*>> distillationsByFrame;
+    std::map<std::string, int> nodeFrames;
+    std::vector<const GraphNode*> beliefs;
 
-    // Create graph nodes for every semantic node, keyed by NodeId value.
-    // We set an explicit size so the DOT engine keeps our node dimensions.
-    char wbuf[32], hbuf[32];
-    std::snprintf(wbuf, sizeof(wbuf), "%f", st.nodeW / st.pointsPerInch);
-    std::snprintf(hbuf, sizeof(hbuf), "%f", st.nodeH / st.pointsPerInch);
-    Agnode_t graphNodeOf[1]; // unused, placeholder to avoid unused warning
-    (void)graphNodeOf;
-    std::vector<Agnode_t*> nodeHandles;
-    for (const GraphNode& n : state.nodes) {
-        Agnode_t* an = agnode(g, const_cast<char*>(n.id.value.c_str()), 1);
-        if (!an) continue;
-        agset(an, const_cast<char*>("width"), wbuf);
-        agset(an, const_cast<char*>("height"), hbuf);
-        agset(an, const_cast<char*>("shape"), const_cast<char*>("box"));
-        nodeHandles.push_back(an);
+    for (std::size_t i = 0; i < state.frames.size(); ++i) {
+        frameOrder[state.frames[i].id] = i;
     }
-    // Add explicit, directed edges only between nodes that exist in the graph.
-    for (const GraphEdge& e : state.edges) {
-        Agnode_t* s = agnode(g, const_cast<char*>(e.source.value.c_str()), 0);
-        Agnode_t* t = agnode(g, const_cast<char*>(e.target.value.c_str()), 0);
-        if (s && t) agedge(g, s, t, nullptr, 1);
+    for (const GraphNode& node : state.nodes) {
+        if (node.family == NodeFamily::Belief || !node.frameId) {
+            beliefs.push_back(&node);
+            continue;
+        }
+        const int frameId = *node.frameId;
+        nodeFrames[node.id.value] = frameId;
+        if (node.family == NodeFamily::Plan) plansByFrame[frameId].push_back(&node);
+        else if (node.family == NodeFamily::Execution) executionsByFrame[frameId].push_back(&node);
+        else if (node.family == NodeFamily::Distill) distillationsByFrame[frameId].push_back(&node);
     }
 
-    // Run the DOT automatic layout.
-    if (gvLayout(gvc, g, const_cast<char*>("dot")) != 0) {
-        agclose(g);
-        gvFreeContext(gvc);
-        return out;
+    sortByOrder(beliefs, [](const GraphNode& node) { return node.creationOrder; });
+    for (const LoopFrameInfo& frame : state.frames) {
+        sortByOrder(plansByFrame[frame.id], [](const GraphNode& node) { return node.creationOrder; });
+        sortByOrder(executionsByFrame[frame.id], [](const GraphNode& node) {
+            return node.executionOrder.value_or(node.creationOrder);
+        });
+        sortByOrder(distillationsByFrame[frame.id], [](const GraphNode& node) { return node.creationOrder; });
     }
 
-    // Recover the graph bounding box ("xmin,ymin,xmax,ymax") to translate/flip
-    // coordinates from Graphviz's bottom-left origin to our top-left y-down.
-    const char* bb = agget((Agraph_t*)g, const_cast<char*>("bb"));
-    float xmin = 0.0f, ymin = 0.0f, xmax = 0.0f, ymax = 0.0f;
-    // Graphviz "bb" is space-separated: "xmin ymin xmax ymax".
-    if (bb) std::sscanf(bb, "%f %f %f %f", &xmin, &ymin, &xmax, &ymax);
-    float canvasW = (xmax > xmin) ? (xmax - xmin) : 0.0f;
-    float canvasH = (ymax > ymin) ? (ymax - ymin) : 0.0f;
-
-    // Map each graph node's center position back into a nodeRect.
-    for (const GraphNode& n : state.nodes) {
-        Agnode_t* an = agnode(g, const_cast<char*>(n.id.value.c_str()), 0);
-        if (!an) continue;
-        // Graphviz v15 exposes post-layout geometry through the ND_* macros
-        // (accessing Agnodeinfo_t via AGDATA), NOT via agget(node,"pos").
-        // ND_coord is the node center in points; ND_width/ND_height are in inches.
-        pointf c = ND_coord(an);
-        float cx = c.x, cy = c.y;
-        float wpt = (float)(ND_width(an) * st.pointsPerInch);
-        float hpt = (float)(ND_height(an) * st.pointsPerInch);
-        // Graphviz center (cx,cy); top-left in graphviz coords is (cx-w/2, cy+h/2).
-        // Convert to our top-left y-down canvas.
-        GraphRect r;
-        r.x = (cx - wpt * 0.5f) - xmin;
-        r.y = ymax - (cy + hpt * 0.5f);
-        r.w = wpt;
-        r.h = hpt;
-        out.nodeRects[n.id.value] = r;
-    }
-
-    out.canvasWidth = canvasW;
-    out.canvasHeight = canvasH;
-
-    // Frame container rects: bounding box of each frame's constituent nodes,
-    // plus horizontal gutters so frames read left->right.
-    float maxRight = 0.0f;
-    std::map<int, float> frameMinX, frameMaxX, frameMinY, frameMaxY;
-    for (const GraphNode& n : state.nodes) {
-        if (!n.frameId) continue;
-        auto it = out.nodeRects.find(n.id.value);
-        if (it == out.nodeRects.end()) continue;
-        const GraphRect& r = it->second;
-        int fid = *n.frameId;
-        bool first = frameMinX.find(fid) == frameMinX.end();
-        if (first) { frameMinX[fid] = r.x; frameMaxX[fid] = r.x + r.w; frameMinY[fid] = r.y; frameMaxY[fid] = r.y + r.h; }
-        else {
-            frameMinX[fid] = std::min(frameMinX[fid], r.x);
-            frameMaxX[fid] = std::max(frameMaxX[fid], r.x + r.w);
-            frameMinY[fid] = std::min(frameMinY[fid], r.y);
-            frameMaxY[fid] = std::max(frameMaxY[fid], r.y + r.h);
+    // Assign each global Belief to the row where it first appeared. Beliefs
+    // without creation provenance form the initial group in the first row.
+    std::map<int, std::vector<const GraphNode*>> beliefsByFrame;
+    std::map<int, std::vector<const GraphNode*>> createdBeliefsByFrame;
+    std::vector<const GraphNode*> unanchoredBeliefs;
+    for (const GraphNode* belief : beliefs) {
+        std::optional<int> created = inferredCreationFrame(
+            *belief, nodeFrames, frameOrder, state.edges);
+        if (created && frameOrder.count(*created)) {
+            beliefsByFrame[*created].push_back(belief);
+            createdBeliefsByFrame[*created].push_back(belief);
+        } else {
+            unanchoredBeliefs.push_back(belief);
         }
     }
-    for (const LoopFrameInfo& fi : state.frames) {
-        auto mx = frameMaxX.find(fi.id);
-        if (mx == frameMaxX.end()) continue;
-        float pad = st.framePad;
-        GraphRect r;
-        r.x = frameMinX[fi.id] - pad;
-        r.y = frameMinY[fi.id] - pad;
-        r.w = (frameMaxX[fi.id] - frameMinX[fi.id]) + pad * 2.0f;
-        r.h = (frameMaxY[fi.id] - frameMinY[fi.id]) + pad * 2.0f;
-        maxRight = std::max(maxRight, r.x + r.w + st.frameGap);
-        out.frameRects[fi.id] = r;
+    if (!state.frames.empty()) {
+        auto& first = beliefsByFrame[state.frames.front().id];
+        first.insert(first.begin(), unanchoredBeliefs.begin(), unanchoredBeliefs.end());
     }
-    if (maxRight > out.canvasWidth) out.canvasWidth = maxRight;
 
-    gvFreeLayout(gvc, g);
-    agclose(g);
-    gvFreeContext(gvc);
+    std::size_t maxPlanCount = 1;
+    std::size_t maxDistillCount = 1;
+    for (const LoopFrameInfo& frame : state.frames) {
+        maxPlanCount = std::max(maxPlanCount, plansByFrame[frame.id].size());
+        maxDistillCount = std::max(maxDistillCount, distillationsByFrame[frame.id].size());
+    }
 
+    const float beliefX = st.canvasPad + st.beliefAnnotationWidth;
+    const float middleX = beliefX + st.nodeW + st.regionGap;
+    const float middleW = std::max(sequenceWidth(maxPlanCount), sequenceWidth(maxDistillCount));
+    const float executionX = middleX + middleW + st.regionGap;
+    const float contentTop = st.canvasPad + st.columnHeaderHeight;
+    float rowTop = contentTop;
+
+    for (const LoopFrameInfo& frame : state.frames) {
+        const auto& planNodes = plansByFrame[frame.id];
+        const auto& executionNodes = executionsByFrame[frame.id];
+        const auto& distillNodes = distillationsByFrame[frame.id];
+        const auto& beliefNodes = beliefsByFrame[frame.id];
+
+        const float planH = planNodes.empty() ? 0.0f : st.nodeH;
+        const float distillH = distillNodes.empty() ? 0.0f : st.nodeH;
+        const float middleH = planH + distillH +
+            ((planH > 0.0f && distillH > 0.0f) ? st.phaseBandGap : 0.0f);
+        const float contentH = std::max({st.nodeH, middleH,
+                                         stackHeight(executionNodes.size()),
+                                         stackHeight(beliefNodes.size())});
+        const float rowH = contentH + st.framePad * 2.0f;
+        const float nodeTop = rowTop + st.framePad;
+        const float distillY = rowTop + rowH - st.framePad - st.nodeH;
+
+        for (std::size_t i = 0; i < beliefNodes.size(); ++i) {
+            out.nodeRects[beliefNodes[i]->id.value] = GraphRect{
+                beliefX,
+                nodeTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
+                st.nodeW,
+                st.nodeH,
+            };
+        }
+        for (std::size_t i = 0; i < planNodes.size(); ++i) {
+            out.nodeRects[planNodes[i]->id.value] = GraphRect{
+                middleX + static_cast<float>(i) * (st.nodeW + st.nodeGapH),
+                nodeTop,
+                st.nodeW,
+                st.nodeH,
+            };
+        }
+        for (std::size_t i = 0; i < executionNodes.size(); ++i) {
+            out.nodeRects[executionNodes[i]->id.value] = GraphRect{
+                executionX,
+                nodeTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
+                st.nodeW,
+                st.nodeH,
+            };
+        }
+        for (std::size_t i = 0; i < distillNodes.size(); ++i) {
+            out.nodeRects[distillNodes[i]->id.value] = GraphRect{
+                middleX + static_cast<float>(i) * (st.nodeW + st.nodeGapH),
+                distillY,
+                st.nodeW,
+                st.nodeH,
+            };
+        }
+
+        out.frameRects[frame.id] = GraphRect{
+            middleX - st.framePad,
+            rowTop,
+            executionX + st.nodeW - middleX + st.framePad * 2.0f,
+            rowH,
+        };
+        out.planRegionRects[frame.id] = GraphRect{
+            middleX - st.framePad * 0.5f,
+            rowTop + st.framePad * 0.5f,
+            middleW + st.framePad,
+            rowH * 0.5f - st.framePad * 0.5f,
+        };
+        out.distillRegionRects[frame.id] = GraphRect{
+            middleX - st.framePad * 0.5f,
+            rowTop + rowH * 0.5f,
+            middleW + st.framePad,
+            rowH * 0.5f - st.framePad * 0.5f,
+        };
+        out.executionRegionRects[frame.id] = GraphRect{
+            executionX - st.framePad * 0.5f,
+            rowTop + st.framePad * 0.5f,
+            st.nodeW + st.framePad,
+            rowH - st.framePad,
+        };
+
+        const auto& created = createdBeliefsByFrame[frame.id];
+        GraphRect createdBounds = paddedBounds(created, out.nodeRects, st.framePad * 0.5f);
+        if (createdBounds.w > 0.0f) out.beliefRegionRects[frame.id] = createdBounds;
+
+        rowTop += rowH + st.rowGap;
+    }
+
+    // A belief-only state still has a useful layout before the first frame.
+    if (state.frames.empty()) {
+        for (std::size_t i = 0; i < beliefs.size(); ++i) {
+            out.nodeRects[beliefs[i]->id.value] = GraphRect{
+                beliefX,
+                contentTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
+                st.nodeW,
+                st.nodeH,
+            };
+        }
+        rowTop = contentTop + stackHeight(beliefs.size());
+    }
+
+    out.beliefColumnRect = paddedBounds(beliefs, out.nodeRects, st.framePad * 0.5f);
+    if (out.beliefColumnRect.w <= 0.0f) {
+        out.beliefColumnRect = GraphRect{beliefX - st.framePad * 0.5f,
+                                         contentTop,
+                                         st.nodeW + st.framePad,
+                                         st.nodeH};
+    }
+
+    out.canvasWidth = executionX + st.nodeW + st.framePad +
+                      st.frameLabelWidth + st.canvasPad;
+    out.canvasHeight = std::max(rowTop - st.rowGap + st.canvasPad,
+                                out.beliefColumnRect.y + out.beliefColumnRect.h + st.canvasPad);
+    if (state.frames.empty()) {
+        out.canvasHeight = std::max(out.canvasHeight,
+                                    contentTop + st.nodeH + st.canvasPad);
+    }
     return out;
 }
 

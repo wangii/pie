@@ -136,7 +136,8 @@ int main() {
     // --- distillation, and stage on the active frame. Stage is driven by
     // --- CursorChanged (not by Execution* / Distillation* events, which the
     // --- runtime never emits); DistillationProduced consumes only label and
-    // --- interpretation (inputIds/unexplained never come from the runtime).
+    // --- interpretation. inputIds are correlated only when execution calls
+    // --- occurred inside the explicit phase boundaries.
     {
         pie::gui::NativeGuiModel rpc;
         check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "agent_start opens frame");
@@ -156,7 +157,7 @@ int main() {
         check(fr && fr->stage == pie::gui::FrameStage::EXECUTING, "stage driven by CursorChanged");
         check(fr && fr->distillation.valid() && fr->distillation.label == "D-42", "distillation label");
         check(fr && fr->distillation.interpretation == "mismatch", "distillation interpretation");
-        check(fr && fr->distillation.inputIds.empty(), "distillation inputIds empty (runtime never sends)");
+        check(fr && fr->distillation.inputIds.empty(), "distillation inputIds empty without execution calls");
 
         check(rpc.beliefs().size() == 1, "one belief registered");
         check(rpc.beliefs()[0].id.value == 42, "registered belief id 42");
@@ -171,6 +172,8 @@ int main() {
     {
         pie::gui::NativeGuiModel rpc;
         check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Applied, "regression: agent_start opens placeholder");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefCreated","beliefId":9,"statement":"created before task binding"})") == pie::gui::RpcApplyResult::Applied,
+              "regression: pre-bind belief created on placeholder");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","frameId":1,"stage":"PLANNING"})") == pie::gui::RpcApplyResult::Applied, "regression: cursor_changed binds runtime frame id");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"BeliefsSelected","frameId":1,"beliefs":[42,47]})") == pie::gui::RpcApplyResult::Applied, "regression: beliefs_selected on runtime frame");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"PlanProduced","frameId":1,"label":"P-1","question":"q","intent":"intent"})") == pie::gui::RpcApplyResult::Applied, "regression: plan on runtime frame");
@@ -185,9 +188,11 @@ int main() {
         check(f1 && f1->plan.valid() && f1->plan.label == "P-1", "regression: plan on runtime frame");
         check(f1 && f1->stage == pie::gui::FrameStage::EXECUTING, "regression: stage on runtime frame");
         check(f1 && f1->distillation.valid() && f1->distillation.label == "D-1", "regression: distillation label");
-        check(f1 && f1->distillation.inputIds.empty(), "regression: distillation inputIds empty (runtime never sends)");
+        check(f1 && f1->distillation.inputIds.empty(), "regression: no distillation inputs without execution calls");
         check(f1 && f1->distillation.interpretation == "distilled", "regression: distillation interpretation");
         check(f1 && f1->proposals.size() == 1, "regression: proposal on runtime frame");
+        check(!rpc.beliefs().empty() && rpc.beliefs()[0].createdInFrame == 1,
+              "regression: placeholder belief provenance follows the frame rebind");
         check(rpc.frameById(1000) == nullptr, "regression: synthetic placeholder 1000 no longer exists");
     }
 
@@ -561,9 +566,63 @@ int main() {
         check(!d1.empty() && d2 != d1, "multi-turn: Distill node ids are distinct");
     }
 
-    // --- Regression: multiple PlanProduced / DistillationProduced within ONE  ---
-    // --- frameId (e.g. several belief batches in one task) must each yield a  ---
-    // --- distinct Plan and Distillation node, not collapse to a single node.   ---
+    // --- LoopFrame boundary: frameId is the runtime task id, while each       ---
+    // --- explicit entry into PROPOSING opens a new logical LoopFrame.         ---
+    {
+        pie::gui::NativeGuiModel loop;
+        auto event = [&](const char* line) { return pie::gui::applyRpcLine(loop, line); };
+        check(event(R"({"type":"turn_start"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: task starts with a placeholder");
+        check(event(R"({"type":"CursorChanged","frameId":7,"stage":"PROPOSING"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first propose enters frame 1");
+        check(event(R"({"type":"BeliefCreated","beliefId":1,"statement":"first belief"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first belief created");
+        check(event(R"({"type":"CursorChanged","frameId":7,"stage":"PLANNING"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first frame plans");
+        check(event(R"({"type":"BeliefsSelected","frameId":7,"beliefs":[1]})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first batch selected");
+        check(event(R"({"type":"PlanProduced","frameId":7,"planId":"plan-7-1","label":"P-7-1","question":"q1","intent":"i1"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first plan produced");
+        check(event(R"({"type":"CursorChanged","frameId":7,"stage":"EXECUTING"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first frame executes");
+        check(event(R"({"type":"tool_execution_start","toolCallId":"E-7-1","toolName":"read","args":{"path":"x"}})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first execution recorded");
+        check(event(R"({"type":"CursorChanged","frameId":7,"stage":"DISTILLING"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first frame distills");
+        check(event(R"({"type":"ProposalCreated","frameId":7,"op":"+","belief":"B2","detail":"new"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: distillation proposal recorded");
+        check(event(R"({"type":"DistillationProduced","frameId":7,"label":"D-7-1","interpretation":"result"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: first distillation produced");
+
+        const int firstFrameId = loop.frames().front().id;
+        check(event(R"({"type":"CursorChanged","frameId":7,"stage":"PROPOSING"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: second propose opens another frame");
+        check(event(R"({"type":"BeliefCreated","beliefId":2,"statement":"second belief"})") == pie::gui::RpcApplyResult::Applied,
+              "propose-frame: second belief created");
+
+        const auto logicalFrames = loop.frames();
+        check(logicalFrames.size() == 2, "propose-frame: one task contains two LoopFrames");
+        check(logicalFrames[0].id == firstFrameId && logicalFrames[0].closed,
+              "propose-frame: first LoopFrame is immutable history");
+        check(logicalFrames[0].runtimeTaskId == 7 && logicalFrames[1].runtimeTaskId == 7,
+              "propose-frame: both LoopFrames retain the same runtime task id");
+        check(logicalFrames[0].plans.size() == 1 && logicalFrames[1].plans.empty(),
+              "propose-frame: plan history does not leak into the next frame");
+        check(loop.beliefs().size() == 2 &&
+              loop.beliefs()[0].createdInFrame == logicalFrames[0].id &&
+              loop.beliefs()[1].createdInFrame == logicalFrames[1].id,
+              "propose-frame: belief creation provenance follows logical frames");
+
+        pie::gui::GraphTaskState graph = pie::gui::projectGraphTask(loop);
+        check(graph.frames.size() == 2 && graph.frames[0].label == "LoopFrame #1" &&
+              graph.frames[1].label == "LoopFrame #2",
+              "propose-frame: Graph View labels logical frames in loop order");
+    }
+
+    // --- Regression: a second PlanProduced / DistillationProduced (e.g. a
+    // --- distill returning directly to planner) splits into a fresh LoopFrame, so
+    // --- each LoopFrame holds at most one Plan and one Distillation, and each
+    // --- occurrence still yields a distinct node (not collapsed to one).
     {
         pie::gui::NativeGuiModel multi;
         auto evm = [&](const char* s) { return pie::gui::applyRpcLine(multi, s); };
@@ -575,15 +634,27 @@ int main() {
         check(evm(R"({"type":"CursorChanged","frameId":5,"stage":"CLOSED","item":""})") == pie::gui::RpcApplyResult::Applied, "same-frame: close cursor");
         check(evm(R"({"type":"turn_end"})") == pie::gui::RpcApplyResult::Applied, "same-frame: end closes frame");
 
+        // Each LoopFrame carries at most one plan and one distillation. A second
+        // PlanProduced / DistillationProduced closes the current frame and opens a
+        // fresh one, so the occurrences land in distinct frames, each still a
+        // distinct node with its authoritative planId.
         auto mfs = multi.frames();
-        check(mfs.size() == 1, "same-frame: a single frame is produced");
-        const pie::gui::LoopFrame* mf = multi.frameById(5);
-        check(mf != nullptr, "same-frame: frame queryable");
-        check(mf && mf->plans.size() == 2, "same-frame: two plan occurrences accumulated");
-        check(mf && mf->distillations.size() == 2, "same-frame: two distill occurrences accumulated");
-        // The single-value fields hold the latest/representative occurrence.
-        check(mf && mf->plan.label == "P-5-2", "same-frame: single plan field is latest");
-        check(mf && mf->distillation.label == "D-5-2", "same-frame: single distill field is latest");
+        check(mfs.size() == 3, "same-frame: three frames after splitting on 2nd plan/distill");
+        const pie::gui::LoopFrame* f5 = multi.frameById(5);
+        check(f5 != nullptr, "same-frame: first frame queryable");
+        check(f5 && f5->plans.size() == 1 && f5->plan.label == "P-5-1",
+              "same-frame: first frame holds one plan (P-5-1)");
+        // The second plan is split into a new frame, and the first distillation
+        // joins that frame (propose→plan→execution→distill share one cycle).
+        bool splitPlanFound = false, splitDistillFound = false;
+        for (const pie::gui::LoopFrame& fr : multi.frames()) {
+            if (fr.plans.size() == 1 && fr.plan.label == "P-5-2" && fr.plans.size() <= 1)
+                splitPlanFound = true;
+            if (fr.distillations.size() == 1 && fr.distillation.label == "D-5-1" && fr.distillations.size() <= 1)
+                splitDistillFound = true;
+        }
+        check(splitPlanFound, "same-frame: second plan in its own frame");
+        check(splitDistillFound, "same-frame: first distillation in a frame");
 
         pie::gui::GraphTaskState mst = pie::gui::projectGraphTask(multi);
         int mplans = 0, mdists = 0;

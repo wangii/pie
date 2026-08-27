@@ -93,17 +93,9 @@ if(NOT APPLE)
     find_package(OpenGL REQUIRED)
 endif()
 
-# Graphviz is used by the graph layout engine (PieGraphLayout) to auto-layout
-# the node graph. The Homebrew Graphviz install exposes the C API via pkg-config
-# modules named 'libcgraph' and 'libgvc' (note: not 'graphviz'/'gvc'/'cgraph').
-# We require both so the layout engine can call dot/gvc; fail clearly if absent.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GRAPHVIZ IMPORTED_TARGET libgvc libcgraph)
-if(NOT GRAPHVIZ_FOUND)
-    message(FATAL_ERROR
-        "Graphviz (libcgraph/libgvc) not found. Install it with:\n"
-        "  brew install graphviz   (macOS)   or   apt-get install libgraphviz-dev (Debian/Ubuntu)")
-endif()
+# The graph layout engine (PieGraphLayout) no longer uses Graphviz: the
+# deterministic custom layout computes positions itself, so libgvc/libcgraph are
+# not required (and pkg-config is not needed for this project).
 
 # ---------------------------------------------------------------------------
 # Model layer: headless, no ImGui dependency. Unit-testable without a window.
@@ -113,9 +105,6 @@ add_library(pi_gui_model STATIC src/Model.cpp src/FileList.cpp
     src/graph/GraphRouting.cpp src/graph/GraphInteraction.cpp src/graph/GraphLive.cpp
     src/graph/GraphMinimap.cpp src/graph/GraphCache.cpp)
 target_include_directories(pi_gui_model PUBLIC src)
-# The graph layout engine (PieGraphLayout) calls the Graphviz C API for
-# automatic layout, so the headless model target links libgvc/libcgraph.
-target_link_libraries(pi_gui_model PUBLIC PkgConfig::GRAPHVIZ)
 
 # ---------------------------------------------------------------------------
 # Model unit tests (headless; no window, no SDK).

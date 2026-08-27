@@ -90,10 +90,9 @@ static GraphTaskState buildBigState(int frames, int nodesPerFrame) {
         }
     }
 
-    // Add global beliefs + long semantic edges so the long-route cache path is
-    // exercised (BeliefToPlan rides the top periphery, DistillToBelief the
-    // bottom). Frames are laid out left->right; frame 1's plan and distill are
-    // the first/last node ids of frame 1.
+    // Add global beliefs + cross-region semantic edges so the long-route cache
+    // path is exercised. Frame 1's plan and distill are the first/last node ids
+    // of frame 1.
     GraphNode b1; b1.id.value = "B1"; b1.family = NodeFamily::Belief;
     b1.title = "B1"; b1.compactText = "b"; b1.fullText = "b";
     GraphNode b2; b2.id.value = "B2"; b2.family = NodeFamily::Belief;

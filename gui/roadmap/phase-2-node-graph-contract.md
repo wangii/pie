@@ -62,10 +62,15 @@ expanded by default (no frame collapse in P0).
 
 ### Highest-level layout
 
-Belief Region (global, left) feeds the frames laid left→right. Inside a frame:
-Plan-family nodes top, Execution/Tool nodes right, Distill-family nodes bottom.
-This yields the direction `Belief → Plan → Execution → Distill → Belief` per
-frame, which is a feedback loop, not a linear pipeline.
+LoopFrames are complete rows stacked top→bottom in cognition order. Each
+LoopFrame starts at propose and carries at most one Plan and one Distillation;
+multiple Execution Blocks stack vertically on the right. A second PlanProduced
+or DistillationProduced closes the frame and opens a fresh one, so a row never
+holds more than one Plan or one Distillation node. The global Belief Set is the
+fixed left column; each row has Plan in the upper middle, Distillation in the
+lower middle, and vertically ordered Execution Blocks on the right. This yields
+`Belief → Plan → Execution → Distill → Belief` within a row while preserving
+the task's accumulated history down the canvas.
 
 ### Node ontology
 
@@ -83,30 +88,28 @@ and is runtime-provided, not inferred by the GUI.
 
 ### Edges and cross-frame semantics
 
-All edges are typed, directed, explicit. Default UI shows no edge labels and no
-edge legend. Cross-frame cognition passes only through Belief; direct
-`Frame#3 Distill → Frame#8 Plan` is not allowed. Long `Belief → Plan` routes go
-along the top outer periphery and long `Distill → Belief` routes along the
-bottom, with cross-frame long edges defaulting to subdued and emphasizing only on
-selection.
+All edges are typed, directed, explicit. The UI includes a compact legend but
+does not put labels on individual edges. Cross-frame cognition passes only
+through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
+`Belief → Plan` and `Distill → Belief` use orthogonal cross-region routes;
+`Plan → Execution` and `Execution → Distill` remain local curves. Create
+write-backs are dashed and update write-backs are solid.
 
-### LoopFrame boundary (one propose as delimiter)
+### LoopFrame boundary (entering propose is the delimiter)
 
-A LoopFrame is the container for one complete epistemic transaction. At the
-cognitive level it is delimited by a single Proposal: the frame's
-plan/execution/distillation run and it produces exactly one proposal, which is
-the epistemic boundary of that turn. The Graph View maps one User Task's frames
-to the horizontal top-level layout; frames do not own Belief nodes (beliefs are
-global in the Belief Region).
+A LoopFrame is one cognition-feedback cycle inside a User Task. Every explicit
+`CursorChanged(stage=PROPOSING)` entry starts a new LoopFrame; `frameId` in live
+RPC events remains the runtime task id, so several logical LoopFrames can share
+one task id. The first propose entry reuses an empty task placeholder. A later
+entry closes the prior logical frame and opens the next one. `turn_end` and
+`agent_settled` are model-turn boundaries and do not close a belief-loop frame;
+`CursorChanged(stage=CLOSED)` closes the final frame. Demo `FrameOpened` /
+`FrameClosed` events remain explicit frame boundaries.
 
-**Event boundary (must not be conflated with `ProposalCreated`).** The user-word
-"a single propose as the boundary" is a conceptual/cognitive boundary, but the
-GUI/runtime only closes a frame on an explicit close event: `CursorChanged` with
-`stage=CLOSED`, `turn_end` / `agent_settled`, or `FrameClosed` (demo path).
-`ProposalCreated` only appends a proposal to the frame's proposal list and never
-closes the frame; it is not the close event. The roadmap therefore records the
-boundary as "one proposal per frame" for cognition, and the close trigger as the
-runtime close event, not `ProposalCreated`.
+`ProposalCreated` still only appends a proposal and never opens or closes a
+frame. Frames do not own Belief nodes: beliefs are global, with separate
+creation provenance used only to align a newly created belief with the row that
+produced it.
 
 ### Node visual language (single card family)
 
@@ -119,11 +122,9 @@ inputs/outputs expressed by edges.
 
 ### LoopFrame container header
 
-The frame container is the only explicit group (no nested Plan/Distill groups).
-Its header is minimal: `LoopFrame #<n>` plus an optional short `EXECUTING` marker
-when the active runtime state is present. It shows no summary, no selected
-beliefs, no proposal count, and no explanation — all of that is read from the
-graph itself.
+Each row has subtle Plan, Distillation, and Execution region surfaces plus a
+dashed LoopFrame boundary. Its label is the logical order `LoopFrame #<n>`; it
+shows no summary, selected-belief list, or proposal count.
 
 ### CURRENT vs SELECTED
 
@@ -140,40 +141,20 @@ reconnect, frame move, and semantic mutation are forbidden. The GUI never
 infers cognition; `GraphNode`/`GraphEdge`/`GraphTaskState` semantic edges are
 runtime-supplied.
 
-### PIE-specific layout engine (Graphviz auto-layout)
+### PIE-specific deterministic layout engine
 
-P0 implements `PieGraphLayout`, which projects the PIE cognition ontology
-(nodes/edges) into a Graphviz directed graph and runs the DOT automatic layout
-engine to position nodes. The layout is deterministic for an identical
-`GraphTaskState` (same input graph and Graphviz version). The GUI never infers
-cognition: node/edge semantic types are runtime-supplied; only positions come
-from the engine.
+`PieGraphLayout` directly implements the ontology instead of delegating to a
+generic graph engine. It computes fixed semantic columns, sizes each LoopFrame
+row to the maximum of its belief group, Plan/Distillation bands, and Execution
+stack, then advances to the next row. Plans and Distillations expand
+horizontally; Executions and Beliefs expand vertically. Beliefs stay globally
+unique and creation-ordered. New beliefs begin at their producing frame's row
+top, with an explicit per-round marker.
 
-- **Dependency**: Graphviz is a hard build dependency. CMake finds it via
-  pkg-config modules `libcgraph` / `libgvc` (note: not `graphviz`/`gvc`),
-  propagates it to the model library and app, and errors with an explicit
-  install hint (`brew install graphviz` / `apt-get install libgraphviz-dev`)
-  if missing. There is no silent fallback to a hand-rolled layout.
-- **Geometry**: post-layout node positions/sizes are read via the C API macros
-  `ND_coord` / `ND_width` / `ND_height` (accessing `Agnodeinfo_t` through
-  `AGDATA`); sizes are in inches and are scaled by 72 points/inch. The Graphviz
-  `bb` graph bounding box is space-separated (`xmin ymin xmax ymax`) and is
-  used to translate/flip coordinates from Graphviz's bottom-left origin to the
-  viewer's top-left y-down space.
-- **Contract**: the general layout contract is that every node gets a
-  positive-size rectangle, node rectangles do not overlap, the canvas size is
-  positive, and each frame has a container rectangle. The previous per-region
-  directional ordering (Belief left-of-Plan, Distill return-leftward) is NOT
-  guaranteed by the DOT engine and is deliberately not asserted; the
-  auto-layout is top-down by edge direction.
-
-### Per-region layout (superseded)
-
-The prior hand-rolled `PieGraphLayout` placed a Belief creation-order grid, Plan
-upper region, Execution right region, and Distill lower right→left return flow.
-Under the Graphviz auto-layout those per-region directional rules are replaced
-by the engine's general placement; tests assert only the general contract
-(valid, non-overlapping, framed, positive canvas) enumerated above.
+Graphviz and pkg-config are not build dependencies. Identical
+`GraphTaskState` input produces identical rectangles. Tests assert positive
+geometry, no node overlap, top-to-bottom frame separation, and the fixed
+Belief / middle / Execution ordering.
 
 ### Runtime contract (to be supplied by the runtime)
 
@@ -182,6 +163,7 @@ struct GraphNode {
     NodeId id;
     NodeFamily family;            // Belief | Plan | Execution | Distill
     optional<LoopFrameId> frame_id;
+    optional<LoopFrameId> created_in_frame;  // Belief provenance only
     string display_type;
     string title;
     string compact_text;
@@ -216,11 +198,10 @@ M1 Graph Model   runtime data -> GraphTaskState projection (no Proposal/Observat
                  node; tool+result merged; no ExecutionStep wrapper; runtime-supplied edges)  [implemented]
 M2 Nodes         belief/plan/execution/distill card renderers (status/result colors,
                  hidden pins, current/selected highlight, tooltip, "..." popup)  [implemented]
-M3 Layout v1     PieGraphLayout -> Graphviz dot auto-layout (project nodes/edges,
-                 run DOT, ND_coord/ND_width/ND_height -> nodeRects/frameRects);
-                 general contract: valid, non-overlapping, framed, positive canvas  [implemented]
-M4 Edge Routing  local semantic edges + long Belief->Plan (top) / Distill->Belief
-                 (bottom) routes, default dim, +/- operation glyphs  [implemented]
+M3 Layout v1     deterministic three-column semantic layout; LoopFrame rows
+                 stacked top-to-bottom; valid, non-overlapping region geometry  [implemented]
+M4 Edge Routing  local semantic curves + orthogonal Belief read/write routes,
+                 default dim, dashed-create/solid-update glyphs  [implemented]
 M5 Selection     click node -> ancestor + descendant dependency path (cycle-safe
                  visited set, cached adjacency), emphasize related, dim rest  [implemented]
 M6 Live          runtime events (node/edge added, belief created/updated, current

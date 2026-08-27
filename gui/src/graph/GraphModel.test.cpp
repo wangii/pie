@@ -167,24 +167,27 @@ int main() {
     }
     check(deterministic, "layout is deterministic");
 
-    // Belief grid is left of plan; plan is above execution and distill.
+    // Semantic columns: Belief | Plan/Distillation | Execution.
     auto findRect = [&](const std::string& id) -> const pie::gui::GraphRect* {
         auto it = layout.nodeRects.find(id);
         return it == layout.nodeRects.end() ? nullptr : &it->second;
     };
     const auto* b42 = findRect("B42");
     const auto* p128 = findRect("P-128");
+    const auto* e88 = findRect("E-88");
     const auto* e89 = findRect("E-89");
     const auto* d42 = findRect("D-42");
     check(b42 && p128 && e89 && d42, "core nodes (B42, P-128, E-89, D-42) all placed");
-    // The generic Graphviz dot layout is top-down by edge direction and does not
-    // guarantee the hand-ordered feedback-loop left-region x-ordering (Belief
-    // left of Plan, Distill leftward) that the previous deterministic grid
-    // enforced. Under auto-layout those two direction assertions are dropped;
-    // the general contract below (valid rects, no overlap, frame container,
-    // positive canvas) is what must hold.
-    check(p128 && e89 && p128->y < e89->y, "Plan is above Execution");
-    check(e89 && d42 && e89->y < d42->y, "Execution is above Distill");
+    check(b42 && p128 && b42->x + b42->w < p128->x,
+          "Belief column is left of Plan");
+    check(p128 && e88 && p128->x + p128->w < e88->x,
+          "Plan region is left of Execution");
+    check(d42 && e89 && d42->x + d42->w < e89->x,
+          "Distillation region is left of Execution");
+    check(p128 && d42 && p128->y < d42->y,
+          "Plan is in the upper band and Distillation in the lower band");
+    check(e88 && e89 && e88->y < e89->y,
+          "Execution nodes are vertical in execution order");
     bool allValid = true;
     bool noOverlap = true;
     for (const auto& [k, r] : layout.nodeRects) {
@@ -198,9 +201,26 @@ int main() {
     check(allValid, "every node rect has positive size");
     check(noOverlap, "node rects do not overlap");
 
-    // Frames laid out left->right; frame 128 rect is non-empty.
+    // LoopFrames are complete rows stacked top-to-bottom.
     auto f128 = layout.frameRects.find(128);
+    auto f129 = layout.frameRects.find(129);
     check(f128 != layout.frameRects.end() && f128->second.w > 0, "frame 128 has a container");
+    check(f128 != layout.frameRects.end() && f129 != layout.frameRects.end() &&
+          f129->second.y >= f128->second.y + f128->second.h,
+          "LoopFrame rows are stacked without overlap");
+    check(layout.planRegionRects.count(128) && layout.distillRegionRects.count(128) &&
+          layout.executionRegionRects.count(128),
+          "frame 128 exposes Plan, Distillation, and Execution regions");
+
+    // The round-anchored belief B53 (created in frame 128) must be placed in the
+    // left belief column, anchored at/after its create round's row top, and sit
+    // below the pre-existing belief B42.
+    const auto* b53 = findRect("B53");
+    check(b53, "round-anchored belief (B53) is placed");
+    check(b53 && b42 && b53->x < b42->x + b42->w, "round belief is in the left belief column");
+    check(b53 && b42 && b53->y >= b42->y + b42->h + 0.0f, "round belief sits below the pre-existing belief column");
+    check(layout.beliefRegionRects.count(128),
+          "frame 128 exposes its newly-created belief group");
 
     // Belief region nodes are in creation order along columns increasing.
     check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");

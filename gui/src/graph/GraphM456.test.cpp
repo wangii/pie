@@ -28,7 +28,8 @@ static void check(bool cond, const char* what) {
 }
 
 // A compact GraphTaskState with one closed frame (with a cycle among its nodes)
-// and two global beliefs, giving both long (Belief->Plan, Distill->Belief) and
+// and two global beliefs, giving both cross-region (Belief->Plan,
+// Distill->Belief) and
 // local (Plan->Execution, Execution->Distill) edges. The cycle (E1 -> P1 -> E2
 // -> D1 -> E1... but edges are semantic) exercises the cycle-safe traversal; we
 // add one deliberate cross edge that re-enters an earlier node.
@@ -37,10 +38,10 @@ static void check(bool cond, const char* what) {
 //   Beliefs: B1 (no frame), B2 (no frame)
 //   Frame 10 (CLOSED):
 //     Plan P10, Exec E10a, Exec E10b, Distill D10
-//     Edges: B1->P10 (BeliefToPlan, long top), B2->P10 (BeliefToPlan, long top)
+//     Edges: B1->P10, B2->P10 (BeliefToPlan, orthogonal cross-region)
 //            P10->E10a, P10->E10b (PlanToExecution, local)
 //            E10a->D10, E10b->D10 (ExecutionToDistill, local)
-//            D10->B1 (DistillToBelief, long bottom), D10->B2 (long bottom)
+//            D10->B1, D10->B2 (DistillToBelief, orthogonal return)
 //   Frame 20 (OPEN):
 //     Plan P20, Exec E20, Distill D20
 //     Edges: B1->P20 (long top), P20->E20, E20->D20, D20->B2 (long bottom)
@@ -112,30 +113,32 @@ static void testRouting(const GraphTaskState& s, const PieGraphLayout& layout) {
     std::vector<EdgeRoute> routes = computeEdgeRoutes(s, layout);
     check(!routes.empty(), "M4: routes produced for every placed edge");
 
-    bool haveTop = false, haveBottom = false, haveLocal = false;
+    bool haveForward = false, haveReturn = false, haveLocal = false;
     for (const EdgeRoute& r : routes) {
         if (r.type == EdgeSemanticType::BeliefToPlan) {
-            // Long top route: rides a band above all nodes. The band is above
-            // every node rect, so route y must dip above both endpoints.
-            haveTop = true;
-            check(r.longRoute, "M4: Belief->Plan is a long route");
-            check(r.points.size() == 4, "M4: Belief->Plan route has 4 points (band pass)");
-            // The band segment is the second->third point; it sits above the
-            // first point's y (source anchor), i.e. the route goes upward.
-            check(r.points[1].second <= r.points[0].second, "M4: Belief->Plan route rises to a top band");
+            haveForward = true;
+            check(r.longRoute, "M4: Belief->Plan uses an orthogonal cross-region route");
+            check(r.points.size() == 4, "M4: Belief->Plan route has two elbows");
+            check(r.points[0].second == r.points[1].second &&
+                  r.points[1].first == r.points[2].first &&
+                  r.points[2].second == r.points[3].second,
+                  "M4: Belief->Plan stays inside its semantic row");
         } else if (r.type == EdgeSemanticType::DistillToBelief) {
-            haveBottom = true;
-            check(r.longRoute, "M4: Distill->Belief is a long route");
-            check(r.points.size() == 4, "M4: Distill->Belief route has 4 points (band pass)");
-            check(r.points[1].second >= r.points[0].second, "M4: Distill->Belief route drops to a bottom band");
+            haveReturn = true;
+            check(r.longRoute, "M4: Distill->Belief uses an orthogonal return route");
+            check(r.points.size() == 4, "M4: Distill->Belief route has two elbows");
+            check(r.points[0].second == r.points[1].second &&
+                  r.points[1].first == r.points[2].first &&
+                  r.points[2].second == r.points[3].second,
+                  "M4: Distill->Belief stays inside its semantic row");
         } else {
             haveLocal = true;
             check(!r.longRoute, "M4: local edge is not a long route");
             check(r.points.size() == 3, "M4: local edge keeps the short curve");
         }
     }
-    check(haveTop, "M4: at least one top (Belief->Plan) route");
-    check(haveBottom, "M4: at least one bottom (Distill->Belief) route");
+    check(haveForward, "M4: at least one Belief->Plan route");
+    check(haveReturn, "M4: at least one Distill->Belief route");
     check(haveLocal, "M4: at least one local (Plan/Exec ->) route");
 
     // Determinism: identical inputs -> identical routes.

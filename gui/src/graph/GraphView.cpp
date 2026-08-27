@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <optional>
 
 #include <imgui.h>
 
@@ -68,6 +70,44 @@ ImU32 edgeColor(EdgeSemanticType t, float alpha) {
     }
     return IM_COL32(st.edgeMuted.r, st.edgeMuted.g, st.edgeMuted.b, 255);
 }
+
+// ImGui has no dashed-rect primitive (ImDrawFlags only exposes rounding bounds +
+// Closed), so a dashed LoopFrame boundary is drawn as four dashed line segments.
+void drawDashedRect(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, ImU32 col, float thickness, float zoom) {
+    const float dash = 6.0f * zoom;
+    const float gap = 4.0f * zoom;
+    auto seg = [&](ImVec2 a, ImVec2 b) {
+        float dx = b.x - a.x, dy = b.y - a.y;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1e-3f) return;
+        float ux = dx / len, uy = dy / len;
+        for (float d = 0.0f; d < len; d += dash + gap) {
+            float e = std::min(d + dash, len);
+            dl->AddLine(ImVec2(a.x + ux * d, a.y + uy * d), ImVec2(a.x + ux * e, a.y + uy * e), col, thickness);
+        }
+    };
+    seg(ImVec2(p0.x, p0.y), ImVec2(p1.x, p0.y));
+    seg(ImVec2(p1.x, p0.y), ImVec2(p1.x, p1.y));
+    seg(ImVec2(p1.x, p1.y), ImVec2(p0.x, p1.y));
+    seg(ImVec2(p0.x, p1.y), ImVec2(p0.x, p0.y));
+}
+
+void drawDashedLine(ImDrawList* dl, const ImVec2& a, const ImVec2& b,
+                    ImU32 col, float thickness, float zoom) {
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length < 1e-3f) return;
+    const float ux = dx / length;
+    const float uy = dy / length;
+    const float dash = 6.0f * zoom;
+    const float gap = 4.0f * zoom;
+    for (float offset = 0.0f; offset < length; offset += dash + gap) {
+        const float end = std::min(offset + dash, length);
+        dl->AddLine(ImVec2(a.x + ux * offset, a.y + uy * offset),
+                    ImVec2(a.x + ux * end, a.y + uy * end), col, thickness);
+    }
+}
 } // namespace
 
 bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout) {
@@ -108,24 +148,93 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                       origin.y + view.panY + gy * view.zoom);
     };
 
-    // --- Frame container boxes (subtle) ---
+    // --- Semantic region surfaces ---
+    auto drawSurface = [&](const GraphRect& rect, const GraphStyle::Rgb& fill) {
+        ImVec2 p0 = toScreen(rect.x, rect.y);
+        ImVec2 p1 = toScreen(rect.x + rect.w, rect.y + rect.h);
+        dl->AddRectFilled(p0, p1,
+                          IM_COL32(fill.r, fill.g, fill.b, st.regionFillAlpha),
+                          st.frameRadius);
+        drawDashedRect(dl, p0, p1,
+                       IM_COL32(st.frameBorder.r, st.frameBorder.g,
+                                st.frameBorder.b, 70),
+                       view.zoom, view.zoom);
+    };
+    drawSurface(layout.beliefColumnRect, st.beliefRegionFill);
+    for (const auto& [frameId, rect] : layout.planRegionRects) {
+        (void)frameId;
+        drawSurface(rect, st.planRegionFill);
+    }
+    for (const auto& [frameId, rect] : layout.distillRegionRects) {
+        (void)frameId;
+        drawSurface(rect, st.distillRegionFill);
+    }
+    for (const auto& [frameId, rect] : layout.executionRegionRects) {
+        (void)frameId;
+        drawSurface(rect, st.executionRegionFill);
+    }
+
+    // Column headings sit in the reserved header band and remain aligned with
+    // the semantic columns while the canvas pans and zooms.
+    const float headerY = st.canvasPad + st.columnHeaderHeight * 0.15f;
+    dl->AddText(toScreen(layout.beliefColumnRect.x, headerY),
+                IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
+                         st.beliefRegionLabel.b, 255), "Belief Set (global)");
+    if (!layout.planRegionRects.empty()) {
+        const GraphRect& rect = layout.planRegionRects.begin()->second;
+        dl->AddText(toScreen(rect.x, headerY),
+                    IM_COL32(st.planRegionLabel.r, st.planRegionLabel.g,
+                             st.planRegionLabel.b, 255), "Plan (upper)");
+        dl->AddText(toScreen(rect.x, headerY + 16.0f),
+                    IM_COL32(st.distillRegionLabel.r, st.distillRegionLabel.g,
+                             st.distillRegionLabel.b, 255), "Distillation (lower)");
+    }
+    if (!layout.executionRegionRects.empty()) {
+        const GraphRect& rect = layout.executionRegionRects.begin()->second;
+        dl->AddText(toScreen(rect.x, headerY),
+                    IM_COL32(st.executionRegionLabel.r, st.executionRegionLabel.g,
+                             st.executionRegionLabel.b, 255), "Execution Blocks");
+    }
+
+    // --- LoopFrame row boundaries ---
     for (const auto& fi : state.frames) {
         auto it = layout.frameRects.find(fi.id);
         if (it == layout.frameRects.end()) continue;
         GraphRect r = it->second;
         ImVec2 p0 = toScreen(r.x, r.y);
         ImVec2 p1 = toScreen(r.x + r.w, r.y + r.h);
-        dl->AddRect(p0, p1, IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, st.frameBorderAlpha), st.frameRadius, 0, st.frameBorderWidth * view.zoom);
+        drawDashedRect(dl, p0, p1, IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, st.frameBorderAlpha), st.frameBorderWidth * view.zoom, view.zoom);
         // Label is drawn at an explicit position via AddText; do NOT SetCursorScreenPos
         // here (it submits no item, leaving IsSetPos set and triggering the
         // "SetCursorPos() to extend window/parent boundaries" assert at End()).
-        dl->AddText(ImVec2(p0.x + st.frameLabelPadX, p0.y + st.frameLabelPadY),
+        dl->AddText(ImVec2(p1.x + st.frameLabelPadX,
+                           (p0.y + p1.y) * 0.5f - 7.0f),
                     IM_COL32(st.frameLabel.r, st.frameLabel.g, st.frameLabel.b, st.frameLabelAlpha), fi.label.c_str());
     }
 
-    // --- Edges: typed, directed, routed (m4). Long edges ride a canvas
-    // periphery (top for Belief->Plan, bottom for Distill->Belief); local edges
-    // keep a short curve. The m5 dependency set drives emphasis on selection.
+    // Each new-belief group is marked at the top of the LoopFrame that created
+    // it. The cards themselves remain in the one global creation-order column.
+    for (std::size_t i = 0; i < state.frames.size(); ++i) {
+        auto it = layout.beliefRegionRects.find(state.frames[i].id);
+        if (it == layout.beliefRegionRects.end()) continue;
+        ImVec2 p0 = toScreen(it->second.x, it->second.y);
+        ImVec2 p1 = toScreen(it->second.x + it->second.w,
+                             it->second.y + it->second.h);
+        drawDashedRect(dl, p0, p1,
+                       IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
+                                st.beliefRegionLabel.b, 120),
+                       view.zoom, view.zoom);
+        char label[80];
+        std::snprintf(label, sizeof(label), "Round %zu\nnew beliefs", i + 1);
+        dl->AddText(toScreen(it->second.x - st.beliefAnnotationWidth + 8.0f,
+                             it->second.y + 4.0f),
+                    IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
+                             st.beliefRegionLabel.b, 230), label);
+    }
+
+    // --- Edges: typed, directed, routed (m4). Belief read/write edges use
+    // orthogonal cross-region routes; local edges keep a short curve. The m5
+    // dependency set drives emphasis on selection.
     // Both the dependency set and the routes come from the M8 cache (recomputed
     // only when the state / layout changed).
     const std::set<std::string>& dep = view.cache.getDependencySet(state, view.selectedNode, view.cacheMetrics);
@@ -146,11 +255,17 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                                   : (onPath ? st.edgeAlphaPath : st.edgeAlphaOffPath);
         ImU32 col = edgeColor(route.type, alpha);
         if (route.longRoute) {
-            // Polyline along the periphery band.
+            const bool dashedCreate = route.type == EdgeSemanticType::DistillToBelief &&
+                                      route.beliefOperation == BeliefOperation::Create;
             for (size_t i = 0; i + 1 < route.points.size(); ++i) {
                 ImVec2 a = toPx(route.points[i].first, route.points[i].second);
                 ImVec2 b = toPx(route.points[i + 1].first, route.points[i + 1].second);
-                dl->AddLine(a, b, col, st.edgeWidthLong * view.zoom);
+                if (dashedCreate) {
+                    drawDashedLine(dl, a, b, col,
+                                   st.edgeWidthLong * view.zoom, view.zoom);
+                } else {
+                    dl->AddLine(a, b, col, st.edgeWidthLong * view.zoom);
+                }
             }
         } else {
             // Local curve: source -> mid control -> target.
@@ -226,6 +341,51 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             ImGui::BeginTooltip();
             ImGui::TextUnformatted((title + "\n" + n.compactText + "\n" + n.fullText).c_str());
             ImGui::EndTooltip();
+        }
+    }
+
+    // --- Legend: the five edge-semantic encodings (top-left overlay). ---
+    {
+        const char* labels[] = {
+            "Belief -> Plan   (read)",
+            "Plan -> Execution",
+            "Execution -> Distillation",
+            "Distillation -> Belief   (write back)",
+            "Distillation -> Belief   (create)",
+        };
+        const EdgeSemanticType types[] = {
+            EdgeSemanticType::BeliefToPlan,
+            EdgeSemanticType::PlanToExecution,
+            EdgeSemanticType::ExecutionToDistill,
+            EdgeSemanticType::DistillToBelief,
+            EdgeSemanticType::DistillToBelief,
+        };
+        const char* glyphs[] = {"", "", "", "~", "+"};
+        const float lgPad = 8.0f, lgLineH = 20.0f, lgRowGap = 6.0f;
+        const float lgW = 310.0f;
+        const float lgH = lgPad * 2.0f + (int)(sizeof(labels) / sizeof(labels[0])) * (lgLineH + lgRowGap);
+        ImVec2 lg0(origin.x + lgPad,
+                   origin.y + gridSize.y - lgH - lgPad);
+        dl->AddRectFilled(lg0, ImVec2(lg0.x + lgW, lg0.y + lgH), IM_COL32(22, 24, 28, 220), st.frameRadius, 0);
+        dl->AddRect(lg0, ImVec2(lg0.x + lgW, lg0.y + lgH), IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, 120), st.frameRadius, 0, 1.0f);
+        float ly = lg0.y + lgPad;
+        for (int i = 0; i < (int)(sizeof(labels) / sizeof(labels[0])); ++i) {
+            ImU32 col = edgeColor(types[i], 1.0f);
+            ImVec2 sampleStart(lg0.x + lgPad, ly + lgLineH * 0.5f);
+            ImVec2 sampleEnd(lg0.x + lgPad + 28.0f, ly + lgLineH * 0.5f);
+            if (i == 4) drawDashedLine(dl, sampleStart, sampleEnd, col, 2.0f, 1.0f);
+            else dl->AddLine(sampleStart, sampleEnd, col, 2.0f);
+            // Arrowhead toward the right end of the sample line.
+            dl->AddTriangleFilled(ImVec2(lg0.x + lgPad + 32.0f, ly + lgLineH * 0.5f),
+                                  ImVec2(lg0.x + lgPad + 26.0f, ly + lgLineH * 0.5f - 4.0f),
+                                  ImVec2(lg0.x + lgPad + 26.0f, ly + lgLineH * 0.5f + 4.0f), col);
+            ImU32 textCol = IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255);
+            dl->AddText(ImVec2(lg0.x + lgPad + 42.0f, ly + lgLineH * 0.5f - 8.0f), textCol, labels[i]);
+            if (glyphs[i][0] != '\0') {
+                dl->AddText(ImVec2(lg0.x + lgPad + 286.0f, ly + lgLineH * 0.5f - 8.0f),
+                            IM_COL32(st.opGlyphText.r, st.opGlyphText.g, st.opGlyphText.b, 255), glyphs[i]);
+            }
+            ly += lgLineH + lgRowGap;
         }
     }
 

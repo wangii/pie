@@ -28,6 +28,9 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
         for (unsigned char c : n.id.value) h = hashMix(h, c);
         h = hashMix(h, static_cast<uint64_t>(n.family));
         h = hashMix(h, n.frameId.has_value() ? static_cast<uint64_t>(*n.frameId) : 0xFFFFFFFFFFFFFFFFULL);
+        h = hashMix(h, n.createdInFrame.has_value() ? static_cast<uint64_t>(*n.createdInFrame) : 0xFFFFFFFFFFFFFFFFULL);
+        h = hashMix(h, n.creationOrder);
+        h = hashMix(h, n.executionOrder.value_or(0));
         h = hashMix(h, n.displayType.empty() ? 0 : static_cast<unsigned char>(n.displayType[0]));
     }
     h = hashMix(h, state.edges.size());
@@ -36,6 +39,12 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
         for (unsigned char c : e.target.value) h = hashMix(h, c);
         h = hashMix(h, static_cast<uint64_t>(e.type));
         h = hashMix(h, e.beliefOperation.has_value() ? static_cast<uint64_t>(*e.beliefOperation) : 0);
+    }
+    h = hashMix(h, state.frames.size());
+    for (const LoopFrameInfo& frame : state.frames) {
+        h = hashMix(h, static_cast<uint64_t>(frame.id));
+        h = hashMix(h, frame.closed ? 1 : 0);
+        h = hashMix(h, frame.executing ? 1 : 0);
     }
     return h;
 }
@@ -55,6 +64,8 @@ uint64_t GraphCache::layoutFingerprint(const PieGraphLayout& layout) const {
         h = hashMix(h, static_cast<uint64_t>(fid));
         h = hashMix(h, static_cast<uint64_t>(r.x * 100.0f));
         h = hashMix(h, static_cast<uint64_t>(r.y * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(r.w * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(r.h * 100.0f));
     }
     return h;
 }

@@ -35,7 +35,9 @@ spec sections and source files.
   `GraphCache` (m8 caches), and the `GraphStyle` config (m9 style); a Cmd/Ctrl+G
   Text<->Graph toggle lives in `App.cpp`; and the headless `pi_gui_graph_test`
   (M1 projection + M3 layout), `pi_gui_graph_m456_test` (m4/m5/m6), and
-  `pi_gui_graph_m789_test` (m7/m8/m9) cover the implementation.
+  `pi_gui_graph_m789_test` (m7/m8/m9) cover the implementation. LoopFrames are
+  logical propose cycles within a task, stacked top-to-bottom in the fixed
+  Belief / Plan+Distillation / Execution layout.
 - **Partial**: Phase 3. Belief filtering and frame search are implemented;
   proposal-to-source jump, frame comparison, and full provenance inspection are
   not yet present.

@@ -46,9 +46,9 @@ struct GraphStyle {
     Rgb cardBeliefRevised{110, 95, 50};
     Rgb cardBeliefClosed{70, 70, 76};
     Rgb cardPlan{52, 78, 108};
-    Rgb cardExecOk{48, 110, 70};
+    Rgb cardExecOk{118, 82, 28};
     Rgb cardExecFailed{120, 48, 48};
-    Rgb cardExecRunning{60, 72, 92};
+    Rgb cardExecRunning{104, 76, 30};
     Rgb cardDistill{96, 66, 116};
     Rgb cardDefault{60, 65, 78};
     Rgb borderSelected{255, 176, 50};
@@ -69,9 +69,9 @@ struct GraphStyle {
     float edgeWidthLong = 1.6f;   // * zoom at draw
     float edgeWidthLocal = 2.0f;  // * zoom at draw
     int edgeMutedAlphaScale = 70; // alpha denominator for the muted edge color
-    Rgb edgeBeliefToPlan{200, 180, 90};
-    Rgb edgePlanToExecution{120, 180, 220};
-    Rgb edgeExecutionToDistill{150, 220, 160};
+    Rgb edgeBeliefToPlan{104, 204, 120};
+    Rgb edgePlanToExecution{190, 198, 208};
+    Rgb edgeExecutionToDistill{190, 198, 208};
     Rgb edgeDistillToBelief{220, 140, 220};
     Rgb edgeMuted{90, 95, 100};
     float arrowheadSize = 8.0f;   // base length along the direction
@@ -98,6 +98,31 @@ struct GraphStyle {
     float framePad = 12.0f;
     float frameGap = 120.0f;
     float peripheryGap = 40.0f;
+
+    // --- Deterministic custom layout geometry (replaces Graphviz dot) ---
+    // The custom engine stacks LoopFrames into vertical rows and uses three
+    // fixed x-regions (Belief | Plan+Distill | Execution). These gaps keep the
+    // regions / rows from overlapping.
+    float rowGap = 48.0f;        // vertical gap between LoopFrame rows
+    float regionGap = 80.0f;     // horizontal gap between Belief / mid / Execution columns
+    float nodeGapH = 28.0f;      // horizontal gap between nodes in a region row
+    float nodeGapV = 28.0f;      // vertical gap between stacked nodes (belief / exec column)
+    float canvasPad = 28.0f;
+    float beliefAnnotationWidth = 132.0f;
+    float columnHeaderHeight = 36.0f;
+    float phaseBandGap = 28.0f;
+    float frameLabelWidth = 150.0f;
+
+    // --- Semantic region surfaces ---
+    Rgb beliefRegionFill{40, 82, 54};
+    Rgb planRegionFill{35, 64, 98};
+    Rgb distillRegionFill{73, 48, 92};
+    Rgb executionRegionFill{92, 68, 26};
+    int regionFillAlpha = 38;
+    Rgb beliefRegionLabel{112, 205, 126};
+    Rgb planRegionLabel{104, 168, 238};
+    Rgb distillRegionLabel{190, 126, 224};
+    Rgb executionRegionLabel{238, 184, 74};
 };
 
 // The single default style instance. Shared by the headless layout / routing

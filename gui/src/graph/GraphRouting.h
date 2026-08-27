@@ -1,11 +1,9 @@
 // GraphRouting: Phase 2 M4 edge routing.
 //
 // Headless, ImGui-free, unit-testable. It turns a GraphTaskState + a
-// PieGraphLayout into a polyline route per edge. Long semantic edges (a Belief
-// -> Plan expressed across the frame strip, and a Distill -> Belief returning
-// to the global Belief Region) are routed around the top / bottom periphery of
-// the canvas so they do not cut through the frame content; local edges (Plan ->
-// Execution, Execution -> Distill, within one frame) keep a short curve. The
+// PieGraphLayout into a polyline route per edge. Belief -> Plan and Distill ->
+// Belief use two-elbow orthogonal routes within their semantic row; local Plan
+// -> Execution and Execution -> Distill edges keep a short curve. The
 // GUI never infers cognition: the routing only uses the runtime-supplied edge
 // semantic type and the geometry produced by the layout engine.
 //
@@ -29,10 +27,10 @@ struct EdgeRoute {
     EdgeSemanticType type = EdgeSemanticType::BeliefToPlan;
     std::optional<BeliefOperation> beliefOperation;  // Distill->Belief result glyph
     // The routed path, first = source anchor, last = target anchor. The viewer
-    // draws it as straight segments (long periphery) or as a curve (local).
+    // draws it as straight segments (cross-region) or as a curve (local).
     std::vector<std::pair<float, float>> points;
-    // True when the edge was routed along a canvas periphery (Belief->Plan top /
-    // Distill->Belief bottom). Such edges default to subdued in the viewer.
+    // True for cross-region Belief read/write routes. Such edges default to
+    // subdued in the viewer.
     bool longRoute = false;
 };
 

@@ -247,6 +247,12 @@ bool containsFold(const std::string& hay, std::string_view needle) {
     return hl.find(nl) != std::string::npos;
 }
 
+bool hasLoopCycleContent(const LoopFrame& frame) {
+    return !frame.selectedBeliefs.empty() || !frame.plans.empty() || frame.plan.valid() ||
+           !frame.trajectory.empty() || !frame.distillations.empty() ||
+           frame.distillation.valid() || !frame.proposals.empty();
+}
+
 // Extract the raw value (object/array/string/number) for a top-level key.
 // Handles nested {}[] and strings. Used to read args/result/content objects
 // that the minimal scalar helpers cannot parse.
@@ -487,7 +493,7 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         }
         // Frame summary folding only applies when a frame is actually active.
         active = model.activeFrame();
-        if (active && !text.empty()) {
+        if (active && !active->closed && !text.empty()) {
             model.appendRpcFrameSummary(active->id, text);
         }
         return RpcApplyResult::Applied;
@@ -528,7 +534,7 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
     if (type == "tool_execution_start") {
         active = model.activeFrame();
-        if (!active) return RpcApplyResult::Ignored;
+        if (!active || active->closed) return RpcApplyResult::Ignored;
         std::string args;
         rawValue(line, "args", args);
         std::string tool = str(line, "toolName");
@@ -544,7 +550,7 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
     if (type == "tool_execution_end") {
         active = model.activeFrame();
-        if (!active) return RpcApplyResult::Ignored;
+        if (!active || active->closed) return RpcApplyResult::Ignored;
         std::string result;
         rawValue(line, "result", result);
         std::string isErr;
@@ -556,10 +562,11 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     // demo/headless path produces via applyLine(): the selected belief ids, the
     // planner's plan, the distillation output, and the execution stage. Live mode
     // builds its frame via openRpcFrame (agent_start/turn_start) as a synthetic
-    // placeholder; the runtime's frame id (taskId, 1-based) is authoritative, so
-    // each phase event resolves/rebinds the frame via model.rpcFrame(frameId).
-    // Stage comes only from CursorChanged; DistillationProduced consumes only the
-    // documented rpc.md fields (label/interpretation), never inputIds/unexplained.
+    // placeholder; runtime frameId is a task id, so each phase event resolves to
+    // the active logical LoopFrame for that task via model.rpcFrame(frameId).
+    // Stage comes only from CursorChanged. DistillationProduced consumes its
+    // documented label/interpretation and correlates the tool calls collected
+    // since the explicit DISTILLING boundary for Graph View edges.
     auto phaseFrame = [&]() -> LoopFrame* {
         return model.rpcFrame(intVal(line, "frameId", model.cursor().frameId));
     };
@@ -569,6 +576,7 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         std::string raw;
         if (!findKey(line, "beliefs", raw)) return RpcApplyResult::Ignored;
         p->selectedBeliefs = beliefsArray(raw);
+        p->selectedBeliefBatches.push_back(p->selectedBeliefs);
         return RpcApplyResult::Applied;
     }
     if (type == "BeliefCreated") {
@@ -581,6 +589,8 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         Belief& b = model.upsertBeliefRpc(id);
         b.status = str(line, "status", "proposed");
         b.statement = str(line, "statement", b.statement);
+        const LoopFrame* current = model.activeFrame();
+        if (current && b.createdInFrame < 0) b.createdInFrame = current->id;
         return RpcApplyResult::Applied;
     }
     if (type == "BeliefUpdated") {
@@ -592,14 +602,18 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         Belief& b = model.upsertBeliefRpc(id);
         b.status = str(line, "status", b.status);
         b.statement = str(line, "statement", b.statement);
+        const LoopFrame* current = model.activeFrame();
+        if (current && current->stage == FrameStage::DISTILLING &&
+            (b.sourceFrames.empty() || b.sourceFrames.back() != current->id)) {
+            b.sourceFrames.push_back(current->id);
+        }
         return RpcApplyResult::Applied;
     }
     if (type == "PlanProduced") {
-        LoopFrame* p = phaseFrame();
+        // Each LoopFrame carries at most one plan: a frame that already holds a
+        // plan is closed and a fresh LoopFrame is opened for this new plan.
+        LoopFrame* p = model.enterRpcPlanFrame(intVal(line, "frameId", model.cursor().frameId));
         if (!p) return RpcApplyResult::Ignored;
-        // Accumulate every plan occurrence so the Graph View can render one node
-        // per batch; the single-value `plan` stays as the latest/representative
-        // occurrence for the text-view lanes.
         PlannerOutput po;
         po.id = str(line, "planId");
         po.label = str(line, "label");
@@ -610,14 +624,38 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         return RpcApplyResult::Applied;
     }
     if (type == "DistillationProduced") {
-        // Consume only the documented rpc.md fields (label, interpretation). The
-        // runtime never emits inputIds/unexplained, so those stay empty.
-        LoopFrame* p = phaseFrame();
+        // Consume the documented rpc.md fields (label, interpretation). The
+        // runtime omits inputIds, so correlate the executions bracketed by the
+        // explicit phase events; unexplained remains empty. Each LoopFrame carries
+        // at most one distillation, so a frame that already holds one is closed
+        // and a fresh LoopFrame is opened.
+        LoopFrame* p = model.enterRpcDistillFrame(intVal(line, "frameId", model.cursor().frameId));
         if (!p) return RpcApplyResult::Ignored;
         DistillationOutput do_;
         do_.label = str(line, "label");
         do_.interpretation = str(line, "interpretation");
-        if (!do_.label.empty()) p->distillations.push_back(do_);
+        // Live events omit inputIds. Attribute the execution calls not already
+        // consumed by an earlier distillation in this LoopFrame.
+        std::set<std::string> consumed;
+        for (const DistillationOutput& prior : p->distillations) {
+            consumed.insert(prior.inputIds.begin(), prior.inputIds.end());
+        }
+        for (const ToolCall& call : p->trajectory) {
+            if (!call.id.empty() && !consumed.count(call.id)) do_.inputIds.push_back(call.id);
+        }
+        if (!do_.label.empty()) {
+            for (std::size_t i = p->distillationProposalStart; i < p->proposals.size(); ++i) {
+                if (p->proposals[i].distillationLabel.empty()) {
+                    p->proposals[i].distillationLabel = do_.label;
+                }
+            }
+            p->distillationProposalStart = p->proposals.size();
+            // Bind beliefs created/updated during this distillation's DISTILLING
+            // stage to this distillation occurrence. The distill mutation events
+            // arrive before DistillationProduced and only carry a frame id.
+            model.bindDistillationLabel(p->id, do_.label);
+            p->distillations.push_back(do_);
+        }
         p->distillation = std::move(do_);
         return RpcApplyResult::Applied;
     }
@@ -631,19 +669,32 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         prop.relation = str(line, "relation");
         prop.rhs = str(line, "rhs");
         prop.detail = str(line, "detail");
+        if (p->stage == FrameStage::DISTILLING && p->distillation.valid()) {
+            prop.distillationLabel = p->distillation.label;
+        }
         p->proposals.push_back(std::move(prop));
         return RpcApplyResult::Applied;
     }
     if (type == "CursorChanged") {
-        // The runtime's frame id (taskId) is authoritative: resolve/rebind the
-        // frame, then drive stage/item from this single event. Stage is never
+        // Resolve the runtime task to its active logical LoopFrame, then drive
+        // stage/item from this single event. Stage is never
         // inferred from Execution* / Distillation* events (those are not emitted
         // by the runtime).
-        LoopFrame* p = phaseFrame();
         const FrameStage st = parseStage(str(line, "stage"));
+        const int runtimeTaskId = intVal(line, "frameId", model.cursor().frameId);
+        LoopFrame* p = st == FrameStage::PROPOSING
+            ? model.enterRpcProposeFrame(runtimeTaskId)
+            : model.rpcFrame(runtimeTaskId);
         model.mutableCursor().stage = st;
         model.mutableCursor().item = str(line, "item");
-        if (p && st != FrameStage::NONE) p->stage = st;
+        if (p && st != FrameStage::NONE) {
+            p->stage = st;
+            if (st == FrameStage::DISTILLING) {
+                p->distillationProposalStart = p->proposals.size();
+            } else if (st == FrameStage::CLOSED) {
+                model.closeRpcFrame(p->id, false);
+            }
+        }
         // The belief loop enters the terminal finalReport role by emitting a
         // CursorChanged with stage CLOSED. Mark the model so the next message_end
         // (the final conclusion text) can request the auto-reopen of the pane.
@@ -653,10 +704,10 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     if (type == "turn_end" || type == "agent_settled") {
         active = model.activeFrame();
         if (!active) return RpcApplyResult::Ignored;
-        // Mark the frame closed but keep it visible (the lane still renders the
-        // execution trajectory) rather than clearing the cursor, so the finished
-        // turn's records do not vanish the moment the turn ends.
-        model.closeRpcFrame(active->id, false);
+        // A belief-loop LoopFrame spans several model turns. Its boundary is an
+        // explicit entry into PROPOSING (or CLOSED), not turn_end. Preserve the
+        // legacy fallback for plain RPC streams that never supplied a task id.
+        if (active->runtimeTaskId < 0) model.closeRpcFrame(active->id, false);
         return RpcApplyResult::Applied;
     }
     return RpcApplyResult::Ignored;
@@ -707,6 +758,20 @@ Belief& NativeGuiModel::upsertBelief(BeliefId id) {
     return beliefs_[idx];
 }
 
+void NativeGuiModel::bindDistillationLabel(int frameId, const std::string& label) {
+    if (label.empty()) return;
+    // Bind the distillation occurrence to beliefs created/updated within frameId
+    // that have not yet been attributed to a distillation. The distill mutation
+    // events (BeliefCreated/BeliefUpdated) arrive before DistillationProduced and
+    // only carry a frame id, so we match on provenance here.
+    for (Belief& belief : beliefs_) {
+        if (!belief.distillationLabel.empty()) continue;
+        const bool touchesFrame = belief.createdInFrame == frameId ||
+            (!belief.sourceFrames.empty() && belief.sourceFrames.back() == frameId);
+        if (touchesFrame) belief.distillationLabel = label;
+    }
+}
+
 bool NativeGuiModel::isSelectedInCurrentFrame(BeliefId b) const {
     const LoopFrame* f = activeFrame();
     if (!f) return false;
@@ -724,53 +789,126 @@ int NativeGuiModel::openRpcFrame(const std::string& summary) {
 
 LoopFrame* NativeGuiModel::rpcFrame(int runtimeFrameId) {
     if (runtimeFrameId < 0) return frame(cursor_.frameId);
-    // Already resolved under this runtime id: return the existing frame.
-    if (frames_.count(runtimeFrameId)) return frame(runtimeFrameId);
-    // Rebind the current placeholder frame (opened by agent_start/turn_start with a
-    // synthetic id) to the runtime's authoritative id so all later events for the
-    // same task resolve to the same frame.
+    // Prefer the active LoopFrame for this runtime task. A task may have several
+    // historical LoopFrames, so looking up frames_[runtimeFrameId] first would
+    // incorrectly route later cycles back into the first one.
     const int cur = cursor_.frameId;
     if (cur >= 0 && frames_.count(cur)) {
-        LoopFrame f = std::move(frames_[cur]);
-        // Keep the frame's own id in sync with the map key so later lookups by
-        // frame()->id (addRpcToolCall/setRpcToolResult/closeRpcFrame) resolve to
-        // the rebound frame instead of the stale synthetic placeholder id.
-        f.id = runtimeFrameId;
-        frames_.erase(cur);
-        for (auto& id : frameOrder_) {
-            if (id == cur) { id = runtimeFrameId; break; }
+        LoopFrame* current = frame(cur);
+        if (!current->closed &&
+            (current->runtimeTaskId < 0 || current->runtimeTaskId == runtimeFrameId)) {
+            current->runtimeTaskId = runtimeFrameId;
+            // Preserve the first loop's historical lookup by runtime task id
+            // when the current record is only the synthetic placeholder.
+            if (cur != runtimeFrameId && !frames_.count(runtimeFrameId)) {
+                LoopFrame f = std::move(frames_[cur]);
+                f.id = runtimeFrameId;
+                frames_.erase(cur);
+                for (int& id : frameOrder_) {
+                    if (id == cur) { id = runtimeFrameId; break; }
+                }
+                for (Belief& belief : beliefs_) {
+                    if (belief.createdInFrame == cur) belief.createdInFrame = runtimeFrameId;
+                    for (int& sourceFrame : belief.sourceFrames) {
+                        if (sourceFrame == cur) sourceFrame = runtimeFrameId;
+                    }
+                }
+                frames_[runtimeFrameId] = std::move(f);
+                cursor_.frameId = runtimeFrameId;
+                return frame(runtimeFrameId);
+            }
+            return current;
         }
-        frames_[runtimeFrameId] = std::move(f);
-        if (cursor_.frameId == cur) cursor_.frameId = runtimeFrameId;
-        return frame(runtimeFrameId);
     }
-    // No placeholder: open a fresh frame keyed by the runtime id.
-    openFrame(runtimeFrameId, "", "rpc");
-    return frame(runtimeFrameId);
+
+    // No active frame for this task. Use the runtime id when available, else a
+    // synthetic id because an earlier LoopFrame from the same task owns it.
+    const int id = frames_.count(runtimeFrameId) ? nextRpcFrameId_++ : runtimeFrameId;
+    openFrame(id, "", "rpc");
+    LoopFrame* opened = frame(id);
+    opened->runtimeTaskId = runtimeFrameId;
+    return opened;
+}
+
+LoopFrame* NativeGuiModel::enterRpcProposeFrame(int runtimeTaskId) {
+    LoopFrame* current = rpcFrame(runtimeTaskId);
+    if (!current) return nullptr;
+
+    // Repeated PROPOSING notifications do not split a frame. A transition back
+    // into propose after any concrete cycle content does.
+    if (!current->closed && current->stage != FrameStage::PROPOSING &&
+        hasLoopCycleContent(*current)) {
+        closeRpcFrame(current->id, false);
+        const int id = nextRpcFrameId_++;
+        openFrame(id, "", "rpc");
+        current = frame(id);
+        current->runtimeTaskId = runtimeTaskId;
+    }
+    current->stage = FrameStage::PROPOSING;
+    cursor_.frameId = current->id;
+    cursor_.stage = FrameStage::PROPOSING;
+    cursor_.item.clear();
+    return current;
+}
+
+LoopFrame* NativeGuiModel::enterRpcPlanFrame(int runtimeTaskId) {
+    LoopFrame* current = rpcFrame(runtimeTaskId);
+    if (!current) return nullptr;
+    // A frame that already holds a plan is a complete cycle: close it and open a
+    // fresh LoopFrame so each LoopFrame carries at most one plan.
+    if (!current->closed && (current->plan.valid() || !current->plans.empty())) {
+        closeRpcFrame(current->id, false);
+        const int id = nextRpcFrameId_++;
+        openFrame(id, "", "rpc");
+        current = frame(id);
+        current->runtimeTaskId = runtimeTaskId;
+    }
+    return current;
+}
+
+LoopFrame* NativeGuiModel::enterRpcDistillFrame(int runtimeTaskId) {
+    LoopFrame* current = rpcFrame(runtimeTaskId);
+    if (!current) return nullptr;
+    // A frame that already holds a distillation is a complete cycle: close it and
+    // open a fresh LoopFrame so each LoopFrame carries at most one distillation.
+    if (!current->closed && (current->distillation.valid() || !current->distillations.empty())) {
+        closeRpcFrame(current->id, false);
+        const int id = nextRpcFrameId_++;
+        openFrame(id, "", "rpc");
+        current = frame(id);
+        current->runtimeTaskId = runtimeTaskId;
+    }
+    return current;
 }
 
 void NativeGuiModel::appendRpcFrameSummary(int id, const std::string& text) {
     if (text.empty()) return;
     LoopFrame* f = frame(id);
-    if (!f) return;
+    if (!f || f->closed) return;
     if (!f->summary.empty()) f->summary += " ";
     f->summary += text;
 }
 
 void NativeGuiModel::addRpcToolCall(int id, const std::string& toolCallId, const std::string& tool, const std::string& command) {
     LoopFrame* f = frame(id);
-    if (!f) return;
+    if (!f || f->closed) return;
     ToolCall t;
     t.id = toolCallId;
     t.tool = tool;
     t.command = command;
     t.status = "running";
+    if (!f->plans.empty()) {
+        const PlannerOutput& plan = f->plans.back();
+        t.planId = !plan.id.empty() ? plan.id : plan.label;
+    } else if (f->plan.valid()) {
+        t.planId = !f->plan.id.empty() ? f->plan.id : f->plan.label;
+    }
     f->trajectory.push_back(std::move(t));
 }
 
 void NativeGuiModel::setRpcToolResult(int id, const std::string& toolCallId, const std::string& result, const std::string& status) {
     LoopFrame* f = frame(id);
-    if (!f) return;
+    if (!f || f->closed) return;
     for (auto& t : f->trajectory) {
         if (t.id == toolCallId) {
             t.result = result;
@@ -850,14 +988,19 @@ void NativeGuiModel::applyLine(const std::string& line) {
         std::string raw;
         if (!findKey(line, "beliefs", raw)) return;
         f->selectedBeliefs = beliefsArray(raw);
+        f->selectedBeliefBatches.push_back(f->selectedBeliefs);
         return;
     }
     if (type == "PlanProduced") {
         LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
         if (!f) return;
-        f->plan.label = str(line, "label");
-        f->plan.question = str(line, "question");
-        f->plan.intent = str(line, "intent");
+        PlannerOutput plan;
+        plan.id = str(line, "planId");
+        plan.label = str(line, "label");
+        plan.question = str(line, "question");
+        plan.intent = str(line, "intent");
+        if (plan.valid()) f->plans.push_back(plan);
+        f->plan = std::move(plan);
         return;
     }
     if (type == "ExecutionStarted") {
@@ -874,6 +1017,10 @@ void NativeGuiModel::applyLine(const std::string& line) {
         t.tool = str(line, "tool");
         t.command = str(line, "command");
         t.status = str(line, "status", "pending");
+        if (!f->plans.empty()) {
+            const PlannerOutput& plan = f->plans.back();
+            t.planId = !plan.id.empty() ? plan.id : plan.label;
+        }
         // Session file list: demo read/write/edit tool calls carry the path in
         // the `command` field; record it normalized relative to the session cwd.
         // Record BEFORE the move: std::move leaves t.tool/t.command moved-from.
@@ -913,13 +1060,16 @@ void NativeGuiModel::applyLine(const std::string& line) {
     if (type == "DistillationProduced") {
         LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
         if (!f) return;
-        f->distillation.label = str(line, "label");
-        f->distillation.inputIds = [&] {
+        DistillationOutput distillation;
+        distillation.label = str(line, "label");
+        distillation.inputIds = [&] {
             std::string raw;
             return findKey(line, "inputIds", raw) ? strArray(raw) : std::vector<std::string>{};
         }();
-        f->distillation.unexplained = str(line, "unexplained");
-        f->distillation.interpretation = str(line, "interpretation");
+        distillation.unexplained = str(line, "unexplained");
+        distillation.interpretation = str(line, "interpretation");
+        if (distillation.valid()) f->distillations.push_back(distillation);
+        f->distillation = std::move(distillation);
         f->stage = FrameStage::PROPOSING;
         return;
     }
@@ -933,6 +1083,7 @@ void NativeGuiModel::applyLine(const std::string& line) {
         p.relation = str(line, "relation");
         p.rhs = str(line, "rhs");
         p.detail = str(line, "detail");
+        if (f->distillation.valid()) p.distillationLabel = f->distillation.label;
         f->proposals.push_back(std::move(p));
         return;
     }
@@ -988,6 +1139,18 @@ void NativeGuiModel::applyLine(const std::string& line) {
         int src = intVal(line, "sourceFrame", -1);
         if (src > 0 && (b.sourceFrames.empty() || b.sourceFrames.back() != src))
             b.sourceFrames.push_back(src);
+        if (src > 0 && b.createdInFrame < 0) {
+            const LoopFrame* source = frame(src);
+            const std::string beliefLabel = "B" + std::to_string(id.value);
+            if (source) {
+                for (const Proposal& proposal : source->proposals) {
+                    if (proposal.op == '+' && proposal.belief == beliefLabel) {
+                        b.createdInFrame = src;
+                        break;
+                    }
+                }
+            }
+        }
         return;
     }
     // Unknown event: ignored, model state unchanged.

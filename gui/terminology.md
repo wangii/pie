@@ -54,7 +54,7 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 | **NativeGuiModel**（原生 GUI 模型） | 消费运行时事件流（JSONL）并持有信念快照、活动循环帧、帧历史、执行轨迹与帧光标的状态模型；不推断阶段/光标/认知语义。 | `src/Model.h` |
 | **BeliefId**（信念 ID） | 一条信念的整数标识（`B<n>`），如 `B31`。 | `src/Model.h` |
 | **Belief**（信念） | 一条带标签的关系：lhs/relation/rhs、置信度、状态与断言（statement）。 | `src/Model.h` |
-| **LoopFrame**（循环帧） | 一次完整的认知事务：所选信念、planner 输出、执行轨迹、蒸馏输出与提案。 | `src/Model.h` |
+| **LoopFrame**（循环帧） | 一次完整的认知事务，始于 propose 阶段：所选信念、planner 输出、执行轨迹、蒸馏输出与提案。每帧至多一个 plan 与一个 distillation，可含多个 execution；第二个 PlanProduced/DistillationProduced 会关闭当前帧并开启下一帧。 | `src/Model.h` |
 | **FrameStage**（帧阶段） | 运行时显式阶段：`NONE/PLANNING/EXECUTING/DISTILLING/PROPOSING/CLOSED`；GUI 只读不推。 | `src/Model.h` |
 | **FrameCursor**（帧光标） | 活动帧光标/当前执行位置，仅由 `CursorChanged` 等事件设置。 | `src/Model.h` |
 | **PlannerOutput**（规划输出） | planner 阶段输出：label（`P-<n>`）、question、intent。 | `src/Model.h` |

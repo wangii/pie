@@ -60,9 +60,8 @@ public:
                                             const PieGraphLayout& layout,
                                             GraphCacheMetrics& m);
 
-    // The subset of getRoutes() routed along the canvas periphery (the long
-    // routes: Belief->Plan top, Distill->Belief bottom). Recomputed together
-    // with getRoutes().
+    // The cross-region Belief read/write subset of getRoutes(). Recomputed
+    // together with getRoutes().
     const std::vector<EdgeRoute>& getLongRoutes(const GraphTaskState& state,
                                                 const PieGraphLayout& layout,
                                                 GraphCacheMetrics& m);
