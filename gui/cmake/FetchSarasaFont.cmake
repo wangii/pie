@@ -14,6 +14,7 @@
 #   PIE_GUI_FONT_NAME    - the single file name to produce (SarasaTermSCNerd.ttc)
 
 set(PIE_GUI_FONT_ARCHIVE "${PIE_GUI_FONT_CACHE_DIR}/SarasaTermSCNerd.ttc.tar.gz")
+set(PIE_GUI_FONT_LOCAL_ARCHIVE "$ENV{HOME}/download/SarasaTermSCNerd.ttc.tar.gz")
 set(PIE_GUI_FONT_EXTRACTED "${PIE_GUI_FONT_CACHE_DIR}/${PIE_GUI_FONT_NAME}")
 set(PIE_GUI_FONT_STAMP "${PIE_GUI_FONT_CACHE_DIR}/.fetch-stamp")
 
@@ -25,16 +26,41 @@ endif()
 
 file(MAKE_DIRECTORY "${PIE_GUI_FONT_CACHE_DIR}")
 
-message(STATUS "Downloading Sarasa Term SC Nerd font (${PIE_GUI_FONT_NAME})...")
-file(DOWNLOAD "${PIE_GUI_FONT_URL}" "${PIE_GUI_FONT_ARCHIVE}"
-    EXPECTED_HASH SHA256=${PIE_GUI_FONT_ARCHIVE_SHA256}
-    STATUS download_status
-    LOG download_log
-)
-list(GET download_status 0 download_error)
-if(NOT download_error EQUAL 0)
-    list(GET download_status 1 download_msg)
-    message(FATAL_ERROR "Font download failed: ${download_msg}\n${download_log}")
+set(PIE_GUI_FONT_ARCHIVE_READY OFF)
+if(EXISTS "${PIE_GUI_FONT_LOCAL_ARCHIVE}")
+    file(SHA256 "${PIE_GUI_FONT_LOCAL_ARCHIVE}" local_archive_hash)
+    if(local_archive_hash STREQUAL PIE_GUI_FONT_ARCHIVE_SHA256)
+        message(STATUS "Using local Sarasa font archive: ${PIE_GUI_FONT_LOCAL_ARCHIVE}")
+        file(COPY_FILE "${PIE_GUI_FONT_LOCAL_ARCHIVE}" "${PIE_GUI_FONT_ARCHIVE}"
+            ONLY_IF_DIFFERENT
+            RESULT copy_result
+        )
+        if(NOT copy_result STREQUAL "0")
+            message(FATAL_ERROR "Could not copy local font archive: ${copy_result}")
+        endif()
+        set(PIE_GUI_FONT_ARCHIVE_READY ON)
+    else()
+        message(STATUS "Ignoring local Sarasa font archive: hash mismatch (expected ${PIE_GUI_FONT_ARCHIVE_SHA256}, got ${local_archive_hash})")
+    endif()
+endif()
+
+if(NOT PIE_GUI_FONT_ARCHIVE_READY)
+    message(STATUS "Downloading Sarasa Term SC Nerd font (${PIE_GUI_FONT_NAME})...")
+    file(DOWNLOAD "${PIE_GUI_FONT_URL}" "${PIE_GUI_FONT_ARCHIVE}"
+        EXPECTED_HASH SHA256=${PIE_GUI_FONT_ARCHIVE_SHA256}
+        STATUS download_status
+        LOG download_log
+    )
+    list(GET download_status 0 download_error)
+    if(NOT download_error EQUAL 0)
+        list(GET download_status 1 download_msg)
+        message(FATAL_ERROR "Font download failed: ${download_msg}\n${download_log}")
+    endif()
+endif()
+
+file(SHA256 "${PIE_GUI_FONT_ARCHIVE}" archive_hash)
+if(NOT archive_hash STREQUAL PIE_GUI_FONT_ARCHIVE_SHA256)
+    message(FATAL_ERROR "Font archive hash mismatch: expected ${PIE_GUI_FONT_ARCHIVE_SHA256}, got ${archive_hash}")
 endif()
 
 message(STATUS "Verifying + extracting ${PIE_GUI_FONT_ARCHIVE}...")

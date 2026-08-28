@@ -1,9 +1,20 @@
 cmake_minimum_required(VERSION 3.24)
-# OBJC and OBJCXX both enabled: CMake maps .m -> OBJC (Objective-C) and .mm /
-# App.cpp -> OBJCXX (Objective-C++) by extension, so GLFW's .m files compile as
-# Objective-C (lenient void* conversions) while the OSX backend and App.cpp
-# compile as Objective-C++.
-project(pi_gui LANGUAGES CXX C OBJC OBJCXX)
+# OBJC and OBJCXX are enabled ONLY on Apple (see the if(APPLE)/enable_language
+# just below project()). They are the Apple-native Cocoa/Metal path: .mm sources
+# compile as Objective-C++ for src/plats/macos/MetalBackend.mm and the ImGui
+# OSX/Metal backends (imgui_impl_osx.mm, imgui_impl_metal.mm). On Linux/Windows
+# no Objective-C compiler is required, so enabling them unconditionally would
+# make cmake try to identify an Objective-C compiler that gcc lacks.
+project(pi_gui LANGUAGES CXX C)
+
+# OBJC/OBJCXX are only needed on Apple: the native Cocoa/Metal shell compiles
+# src/plats/macos/MetalBackend.mm and the imgui_impl_osx/metal backends as
+# Objective-C++. Enabling them unconditionally forces cmake to identify an
+# Objective-C compiler on Linux (gcc lacks cc1obj/cc1objplus), which aborts
+# configure before dependency discovery. Enable them only on APPLE.
+if(APPLE)
+    enable_language(OBJC OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,19 +32,29 @@ if(NOT APPLE)
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
+    # Linux/other-non-Apple: GLFW 3.4 defaults GLFW_BUILD_WAYLAND to ON and
+    # requires wayland-scanner at configure time. Only enable Wayland when the
+    # scanner is actually available; otherwise fall back to X11 so the build
+    # does not force the extra tool. (Scoped to if(NOT APPLE): macOS uses the
+    # Cocoa/Metal shell and never fetches GLFW.)
+    find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
+    if(WAYLAND_SCANNER_EXECUTABLE)
+        set(GLFW_BUILD_WAYLAND ON CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+    else()
+        set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+    endif()
     FetchContent_MakeAvailable(glfw)
 endif()
 
-# Do NOT enable OBJCXX at project scope: with OBJC unset, CMake maps GLFW's .m
-# sources to the OBJCXX compiler, breaking cocoa_monitor.m's implicit void* ->
-# typed-pointer casts. Only App.cpp needs Objective-C++ (see below); the OSX .mm
-# maps to OBJCXX automatically.
-#
-# On Apple the ImGui backend is the OSX + Metal pair with a native Cocoa shell,
-# so GLFW and the OpenGL renderer are only needed on non-Apple platforms.
-# Fetch GLFW unconditionally is harmless but wasteful; keep it for the non-Apple
-# branch below.
+# OBJC/OBJCXX are enabled once, above, inside if(APPLE). On Apple the ImGui
+# backend is the OSX + Metal pair (imgui_impl_osx.mm / imgui_impl_metal.mm) and
+# pie_gui builds src/plats/macos/MetalBackend.mm as Objective-C++, all inside a
+# Cocoa/MTKView shell. GLFW and the OpenGL renderer are only needed on non-Apple
+# platforms (Linux uses X11/Wayland via GLFW + OpenGL3). GLFW is only fetched in
+# the if(NOT APPLE) branch below, so its .m files never appear here.
 
 # Dear ImGui (glfw + opengl3 backends, plus OSX on Apple), exact coach-desktop version
 FetchContent_Declare(
