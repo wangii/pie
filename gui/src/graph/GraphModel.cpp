@@ -184,6 +184,17 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
 
         // --- Propose nodes (one per belief delta: the hypothesis-formation
         // step between distillation and the belief it writes back). ---
+        // A propose that a distillation produced (its outputs name the delta)
+        // belongs to the NEXT loopframe/episode: the distillation closes out the
+        // frame's epistemic work, and the propose it feeds is the following
+        // frame's proposal step. The last frame has no successor, so its
+        // distillation-produced propose stays in the current frame.
+        std::set<std::string> distillOutputs;
+        if (f.distillation.valid()) {
+            for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
+        }
+        const std::string& nextFrameId =
+            (frameIndex + 1 < frames.size()) ? frames[frameIndex + 1].id : f.id;
         uint64_t proposeIdx = 0;
         for (const BeliefDelta& d : f.beliefDeltas) {
             if (d.beliefId.empty()) continue;
@@ -192,7 +203,9 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
                 ? ("PR-" + f.id + "-" + std::to_string(proposeIdx))
                 : d.id);
             propose.family = NodeFamily::Propose;
-            propose.frameId = f.id;
+            propose.frameId = (frameIndex + 1 < frames.size() && distillOutputs.count(d.id))
+                ? nextFrameId
+                : f.id;
             propose.displayType = "propose";
             propose.title = d.operation;
             propose.compactText = d.evidence;
@@ -213,29 +226,6 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
                 edge.source = makeNodeId(b);
                 edge.target = makeNodeId(f.plan.id);
                 edge.type = EdgeSemanticType::BeliefToPlan;
-                state.edges.push_back(std::move(edge));
-            }
-        }
-
-        // Plan -> Execution: the execution's planId, else the frame plan.
-        if (f.plan.valid()) {
-            for (const Execution& call : f.trajectory) {
-                GraphEdge edge;
-                edge.source = makeNodeId(call.planId.empty() ? f.plan.id : call.planId);
-                edge.target = makeNodeId(call.id);
-                edge.type = EdgeSemanticType::PlanToExecution;
-                state.edges.push_back(std::move(edge));
-            }
-        }
-
-        // Execution -> Distill: the distillation's explicit input ids.
-        if (f.distillation.valid()) {
-            for (const ExecutionId& inputId : f.distillation.inputs) {
-                if (inputId.empty()) continue;
-                GraphEdge edge;
-                edge.source = makeNodeId(inputId);
-                edge.target = makeNodeId(f.distillation.id);
-                edge.type = EdgeSemanticType::ExecutionToDistill;
                 state.edges.push_back(std::move(edge));
             }
         }

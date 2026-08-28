@@ -431,16 +431,12 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         // sub-state. Distillation->Belief is a distinct legacy semantic.
         const char* labels[] = {
             "Belief -> Plan   (read)",
-            "Plan -> Execution",
-            "Execution -> Distillation",
             "Distillation -> Propose",
             "Propose -> Belief   (write back / create)",
             "Distillation -> Belief   (create)",
         };
         const EdgeSemanticType types[] = {
             EdgeSemanticType::BeliefToPlan,
-            EdgeSemanticType::PlanToExecution,
-            EdgeSemanticType::ExecutionToDistill,
             EdgeSemanticType::DistillToPropose,
             EdgeSemanticType::ProposeToBelief,
             EdgeSemanticType::DistillToBelief,

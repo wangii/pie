@@ -229,8 +229,12 @@ int main() {
     check(planCount == 2, "two plan nodes");
     check(execCount1 == 2, "two execution nodes for frame 1");
     check(distillCount == 2, "two distill nodes");
-    check(proposeNodes1 == 2, "two Propose nodes for frame 1 (two deltas)");
-    check(proposeNodes2 == 1, "one Propose node for frame 2 (one delta)");
+    // A distillation-produced propose belongs to the NEXT episode: frame-1's
+    // distill outputs delta-1/delta-2, which now render in frame-2's lane;
+    // frame-2's distill outputs delta-3 but frame-2 is the last frame, so
+    // delta-3 stays in frame-2.
+    check(proposeNodes1 == 0, "frame 1 owns no Propose node (its distill's proposes move to frame 2)");
+    check(proposeNodes2 == 3, "frame 2 owns three Propose nodes (two moved from frame 1 + its own)");
 
     // --- M1: typed, directed edges with valid endpoints ---
     bool allTyped = !state.edges.empty();
