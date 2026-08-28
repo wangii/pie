@@ -292,9 +292,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                                   : (onPath ? st.edgeAlphaPath : st.edgeAlphaOffPath);
         ImU32 col = edgeColor(route.type, alpha);
         if (route.longRoute) {
-            const bool dashedCreate = (route.type == EdgeSemanticType::DistillToBelief ||
-                                      route.type == EdgeSemanticType::ProposeToBelief) &&
-                                      route.beliefOperation == BeliefOperation::Create;
+            const bool dashedCreate = edgeIsCreate(route.type, route.beliefOperation);
             for (size_t i = 0; i + 1 < route.points.size(); ++i) {
                 ImVec2 a = toPx(route.points[i].first, route.points[i].second);
                 ImVec2 b = toPx(route.points[i + 1].first, route.points[i + 1].second);
@@ -351,13 +349,10 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         std::string title;
         const char* execGlyph = nullptr;
         if (n.family == NodeFamily::Belief) {
-            // Belief nodes show a display category + number (B<n>); the
-            // descriptive content lives in the hover tooltip below.
-            const char* cat = "Belief";
-            if (n.domain == "framing") cat = "Target";
-            else if (n.domain == "routing") cat = "Route";
-            const std::string num = n.title.empty() ? n.id.value : n.title;
-            title = std::string(cat) + " " + num;
+            // Belief nodes show a category + number (B<n>) with a parenthesized
+            // status suffix when the runtime supplies one; the descriptive content
+            // lives in the hover tooltip below.
+            title = beliefNodeTitle(n);
         } else if (n.family == NodeFamily::Plan) {
             title = "Plan";
         } else if (n.family == NodeFamily::Execution) {
@@ -430,14 +425,16 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
 
     // --- Legend: the five edge-semantic encodings (top-left overlay). ---
     {
+        // Belief create is part of the propose write-back, not a separate
+        // category: Propose->Belief is listed once, drawn dashed for the create
+        // sub-state. Distillation->Belief is a distinct legacy semantic.
         const char* labels[] = {
             "Belief -> Plan   (read)",
             "Plan -> Execution",
             "Execution -> Distillation",
             "Distillation -> Propose",
-            "Propose -> Belief   (write back)",
+            "Propose -> Belief   (write back / create)",
             "Distillation -> Belief   (create)",
-            "Propose -> Belief   (create)",
         };
         const EdgeSemanticType types[] = {
             EdgeSemanticType::BeliefToPlan,
@@ -446,9 +443,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             EdgeSemanticType::DistillToPropose,
             EdgeSemanticType::ProposeToBelief,
             EdgeSemanticType::DistillToBelief,
-            EdgeSemanticType::ProposeToBelief,
         };
-        const char* glyphs[] = {"", "", "", "", "", "", ""};
         const float lgPad = 8.0f, lgLineH = 20.0f, lgRowGap = 6.0f;
         const float lgW = 330.0f;
         const float lgH = lgPad * 2.0f + (int)(sizeof(labels) / sizeof(labels[0])) * (lgLineH + lgRowGap);
@@ -461,7 +456,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             ImU32 col = edgeColor(types[i], 1.0f);
             ImVec2 sampleStart(lg0.x + lgPad, ly + lgLineH * 0.5f);
             ImVec2 sampleEnd(lg0.x + lgPad + 28.0f, ly + lgLineH * 0.5f);
-            if (i == 5 || i == 6) drawDashedLine(dl, sampleStart, sampleEnd, col, 2.0f, 1.0f);
+            if (edgeIsCreate(types[i], BeliefOperation::Create)) drawDashedLine(dl, sampleStart, sampleEnd, col, 2.0f, 1.0f);
             else dl->AddLine(sampleStart, sampleEnd, col, 2.0f);
             // Arrowhead toward the right end of the sample line.
             dl->AddTriangleFilled(ImVec2(lg0.x + lgPad + 32.0f, ly + lgLineH * 0.5f),
@@ -469,10 +464,6 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                                   ImVec2(lg0.x + lgPad + 26.0f, ly + lgLineH * 0.5f + 4.0f), col);
             ImU32 textCol = IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255);
             dl->AddText(ImVec2(lg0.x + lgPad + 42.0f, ly + lgLineH * 0.5f - 8.0f), textCol, labels[i]);
-            if (glyphs[i][0] != '\0') {
-                dl->AddText(ImVec2(lg0.x + lgPad + 286.0f, ly + lgLineH * 0.5f - 8.0f),
-                            IM_COL32(st.opGlyphText.r, st.opGlyphText.g, st.opGlyphText.b, 255), glyphs[i]);
-            }
             ly += lgLineH + lgRowGap;
         }
     }

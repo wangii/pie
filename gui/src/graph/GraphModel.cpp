@@ -73,6 +73,23 @@ BeliefOperation beliefOperationFromDelta(const std::string& operation) {
 
 } // namespace
 
+std::string beliefNodeTitle(const GraphNode& n) {
+    const char* cat = "Belief";
+    if (n.domain == "framing") cat = "Target";
+    else if (n.domain == "routing") cat = "Route";
+    const std::string num = n.title.empty() ? n.id.value : n.title;
+    std::string label = std::string(cat) + " " + num;
+    if (!n.displayType.empty() && n.displayType != "belief")
+        label += " (" + n.displayType + ")";
+    return label;
+}
+
+bool edgeIsCreate(EdgeSemanticType t, const std::optional<BeliefOperation>& op) {
+    if (!op || *op != BeliefOperation::Create) return false;
+    return t == EdgeSemanticType::DistillToBelief ||
+           t == EdgeSemanticType::ProposeToBelief;
+}
+
 GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     GraphTaskState state;
 

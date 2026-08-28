@@ -104,6 +104,22 @@ struct GraphNode {
     std::optional<BeliefOperation> beliefOperation;  // Distill->Belief / Propose->Belief create/update (drives dashed styling)
 };
 
+// Build a Belief node's display title: "<Category> <number>" plus a parenthesized
+// status suffix when the runtime supplies a derived status (e.g. "Belief B1
+// (supported)"). The status string is passed through verbatim (authoritative
+// spelling from the runtime); when the runtime has no status the label is just
+// the category + number. Headless/ImGui-free so a unit test can assert it; the
+// view layer calls it and never builds a Belief label inline. Non-Belief node
+// labels are built by the view layer and are unaffected.
+std::string beliefNodeTitle(const GraphNode& n);
+
+// True for a write-back edge that creates a new belief. Create is a sub-state
+// of the write-back semantic (Distill->Belief / Propose->Belief): it renders
+// dashed, but it is NOT a separate edge category from the write-back. Headless/
+// ImGui-free so a unit test can assert it; the view layer uses it for the
+// create-dashed style and its legend.
+bool edgeIsCreate(EdgeSemanticType t, const std::optional<BeliefOperation>& op);
+
 struct GraphEdge {
     NodeId source;
     NodeId target;

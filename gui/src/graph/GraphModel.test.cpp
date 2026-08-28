@@ -18,6 +18,12 @@ using pie::gui::NodeFamily;
 using pie::gui::PieGraphLayout;
 using pie::gui::projectGraphTask;
 using pie::gui::computeGraphLayout;
+using pie::gui::beliefNodeTitle;
+using pie::gui::edgeIsCreate;
+using pie::gui::GraphNode;
+using pie::gui::NodeId;
+using pie::gui::GraphRect;
+using pie::gui::GraphEdge;
 
 static int failures = 0;
 static void check(bool cond, const char* what) {
@@ -94,6 +100,46 @@ static NativeGuiModel buildModel() {
     model.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-2"})");
 
     return model;
+}
+
+// Belief create is a Propose step: a BeliefDeltaApplied with operation
+// "propose" must project as one Propose node plus a Propose->Belief edge whose
+// beliefOperation is Create, and the layout must place both positively.
+static void testBeliefCreateIsPropose() {
+    NativeGuiModel m;
+    m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+    m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
+    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+    m.applyLine(R"({"type":"DistillationProduced","taskId":"t-1","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
+
+    GraphTaskState s = projectGraphTask(m);
+    int proposeCount = 0, createEdges = 0, distillToPropose = 0, beliefCount = 0;
+    for (const GraphNode& n : s.nodes) {
+        if (n.family == NodeFamily::Propose) {
+            ++proposeCount;
+            check(n.displayType == "propose", "create Propose node displayType is 'propose'");
+            check(n.frameId && *n.frameId == "f1", "create Propose node belongs to the frame");
+        }
+        if (n.family == NodeFamily::Belief) {
+            ++beliefCount;
+            check(n.displayType == "proposed", "created belief status projected as 'proposed'");
+        }
+    }
+    for (const GraphEdge& e : s.edges) {
+        if (e.type == EdgeSemanticType::ProposeToBelief && e.beliefOperation &&
+            *e.beliefOperation == BeliefOperation::Create) ++createEdges;
+        if (e.type == EdgeSemanticType::DistillToPropose) ++distillToPropose;
+    }
+    check(proposeCount == 1, "belief create yields exactly one Propose node");
+    check(createEdges == 1, "belief create yields one Propose->Belief create edge");
+    check(distillToPropose == 1, "belief create yields one Distill->Propose edge");
+    check(beliefCount == 1, "belief create yields exactly one belief node");
+
+    PieGraphLayout layout = computeGraphLayout(s);
+    const GraphRect* pr = nullptr;
+    for (const auto& [k, r] : layout.nodeRects) if (k == "d1") { pr = &r; break; }
+    if (pr) check(pr->w > 0.0f && pr->h > 0.0f, "create Propose node has a positive-size layout rect");
+    else check(false, "create Propose node is laid out");
 }
 
 int main() {
@@ -192,6 +238,50 @@ int main() {
           "frame 1 exposes Plan/Distillation/Execution regions");
 
     check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");
+
+    testBeliefCreateIsPropose();
+
+    // --- Create is a sub-state of the write-back semantic, not a separate edge ---
+    {
+        check(edgeIsCreate(EdgeSemanticType::ProposeToBelief, BeliefOperation::Create),
+              "create is a Propose->Belief write-back sub-state");
+        check(edgeIsCreate(EdgeSemanticType::DistillToBelief, BeliefOperation::Create),
+              "create is a Distill->Belief write-back sub-state");
+        check(!edgeIsCreate(EdgeSemanticType::ProposeToBelief, BeliefOperation::Update),
+              "non-create Propose write-back is not the create sub-state");
+        check(!edgeIsCreate(EdgeSemanticType::ProposeToBelief, std::nullopt),
+              "no operation is not a create write-back");
+        check(!edgeIsCreate(EdgeSemanticType::DistillToPropose, BeliefOperation::Create),
+              "non-write-back semantics are never create");
+    }
+
+    // --- M1: belief node title carries the authoritative status suffix ---
+    {
+        GraphNode b;
+        b.id = NodeId{"B1"};
+        b.title = "B1";
+        b.family = NodeFamily::Belief;
+        b.domain = "";
+        b.displayType = "";
+        check(beliefNodeTitle(b) == "Belief B1", "no status -> no suffix (Belief B1)");
+        b.displayType = "belief";
+        check(beliefNodeTitle(b) == "Belief B1", "'belief' placeholder -> no suffix");
+        b.displayType = "proposed";
+        check(beliefNodeTitle(b) == "Belief B1 (proposed)", "proposed suffix");
+        b.displayType = "supported";
+        check(beliefNodeTitle(b) == "Belief B1 (supported)", "supported suffix");
+        b.displayType = "refuted";
+        check(beliefNodeTitle(b) == "Belief B1 (refuted)", "refuted suffix");
+        b.displayType = "superseded";
+        check(beliefNodeTitle(b) == "Belief B1 (superseded)", "authoritative 'superseded' spelling");
+        check(beliefNodeTitle(b) != "Belief B1 (superceded)", "misspelling 'superceded' is not emitted");
+        b.domain = "framing";
+        check(beliefNodeTitle(b) == "Target B1 (superseded)", "framing domain -> Target prefix");
+        b.domain = "routing";
+        check(beliefNodeTitle(b) == "Route B1 (superseded)", "routing domain -> Route prefix");
+        b.title = "";
+        check(beliefNodeTitle(b) == "Route B1 (superseded)", "empty title falls back to id");
+    }
 
     if (failures == 0) std::printf("PASS\n");
     std::printf("graph test: %s\n", failures == 0 ? "PASS" : "FAIL");
