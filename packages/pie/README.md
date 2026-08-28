@@ -65,18 +65,23 @@ Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (pro
 - `pie.beliefLang`：信念循环提示词要求的书写语言，默认 `English`，可改为任意语言名称（如 `Chinese`）。
 - `pie.fastPathModel`：fast path（快速路径）执行的模型。propose 角色第一回合先用配置的 `defaultModel` 对请求做路由判断（`declare_belief` 的 `route` 操作，记为 `RoutingSet` 中的 `Routing`）：判定为 `fast-path` 时，execution 角色直接执行请求并在 `fastPathModel` 上作答，随后用 `distillationModel` 把执行上下文蒸馏成摘要写回 epistemic context，再复位到下一任务的 propose；判定为 `belief-loop` 时走完整信念循环。每个 `route` 记录在首次评估时即按 routing id 消费，后续 propose 回合只处理最新未消费的路由；fast path 仅在信念集静止时派发（无待验证的开放世界信念、无未闭合 framing 义务），因此 distill 批次落定后的后续 propose 回合可以声明一次性的 `fast-path` handoff 把剩余工作交给快速路径；失败的 fast-path 运行使该 route 不再重放，任务带着失败摘要回到 propose 继续信念循环。未配置时 fast path 沿用会话主模型。
 
-propose 始终使用会话主模型（`defaultModel`），finalReport 使用 `pie.fastPathModel`（未配置时回退会话主模型）。模型字符串使用 `provider/modelId` 格式，配置在全局 `~/.pi/agent/settings.json` 或项目 `.pi/settings.json`：
+propose 始终使用会话主模型（`defaultModel`），finalReport 使用 `pie.fastPathModel`（未配置时回退会话主模型）。模型字符串使用 `provider/modelId` 格式；Pie 专属设置配置在全局 `~/.pi/agent/settings-pie.json` 或项目 `.pi/settings-pie.json`，非 Pie 设置（如 `defaultModel`）继续取自 `settings.json`：
 
 ```json
+// ~/.pi/agent/settings.json
 {
-  "defaultModel": "provider/defaultModel",
-  "pie": {
-    "executionModel": "provider/probeModel",
-    "distillationModel": "provider/strongModel",
-    "distillationThinkingLevel": "low",
-    "beliefLang": "English",
-    "fastPathModel": "provider/fastModel"
-  }
+  "defaultModel": "provider/defaultModel"
+}
+```
+
+```json
+// ~/.pi/agent/settings-pie.json
+{
+  "executionModel": "provider/probeModel",
+  "distillationModel": "provider/strongModel",
+  "distillationThinkingLevel": "low",
+  "beliefLang": "English",
+  "fastPathModel": "provider/fastModel"
 }
 ```
 
@@ -90,7 +95,7 @@ The belief loop lets two roles run on separately configured models (only while t
 - `pie.beliefLang`: the language the belief-loop prompts must write in; defaults to `English` — set it to another language name (e.g. `Chinese`) to change it.
 - `pie.fastPathModel`: the model for fast-path execution. On the first propose turn of a request, the loop routes on the configured `defaultModel` (a `route` decision recorded as a `Routing` in `RoutingSet`). A `fast-path` decision dispatches the execution role to execute the request directly on `fastPathModel`; the run is then distilled into a summary with `distillationModel` (written back to the epistemic context) and the loop resets to the next task's propose. A `belief-loop` decision keeps the full belief protocol. Each `route` is consumed by id on first evaluation and only the latest unconsumed route decides; the fast path dispatches only when the belief set is quiescent (no proposed world belief pending verification, no open framing obligation) — so a subsequent propose turn may declare a one-shot `fast-path` handoff for the remaining work once a distill batch settles. A failed fast-path run is not re-dispatched: the task returns to propose with the failure summary and the consumed route stays consumed. Unset means the fast path uses the session's main model.
 
-The propose role always uses the session's main model (`defaultModel`); the finalReport role runs on `pie.fastPathModel` (falling back to the session's main model when unset). Model strings use the `provider/modelId` format and live in the global `~/.pi/agent/settings.json` or the project `.pi/settings.json` (see the example above).
+The propose role always uses the session's main model (`defaultModel`); the finalReport role runs on `pie.fastPathModel` (falling back to the session's main model when unset). Model strings use the `provider/modelId` format; pie-specific settings live in the global `~/.pi/agent/settings-pie.json` or the project `.pi/settings-pie.json` (see the example above), while non-pie settings like `defaultModel` stay in `settings.json`.
 
 Fallbacks: if `pie.executionModel` is unset or fails to resolve, execution falls back to the session's main model; if `pie.distillationModel` is unset it falls back to `defaultModel` first — either way, an unresolvable model name ends up on the session's main model. If `pie.fastPathModel` is unset or fails to resolve, the fast path and the finalReport role use the session's main model; fast-path distillation always uses `pie.distillationModel` (then `defaultModel`, then the session's main model).
 

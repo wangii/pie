@@ -536,6 +536,11 @@ export function getSettingsPath(): string {
 	return join(getAgentDir(), "settings.json");
 }
 
+/** Get path to settings-pie.json (pie-specific settings, same dir as settings.json) */
+export function getSettingsPiePath(): string {
+	return join(getAgentDir(), "settings-pie.json");
+}
+
 /** Get path to tools directory */
 export function getToolsDir(): string {
 	return join(getAgentDir(), "tools");

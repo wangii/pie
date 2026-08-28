@@ -215,6 +215,13 @@ export interface SettingsManagerCreateOptions {
 
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
+	/**
+	 * Read pie-specific settings from a separate backing store (e.g. settings-pie.json).
+	 * Return `undefined` when no separate store is configured or it is missing. Storages that do not
+	 * separate pie settings (in-memory / custom) may omit this, in which case pie is read from the
+	 * main settings object's `pie` key.
+	 */
+	readPieSettings?(scope: SettingsScope): string | undefined;
 }
 
 export interface SettingsError {
@@ -224,6 +231,7 @@ export interface SettingsError {
 }
 
 type SettingsPaths = Partial<Record<SettingsScope, string>>;
+type PieSettingsPaths = Partial<Record<SettingsScope, string>>;
 
 function toSettingsError(scope: SettingsScope, error: unknown, path?: string): SettingsError {
 	return {
@@ -236,12 +244,16 @@ function toSettingsError(scope: SettingsScope, error: unknown, path?: string): S
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
+	private globalPieSettingsPath: string;
+	private projectPieSettingsPath: string;
 
 	constructor(cwd: string, agentDir: string) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
+		this.globalPieSettingsPath = join(resolvedAgentDir, "settings-pie.json");
+		this.projectPieSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings-pie.json");
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -300,6 +312,14 @@ export class FileSettingsStorage implements SettingsStorage {
 			}
 		}
 	}
+
+	readPieSettings(scope: SettingsScope): string | undefined {
+		const path = scope === "global" ? this.globalPieSettingsPath : this.projectPieSettingsPath;
+		if (!existsSync(path)) {
+			return undefined;
+		}
+		return readFileSync(path, "utf-8");
+	}
 }
 
 export class InMemorySettingsStorage implements SettingsStorage {
@@ -334,6 +354,7 @@ export class SettingsManager {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private settingsPaths: SettingsPaths;
+	private pieSettingsPaths: PieSettingsPaths;
 
 	private constructor(
 		storage: SettingsStorage,
@@ -344,6 +365,7 @@ export class SettingsManager {
 		initialErrors: SettingsError[] = [],
 		projectTrusted = true,
 		settingsPaths: SettingsPaths = {},
+		pieSettingsPaths: PieSettingsPaths = {},
 	) {
 		this.storage = storage;
 		this.globalSettings = initialGlobal;
@@ -353,6 +375,7 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
 		this.settingsPaths = settingsPaths;
+		this.pieSettingsPaths = pieSettingsPaths;
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 	}
 
@@ -365,10 +388,18 @@ export class SettingsManager {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir);
-		return SettingsManager.fromStorageWithPaths(storage, options, {
-			global: join(resolvedAgentDir, "settings.json"),
-			project: join(resolvedCwd, CONFIG_DIR_NAME, "settings.json"),
-		});
+		return SettingsManager.fromStorageWithPaths(
+			storage,
+			options,
+			{
+				global: join(resolvedAgentDir, "settings.json"),
+				project: join(resolvedCwd, CONFIG_DIR_NAME, "settings.json"),
+			},
+			{
+				global: join(resolvedAgentDir, "settings-pie.json"),
+				project: join(resolvedCwd, CONFIG_DIR_NAME, "settings-pie.json"),
+			},
+		);
 	}
 
 	/** Create a SettingsManager from an arbitrary storage backend */
@@ -381,6 +412,7 @@ export class SettingsManager {
 		storage: SettingsStorage,
 		options: SettingsManagerCreateOptions,
 		settingsPaths: SettingsPaths = {},
+		pieSettingsPaths: PieSettingsPaths = {},
 	): SettingsManager {
 		const projectTrusted = options.projectTrusted ?? true;
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
@@ -389,8 +421,14 @@ export class SettingsManager {
 		if (globalLoad.error) {
 			initialErrors.push(toSettingsError("global", globalLoad.error, settingsPaths.global));
 		}
+		if (globalLoad.pieError) {
+			initialErrors.push(toSettingsError("global", globalLoad.pieError, pieSettingsPaths.global));
+		}
 		if (projectLoad.error) {
 			initialErrors.push(toSettingsError("project", projectLoad.error, settingsPaths.project));
+		}
+		if (projectLoad.pieError) {
+			initialErrors.push(toSettingsError("project", projectLoad.pieError, pieSettingsPaths.project));
 		}
 
 		return new SettingsManager(
@@ -402,6 +440,7 @@ export class SettingsManager {
 			initialErrors,
 			projectTrusted,
 			settingsPaths,
+			pieSettingsPaths,
 		);
 	}
 
@@ -413,9 +452,13 @@ export class SettingsManager {
 		return SettingsManager.fromStorage(storage, options);
 	}
 
-	private static loadFromStorage(storage: SettingsStorage, scope: SettingsScope, projectTrusted = true): Settings {
+	private static loadFromStorage(
+		storage: SettingsStorage,
+		scope: SettingsScope,
+		projectTrusted = true,
+	): { settings: Settings; pieError: Error | null } {
 		if (scope === "project" && !projectTrusted) {
-			return {};
+			return { settings: {}, pieError: null };
 		}
 
 		let content: string | undefined;
@@ -424,22 +467,38 @@ export class SettingsManager {
 			return undefined;
 		});
 
-		if (!content) {
-			return {};
+		const settings = content
+			? SettingsManager.migrateSettings(JSON.parse(stripBom(content)) as Record<string, unknown>)
+			: ({} as Settings);
+
+		let pieError: Error | null = null;
+		if (storage.readPieSettings) {
+			// Pie settings live in a separate file; ignore any `pie` key inside settings.json.
+			const settingsRecord = settings as Record<string, unknown>;
+			delete settingsRecord.pie;
+			try {
+				const pieContent = storage.readPieSettings(scope);
+				if (pieContent) {
+					settingsRecord.pie = JSON.parse(stripBom(pieContent));
+				}
+			} catch (error) {
+				pieError = error instanceof Error ? error : new Error(String(error));
+			}
 		}
-		const settings = JSON.parse(stripBom(content));
-		return SettingsManager.migrateSettings(settings);
+
+		return { settings, pieError };
 	}
 
 	private static tryLoadFromStorage(
 		storage: SettingsStorage,
 		scope: SettingsScope,
 		projectTrusted = true,
-	): { settings: Settings; error: Error | null } {
+	): { settings: Settings; error: Error | null; pieError: Error | null } {
 		try {
-			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
+			const { settings, pieError } = SettingsManager.loadFromStorage(storage, scope, projectTrusted);
+			return { settings, error: null, pieError };
 		} catch (error) {
-			return { settings: {}, error: error as Error };
+			return { settings: {}, error: error as Error, pieError: null };
 		}
 	}
 
@@ -539,6 +598,9 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
+		if (projectLoad.pieError) {
+			this.recordPieError("project", projectLoad.pieError);
+		}
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 	}
 
@@ -551,6 +613,9 @@ export class SettingsManager {
 		} else {
 			this.globalSettingsLoadError = globalLoad.error;
 			this.recordError("global", globalLoad.error);
+		}
+		if (globalLoad.pieError) {
+			this.recordPieError("global", globalLoad.pieError);
 		}
 
 		this.modifiedFields.clear();
@@ -565,6 +630,9 @@ export class SettingsManager {
 		} else {
 			this.projectSettingsLoadError = projectLoad.error;
 			this.recordError("project", projectLoad.error);
+		}
+		if (projectLoad.pieError) {
+			this.recordPieError("project", projectLoad.pieError);
 		}
 
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
@@ -605,6 +673,10 @@ export class SettingsManager {
 
 	private recordError(scope: SettingsScope, error: unknown): void {
 		this.errors.push(toSettingsError(scope, error, this.settingsPaths[scope]));
+	}
+
+	private recordPieError(scope: SettingsScope, error: unknown): void {
+		this.errors.push(toSettingsError(scope, error, this.pieSettingsPaths[scope]));
 	}
 
 	private clearModifiedScope(scope: SettingsScope): void {

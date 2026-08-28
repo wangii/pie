@@ -281,6 +281,107 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("pie settings in settings-pie.json", () => {
+		it("loads pie settings from settings-pie.json alongside non-pie from settings.json", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ theme: "dark", defaultModel: "claude-sonnet" }),
+			);
+			writeFileSync(
+				join(agentDir, "settings-pie.json"),
+				JSON.stringify({ executionModel: "claude-haiku-4-5", beliefLang: "English" }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.getDefaultModel()).toBe("claude-sonnet");
+			expect(manager.getExecutionModel()).toBe("claude-haiku-4-5");
+			expect(manager.getBeliefLang()).toBe("English");
+		});
+
+		it("defaults pie settings when settings-pie.json is missing", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.getExecutionModel()).toBeUndefined();
+			expect(manager.getDistillationModel()).toBeUndefined();
+			expect(manager.getDistillationThinkingLevel()).toBe("low");
+			expect(manager.getBeliefLang()).toBe("English");
+		});
+
+		it("reads pie only from settings-pie.json, ignoring a pie key in settings.json", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ theme: "dark", pie: { executionModel: "claude-opus-4-5" } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.getExecutionModel()).toBeUndefined();
+		});
+
+		it("merges global and project pie with project precedence", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "claude-sonnet" }));
+			writeFileSync(
+				join(agentDir, "settings-pie.json"),
+				JSON.stringify({ executionModel: "claude-haiku-4-5", distillationModel: "deepseek-v4-pro" }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings-pie.json"),
+				JSON.stringify({ executionModel: "project-exec", beliefLang: "Chinese" }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getExecutionModel()).toBe("project-exec");
+			expect(manager.getDistillationModel()).toBe("deepseek-v4-pro");
+			expect(manager.getBeliefLang()).toBe("Chinese");
+		});
+
+		it("reloads pie settings from disk on reload()", async () => {
+			const piePath = join(agentDir, "settings-pie.json");
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+			writeFileSync(piePath, JSON.stringify({ executionModel: "claude-haiku-4-5" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getExecutionModel()).toBe("claude-haiku-4-5");
+
+			writeFileSync(piePath, JSON.stringify({ executionModel: "gpt-5.2-codex" }));
+			await manager.reload();
+
+			expect(manager.getExecutionModel()).toBe("gpt-5.2-codex");
+		});
+
+		it("reloads project pie after trust changes to true", () => {
+			const projectPiePath = join(projectDir, ".pi", "settings-pie.json");
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "global" }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ theme: "project" }));
+			writeFileSync(projectPiePath, JSON.stringify({ executionModel: "project-exec", beliefLang: "Chinese" }));
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			expect(manager.getExecutionModel()).toBeUndefined();
+
+			manager.setProjectTrusted(true);
+
+			expect(manager.getExecutionModel()).toBe("project-exec");
+			expect(manager.getBeliefLang()).toBe("Chinese");
+		});
+
+		it("reports an error with the settings-pie.json path when it is invalid but preserves non-pie settings", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+			writeFileSync(join(agentDir, "settings-pie.json"), "{ invalid pie json");
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.drainErrors()).toMatchObject([{ scope: "global", path: join(agentDir, "settings-pie.json") }]);
+		});
+	});
+
 	describe("theme setting", () => {
 		it("stores slash-separated automatic theme settings separately from fixed theme names", async () => {
 			const settingsPath = join(agentDir, "settings.json");
