@@ -1,5 +1,7 @@
 # Pie: Pi + Epistemology
 
+![belief-loop-harness](screenshots/1.jpg)
+
 PIE is an experimental coding-agent harness that makes the epistemic process itself an explicit runtime object. Rather than allowing one model invocation to freely mix hypothesis formation, investigation, interpretation and answer generation, PIE separates these cognitive operations and controls the information allowed to cross between them.
 
 Pie 是一个以四阶段信念循环为核心、默认启用的可自我扩展编码智能体；其余 workspace 只提供通用支撑能力。
@@ -51,9 +53,6 @@ The core idea of Pie in this iteration is to model "how the agent answers a ques
 
 Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (product behavior or documented claim), `[user]` (user intent/requirement), `[convention]` (repo idiom/naming/pattern) — and are written in the language set by `pie.beliefLang` (default `English`). Use `/bs` to view the current belief set and `/thinking` to set the thinking level. See [belief-loop-roles.md](packages/pie/docs/belief-loop-roles.md).
 
-The belief-loop harness renders the four-phase loop and its proposal/plan/distill nodes in the native GUI (see the screenshot below):
-
-![belief-loop-harness](screenshots/1.jpg)
 
 ### 角色模型配置（Role model configuration）
 
