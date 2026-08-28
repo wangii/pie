@@ -236,6 +236,54 @@ static void testLive(const GraphTaskState& s) {
           "M6: belief nodes are position-stable across live updates");
 }
 
+// --- M6+ regression: a framing ("Target") card must follow the LATEST episode
+// box when it grows (it is anchored below it), rather than being frozen like a
+// plain belief node. A non-framing world belief must stay frozen.
+static void testFramingFollowsLatest() {
+    auto mkNode = [](const std::string& id, NodeFamily f, const std::string& frame,
+                     const std::string& domain, const std::string& createdIn,
+                     const std::string& displayType, uint64_t order) {
+        GraphNode n;
+        n.id.value = id;
+        n.family = f;
+        if (!frame.empty()) n.frameId = frame;
+        if (!domain.empty()) n.domain = domain;
+        if (!createdIn.empty()) n.createdInFrame = createdIn;
+        n.displayType = displayType;
+        n.title = id;
+        n.compactText = id;
+        n.fullText = id;
+        n.creationOrder = order;
+        return n;
+    };
+
+    GraphTaskState s;
+    LoopFrameInfo f20; f20.id = "20"; f20.label = "LoopFrame #20"; f20.closed = false;
+    s.frames.push_back(f20);
+    s.nodes.push_back(mkNode("T1", NodeFamily::Belief, "", "framing", "20", "proposed", 1));
+    s.nodes.push_back(mkNode("W1", NodeFamily::Belief, "", "", "", "", 2));
+    s.nodes.push_back(mkNode("P20", NodeFamily::Plan, "20", "", "", "", 3));
+    s.nodes.push_back(mkNode("E20", NodeFamily::Execution, "20", "", "", "", 4));
+
+    GraphLiveState live;
+    PieGraphLayout stable1 = stabilizeLiveLayout(s, computeGraphLayout(s), live);
+    float t1y1 = stable1.nodeRects["T1"].y;
+    check(stable1.nodeRects.count("T1") == 1, "M6+: framing card placed by fresh layout");
+
+    // Grow the latest (open) episode with a second execution node; the frame box
+    // gets taller, so its bottom (and thus the anchored framing card) moves down.
+    GraphTaskState s2 = s;
+    s2.nodes.push_back(mkNode("E21", NodeFamily::Execution, "20", "", "", "", 5));
+    PieGraphLayout stable2 = stabilizeLiveLayout(s2, computeGraphLayout(s2), live);
+
+    float t1y2 = stable2.nodeRects["T1"].y;
+    check(t1y2 > t1y1, "M6+: framing card follows a growing latest episode (moves down)");
+
+    float w1y1 = stable1.nodeRects["W1"].y;
+    float w1y2 = stable2.nodeRects["W1"].y;
+    check(w1y1 == w1y2, "M6+: non-framing world belief stays frozen across the update");
+}
+
 int main() {
     GraphTaskState s = buildState();
     PieGraphLayout layout = computeGraphLayout(s);
@@ -244,6 +292,7 @@ int main() {
     testRouting(s, layout);
     testDependency(s);
     testLive(s);
+    testFramingFollowsLatest();
 
     std::printf("graph m456 test: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

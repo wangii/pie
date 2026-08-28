@@ -151,7 +151,7 @@ void drawDashedLine(ImDrawList* dl, const ImVec2& a, const ImVec2& b,
 }
 } // namespace
 
-bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx) {
+bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx, const std::string& cwd) {
     bool selectionChanged = false;
 
     ImGuiIO& io = ImGui::GetIO();
@@ -261,12 +261,12 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                        IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
                                 st.beliefRegionLabel.b, 120),
                        view.zoom, view.zoom);
-        char label[80];
-        std::snprintf(label, sizeof(label), "Round %zu\nnew beliefs", i + 1);
-        dl->AddText(toScreen(it->second.x - st.beliefAnnotationWidth + 8.0f,
-                             it->second.y + 4.0f),
-                    IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
-                             st.beliefRegionLabel.b, 230), label);
+        // char label[80];
+        // std::snprintf(label, sizeof(label), "Round %zu\nnew beliefs", i + 1);
+        // dl->AddText(toScreen(it->second.x - st.beliefAnnotationWidth + 8.0f,
+        //                      it->second.y + 4.0f),
+        //             IM_COL32(st.beliefRegionLabel.r, st.beliefRegionLabel.g,
+        //                      st.beliefRegionLabel.b, 230), label);
     }
 
     // --- Edges: typed, directed, routed (m4). Belief read/write edges use
@@ -407,7 +407,8 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         if (n.family != NodeFamily::Plan && n.family != NodeFamily::Distill &&
             ImGui::IsMouseHoveringRect(p0, p1)) {
             ImGui::BeginTooltip();
-            ImGui::TextUnformatted((title + "\n" + n.compactText + "\n" + n.fullText).c_str());
+            // ImGui::TextUnformatted((title + "\n" + n.compactText + "\n" + n.fullText).c_str());
+            ImGui::TextUnformatted(n.fullText.c_str());
             ImGui::EndTooltip();
         }
     };
@@ -483,7 +484,19 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         ImVec2 bg0(origin.x + gridSize.x - w - 12.0f,
                    origin.y + 12.0f);
         dl->AddRectFilled(bg0, ImVec2(bg0.x + w, bg0.y + h), IM_COL32(22, 24, 28, 230));
-        dl->AddRect(bg0, ImVec2(bg0.x + w, bg0.y + h), col, st.frameRadius, 0, 1.0f);
+        // Restrained "working" pulse for non-terminating stages (user-requested
+        // augmentation of the stage badge; CLOSED / NONE stay static). The pulse
+        // is limited to the border so the label keeps full contrast, and follows
+        // the cosine-time convention already used by paneBg().
+        const bool working = stage != FrameStage::CLOSED && stage != FrameStage::NONE;
+        ImU32 borderCol = col;
+        if (working) {
+            const float kSpeed = 1.0f;  // radians per second (full cycle ~ 6.28 s)
+            const float t = 0.5f - 0.5f * std::cos(ImGui::GetTime() * kSpeed);  // 0..1
+            const int alpha = static_cast<int>((0.55f + 0.45f * t) * 255.0f);
+            borderCol = IM_COL32((col >> 16) & 255, (col >> 8) & 255, col & 255, alpha);
+        }
+        dl->AddRect(bg0, ImVec2(bg0.x + w, bg0.y + h), borderCol, st.frameRadius, 0, 1.0f);
         dl->AddText(ImVec2(bg0.x + pad, bg0.y + pad),
                     IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255), title);
         dl->AddText(ImVec2(bg0.x + pad, bg0.y + pad + ts.y + 2.0f), col, label);
@@ -561,6 +574,17 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         view.panY = p.y;
         view.hasFocusedOnce = true;
         view.focusCurrentOnce.reset();
+    }
+
+    // --- User request: show the session cwd centered at the top edge of the
+    // graph canvas. Drawn last so it stays above any panned/zoomed node. The
+    // label does not affect node layout (positions come from layout.nodeRects).
+    if (!cwd.empty()) {
+        ImVec2 ts = ImGui::CalcTextSize(cwd.c_str());
+        const float cx = origin.x + gridSize.x * 0.5f;
+        dl->AddText(ImVec2(cx - ts.x * 0.5f, origin.y + 8.0f),
+                    IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 220),
+                    cwd.c_str());
     }
 
     return selectionChanged;

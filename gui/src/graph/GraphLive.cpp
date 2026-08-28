@@ -1,9 +1,9 @@
 // GraphLive.cpp: Phase 2 M6 live-layout stability implementation.
 //
-// Stabilize a fresh auto-layout by freezing the settled nodes (global Beliefs
-// and nodes of CLOSED frames) at their previous rects, and letting active /
-// open-frame nodes take fresh positions. This keeps the graph from jumping on
-// every streamed event while still relaying-out the currently active frame.
+// Stabilize a fresh auto-layout by freezing every node at its previous rect
+// except the framing ("Target") belief cards, which anchor below the latest
+// episode and keep taking fresh positions as it grows. This keeps the graph
+// from jumping on every streamed event while still tracking the opened target.
 
 #include "graph/GraphLive.h"
 
@@ -12,15 +12,19 @@
 namespace pie::gui {
 
 namespace {
-// A node is "settled" (position-stable) if it is a global Belief (no owning
-// frame) or belongs to a frame the runtime has marked closed.
+// A node is "settled" (position-stable) unless it is a framing ("Target")
+// belief that is still in the propose state (displayType == "proposed", the
+// deriveBeliefStatus fallback). Only that actively-worked target keeps
+// updating its position as its episode box grows; every other node — global
+// beliefs (including a framing target that is no longer proposed), closed-frame
+// nodes, and active/open-frame nodes — freezes at its previous rect across live
+// updates. New nodes still receive a fresh initial position because they have
+// no previous rect yet.
 bool isSettled(const GraphTaskState& state, const GraphNode& n) {
-    if (n.family == NodeFamily::Belief) return true;
-    if (!n.frameId) return false;
-    for (const LoopFrameInfo& fi : state.frames) {
-        if (fi.id == *n.frameId) return fi.closed;
-    }
-    return false;
+    (void)state;
+    if (n.family == NodeFamily::Belief && n.domain == "framing")
+        return n.displayType != "proposed";
+    return true;
 }
 } // namespace
 

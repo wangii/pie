@@ -55,7 +55,7 @@ struct GraphStyle {
     Rgb cardBeliefRouting{96, 70, 26};    // dark amber
     Rgb cardBeliefFraming{86, 62, 118};   // dark violet
     Rgb cardPlan{52, 78, 108};
-    Rgb cardExecOk{118, 82, 28};
+    Rgb cardExecOk{104, 204, 120};  // success (green), per user status-color spec
     Rgb cardExecFailed{120, 48, 48};
     Rgb cardExecRunning{104, 76, 30};
     Rgb cardDistill{96, 66, 116};

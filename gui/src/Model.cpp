@@ -396,6 +396,8 @@ void NativeGuiModel::reset() {
     beliefById_.clear();
     beliefs_.clear();
     activeBeliefs_.clear();
+    pendingDeltas_.clear();
+    seenDeltaIds_.clear();
     cursor_ = FrameCursor{};
     nextBeliefOrdinal_ = 0;
     nextPlanOrdinal_ = 0;
@@ -517,6 +519,16 @@ void NativeGuiModel::openTask(TaskId id, TaskId parentTaskId, const std::string&
 }
 
 void NativeGuiModel::openFrame(FrameId id, TaskId taskId, uint64_t ordinal, const std::string& openedAt) {
+    // Idempotent reopen: a repeated FrameOpened for an already-open frame must
+    // not clobber its existing contents (plan, executions, deltas, etc.). Point
+    // the cursor at it and preserve what the runtime already gave us.
+    if (frames_.count(id)) {
+        cursor_.taskId = taskId;
+        cursor_.frameId = id;
+        cursor_.stage = FrameStage::ROUTING;
+        cursor_.item.clear();
+        return;
+    }
     LoopFrame f;
     f.id = id;
     f.taskId = taskId;
@@ -582,6 +594,18 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
         const std::string frameId = str(line, "frameId");
         if (frameId.empty()) return true;
         openFrame(frameId, taskId, static_cast<uint64_t>(intVal(line, "ordinal", 0)), "");
+        // Backfill belief-deltas that arrived before this frame was opened, so
+        // a belief creation keeps its corresponding Propose node even when the
+        // runtime emits the delta out of order.
+        if (!pendingDeltas_.empty()) {
+            LoopFrame* opened = frame(frameId);
+            std::vector<BeliefDelta> remaining;
+            for (auto& pd : pendingDeltas_) {
+                if (pd.frameId == frameId && opened) opened->beliefDeltas.push_back(std::move(pd));
+                else remaining.push_back(std::move(pd));
+            }
+            pendingDeltas_ = std::move(remaining);
+        }
         // Seed the display summary from the task's target statement.
         if (const Task* task = taskById(taskId); task && !task->targetStatement.empty()) {
             frame(frameId)->summary = task->targetStatement;
@@ -636,6 +660,9 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
 
         BeliefDelta d;
         d.id = str(deltaRaw, "id");
+        // Ignore a replayed mutation (same id) so it cannot create a duplicate
+        // Propose node; only dedup when the id is non-empty.
+        if (!d.id.empty() && !seenDeltaIds_.insert(d.id).second) return true;
         d.frameId = str(deltaRaw, "frameId", frameId);
         d.distillationId = str(deltaRaw, "distillationId");
         d.operation = str(deltaRaw, "operation");
@@ -644,11 +671,13 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
         d.evidenceBeliefIds = strArrayField(deltaRaw, "evidenceBeliefIds");
 
         std::string resultingRaw;
+        std::string createdId;
         if (rawValue(deltaRaw, "resultingBeliefs", resultingRaw)) {
             for (auto& e : arrayElements(resultingRaw)) {
                 Belief parsed;
                 parseBeliefRecord(e, parsed);
                 if (parsed.id.empty()) continue;
+                if (createdId.empty()) createdId = parsed.id;
                 const bool isNew = beliefById_.find(parsed.id) == beliefById_.end();
                 Belief& stored = upsertBelief(parsed.id);
                 stored.statement = parsed.statement;
@@ -664,7 +693,12 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
                 if (isNew || stored.createdInFrame.empty()) stored.createdInFrame = frameId;
             }
         }
+        // A creation delta names its belief via beliefId; when the runtime omits
+        // it but does project a resulting belief, fall back to that id so the
+        // Propose node is still emitted and linked.
+        if (d.beliefId.empty() && !createdId.empty()) d.beliefId = createdId;
         if (f) f->beliefDeltas.push_back(std::move(d));
+        else pendingDeltas_.push_back(std::move(d));
         activeBeliefs_ = strArrayField(line, "activeBeliefs");
         return true;
     }
@@ -754,6 +788,9 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
             activeTaskId_.clear();
             cursor_ = FrameCursor{};
         }
+        // Bound the pending-delta buffer: once a task closes its frames will not
+        // reopen, so drop any still-unattached deltas rather than leaking them.
+        pendingDeltas_.clear();
         return true;
     }
     // Not a domain event.

@@ -5,10 +5,12 @@
 // recomputes a fresh auto-layout each frame. An unthrottled relayout would make
 // the whole graph jump every event. This module keeps the view stable under
 // updates by freezing the positions of nodes the runtime has already settled
-// (global Belief nodes and nodes belonging to CLOSED frames) while letting the
-// active/open frames take fresh positions (active relayout). Belief nodes are
-// stable by construction (created once, positioned once, never re-laid-out);
-// closed-frame nodes are frozen after their frame closes. The GUI never infers
+// (non-framing Belief nodes and nodes belonging to CLOSED frames) while letting
+// the active/open frames take fresh positions (active relayout). Non-framing
+// Belief nodes are stable by construction (created once, positioned once, never
+// re-laid-out); framing ("Target") Belief cards are exempt — they anchor below
+// the LATEST episode box, so they follow the fresh layout as that box grows.
+// Closed-frame nodes are frozen after their frame closes. The GUI never infers
 // cognition: whether a frame is closed comes from the runtime's FrameStage /
 // closed flag, which the projection carries into GraphTaskState.
 
@@ -30,10 +32,13 @@ struct GraphLiveState {
 };
 
 // Produce a stable layout for `state` given a `fresh` auto-layout (computed by
-// the caller from the same state) and the previous round's layout. Freezes
-// stable nodes (beliefs + closed-frame nodes) at their previous rects; active /
-// open-frame nodes take fresh positions. Stores `result` back in `live` for the
-// next round. Deterministic given (state, fresh, live.prevLayout).
+// the caller from the same state) and the previous round's layout. Only a
+// framing ("Target") belief still in the propose state takes a fresh position
+// each round; every other node (global beliefs, including a framing target no
+// longer proposed, closed-frame nodes, and active/open-frame nodes) freezes at
+// its previous rect. New nodes get a fresh initial position because they have
+// no previous rect yet. Stores `result` back in `live` for the next round.
+// Deterministic given (state, fresh, live.prevLayout).
 PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state,
                                    const PieGraphLayout& fresh,
                                    GraphLiveState& live);

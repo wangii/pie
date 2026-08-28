@@ -62,6 +62,6 @@ struct GraphViewState {
 // the runtime's explicit frame stage (used for the Stage indicator). Returns true
 // when a node selection changed this frame (the caller may want to run a
 // dependency-path query / re-emphasize).
-bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx);
+bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx, const std::string& cwd);
 
 } // namespace pie::gui

@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
             PieGraphLayout layout = stabilizeLiveLayout(graphState, freshLayout, app.graphLive);
             ImGui::Text("Node Graph View — (Cmd/Ctrl+G to return to Text View)");
             renderGraphView(app.graphView, graphState, layout, app.model.cursor().stage,
-                            app.model.footer(), app.model.roleContext());
+                            app.model.footer(), app.model.roleContext(), app.model.session());
             ImGui::End();
             return;
         }

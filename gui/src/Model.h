@@ -331,6 +331,14 @@ private:
     std::map<BeliefId, int> beliefById_;
     std::vector<Belief> beliefs_;         // first-inserted order
     std::vector<BeliefId> activeBeliefs_; // active branch working set
+    // Belief-deltas that arrived before their frame was opened. Held here so a
+    // belief creation is not lost when the BeliefDeltaApplied precedes the
+    // FrameOpened; flushed into the frame on FrameOpened (a bounded buffer,
+    // drained on FrameOpened and cleared on reset / task close).
+    std::vector<BeliefDelta> pendingDeltas_;
+    // Belief-delta ids already processed, so a replayed BeliefDeltaApplied (same
+    // mutation id) does not produce a duplicate Propose node.
+    std::set<std::string> seenDeltaIds_;
     std::vector<FileEntry> fileList_;     // session read/write/edit files (insertion order)
     std::set<std::string> fileOpSeen_;    // (op, display-path) dedup set
     FrameCursor cursor_;

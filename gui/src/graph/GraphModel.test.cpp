@@ -142,6 +142,63 @@ static void testBeliefCreateIsPropose() {
     else check(false, "create Propose node is laid out");
 }
 
+// Belief-creation deltas that reach the model before their frame opens, or that
+// omit beliefId but still project a resulting belief, must still yield a
+// Propose node (and a Propose->Belief create edge) once the frame is known.
+static void testBeliefCreateMissingFrameAndLink() {
+    // Out-of-order: the delta arrives before FrameOpened but names its frame.
+    {
+        NativeGuiModel m;
+        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
+        GraphTaskState s = projectGraphTask(m);
+        int propose = 0;
+        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
+        check(propose == 1, "out-of-order belief create still yields one Propose node");
+    }
+    // Empty beliefId but the resultingBeliefs create a belief.
+    {
+        NativeGuiModel m;
+        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        GraphTaskState s = projectGraphTask(m);
+        int propose = 0, createEdges = 0;
+        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
+        for (const GraphEdge& e : s.edges)
+            if (e.type == EdgeSemanticType::ProposeToBelief && e.beliefOperation &&
+                *e.beliefOperation == BeliefOperation::Create && e.target.valid()) ++createEdges;
+        check(propose == 1, "empty-beliefId belief create still yields one Propose node");
+        check(createEdges == 1, "empty-beliefId belief create links Propose->Belief (create)");
+    }
+    // Replay of the same delta id must not duplicate the Propose node.
+    {
+        NativeGuiModel m;
+        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
+        const char* deltaLine = R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})";
+        m.applyLine(deltaLine);
+        m.applyLine(deltaLine);  // replay
+        GraphTaskState s = projectGraphTask(m);
+        int propose = 0;
+        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
+        check(propose == 1, "replayed belief-delta id yields a single Propose node");
+    }
+    // Repeated FrameOpened must not clobber a backfilled delta.
+    {
+        NativeGuiModel m;
+        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");  // duplicate
+        GraphTaskState s = projectGraphTask(m);
+        int propose = 0;
+        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
+        check(propose == 1, "repeated FrameOpened preserves the backfilled Propose node");
+    }
+}
+
 int main() {
     NativeGuiModel model = buildModel();
     GraphTaskState state = projectGraphTask(model);
@@ -240,6 +297,7 @@ int main() {
     check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");
 
     testBeliefCreateIsPropose();
+    testBeliefCreateMissingFrameAndLink();
 
     // --- Create is a sub-state of the write-back semantic, not a separate edge ---
     {
