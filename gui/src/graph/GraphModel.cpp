@@ -74,7 +74,7 @@ BeliefOperation beliefOperationFromDelta(const std::string& operation) {
 } // namespace
 
 std::string beliefNodeTitle(const GraphNode& n) {
-    const char* cat = "Belief";
+    const char* cat = "";
     if (n.domain == "framing") cat = "Target";
     else if (n.domain == "routing") cat = "Route";
     const std::string num = n.title.empty() ? n.id.value : n.title;
@@ -194,7 +194,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
             propose.family = NodeFamily::Propose;
             propose.frameId = f.id;
             propose.displayType = "propose";
-            propose.title = "Propose " + d.operation;
+            propose.title = d.operation;
             propose.compactText = d.evidence;
             propose.fullText = d.evidence;
             propose.creationOrder = frameBase + 400 + proposeIdx;

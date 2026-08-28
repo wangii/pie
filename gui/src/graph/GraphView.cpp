@@ -519,11 +519,14 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             return std::to_string(tokens);
         };
         auto fmtCH = [](const char* label, const RoleFooterSlot& s) -> std::string {
-            char buf[96];
+            char buf[128];
+            // Per-role current model (provider/id) from the existing footer
+            // telemetry, mirroring the text view footer's per-role model config.
+            std::string model = s.model.empty() ? "\xe2\x80\x94" : s.model;
             if (s.cacheHitRate < 0.0f) {
-                std::snprintf(buf, sizeof(buf), "%s CH \xe2\x80\x94", label);
+                std::snprintf(buf, sizeof(buf), "%s %s CH \xe2\x80\x94", label, model.c_str());
             } else {
-                std::snprintf(buf, sizeof(buf), "%s CH %.1f%%", label, s.cacheHitRate);
+                std::snprintf(buf, sizeof(buf), "%s %s CH %.1f%%", label, model.c_str(), s.cacheHitRate);
             }
             return buf;
         };

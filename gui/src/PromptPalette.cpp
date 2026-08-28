@@ -124,8 +124,6 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
         // user can keep typing without clicking.
         ImGui::SetKeyboardFocusHere();
 
-        ImGui::TextUnformatted(">");
-        ImGui::SameLine();
         ImGui::SetNextItemWidth(-1.0f);
 
         // Auto-grow the input height as the text wraps past the available width.
