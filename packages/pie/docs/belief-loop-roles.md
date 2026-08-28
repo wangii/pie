@@ -14,12 +14,13 @@ so prompts, tool surfaces, model selection, and message projections cannot drift
 apart.
 
 > **Fast path.** A request may skip this loop. The propose role's first turn declares a
-> `route` belief (op `route`, domain `routing`) with a `decision`, `suitabilityProbability`,
+> routing decision with the `declare_belief` tool's `route` op (recorded as a `Routing` in
+> the `RoutingSet`, not a belief): a `decision`, `suitabilityProbability`,
 > `successProbability`, `estimatedSteps`, and `difficulty`, judged on the configured
 > `defaultModel`. A `fast-path` decision dispatches the
 > execution role to execute the request directly on `pie.fastPathModel` and answer the user;
 > the run is then distilled with `pie.distillationModel` into a `fast_path_distillation`
-> custom summary and the loop resets to the next task's propose. Each `route` belief is
+> custom summary and the loop resets to the next task's propose. Each `route` is
 > consumed by id on first evaluation, and only the latest unconsumed route decides. An
 > initial `fast-path` route dispatches directly; open framing and world beliefs do not block
 > this one-shot path, but they are not carried into it: the run executes without
@@ -35,20 +36,21 @@ apart.
 
 > **Task boundaries.** At every task-boundary reset (`_resetLoopForNewTask()` — a fast-path
 > success, or the next task arriving after a concluded one) the belief set is pruned to
-> settled product/code knowledge: framing obligations, routing decisions, refuted and
-> superseded records, and any leftover proposed entries are dropped; only `supported`
+> settled product/code knowledge: framing obligations, refuted and
+> superseded records, and any leftover proposed entries are dropped (routing decisions live
+> in a separate `RoutingSet`, cleared independently); only `supported`
 > product/code beliefs carry over as session knowledge for the next task. A failed fast-path
 > run hands the same task back to propose without pruning. The set is capped at
-> `MAX_BELIEFS` (200) records: a 201st record (propose, refine, or route) is rejected with a
-> validation error, while support/refute/retract keep working at capacity.
+> `MAX_BELIEFS` (200) records: a 201st record (propose or refine) is rejected with a
+> validation error, while support/refute/retract keep working at capacity. Routing decisions
+> are not belief records; they are held in `RoutingSet`, likewise capped at `MAX_BELIEFS`.
 
 > **Mid-task frame-open handoff.** A later propose turn may hand the remaining work to the
 > fast path even while a framing obligation is still open, but only with explicit
-> authorization. Declare a `route` belief with decision `fast-path` plus `handoffFromBeliefIds`
-> naming **exactly** the open framing obligations it takes over, the current `parentTaskId`
-> (the session's stable task id), and a `reason`. The gate (`_frameOpenHandoffAuthorized`)
-> requires that every open framing is covered exactly and that the `parentTaskId` matches the
-> current task id; otherwise the route is rejected and the belief loop continues. Unlike the
+> authorization. Declare a `route` with decision `fast-path` plus `handoffFromBeliefIds`
+> naming **exactly** the open framing obligations it takes over, and a `reason`. The gate
+> (`_frameOpenHandoffAuthorized`) requires that every open framing is covered exactly by
+> `handoffFromBeliefIds`; otherwise the route is rejected and the belief loop continues. Unlike the
 > one-shot path, the handoff snapshots any still-open world hypotheses into the fast-path
 > context as unverified assumptions (not facts): the execution role sees them explicitly, and
 > the distillation prompt lists them. Because the loop is not reset, the distill step
