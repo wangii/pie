@@ -106,7 +106,7 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         if (node.family == NodeFamily::Belief || !node.frameId) {
             beliefs.push_back(&node);
             if (node.family == NodeFamily::Belief &&
-                node.domain != "framing") {
+                node.domain != "framing" && node.domain != "routing") {
                 columnBeliefs.push_back(&node);
             }
             continue;
@@ -186,15 +186,25 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         const auto& proposeNodes = proposeByFrame[frame.id];
         const auto& beliefNodes = beliefsByFrame[frame.id];
 
-        // Routing beliefs are the first item in each frame's belief set area;
-        // then the world (non-routing, non-framing) beliefs.
+        // Routing beliefs are re-anchored directly ABOVE their owning frame's
+        // box (centered on it), so they are pulled out of the belief column; the
+        // world (non-routing, non-framing) beliefs stay in the left column.
+        std::vector<const GraphNode*> routingNodes;
         std::vector<const GraphNode*> column;
         for (const GraphNode* b : beliefNodes) {
-            if (b->domain == "routing") column.push_back(b);
+            if (b->domain == "routing") routingNodes.push_back(b);
+            else if (b->domain != "framing") column.push_back(b);
         }
-        for (const GraphNode* b : beliefNodes) {
-            if (b->domain != "routing" && b->domain != "framing") column.push_back(b);
-        }
+        // Reserve a routing slot above the owning frame box: it holds either a
+        // legacy routing belief card stack (domain == "routing") or the frame's
+        // own routing-decision text (the real Routing step), whichever is present.
+        const bool hasRoutingText =
+            !frame.routingDecision.empty() || !frame.routingReason.empty();
+        const float routingSlotH =
+            (routingNodes.empty()
+                 ? 0.0f
+                 : stackHeight(routingNodes.size()) + st.phaseBandGap) +
+            (hasRoutingText ? st.routingTextSlotH : 0.0f);
 
         const float planH = planNodes.empty() ? 0.0f : st.nodeH;
         const float distillH = distillNodes.empty() ? 0.0f : st.nodeH;
@@ -210,7 +220,7 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
                                          stackHeight(column.size())});
         const float blockH = contentH + st.framePad * 2.0f;
 
-        const float frameTop = rowTop;
+        const float frameTop = rowTop + routingSlotH;
         const float frameBottom = frameTop + blockH;
         const float nodeTop = frameTop + st.framePad;
         // Middle band vertical order: Plan (top), Distillation (middle),
@@ -224,6 +234,17 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
             out.nodeRects[column[i]->id.value] = GraphRect{
                 beliefX,
                 nodeTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
+                st.nodeW,
+                st.nodeH,
+            };
+        }
+        // Routing nodes sit directly above the owning frame box, horizontally
+        // centered on the box (frameCenterX = box center x).
+        const float frameCenterX = (middleX + executionX + st.nodeW) * 0.5f;
+        for (std::size_t i = 0; i < routingNodes.size(); ++i) {
+            out.nodeRects[routingNodes[i]->id.value] = GraphRect{
+                frameCenterX - st.nodeW * 0.5f,
+                rowTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
                 st.nodeW,
                 st.nodeH,
             };
@@ -303,9 +324,17 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         float lastBottom = (lastIt != out.frameRects.end())
             ? lastIt->second.y + lastIt->second.h
             : loopAreaTop;
+        // Framing (Target) cards anchor directly below the latest episode box,
+        // horizontally centered on it.
+        float framingCenterX = beliefX;
+        if (lastIt != out.frameRects.end()) {
+            const GraphRect& fr = lastIt->second;
+            framingCenterX = fr.x + fr.w * 0.5f;
+        }
         float fy = lastBottom;
         for (const GraphNode* b : globalFraming) {
-            out.nodeRects[b->id.value] = GraphRect{beliefX, fy, st.nodeW, st.nodeH};
+            out.nodeRects[b->id.value] = GraphRect{
+                framingCenterX - st.nodeW * 0.5f, fy, st.nodeW, st.nodeH};
             fy += st.nodeH + st.nodeGapV;
         }
     }

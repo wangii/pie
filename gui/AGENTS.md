@@ -95,7 +95,7 @@ ImGui backend).
   minimum lane width. When the window is too narrow for three side-by-side
   lanes, the lanes stack vertically inside a scrollable region instead of
   overlapping.
-- The user prompt palette is a floating overlay window toggled by ⌘T/Ctrl-T,
+- The user prompt palette is a floating overlay window opened by `:` and closed by Esc,
   independent of the main workspace layout. When open it is rendered as its own
   ImGui window; text is submitted with Cmd/Ctrl+Enter (Enter inserts a newline,
   so a multiline prompt is preserved end to end). It does not reserve any
@@ -157,7 +157,8 @@ Notes:
 
 - Reconfigure CMake after changing `CMakeLists.txt` (new `find_package`).
 - `cmake --build build -j` must succeed.
-- Launch `./build/pie_gui` (default: `--live`, spawns the RPC child so the ⌘T
+- Launch `./build/pie_gui` (default: `--live`, spawns the RPC child; the `:`
+  palette is opened with `:` and closed with Esc, and its
   pane can submit prompts) and verify: no crash, no "Could not load font
   file" warning, status/navigator/lanes/summary do not overlap.
 - The demo mode is explicit: `./build/pie_gui --demo` injects the formal

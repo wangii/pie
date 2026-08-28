@@ -170,18 +170,17 @@ static void testRoutingFramingPlacement() {
         const GraphRect& f20 = fr20->second;
         const GraphRect& rb = r1->second;
         const GraphRect& rf = r2->second;
-        // Fix 1: a routing belief is the first item in its frame's belief set,
-        // so it sits inside the frame that created it (frame 10), at the top of
-        // that frame's belief column -- not in a global slot above the loop area.
-        check(rb.y + rb.h <= f10.y + f10.h + 1e-3f && rb.y >= f10.y - 1e-3f,
-              "RF: routing card sits inside its frame (frame 10)");
-        check(rb.y <= f10.y + f10.h + 1e-3f,
-              "RF: routing card is not above the loop-frame area top");
-        // Fix 4: framing (target) beliefs anchor below the LATEST episode/loopframe
-        // (frame 20 is the last one), so the framing card sits below frame 10's
-        // bottom edge and above/at frame 20's region, not pinned to the loop area top.
-        check(rf.y >= f10.y + f10.h - 1e-3f,
-              "RF: framing card is below its creating frame (frame 10)");
+        // Routing cards anchor directly ABOVE their owning frame box, centered.
+        check(rb.y + rb.h <= f10.y + 1e-3f,
+              "RF: routing card sits above its frame (frame 10)");
+        check(std::fabs((rb.x + rb.w * 0.5f) - (f10.x + f10.w * 0.5f)) <= 1e-3f,
+              "RF: routing card is horizontally centered on its frame");
+        // Framing (target) cards anchor directly BELOW the LATEST episode box,
+        // centered on it.
+        check(rf.y >= f20.y + f20.h - 1e-3f,
+              "RF: framing card is below the latest episode (frame 20)");
+        check(std::fabs((rf.x + rf.w * 0.5f) - (f20.x + f20.w * 0.5f)) <= 1e-3f,
+              "RF: framing card is horizontally centered on the latest episode");
     } else {
         check(false, "RF: routing/framing cards were placed");
     }
@@ -241,6 +240,10 @@ static void testCurrentFrameSelection() {
         if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
             check(rf->second.y >= bottom(f20->second) - 1e-3f,
                   "CUR: framing card is below the last (latest) episode");
+        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
+            check(std::fabs((rf->second.x + rf->second.w * 0.5f) -
+                            (f20->second.x + f20->second.w * 0.5f)) <= 1e-3f,
+                  "CUR: framing card is horizontally centered on the latest episode");
     }
 }
 
@@ -402,10 +405,13 @@ static void testFramingNextLoopframe() {
         const GraphRect& f30 = fr30->second;
         const GraphRect& rfrect = rf->second;
         const GraphRect& rf2rect = rf2->second;
-        // Fix 1: the routing card B1 (no createdInFrame) is inferred into frame 20
-        // (the frame whose plan reads it), so it sits inside frame 20's belief row.
-        check(rb != layout.nodeRects.end() && rb->second.y >= f20.y - 1e-3f && rb->second.y < f20.y + f20.h + 1e-3f,
-              "NLF: routing card sits inside its inferred frame");
+        // Routing cards anchor directly ABOVE their inferred frame box, centered.
+        check(rb != layout.nodeRects.end() && rb->second.y + rb->second.h <= f20.y + 1e-3f,
+              "NLF: routing card is above its inferred frame");
+        check(rb != layout.nodeRects.end() &&
+              std::fabs((rb->second.x + rb->second.w * 0.5f) -
+                        (f20.x + f20.w * 0.5f)) <= 1e-3f,
+              "NLF: routing card is horizontally centered on its inferred frame");
         // Fix 4: the framing (target) cards anchor below the LAST episode (frame 30),
         // so the stack's TOP card sits at frame 30's bottom edge.
         check(rfrect.y >= f30.y + f30.h - 1e-3f,
@@ -421,6 +427,9 @@ static void testFramingNextLoopframe() {
         // top-of-stack card starts at (or just after) frame 30's bottom edge.
         check(std::fabs(topOfStack - (f30.y + f30.h)) <= 1e-3f,
               "NLF: framing stack top aligns below the latest episode");
+        // Each framing card is horizontally centered on the latest episode box.
+        check(std::fabs((rfrect.x + rfrect.w * 0.5f) - (f30.x + f30.w * 0.5f)) <= 1e-3f,
+              "NLF: framing cards are horizontally centered on the latest episode");
         check(rf2rect.y + rf2rect.h <= rfrect.y + 1e-3f ||
               rfrect.y + rfrect.h <= rf2rect.y + 1e-3f,
               "NLF: two framing cards do not overlap each other");
@@ -438,6 +447,27 @@ static void testFramingNextLoopframe() {
     check(noOverlap, "NLF: no node overlap after next-loopframe framing placement");
 }
 
+// --- Routing decision text slot: a frame carrying a real RoutingDecided
+// decision is pushed DOWN by routingTextSlotH so GraphView can draw its
+// "Route: ..." label centered above the box without overlapping the row above. ---
+static void testRoutingSlotReserved() {
+    GraphTaskState withRoute = buildSmallState();  // frames 10, 20; no domain cards
+    withRoute.frames[0].routingDecision = "belief-loop";
+    withRoute.frames[0].routingReason = "needs beliefs";
+    GraphTaskState withoutRoute = buildSmallState();
+    PieGraphLayout la = computeGraphLayout(withRoute);
+    PieGraphLayout lb = computeGraphLayout(withoutRoute);
+    auto fa = la.frameRects.find("10");
+    auto fb = lb.frameRects.find("10");
+    check(fa != la.frameRects.end() && fb != lb.frameRects.end(),
+          "RS: containers present");
+    if (fa != la.frameRects.end() && fb != lb.frameRects.end()) {
+        const float dy = fa->second.y - fb->second.y;
+        check(std::fabs(dy - kGraphStyle.routingTextSlotH) <= 1e-3f,
+              "RS: frame with a routing decision reserves a routing slot above its box");
+    }
+}
+
 int main() {
     testStyle();
     testFocusNavigation();
@@ -445,7 +475,7 @@ int main() {
     testRoutingFramingPlacement();
     testCurrentFrameSelection();
     testFramingNextLoopframe();
-    testFramingNextLoopframe();
+    testRoutingSlotReserved();
 
     std::printf("graph m789 test: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

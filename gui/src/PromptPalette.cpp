@@ -1,4 +1,4 @@
-// PIE Native GUI - floating user-prompt palette (⌘T / Ctrl-T).
+// PIE Native GUI - floating user-prompt palette (opened with ':', closed with Esc).
 //
 // Standalone undecorated window for entering a user prompt (submitted via
 // Cmd/Ctrl+Enter) and showing the assistant's streaming reply. Interaction
@@ -98,7 +98,7 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
     // is_cancel/revert_edit path (EscapeClearsAll is not set), which reverts
     // promptText to the pre-edit snapshot (TextToRevertTo) and discards the
     // user's un-submitted typing. Handling Escape here keeps the caller-owned
-    // promptText intact so re-opening (Cmd/Ctrl-T) restores the draft.
+    // promptText intact so re-opening (':') restores the draft.
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { open = false; return; }
 
     // Growable prompt text. Enter inserts a newline (no EnterReturnsTrue);

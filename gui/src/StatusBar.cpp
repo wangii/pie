@@ -34,7 +34,7 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
     }
 
     // Current context length for the two belief-loop roles (split epistemic /
-    // execution), displayed to the left of the right-aligned ⌘T prompt hint. The
+    // execution), displayed to the left of the right-aligned : prompt hint. The
     // runtime may report tokens as unknown (negative placeholder -> em-dash).
     const pie::gui::RoleContextUsagePair& rcu = m.roleContext();
     if (rcu.hasData) {
@@ -66,7 +66,7 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
     float avail = ImGui::GetContentRegionAvail().x;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(30.0f, avail - 120.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, kGray);
-    ImGui::TextUnformatted("⌘T  User prompt");
+    ImGui::TextUnformatted(":  User prompt");
     ImGui::PopStyleColor();
 }
 

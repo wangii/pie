@@ -21,7 +21,7 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 | **Lane**（栏） | 主工作区中并排（或窄窗时垂直堆叠）的三列内容区域；有左/中/右三条。 | `src/LayoutMetrics.h` `laneRects` |
 | **Summary**（当前帧摘要） | 渲染当前循环帧（loop frame）的摘要。 | `src/Summary.h` `renderSummary` |
 | **Footer**（底部栏） | 渲染四个信念循环角色（Epistemic/Planner/Distillation/Execution）的模型与缓存命中率，以及累计会话成本；单行紧凑行，钉在工作区底部。 | `src/Footer.h` `renderFooter` |
-| **Prompt Palette**（提示面板） | ⌘T/Ctrl-T 切换的浮动无装饰窗口，用于输入用户提示（Cmd/Ctrl+Enter 提交）并显示助手流式回复；独立于主工作区布局。 | `src/PromptPalette.h` `renderPromptPalette` |
+| **Prompt Palette**（提示面板） | 以 `:` 唤起、Esc 关闭的浮动无装饰窗口，用于输入用户提示（Cmd/Ctrl+Enter 提交）并显示助手流式回复；独立于主工作区布局。 | `src/PromptPalette.h` `renderPromptPalette` |
 | **Navigator**（帧导航器） | 历史帧导航；当前版本不再渲染（其 band 已从布局中移除）。 | `src/LayoutMetrics.h` |
 | **Pane**（窗格） | 当前流程步骤所在的子区域（PLAN/DISTILLATION/PROPOSALS 段落，或 EXECUTING 阶段的右侧执行栏区域）。活动窗格使用 `paneBg` 的背景色高亮；`paneBg` 仅由 `CognitiveLane.cpp` 与 `App.cpp` 的执行栏区域调用，而非 `ExecutionLane.cpp` 内的 `renderExecutionLane`。 | `src/Theme.h` `paneBg` |
 

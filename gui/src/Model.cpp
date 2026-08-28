@@ -485,7 +485,7 @@ std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
 }
 
 // ---------------------------------------------------------------------------
-// Live in-message stream (⌘T pane)
+// Live in-message stream (':' pane)
 // ---------------------------------------------------------------------------
 void NativeGuiModel::beginInMessage(const std::string& text) {
     inMessage_ = text;
@@ -861,7 +861,7 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
             model.beginInMessage(distText);
             return RpcApplyResult::Applied;
         }
-        // Seed the ⌘T in-message stream on an assistant message; clear it on a
+        // Seed the ':' in-message stream on an assistant message; clear it on a
         // user message so the previous reply does not linger.
         if (role == "assistant") {
             model.beginInMessage(text);

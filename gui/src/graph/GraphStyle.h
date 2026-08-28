@@ -124,6 +124,7 @@ struct GraphStyle {
     float columnHeaderHeight = 36.0f;
     float phaseBandGap = 28.0f;
     float frameLabelWidth = 150.0f;
+    float routingTextSlotH = 26.0f;   // slot reserved above a frame box for its routing decision text
 
     // --- Semantic region surfaces ---
     Rgb beliefRegionFill{40, 82, 54};

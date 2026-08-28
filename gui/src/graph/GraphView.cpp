@@ -160,7 +160,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
     ImVec2 avail = ImGui::GetContentRegionAvail();
 
     // --- Focus Current (explicit): F centers the current node (no modifier, so
-    // it does not clash with Cmd+F file-list / Cmd+T prompt toggles). ---
+    // it does not clash with Cmd+F file-list or the ':' prompt palette). ---
     if (ImGui::IsWindowHovered() && ImGui::IsKeyPressed(ImGuiKey_F, false) && state.currentNode) {
         view.focusCurrentOnce = state.currentNode->value;
     }
@@ -233,13 +233,16 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         dl->AddText(ImVec2(p1.x + st.frameLabelPadX,
                            (p0.y + p1.y) * 0.5f - 7.0f),
                     IM_COL32(st.frameLabel.r, st.frameLabel.g, st.frameLabel.b, st.frameLabelAlpha), fi.label.c_str());
-        // Routing decision (from the RoutingDecided event) shown under the frame
-        // label so the loop's routing step is visible in the graph.
+        // Routing decision (from the RoutingDecided event) drawn centered ABOVE
+        // the frame box: the layout reserves a routing slot (routingTextSlotH)
+        // above each frame with a routing decision, so this text never overlaps
+        // the preceding row.
         if (!fi.routingDecision.empty() || !fi.routingReason.empty()) {
             std::string route = "Route: " + (fi.routingDecision.empty() ? "?" : fi.routingDecision);
             if (!fi.routingReason.empty()) route += "  (" + fi.routingReason + ")";
-            dl->AddText(ImVec2(p1.x + st.frameLabelPadX,
-                               (p0.y + p1.y) * 0.5f + 7.0f),
+            ImVec2 ts = ImGui::CalcTextSize(route.c_str());
+            dl->AddText(ImVec2((p0.x + p1.x) * 0.5f - ts.x * 0.5f,
+                               p0.y - ts.y - 4.0f),
                         IM_COL32(st.beliefRoutingLabel.r, st.beliefRoutingLabel.g,
                                  st.beliefRoutingLabel.b, 230),
                         route.c_str());

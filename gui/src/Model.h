@@ -287,7 +287,7 @@ public:
     Belief& upsertBelief(const BeliefId& id);
 
     // Live in-message stream (the assistant's streaming reply shown in the
-    // ⌘T user prompt palette). Populated by the event adapter from
+    // ':' user prompt palette). Populated by the event adapter from
     // message_start / message_update / message_end. ImGui-free.
     void beginInMessage(const std::string& text);
     void appendInMessage(const std::string& delta);
@@ -338,7 +338,7 @@ private:
     int nextBeliefOrdinal_ = 0;  // display-label ordinal (B<n>)
     int nextPlanOrdinal_ = 0;    // display-label ordinal (P<n>)
     int nextDistillOrdinal_ = 0; // display-label ordinal (D<n>)
-    std::string inMessage_;       // live streaming assistant reply for the ⌘T pane
+    std::string inMessage_;       // live streaming assistant reply for the ':' pane
     bool inMessageThinking_ = false;
     bool finalReportPending_ = false;
     bool autoOpenPrompt_ = false;

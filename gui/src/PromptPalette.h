@@ -1,4 +1,4 @@
-// PIE Native GUI - floating user-prompt palette (⌘T / Ctrl-T).
+// PIE Native GUI - floating user-prompt palette (opened with ':', closed with Esc).
 //
 // A standalone undecorated window for entering a user prompt (submitted via
 // Cmd/Ctrl+Enter) and showing the assistant's streaming reply. Interaction
@@ -32,8 +32,8 @@ struct PromptPaletteState {
     int mentionActiveIndex = -1;             // highlighted candidate (-1 = none)
 };
 
-// Render the palette as a floating window. `open` is toggled by the caller via
-// Cmd/Ctrl-T and Escape/close; `state` carries the persistent editor state.
+// Render the palette as a floating window. `open` is opened by the caller via
+// ':' and closed via Escape/close; `state` carries the persistent editor state.
 void renderPromptPalette(bool& open, PromptPaletteState& state,
                          const pie::gui::NativeGuiModel& m, bool canSend,
                          PromptSender send);

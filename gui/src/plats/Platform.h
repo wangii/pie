@@ -38,7 +38,7 @@ struct AppLogic {
     std::function<bool()> setupApp;
 
     // Once per frame, after ImGui::NewFrame() and before drawing. Drains the RPC
-    // event queue, applies auto-open of the user prompt pane, and handles ⌘T.
+    // event queue, applies auto-open of the user prompt pane, and handles ':'.
     std::function<void()> onFrameStart;
 
     // Build one ImGui frame's widgets (status bar, lanes, summary, footer,

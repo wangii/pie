@@ -171,8 +171,11 @@ int main(int argc, char** argv) {
             if (app.model.consumeAutoOpenPrompt()) app.promptOpen = true;
         }
         auto& io = ImGui::GetIO();
-        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_T, false))
-            app.promptOpen = !app.promptOpen;
+        // ':' (Shift+Semicolon) opens the user prompt palette when it is closed.
+        // Esc closes it inside renderPromptPalette. Only open when the palette is
+        // closed so a ':' the user types into the palette input is unaffected.
+        if (!app.promptOpen && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Semicolon, false))
+            app.promptOpen = true;
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_F, false))
             app.fileListOpen = !app.fileListOpen;
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_G, false))
