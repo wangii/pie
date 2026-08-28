@@ -67,6 +67,11 @@ struct AppSession {
     bool promptOpen = false;
     PromptPaletteState promptState;
     bool fileListOpen = false;
+    // Global font zoom (Cmd/Ctrl + plus/minus). Persisted across the session;
+    // applied to style.FontScaleMain (the 1.92+ replacement for io.FontGlobalScale).
+    float fontScale = 1.0f;
+    static constexpr float kMinFontScale = 0.5f;
+    static constexpr float kMaxFontScale = 4.0f;
     // Phase 2 (M0) Graph View: a Text<->Graph switch beside the three-lane
     // workspace. The graph session state (pan/zoom/selection) is preserved
     // across toggles within a session.
@@ -134,6 +139,12 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "WARNING: failed to load bold markdown font (FontNo=0) from %s; bold text will render without bold.\n", ttcPath.c_str());
         }
         setMarkdownFonts(codeFont, boldFont);
+
+        // Global font zoom state (Cmd/Ctrl + plus/minus). FontScaleMain is the
+        // 1.92+ replacement for the deprecated io.FontGlobalScale; it is read at
+        // render time (imgui.cpp), so setting it here before the first frame is
+        // fine and it stays applied to every font face.
+        ImGui::GetStyle().FontScaleMain = app.fontScale;
     };
 
     // App session / runtime: init model; spawn the RPC child (live) or inject
@@ -166,6 +177,20 @@ int main(int argc, char** argv) {
             app.fileListOpen = !app.fileListOpen;
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_G, false))
             app.graphOpen = !app.graphOpen;
+        // Cmd/Ctrl + plus/minus zoom the global font by 10% per press, clamped to
+        // a usable range. Uses the same modifier convention as the toggles above.
+        // On the main keyboard the '+' glyph is Shift+Equal, so the primary plus
+        // branch requires io.KeyShift; the numeric-keypad Add key is a bare '+' and
+        // needs no Shift. Minus is a bare key on the main keyboard and also on the
+        // keypad. The key is read from io directly, so the chord does not depend on
+        // widget focus.
+        if (io.KeySuper || io.KeyCtrl) {
+            if ((io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Equal, false)) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd, false))
+                app.fontScale = std::clamp(app.fontScale * 1.10f, AppSession::kMinFontScale, AppSession::kMaxFontScale);
+            else if (ImGui::IsKeyPressed(ImGuiKey_Minus, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, false))
+                app.fontScale = std::clamp(app.fontScale * 0.90f, AppSession::kMinFontScale, AppSession::kMaxFontScale);
+            ImGui::GetStyle().FontScaleMain = app.fontScale;
+        }
     };
 
     // Build one ImGui frame's widgets.

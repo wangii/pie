@@ -14,7 +14,7 @@
 #   PIE_GUI_FONT_NAME    - the single file name to produce (SarasaTermSCNerd.ttc)
 
 set(PIE_GUI_FONT_ARCHIVE "${PIE_GUI_FONT_CACHE_DIR}/SarasaTermSCNerd.ttc.tar.gz")
-set(PIE_GUI_FONT_LOCAL_ARCHIVE "$ENV{HOME}/download/SarasaTermSCNerd.ttc.tar.gz")
+set(PIE_GUI_FONT_LOCAL_ARCHIVE "$ENV{HOME}/Downloads/SarasaTermSCNerd.ttc.tar.gz")
 set(PIE_GUI_FONT_EXTRACTED "${PIE_GUI_FONT_CACHE_DIR}/${PIE_GUI_FONT_NAME}")
 set(PIE_GUI_FONT_STAMP "${PIE_GUI_FONT_CACHE_DIR}/.fetch-stamp")
 
