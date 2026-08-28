@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { BeliefSet } from "../src/core/belief-set.ts";
+import { BeliefSet, RoutingSet } from "../src/core/belief-set.ts";
 import { createDeclareBeliefToolDefinition } from "../src/core/tools/declare-belief.ts";
 import { createViewBeliefsToolDefinition } from "../src/core/tools/view-beliefs.ts";
 
@@ -189,7 +189,8 @@ describe("declare_belief tool", () => {
 describe("declare_belief route op", () => {
 	test("route applies a settled routing belief", async () => {
 		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set);
+		const routings = new RoutingSet();
+		const tool = createDeclareBeliefToolDefinition(set, routings);
 		const result = await tool.execute(
 			"tc-1",
 			{
@@ -206,16 +207,17 @@ describe("declare_belief route op", () => {
 			undefined as never,
 		);
 
-		const belief = set.beliefs[0]!;
-		expect(belief.domain).toBe("routing");
-		expect(belief.decision).toBe("fast-path");
+		const routing = routings.routings[0]!;
+		expect(routing.id).toBe("routing-1");
+		expect(routing.decision).toBe("fast-path");
+		expect(set.beliefs).toHaveLength(0);
 		expect(set.proposed()).toHaveLength(0);
 		expect((result.content[0] as { text: string }).text).toContain("Applied route");
 	});
 
 	test("route rejects a missing decision", async () => {
 		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set);
+		const tool = createDeclareBeliefToolDefinition(set, new RoutingSet());
 		const result = await tool.execute(
 			"tc-1",
 			{
@@ -252,7 +254,7 @@ describe("view_beliefs tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain("the cache is warm");
 	});
 
-	test("always renders framing and routing beliefs in addition to the frame, for any role", async () => {
+	test("renders framing beliefs in addition to the frame", async () => {
 		const set = new BeliefSet();
 		set.apply({
 			op: "propose",
@@ -268,17 +270,6 @@ describe("view_beliefs tool", () => {
 			expectation: "no second mechanism",
 			evidenceRounds: 1,
 		});
-		set.apply({
-			op: "route",
-			statement: "this request is simple",
-			expectation: "observe",
-			decision: "fast-path",
-			suitabilityProbability: 0.9,
-			successProbability: 0.9,
-			estimatedSteps: 2,
-			difficulty: "low",
-		});
-
 		// The tool signature takes no role callback now, so it is role-independent.
 		const tool = createViewBeliefsToolDefinition(set);
 		const result = await tool.execute("tc-1", {}, undefined, undefined, undefined as never);
@@ -286,7 +277,6 @@ describe("view_beliefs tool", () => {
 
 		expect(text).toContain("[FRAME]");
 		expect(text).toContain("[FRAMING]");
-		expect(text).toContain("[SETTLED]");
-		expect(text).toContain("this request is simple");
+		expect(text).not.toContain("[SETTLED]");
 	});
 });

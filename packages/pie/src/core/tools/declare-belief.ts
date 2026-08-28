@@ -1,5 +1,14 @@
 import { type Static, Type } from "typebox";
-import { type Belief, type BeliefDelta, type BeliefSet, type BeliefStatus, statusOf } from "../belief-set.ts";
+import {
+	type Belief,
+	type BeliefDelta,
+	type BeliefSet,
+	type BeliefStatus,
+	type Routing,
+	type RoutingDelta,
+	RoutingSet,
+	statusOf,
+} from "../belief-set.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 /**
@@ -33,9 +42,9 @@ const declareBeliefSchema = Type.Object({
 		}),
 	),
 	domain: Type.Optional(
-		Type.Union([Type.Literal("product"), Type.Literal("code"), Type.Literal("framing"), Type.Literal("routing")], {
+		Type.Union([Type.Literal("product"), Type.Literal("code"), Type.Literal("framing")], {
 			description:
-				"product/code: a relation about the world. framing: what the final answer must establish (an obligation). routing: the fast-path routing decision for the current request (used with op `route`). Required for propose.",
+				"product/code: a relation about the world. framing: what the final answer must establish (an obligation). Required for propose.",
 		}),
 	),
 	expectation: Type.Optional(
@@ -103,12 +112,6 @@ const declareBeliefSchema = Type.Object({
 				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): the open framing obligations this route authorizes the fast path to take over. Optional.",
 		}),
 	),
-	parentTaskId: Type.Optional(
-		Type.String({
-			description:
-				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): the stable id of the task this handoff belongs to, for traceability. Optional.",
-		}),
-	),
 	reason: Type.Optional(
 		Type.String({
 			description:
@@ -129,7 +132,7 @@ export const declareBeliefSystemPromptContribution = {
 	],
 };
 
-function toDelta(input: DeclareBeliefInput): BeliefDelta {
+function toDelta(input: DeclareBeliefInput): BeliefDelta | RoutingDelta {
 	const op = input.op ?? "propose";
 	// `op` is optional so the model can batch several proposes without restating the
 	// discriminator on each. But support/refute/refine/retract each carry a `beliefId`
@@ -216,14 +219,12 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 			return {
 				op: "route",
 				statement: input.statement,
-				expectation: input.expectation?.trim() || `Routing decision for the request: ${input.decision}.`,
 				decision: input.decision,
 				suitabilityProbability,
 				successProbability,
 				estimatedSteps,
 				difficulty,
 				...(input.handoffFromBeliefIds ? { handoffFromBeliefIds: input.handoffFromBeliefIds } : {}),
-				...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
 				...(input.reason ? { reason: input.reason } : {}),
 			};
 		}
@@ -250,12 +251,14 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 
 export function createDeclareBeliefToolDefinition(
 	beliefSet: BeliefSet,
-	onDelta?: (
+	routingSet: RoutingSet = new RoutingSet(),
+	onBeliefDelta?: (
 		delta: BeliefDelta,
 		belief: Belief,
 		previousStatus: BeliefStatus | undefined,
 		priorBelief?: Belief,
 	) => void,
+	onRouting?: (delta: RoutingDelta, routing: Routing) => void,
 ): ToolDefinition<typeof declareBeliefSchema, undefined> {
 	return {
 		name: "declare_belief",
@@ -272,6 +275,19 @@ export function createDeclareBeliefToolDefinition(
 		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
 			try {
 				const delta = toDelta(input);
+				if (delta.op === "route") {
+					const routing = routingSet.apply(delta);
+					onRouting?.(delta, routing);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Applied route: ${routing.id} ${routing.statement} (${routing.decision}).`,
+							},
+						],
+						details: undefined,
+					};
+				}
 				// Capture the target belief's status *before* the mutation so the session can
 				// emit a `BeliefUpdated` with a strictly accurate `previousStatus`.
 				const priorBelief = "beliefId" in delta ? beliefSet.get(delta.beliefId) : undefined;
@@ -281,7 +297,7 @@ export function createDeclareBeliefToolDefinition(
 				// event at the actual mutation point (creation vs a real status change),
 				// rather than conflating it with batch selection. For `refine`/`retract` the
 				// prior record is carried so the session can surface its supersede transition.
-				onDelta?.(delta, belief, previousStatus, priorBelief);
+				onBeliefDelta?.(delta, belief, previousStatus, priorBelief);
 				return {
 					content: [
 						{

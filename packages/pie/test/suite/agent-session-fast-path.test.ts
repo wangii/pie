@@ -59,9 +59,9 @@ describe("AgentSession fast path", () => {
 
 		await harness.session.prompt("please echo hello");
 
-		// The routing belief drove the dispatch and was pruned at the task-end reset:
-		// routing records are task ephemera, not session knowledge.
-		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(0);
+		// The routing decision drove the dispatch; it is recorded as a frame decision
+		// (RoutingDecided), never as a belief record.
+		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(1);
 
 		// The execution answer reached the user.
 		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
@@ -146,7 +146,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the probe kept the value",
 				}),
 			]),
@@ -156,8 +156,8 @@ describe("AgentSession fast path", () => {
 
 		await harness.session.prompt("is the cache persistent?");
 
-		// No routing belief, no fast-path distillation: the loop ran normally.
-		expect(harness.session.beliefs.some((b) => b.domain === "routing")).toBe(false);
+		// No routing decision, no fast-path distillation: the loop ran normally.
+		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(0);
 		expect(
 			harness.session.messages.find((m) => m.role === "custom" && m.customType === "fast_path_distillation"),
 		).toBeUndefined();
@@ -187,7 +187,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the probe kept the value",
 				}),
 			]),
@@ -208,7 +208,7 @@ describe("AgentSession fast path", () => {
 		// The normal belief loop ran to a conclusion.
 		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
 		expect(assistantTexts).toContain("the cache survives logout for 30s");
-		expect(harness.session.beliefs.find((b) => b.id === "belief-2")?.supportedBy).toHaveLength(1);
+		expect(harness.session.beliefs.find((b) => b.id === "belief-1")?.supportedBy).toHaveLength(1);
 	});
 
 	it("hands the remaining work to the fast path when propose re-routes mid-task", async () => {
@@ -232,7 +232,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the probe kept the value",
 				}),
 			]),
@@ -246,10 +246,10 @@ describe("AgentSession fast path", () => {
 
 		await harness.session.prompt("is the cache persistent?");
 
-		// The belief-loop route was consumed mid-task, and the task-end reset pruned both
-		// routing records — only the settled product belief survives as session knowledge.
-		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(0);
-		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-2"]);
+		// Both routing decisions were consumed mid-task (belief-loop then fast-path), and the
+		// task-end reset keeps only the settled product belief as session knowledge.
+		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(2);
+		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-1"]);
 
 		// The fast-path run was distilled and its answer reached the user.
 		const custom = harness.session.messages.find(
@@ -342,7 +342,7 @@ describe("AgentSession fast path", () => {
 					successProbability: 0.9,
 					estimatedSteps: 1,
 					difficulty: "low",
-					handoffFromBeliefIds: ["belief-2"],
+					handoffFromBeliefIds: ["belief-1"],
 					parentTaskId: "task-1",
 					reason: "the remaining framing is execution-only",
 				}),
@@ -355,14 +355,14 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-4",
+					beliefId: "belief-2",
 					evidence: "the tool results completed without error",
 				}),
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the outcome establishes the obligation",
-					evidenceBeliefIds: ["belief-4"],
+					evidenceBeliefIds: ["belief-2"],
 				}),
 			]),
 			// Conclude.
@@ -381,18 +381,18 @@ describe("AgentSession fast path", () => {
 		expect(custom).toBeDefined();
 		const details = (custom as { details?: Record<string, unknown> })?.details;
 		expect(details?.outcome).toBe("success");
-		expect(details?.parentTaskId).toBe("task-1");
-		expect(details?.handoffFromBeliefIds).toEqual(["belief-2"]);
+		expect(details?.parentTaskId).toBe(harness.eventsOfType("TaskOpened")[0].taskId);
+		expect(details?.handoffFromBeliefIds).toEqual(["belief-1"]);
 		expect(details?.reason).toBe("the remaining framing is execution-only");
-		expect(details?.outcomeBeliefId).toBe("belief-4");
+		expect(details?.outcomeBeliefId).toBe("belief-2");
 
 		// The framing obligation was discharged (supported via evidenceBeliefIds), not left open:
 		// its record remains with a supportedBy entry linking the settled outcome belief.
-		const framing = harness.session.beliefs.find((b) => b.id === "belief-2");
+		const framing = harness.session.beliefs.find((b) => b.id === "belief-1");
 		expect(framing?.domain).toBe("framing");
 		expect(framing?.supportedBy).toHaveLength(1);
-		expect(framing?.supportedBy[0]?.beliefIds).toEqual(["belief-4"]);
-		const outcome = harness.session.beliefs.find((b) => b.id === "belief-4");
+		expect(framing?.supportedBy[0]?.beliefIds).toEqual(["belief-2"]);
+		const outcome = harness.session.beliefs.find((b) => b.id === "belief-2");
 		expect(outcome?.domain).toBe("product");
 
 		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
@@ -417,7 +417,7 @@ describe("AgentSession fast path", () => {
 					successProbability: 0.9,
 					estimatedSteps: 1,
 					difficulty: "low",
-					handoffFromBeliefIds: ["belief-2"],
+					handoffFromBeliefIds: ["belief-1"],
 					parentTaskId: "task-999",
 				}),
 			]),
@@ -478,7 +478,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the probe kept the value",
 				}),
 			]),
@@ -494,9 +494,7 @@ describe("AgentSession fast path", () => {
 		);
 		expect(customMessages).toHaveLength(1);
 		expect((customMessages[0] as { details?: { outcome?: string } }).details?.outcome).toBe("failure");
-		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(1);
-		const assistantTexts = harness.session.messages.filter((m) => m.role === "assistant").map(getMessageText);
-		expect(assistantTexts).toContain("belief loop took over");
+		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(1);
 	});
 
 	it("retains supported product/code knowledge across tasks and prunes ephemera at the next task boundary", async () => {
@@ -519,7 +517,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the probe kept the value",
 				}),
 			]),
@@ -532,15 +530,15 @@ describe("AgentSession fast path", () => {
 		]);
 
 		await harness.session.prompt("is the cache persistent?");
-		// Task 1 concluded via the belief loop: ephemera are still present until the next
-		// task's reset (no prune at conclude — the finalReport snapshot needs them).
-		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(1);
+		// Task 1 concluded via the belief loop: its routing decision is recorded as a frame
+		// decision, and the settled product belief survives as session knowledge.
+		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(1);
 
 		await harness.session.prompt("please echo hi");
-		// Task 2's boundary reset pruned task 1's ephemera; only the settled product belief
-		// survives as session knowledge, and task 2's own routing record is pruned too.
-		expect(harness.session.beliefs.filter((b) => b.domain === "routing")).toHaveLength(0);
-		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-2"]);
+		// Task 2 added its own fast-path routing decision; only the settled product belief
+		// survives as session knowledge.
+		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(2);
+		expect(harness.session.beliefs.map((b) => b.id)).toEqual(["belief-1"]);
 	});
 
 	it("hands off with open world beliefs: fast path dispatches and leaves them un-settled", async () => {
@@ -582,7 +580,7 @@ describe("AgentSession fast path", () => {
 					successProbability: 0.9,
 					estimatedSteps: 1,
 					difficulty: "low",
-					handoffFromBeliefIds: ["belief-2"],
+					handoffFromBeliefIds: ["belief-1"],
 					parentTaskId: "task-1",
 					reason: "the remaining framing is execution-only",
 				}),
@@ -602,14 +600,14 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-5",
+					beliefId: "belief-3",
 					evidence: "the tool results completed without error",
 				}),
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the outcome establishes the obligation",
-					evidenceBeliefIds: ["belief-5"],
+					evidenceBeliefIds: ["belief-3"],
 				}),
 			]),
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
@@ -627,12 +625,12 @@ describe("AgentSession fast path", () => {
 		expect(custom).toBeDefined();
 		const details = (custom as { details?: Record<string, unknown> })?.details;
 		expect(details?.outcome).toBe("success");
-		expect(details?.parentTaskId).toBe("task-1");
-		expect(details?.handoffFromBeliefIds).toEqual(["belief-2"]);
+		expect(details?.parentTaskId).toBe(harness.eventsOfType("TaskOpened")[0].taskId);
+		expect(details?.handoffFromBeliefIds).toEqual(["belief-1"]);
 
 		// The open world hypothesis was NOT auto-settled by the fast path: it stays proposed so
 		// the belief loop re-adjudicates it.
-		const world = harness.session.beliefs.find((b) => b.id === "belief-4");
+		const world = harness.session.beliefs.find((b) => b.id === "belief-2");
 		expect(world?.domain).toBe("product");
 		expect(world?.supportedBy ?? []).toHaveLength(0);
 		expect(world?.refutedBy ?? []).toHaveLength(0);
@@ -723,7 +721,7 @@ describe("AgentSession fast path", () => {
 					successProbability: 0.9,
 					estimatedSteps: 1,
 					difficulty: "low",
-					handoffFromBeliefIds: ["belief-2"],
+					handoffFromBeliefIds: ["belief-1"],
 					parentTaskId: "task-1",
 				}),
 			]),
@@ -732,14 +730,14 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-4",
+					beliefId: "belief-2",
 					evidence: "the tool results completed without error",
 				}),
 				fauxToolCall("declare_belief", {
 					op: "support",
-					beliefId: "belief-2",
+					beliefId: "belief-1",
 					evidence: "the outcome establishes the obligation",
-					evidenceBeliefIds: ["belief-4"],
+					evidenceBeliefIds: ["belief-2"],
 				}),
 			]),
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
@@ -770,16 +768,14 @@ describe("AgentSession fast path", () => {
 
 		// Task 1.
 		await harness.session.prompt("is the cache persistent?");
-		// Task 1's frame-open handoff did NOT reset the loop (it routed to distill), so the task
-		// id is still "task-1" after task 1's own handoff.
-		expect(harness.session.taskId).toBe("task-1");
+		// Completed tasks have no active task id; their stable ids remain in the domain snapshot.
+		expect(harness.session.taskId).toBeUndefined();
+		expect(harness.session.domainSnapshot.activeBranchTasks).toHaveLength(1);
 
 		// Task 2.
 		await harness.session.prompt("is the cache persistent again?");
-		// Task 2's boundary reset rotated the task id to "task-2" before its own loop, but the
-		// stale fast-path route dispatched as a PLAIN run (no frame-open snapshot), which on
-		// completion calls `_resetLoopForNewTask()` and rotates the id once more — to "task-3".
-		expect(harness.session.taskId).toBe("task-3");
+		expect(harness.session.taskId).toBeUndefined();
+		expect(harness.session.domainSnapshot.activeBranchTasks).toHaveLength(2);
 
 		// The stale task-1 fast-path route dispatched as a plain run (no frame-open snapshot), so
 		// a second fast-path distillation summary exists — task 1's authorized handoff plus task 2's.

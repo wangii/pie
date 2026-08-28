@@ -19,7 +19,7 @@
  * languages.
  */
 
-export type BeliefDomain = "product" | "code" | "framing" | "routing";
+export type BeliefDomain = "product" | "code" | "framing";
 
 /** Routing decision for a request: whether it is suitable for fast-path execution. */
 export type RoutingDecision = "fast-path" | "belief-loop";
@@ -53,18 +53,17 @@ export interface Belief {
 	readonly refutedBy: readonly { evidence: string }[];
 	/** The id of the belief that superseded this one (`refine`), or the `WITHDRAWN` sentinel (`retract`). */
 	readonly supersededBy?: string;
-	/** Routing fields, present only for domain "routing". */
-	readonly decision?: RoutingDecision;
-	readonly suitabilityProbability?: number;
-	readonly successProbability?: number;
-	readonly estimatedSteps?: number;
-	readonly difficulty?: RoutingDifficulty;
-	/** For a mid-task fast-path handoff: the open framing obligations this route authorizes the
-	 *  fast path to take over. Only present on a frame-open handoff route (domain "routing"). */
+}
+
+export interface Routing {
+	readonly id: string;
+	readonly statement: string;
+	readonly decision: RoutingDecision;
+	readonly suitabilityProbability: number;
+	readonly successProbability: number;
+	readonly estimatedSteps: number;
+	readonly difficulty: RoutingDifficulty;
 	readonly handoffFromBeliefIds?: readonly string[];
-	/** Stable id of the task this frame-open handoff belongs to, for traceability. */
-	readonly parentTaskId?: string;
-	/** Why the route authorizes a handoff (e.g. the remaining framing is execution-only). */
 	readonly reason?: string;
 }
 
@@ -95,20 +94,19 @@ export type BeliefDelta =
 			evidenceRounds: number;
 			skillRefs?: readonly string[];
 	  }
-	| { op: "retract"; beliefId: string }
-	| {
-			op: "route";
-			statement: string;
-			expectation: string;
-			decision: RoutingDecision;
-			suitabilityProbability: number;
-			successProbability: number;
-			estimatedSteps: number;
-			difficulty: RoutingDifficulty;
-			handoffFromBeliefIds?: readonly string[];
-			parentTaskId?: string;
-			reason?: string;
-	  };
+	| { op: "retract"; beliefId: string };
+
+export interface RoutingDelta {
+	readonly op: "route";
+	readonly statement: string;
+	readonly decision: RoutingDecision;
+	readonly suitabilityProbability: number;
+	readonly successProbability: number;
+	readonly estimatedSteps: number;
+	readonly difficulty: RoutingDifficulty;
+	readonly handoffFromBeliefIds?: readonly string[];
+	readonly reason?: string;
+}
 
 /** Thrown when a delta names an invalid statement or an illegal transition. */
 export class BeliefValidationError extends Error {}
@@ -138,8 +136,8 @@ export function validateBelief(statement: string, domain: BeliefDomain): void {
 	if (!statement.trim()) {
 		throw new BeliefValidationError("Belief statement must not be empty.");
 	}
-	if (domain !== "product" && domain !== "code" && domain !== "framing" && domain !== "routing") {
-		throw new BeliefValidationError("Belief domain must be 'product', 'code', 'framing', or 'routing'.");
+	if (domain !== "product" && domain !== "code" && domain !== "framing") {
+		throw new BeliefValidationError("Belief domain must be 'product', 'code', or 'framing'.");
 	}
 }
 
@@ -203,13 +201,11 @@ export class BeliefSet {
 
 	/**
 	 * The unadjudicated *world* beliefs driving action — the open frame (may be empty or hold
-	 * several). Framing and routing beliefs are excluded: they are obligations/decisions, never
+	 * several). Framing beliefs are excluded: they are obligations, never
 	 * dispatch targets.
 	 */
 	proposed(): Belief[] {
-		return this._beliefs.filter(
-			(b) => statusOf(b) === "proposed" && b.domain !== "framing" && b.domain !== "routing",
-		);
+		return this._beliefs.filter((b) => statusOf(b) === "proposed" && b.domain !== "framing");
 	}
 
 	/** The unadjudicated framing beliefs — open obligations for what the final answer must establish. */
@@ -283,47 +279,12 @@ export class BeliefSet {
 				const prior = this._require(delta.beliefId, ["proposed", "supported", "refuted"]);
 				return this._replace(prior.id, { ...prior, supersededBy: WITHDRAWN });
 			}
-			case "route": {
-				// A routing belief is created settled: it records this request's routing decision and
-				// never enters the dispatch frame (see `proposed()`). Its evidence is the decision.
-				this._ensureCapacity();
-				validateBelief(delta.statement, "routing");
-				validateExpectation(delta.expectation);
-				validateRoutingDecision(delta.decision);
-				validateRoutingProbability(delta.suitabilityProbability, "suitabilityProbability");
-				validateRoutingProbability(delta.successProbability, "successProbability");
-				validateRoutingSteps(delta.estimatedSteps);
-				validateRoutingDifficulty(delta.difficulty);
-				const belief: Belief = {
-					id: this._allocateId(),
-					statement: delta.statement.trim(),
-					domain: "routing",
-					expectation: delta.expectation.trim(),
-					evidenceRounds: 1,
-					supportedBy: [
-						{
-							evidence: `decision=${delta.decision} suitability=${delta.suitabilityProbability} success=${delta.successProbability} steps=${delta.estimatedSteps} difficulty=${delta.difficulty}`,
-						},
-					],
-					refutedBy: [],
-					decision: delta.decision,
-					suitabilityProbability: delta.suitabilityProbability,
-					successProbability: delta.successProbability,
-					estimatedSteps: delta.estimatedSteps,
-					difficulty: delta.difficulty,
-					handoffFromBeliefIds: delta.handoffFromBeliefIds,
-					parentTaskId: delta.parentTaskId,
-					reason: delta.reason,
-				};
-				this._beliefs.push(belief);
-				return belief;
-			}
 		}
 	}
 
 	/**
 	 * Task-end cleanup: keep only settled product/code knowledge that still means something
-	 * to the next task. Everything else — framing obligations, routing decisions, refuted
+	 * to the next task. Everything else — framing obligations, refuted
 	 * and superseded records, and any abnormally leftover proposed entries — is dropped.
 	 * Returns the removed records.
 	 *
@@ -441,6 +402,45 @@ export class BeliefSet {
 
 	private _allocateId(): string {
 		return `belief-${this._nextId++}`;
+	}
+}
+
+/** Task-scoped routing decisions. Routing is an action record, never epistemic evidence. */
+export class RoutingSet {
+	private _routings: Routing[] = [];
+	private _nextId = 1;
+
+	get routings(): readonly Routing[] {
+		return this._routings;
+	}
+
+	apply(delta: RoutingDelta): Routing {
+		if (this._routings.length >= MAX_BELIEFS) {
+			throw new BeliefValidationError(`Routing capacity reached: at most ${MAX_BELIEFS} decisions may be held.`);
+		}
+		if (!delta.statement.trim()) throw new BeliefValidationError("Routing statement must not be empty.");
+		validateRoutingDecision(delta.decision);
+		validateRoutingProbability(delta.suitabilityProbability, "suitabilityProbability");
+		validateRoutingProbability(delta.successProbability, "successProbability");
+		validateRoutingSteps(delta.estimatedSteps);
+		validateRoutingDifficulty(delta.difficulty);
+		const routing: Routing = {
+			id: `routing-${this._nextId++}`,
+			statement: delta.statement.trim(),
+			decision: delta.decision,
+			suitabilityProbability: delta.suitabilityProbability,
+			successProbability: delta.successProbability,
+			estimatedSteps: delta.estimatedSteps,
+			difficulty: delta.difficulty,
+			handoffFromBeliefIds: delta.handoffFromBeliefIds,
+			reason: delta.reason,
+		};
+		this._routings.push(routing);
+		return routing;
+	}
+
+	clear(): void {
+		this._routings = [];
 	}
 }
 

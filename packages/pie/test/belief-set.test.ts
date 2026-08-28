@@ -4,6 +4,7 @@ import {
 	BeliefValidationError,
 	formatBeliefsForView,
 	MAX_EVIDENCE_ROUNDS,
+	RoutingSet,
 	statusOf,
 	validateBelief,
 	validateEvidenceRounds,
@@ -413,13 +414,12 @@ describe("formatBeliefsForView", () => {
 	});
 });
 
-describe("route op (fast-path routing belief)", () => {
-	test("route creates a settled routing belief that never enters the dispatch frame", () => {
-		const set = new BeliefSet();
-		const belief = set.apply({
+describe("RoutingSet", () => {
+	test("route creates a routing decision outside the belief registry", () => {
+		const set = new RoutingSet();
+		const routing = set.apply({
 			op: "route",
 			statement: "本请求适合 fast path 执行",
-			expectation: "该请求为简单任务",
 			decision: "fast-path",
 			suitabilityProbability: 0.9,
 			successProbability: 0.85,
@@ -427,47 +427,39 @@ describe("route op (fast-path routing belief)", () => {
 			difficulty: "low",
 		});
 
-		expect(belief.domain).toBe("routing");
-		expect(belief.decision).toBe("fast-path");
-		expect(belief.suitabilityProbability).toBe(0.9);
-		expect(belief.successProbability).toBe(0.85);
-		expect(belief.estimatedSteps).toBe(2);
-		expect(belief.difficulty).toBe("low");
-		// Created settled (evidence is the decision), so it is not an open dispatch target.
-		expect(statusOf(belief)).toBe("supported");
-		expect(set.proposed()).toHaveLength(0);
-		expect(set.open()).toContain(belief);
+		expect(routing.id).toBe("routing-1");
+		expect(routing.decision).toBe("fast-path");
+		expect(routing.suitabilityProbability).toBe(0.9);
+		expect(routing.successProbability).toBe(0.85);
+		expect(routing.estimatedSteps).toBe(2);
+		expect(routing.difficulty).toBe("low");
+		expect(set.routings).toEqual([routing]);
 	});
 
 	test("route persists optional handoff traceability fields", () => {
-		const set = new BeliefSet();
-		const belief = set.apply({
+		const set = new RoutingSet();
+		const routing = set.apply({
 			op: "route",
 			statement: "本请求可把剩余执行交给 fast path",
-			expectation: "该请求为简单任务",
 			decision: "fast-path",
 			suitabilityProbability: 0.9,
 			successProbability: 0.85,
 			estimatedSteps: 2,
 			difficulty: "low",
 			handoffFromBeliefIds: ["belief-2"],
-			parentTaskId: "task-7",
 			reason: "the remaining framing is execution-only",
 		});
 
-		expect(belief.domain).toBe("routing");
-		expect(belief.handoffFromBeliefIds).toEqual(["belief-2"]);
-		expect(belief.parentTaskId).toBe("task-7");
-		expect(belief.reason).toBe("the remaining framing is execution-only");
+		expect(routing.handoffFromBeliefIds).toEqual(["belief-2"]);
+		expect(routing.reason).toBe("the remaining framing is execution-only");
 	});
 
 	test("rejects an invalid routing decision", () => {
-		const set = new BeliefSet();
+		const set = new RoutingSet();
 		expect(() =>
 			set.apply({
 				op: "route",
 				statement: "本请求适合 fast path 执行",
-				expectation: "简单任务",
 				decision: "maybe" as never,
 				suitabilityProbability: 0.9,
 				successProbability: 0.9,
@@ -478,12 +470,11 @@ describe("route op (fast-path routing belief)", () => {
 	});
 
 	test("rejects probabilities outside 0-1", () => {
-		const set = new BeliefSet();
+		const set = new RoutingSet();
 		expect(() =>
 			set.apply({
 				op: "route",
 				statement: "本请求适合 fast path 执行",
-				expectation: "简单任务",
 				decision: "fast-path",
 				suitabilityProbability: 1.2,
 				successProbability: 0.9,
@@ -495,7 +486,6 @@ describe("route op (fast-path routing belief)", () => {
 			set.apply({
 				op: "route",
 				statement: "本请求适合 fast path 执行",
-				expectation: "简单任务",
 				decision: "fast-path",
 				suitabilityProbability: 0.9,
 				successProbability: -0.1,
@@ -506,12 +496,11 @@ describe("route op (fast-path routing belief)", () => {
 	});
 
 	test("rejects a non-integer step estimate and an unknown difficulty", () => {
-		const set = new BeliefSet();
+		const set = new RoutingSet();
 		expect(() =>
 			set.apply({
 				op: "route",
 				statement: "本请求适合 fast path 执行",
-				expectation: "简单任务",
 				decision: "fast-path",
 				suitabilityProbability: 0.9,
 				successProbability: 0.9,
@@ -523,7 +512,6 @@ describe("route op (fast-path routing belief)", () => {
 			set.apply({
 				op: "route",
 				statement: "本请求适合 fast path 执行",
-				expectation: "简单任务",
 				decision: "fast-path",
 				suitabilityProbability: 0.9,
 				successProbability: 0.9,
@@ -576,7 +564,7 @@ describe("belief set capacity (MAX_BELIEFS = 200)", () => {
 		expect(set.beliefs).toHaveLength(200);
 	});
 
-	test("refine and route still need capacity", () => {
+	test("refine still needs belief capacity", () => {
 		const set = new BeliefSet();
 		for (let i = 0; i < 200; i++) {
 			set.apply({
@@ -594,18 +582,6 @@ describe("belief set capacity (MAX_BELIEFS = 200)", () => {
 				statement: "refined",
 				expectation: "probe",
 				evidenceRounds: 1,
-			}),
-		).toThrow("Belief set capacity reached");
-		expect(() =>
-			set.apply({
-				op: "route",
-				statement: "route",
-				expectation: "route",
-				decision: "belief-loop",
-				suitabilityProbability: 0.5,
-				successProbability: 0.5,
-				estimatedSteps: 1,
-				difficulty: "low",
 			}),
 		).toThrow("Belief set capacity reached");
 		expect(set.beliefs).toHaveLength(200);
@@ -638,16 +614,6 @@ describe("pruneForNewTask (task-end cleanup)", () => {
 			expectation: "probe",
 			evidenceRounds: 1,
 		});
-		const routing = set.apply({
-			op: "route",
-			statement: "route",
-			expectation: "route",
-			decision: "fast-path",
-			suitabilityProbability: 0.9,
-			successProbability: 0.9,
-			estimatedSteps: 1,
-			difficulty: "low",
-		});
 		const refuted = set.apply({
 			op: "propose",
 			statement: "old claim",
@@ -678,15 +644,15 @@ describe("pruneForNewTask (task-end cleanup)", () => {
 			evidenceRounds: 1,
 		});
 
-		expect(set.beliefs).toHaveLength(8);
+		expect(set.beliefs).toHaveLength(7);
 
 		const removed = set.pruneForNewTask();
 
 		// Only the two supported product/code beliefs survive.
 		expect(set.beliefs.map((b) => b.id)).toEqual([product.id, code.id]);
-		// Everything else — framing, routing, refuted, superseded, refined (proposed), proposed — was removed.
+		// Everything else — framing, refuted, superseded, refined (proposed), proposed — was removed.
 		expect(removed.map((b) => b.id).sort()).toEqual(
-			[framing.id, routing.id, refuted.id, superseded.id, refined.id, proposed.id].sort(),
+			[framing.id, refuted.id, superseded.id, refined.id, proposed.id].sort(),
 		);
 	});
 

@@ -24,7 +24,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, type JsonValue } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -52,9 +52,33 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
+import {
+	AGENT_SESSION_DOMAIN_SCHEMA_VERSION,
+	type AgentSessionDomainEvent,
+	type AgentSessionSnapshot,
+	appendAgentSessionDomainEvent,
+	applyAgentSessionDomainEvent,
+	createDomainId,
+	type Belief as DomainBelief,
+	type BeliefDelta as DomainBeliefDelta,
+	type DomainContent,
+	type Routing as DomainRouting,
+	type FrameBodyKind,
+	type FrameStage,
+	replayAgentSessionDomainEntries,
+} from "./agent-session-domain.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { type Belief, type BeliefDelta, BeliefSet, type BeliefStatus, statusOf } from "./belief-set.ts";
+import {
+	type Belief,
+	type BeliefDelta,
+	BeliefSet,
+	type BeliefStatus,
+	type Routing,
+	RoutingSet,
+	statusOf,
+	WITHDRAWN,
+} from "./belief-set.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -87,6 +111,7 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type ToolCallEventResult,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -149,6 +174,7 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
+	| AgentSessionDomainEvent
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
@@ -189,48 +215,7 @@ export type AgentSessionEvent =
 	  }
 	| { type: "summarization_retry_finished" }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "bash_execution_update"; id?: string; delta: string }
-	// Belief-loop phase events (epistemic state feed for the native GUI). These mirror
-	// the demo/headless protocol so the live viewer can render the belief set, plan,
-	// distillation, and execution stage without inferring them from the message log.
-	| { type: "BeliefsSelected"; frameId: number; beliefs: number[] }
-	| {
-			type: "BeliefCreated";
-			beliefId: number;
-			statement: string;
-			domain: string;
-			expectation: string;
-			evidenceRounds: number;
-	  }
-	| {
-			type: "BeliefUpdated";
-			beliefId: number;
-			status: BeliefStatus;
-			previousStatus: BeliefStatus;
-			statement: string;
-	  }
-	| { type: "PlanProduced"; frameId: number; planId: string; label: string; question: string; intent: string }
-	| {
-			type: "ProposalCreated";
-			frameId: number;
-			op: string;
-			belief: string;
-			lhs: string;
-			relation: string;
-			rhs: string;
-			detail: string;
-	  }
-	| {
-			type: "DistillationProduced";
-			frameId: number;
-			label: string;
-			interpretation: string;
-	  }
-	| {
-			type: "CursorChanged";
-			frameId: number;
-			stage: "PLANNING" | "EXECUTING" | "DISTILLING" | "PROPOSING" | "CLOSED";
-	  };
+	| { type: "bash_execution_update"; id?: string; delta: string };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -459,6 +444,7 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private readonly _beliefSet = new BeliefSet();
+	private readonly _routingSet = new RoutingSet();
 	/** The belief loop's current phase; see the `LoopState` type. */
 	private _loopState: LoopState = { role: "propose" };
 	/** The belief ids already dispatched to execution — distinguishes fresh beliefs from dispatched-but-unsettled ones. */
@@ -517,7 +503,7 @@ export class AgentSession {
 	 *  not facts). Non-null only while a frame-open handoff is running, so a successful run can
 	 *  synthesize a handoff-outcome belief and route to distill instead of resetting to the next task. */
 	private _frameOpenHandoff: {
-		route: Belief;
+		route: Routing;
 		framingIds: readonly string[];
 		outcomeBeliefId?: string;
 		openWorldBeliefs: ReadonlyArray<{
@@ -530,10 +516,21 @@ export class AgentSession {
 	} | null = null;
 	/** The current task's request text, captured at `prompt()`, used for the fast-path summary. */
 	private _currentTaskRequestText = "";
-	/** Monotonic counter for the current task's stable id, incremented at each task boundary. */
-	private _taskId = 1;
-	private _planCounter = 0;
-	private _distillCounter = 0;
+	private _domainSnapshot: AgentSessionSnapshot;
+	private _currentTaskId: string | undefined;
+	private _currentFrameId: string | undefined;
+	private _currentPlanId: string | undefined;
+	private _currentFrameExecutionIds: string[] = [];
+	private _currentFrameBeliefDeltaIds: string[] = [];
+	private _pendingDomainBeliefDeltas: Array<{ delta: DomainBeliefDelta; activeBeliefs: string[] }> = [];
+	private _pendingDomainTaskPrompt:
+		| {
+				originalText: string;
+				effectiveText: string;
+				originalImages?: readonly ImageContent[];
+				effectiveImages?: readonly ImageContent[];
+		  }
+		| undefined;
 
 	/** Whether the belief set can operate: enabled and `declare_belief` is actually active (not allowlisted out). */
 	private get _beliefSetUsable(): boolean {
@@ -582,6 +579,22 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._domainSnapshot = replayAgentSessionDomainEntries(
+			this.sessionManager.getSessionId(),
+			this.sessionManager.getBranch(),
+		);
+		const currentTask = [...this._domainSnapshot.activeBranchTasks]
+			.reverse()
+			.map((taskId) => this._domainSnapshot.tasks.get(taskId))
+			.find((task) => task?.status === "active");
+		this._currentTaskId = currentTask?.id;
+		const currentFrame = currentTask?.frames.find((frame) => frame.status === "active");
+		this._currentFrameId = currentFrame?.id;
+		this._currentPlanId = currentFrame?.body.kind === "belief-loop" ? currentFrame.body.plan?.id : undefined;
+		this._currentFrameExecutionIds =
+			currentFrame?.body.kind === "pending"
+				? []
+				: (currentFrame?.body.trajectory.map((execution) => execution.id) ?? []);
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -674,23 +687,63 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_call")) {
-				return undefined;
-			}
-
+			let hookResult: ToolCallEventResult | undefined;
 			try {
-				return await runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				});
+				hookResult = runner.hasHandlers("tool_call")
+					? await runner.emitToolCall({
+							type: "tool_call",
+							toolName: toolCall.name,
+							toolCallId: toolCall.id,
+							input: args as Record<string, unknown>,
+						})
+					: undefined;
 			} catch (err) {
 				if (err instanceof Error) {
 					throw err;
 				}
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
+			if (this._isProbeTool(toolCall.name) && this._currentTaskId && this._currentFrameId) {
+				const isFastPath =
+					!this._beliefSetUsable || (this._loopState.role === "execution" && this._loopState.fastPath);
+				if (isFastPath) {
+					this._selectDomainFrameBody("fast-path");
+				} else {
+					this._ensureDomainPlan(this._beliefSet.proposed().map((belief) => belief.id));
+				}
+				const planId = isFastPath ? undefined : this._currentPlanId;
+				this._recordDomainEvent({
+					...this._domainEventBase(),
+					type: "ExecutionStarted",
+					taskId: this._currentTaskId,
+					frameId: this._currentFrameId,
+					execution: {
+						id: toolCall.id,
+						planId,
+						intention: `Run ${toolCall.name}`,
+						tool: toolCall.name,
+						input: JSON.parse(JSON.stringify(args)) as JsonValue,
+						filePath:
+							typeof (args as Record<string, unknown>).path === "string"
+								? (args as Record<string, string>).path
+								: undefined,
+					},
+				});
+				this._currentFrameExecutionIds.push(toolCall.id);
+				if (hookResult?.block) {
+					this._recordDomainEvent({
+						...this._domainEventBase(),
+						type: "ExecutionCompleted",
+						taskId: this._currentTaskId,
+						frameId: this._currentFrameId,
+						executionId: toolCall.id,
+						output: hookResult.reason ?? "Tool execution was blocked",
+						status: "failed",
+						error: hookResult.reason ?? "Tool execution was blocked",
+					});
+				}
+			}
+			return hookResult;
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
@@ -713,6 +766,19 @@ export class AgentSession {
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
 			});
+			if (this._isProbeTool(toolCall.name) && this._currentTaskId && this._currentFrameId) {
+				const effectiveIsError = hookResult?.isError ?? isError;
+				this._recordDomainEvent({
+					...this._domainEventBase(),
+					type: "ExecutionCompleted",
+					taskId: this._currentTaskId,
+					frameId: this._currentFrameId,
+					executionId: toolCall.id,
+					output: JSON.parse(JSON.stringify(normalizedContent)) as JsonValue[],
+					status: effectiveIsError ? "failed" : "succeeded",
+					error: effectiveIsError ? contentText(normalizedContent, "Tool execution failed") : undefined,
+				});
+			}
 
 			if (!hookResult && normalizedContent === content) {
 				return undefined;
@@ -1050,13 +1116,14 @@ export class AgentSession {
 	 * masked from the fresh epistemic role.
 	 */
 	private _resetLoopForNewTask(): void {
+		this._closeDomainTask();
 		this._loopState = { role: "propose" };
 		this._dispatchedFrameIds = new Set();
 		this._consumedRouteIds = new Set();
+		this._routingSet.clear();
 		this._reflected = false;
 		this._fastPathFailure = false;
 		this._frameOpenHandoff = null;
-		this._taskId += 1;
 		this._evidenceWatermark = this.agent.state.messages.length;
 		// Drop the finished task's ephemera (framing/routing/refuted/superseded and any
 		// abnormal leftovers); only settled product/code knowledge survives as session
@@ -1065,9 +1132,6 @@ export class AgentSession {
 		// Freeze the retained-belief baseline for this task; beliefs produced from here on are
 		// this task's own and re-enable the "deepen or conclude" steer.
 		this._beliefsAtTaskReset = this._beliefSet.beliefs.length;
-		// The loop reset to propose is a cursor transition; surface it so consumers tracking
-		// phase (rather than inferring it from the message log) observe the reset.
-		this._emitCursorChanged("propose");
 	}
 
 	/** Advance the role from the just-completed turn and project the next role's surface. */
@@ -1083,6 +1147,16 @@ export class AgentSession {
 		if (this._pendingNewTask) {
 			this._pendingNewTask = false;
 			this._resetLoopForNewTask();
+			const prompt = this._pendingDomainTaskPrompt;
+			this._pendingDomainTaskPrompt = undefined;
+			if (prompt) {
+				this._beginDomainTask(
+					prompt.originalText,
+					prompt.effectiveText,
+					prompt.originalImages,
+					prompt.effectiveImages,
+				);
+			}
 			this._applyRoleSurface();
 			return;
 		}
@@ -1097,6 +1171,7 @@ export class AgentSession {
 			this._applyRoleSurface();
 			return;
 		}
+		const previousRole = this._loopState.role;
 		const next = await this._transition(this._loopState, turn);
 		this._loopState = next.state;
 		if (next.steer !== undefined) {
@@ -1107,6 +1182,9 @@ export class AgentSession {
 			});
 		}
 		this._applyRoleSurface();
+		if (previousRole === "distill" && next.state.role === "propose") {
+			this._openNextDomainFrame();
+		}
 		this._emitCursorChanged(next.state.role);
 	}
 
@@ -1114,15 +1192,19 @@ export class AgentSession {
 	private _emitCursorChanged(role: LoopState["role"]): void {
 		const stage =
 			role === "planner"
-				? "PLANNING"
+				? "planning"
 				: role === "execution"
-					? "EXECUTING"
+					? "executing"
 					: role === "distill"
-						? "DISTILLING"
+						? "distilling"
 						: role === "finalReport"
-							? "CLOSED"
-							: "PROPOSING";
-		this._emit({ type: "CursorChanged", frameId: this._taskId, stage });
+							? "closed"
+							: "proposing";
+		if (stage === "closed") {
+			this._closeDomainFrame();
+		} else {
+			this._changeDomainCursor(stage);
+		}
 	}
 
 	/**
@@ -1146,18 +1228,16 @@ export class AgentSession {
 				if (concluded) {
 					return this._concludeTransition(state, proposed);
 				}
-				// The propose role's routing belief decides this task's path, and it is evaluated
+				// The propose role's routing decision selects this task's path, and it is evaluated
 				// before open world beliefs are dispatched: a fast-path route may take over the task
 				// even while world hypotheses are still open — they are snapshotted into the
 				// fast-path context as unverified assumptions and re-adjudicated after the run.
-				// Each routing belief is consumed on first evaluation (by id); only the latest
+				// Each routing decision is consumed on first evaluation (by id); only the latest
 				// unconsumed route decides, so a fresh route declared after belief updates can hand
 				// the remaining work to the fast path while the earlier decision stays in the
 				// history. A missing or rejected route falls through to the normal belief-loop
 				// protocol instead of silently bypassing routing.
-				const routes = this._beliefSet.beliefs
-					.slice(this._beliefsAtTaskReset)
-					.filter((b) => b.domain === "routing" && !this._consumedRouteIds.has(b.id));
+				const routes = this._routingSet.routings.filter((routing) => !this._consumedRouteIds.has(routing.id));
 				const route = routes[routes.length - 1];
 				if (route) {
 					this._consumedRouteIds.add(route.id);
@@ -1166,21 +1246,9 @@ export class AgentSession {
 					// framing obligations do not constrain the fast path — the run may execute the
 					// request while they remain open, and they are re-adjudicated after the run.
 					if (route.decision === "fast-path") {
-						// Surface the routing decision to the native GUI's proposals lane. A fast-path
-						// session never reaches the planner's _emitBatchSelectionBlock, so this is the
-						// only ProposalCreated the proposals lane would otherwise see on that path.
-						this._emit({
-							type: "ProposalCreated",
-							frameId: this._taskId,
-							op: "+",
-							belief: `B${this._beliefNumericId(route)}`,
-							lhs: "",
-							relation: "",
-							rhs: "",
-							detail: route.statement,
-						});
 						return this._dispatchToFastExecution(route);
 					}
+					this._selectDomainFrameBody("belief-loop", route);
 				}
 				if (undispatched.length > 1) {
 					return this._dispatchToPlanner();
@@ -1230,10 +1298,12 @@ export class AgentSession {
 				if (undispatched.length > 1) {
 					// A refine (or an opportunistic propose) during distillation re-opens the frame —
 					// plan the next batch from the fresh beliefs before returning to propose.
+					this._openNextDomainFrame();
 					return this._dispatchToPlanner();
 				}
 				if (undispatched.length === 1) {
 					// A single remaining open belief needs no grouping decision — dispatch it directly.
+					this._openNextDomainFrame();
 					return this._dispatchToExecution(undispatched);
 				}
 				if (proposed.length > 0 && !ranTools) {
@@ -1288,13 +1358,7 @@ export class AgentSession {
 					// hand the same task back to propose (failure).
 					if (!ranTools) {
 						if (this._frameOpenHandoff) {
-							const next = this._finishFrameOpenHandoff(turn);
-							await this._settleFastPath(turn);
-							this._frameOpenHandoff = null;
-							if (this._fastPathFailure) {
-								return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-							}
-							return next;
+							return await this._settleFrameOpenHandoff(turn);
 						}
 						await this._settleFastPath(turn);
 						if (this._fastPathFailure) {
@@ -1311,13 +1375,7 @@ export class AgentSession {
 					}
 					if (frameHorizon <= 0) {
 						if (this._frameOpenHandoff) {
-							const next = this._finishFrameOpenHandoff(turn);
-							await this._settleFastPath(turn);
-							this._frameOpenHandoff = null;
-							if (this._fastPathFailure) {
-								return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-							}
-							return next;
+							return await this._settleFrameOpenHandoff(turn);
 						}
 						await this._settleFastPath(turn);
 						if (this._fastPathFailure) {
@@ -1483,140 +1541,52 @@ export class AgentSession {
 		);
 		this._emit({ type: "message_start", message });
 		this._emit({ type: "message_end", message });
-		this._emitBeliefPhase(batch);
-		for (const belief of batch) {
-			// Surface the proposed belief to the native GUI's proposals lane.
-			// The belief loop is prose-only (statement/expectation, no
-			// lhs/relation/rhs triple), so the proposal renders as "+ B<n>"
-			// followed by the statement text; the GUI guards the empty fields.
-			this._emit({
-				type: "ProposalCreated",
-				frameId: this._taskId,
-				op: "+",
-				belief: `B${this._beliefNumericId(belief)}`,
-				lhs: "",
-				relation: "",
-				rhs: "",
-				detail: belief.statement,
-			});
-		}
-		// The belief loop's planner has no structured intent/label/question, so
-		// surface the batch summary as the plan content for the native GUI. The
-		// plan id names this batch so a consumer can correlate the batch with its
-		// PlanProduced without relying on the (non-unique) `P-${taskId}` label.
-		const planCounter = ++this._planCounter;
-		const planId = `plan-${this._taskId}-${planCounter}`;
-		this._emit({
-			type: "PlanProduced",
-			frameId: this._taskId,
-			planId,
-			label: `P-${this._taskId}-${planCounter}`,
-			question: `Batch of ${batch.length} belief(s): ${ids.join(", ")}`,
-			intent: `Probe batch: ${ids.join(", ")}`,
-		});
-	}
-
-	/** Emit the planner's batch-selection phase event to the event listeners (and hence the native GUI). */
-	private _emitBeliefPhase(beliefs: Belief[]): void {
-		this._emit({
-			type: "BeliefsSelected",
-			frameId: this._taskId,
-			beliefs: beliefs.map((b) => this._beliefNumericId(b)),
-		});
-	}
-
-	/** Map a belief to the 1-based registry index used by the native GUI (B{n}). */
-	private _beliefNumericId(belief: Belief): number {
-		const idx = this._beliefSet.beliefs.findIndex((x) => x.id === belief.id);
-		return idx >= 0 ? idx + 1 : 0;
+		this._ensureDomainPlan(ids, `Probe batch: ${ids.join(", ")}`);
 	}
 
 	/**
 	 * Emit the belief-loop mutation events at the actual `declare_belief` mutation point, not at
 	 * batch selection. `belief` is the result `apply` returned and is supplied by the tool
-	 * callback. A `propose`/`refine` that creates a new record records `BeliefCreated`; a
-	 * mutation that changes an existing belief's observable status records `BeliefUpdated`.
-	 * `route` is stored settled and never enters the dispatch frame, but it must still be
-	 * surfaced as a `BeliefCreated` so the native GUI registers it in the belief registry;
-	 * otherwise a routing belief would only reach the GUI as a `ProposalCreated` and never
-	 * appear in the belief-set pane.
+	 * callback. Every mutation becomes one durable BeliefDeltaApplied event. A refinement
+	 * includes both the superseded record and its proposed replacement. Routing is stored
+	 * separately and therefore never enters this callback.
 	 */
 	private _onBeliefDelta(
 		delta: BeliefDelta,
 		belief: Belief,
-		previousStatus: BeliefStatus | undefined,
+		_previousStatus: BeliefStatus | undefined,
 		priorBelief?: Belief,
 	): void {
-		switch (delta.op) {
-			case "propose":
-				this._emit({
-					type: "BeliefCreated",
-					beliefId: this._beliefNumericId(belief),
-					statement: belief.statement,
-					domain: belief.domain,
-					expectation: belief.expectation,
-					evidenceRounds: belief.evidenceRounds,
-				});
-				return;
-			case "route":
-				// A routing belief is created settled (see belief-set.ts `route`): it has
-				// `supportedBy` already populated and `statusOf` returns `supported`. It never
-				// dispatches as an open belief, but it must still be registered in the belief
-				// registry for the native GUI. The `BeliefCreated` event schema carries no
-				// status field (the GUI defaults a new belief to `proposed`), but the GUI only
-				// distinguishes an open belief by the `open` status color, so a routing belief
-				// renders as default text and is not shown as open.
-				this._emit({
-					type: "BeliefCreated",
-					beliefId: this._beliefNumericId(belief),
-					statement: belief.statement,
-					domain: belief.domain,
-					expectation: belief.expectation,
-					evidenceRounds: belief.evidenceRounds,
-				});
-				return;
-			case "support":
-			case "refute":
-			case "retract":
-				// Settle/withdraw an existing belief: its observable status changed from the
-				// pre-mutation status (`previousStatus`) to the post-mutation one.
-				this._emit({
-					type: "BeliefUpdated",
-					beliefId: this._beliefNumericId(belief),
-					status: statusOf(belief),
-					previousStatus: previousStatus ?? "proposed",
-					statement: belief.statement,
-				});
-				return;
-			case "refine":
-				// A refine creates a new record and supersedes the prior; the prior's status
-				// change (proposed/supported -> superseded) is observable too.
-				this._emit({
-					type: "BeliefCreated",
-					beliefId: this._beliefNumericId(belief),
-					statement: belief.statement,
-					domain: belief.domain,
-					expectation: belief.expectation,
-					evidenceRounds: belief.evidenceRounds,
-				});
-				if (previousStatus !== undefined && previousStatus !== "superseded" && priorBelief) {
-					// The prior record was superseded in place by `apply`; recompute its status from
-					// the current store (the pre-apply reference is stale and still reads `proposed`).
-					const currentPrior = this._beliefSet.get(priorBelief.id) ?? priorBelief;
-					this._emit({
-						type: "BeliefUpdated",
-						beliefId: this._beliefNumericId(currentPrior),
-						status: statusOf(currentPrior),
-						previousStatus,
-						statement: currentPrior.statement,
-					});
-				}
-				return;
+		if (!this._currentFrameId) return;
+		const resultingBeliefs = [belief];
+		if (delta.op === "refine" && priorBelief) {
+			resultingBeliefs.unshift(this._beliefSet.get(priorBelief.id) ?? priorBelief);
 		}
+		const domainDelta: DomainBeliefDelta = {
+			id: createDomainId("belief-delta"),
+			frameId: this._currentFrameId,
+			operation: delta.op,
+			beliefId: "beliefId" in delta ? delta.beliefId : undefined,
+			proposedRecord: delta.op === "propose" || delta.op === "refine" ? this._domainBelief(belief) : undefined,
+			evidence: "evidence" in delta ? delta.evidence : undefined,
+			evidenceBeliefIds: "evidenceBeliefIds" in delta ? [...(delta.evidenceBeliefIds ?? [])] : [],
+			resultingBeliefs: resultingBeliefs.map((record) => this._domainBelief(record)),
+		};
+		this._pendingDomainBeliefDeltas.push({ delta: domainDelta, activeBeliefs: this._activeDomainBeliefIds() });
+		const frame = this._currentTaskId
+			? this._domainSnapshot.tasks
+					.get(this._currentTaskId)
+					?.frames.find((candidate) => candidate.id === this._currentFrameId)
+			: undefined;
+		if (frame?.body.kind === "belief-loop") this._flushPendingDomainBeliefDeltas();
 	}
 
 	/** Dispatch the open frame to the execution role, advancing the dispatch ledger and watermark. */
 	private _dispatchToExecution(proposed: Belief[]): { state: LoopState; steer: string } {
+		this._ensureDomainPlan(
+			proposed.map((belief) => belief.id),
+			`Probe ${proposed.map((belief) => belief.id).join(", ")}`,
+		);
 		this._dispatchedFrameIds = new Set(proposed.map((b) => b.id));
 		this._evidenceWatermark = this.agent.state.messages.length;
 		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
@@ -1639,12 +1609,7 @@ export class AgentSession {
 	 * loop re-adjudicates any that stay open afterwards. This is the explicit authorization
 	 * gate for the mid-task handoff — it never infers coverage from framing text.
 	 */
-	private _frameOpenHandoffAuthorized(route: Belief): boolean {
-		// The route must name the task it authorizes; a mismatched task id is rejected.
-		const routeTask = route.parentTaskId;
-		if (!routeTask || routeTask !== this.taskId) {
-			return false;
-		}
+	private _frameOpenHandoffAuthorized(route: Routing): boolean {
 		const openFramings = this._beliefSet.framings();
 		if (openFramings.length === 0) {
 			return false;
@@ -1657,22 +1622,26 @@ export class AgentSession {
 	}
 
 	/** Dispatch the execution role on the fast path: execute the user's request directly and answer. */
-	private _dispatchToFastExecution(route: Belief): { state: LoopState; steer: string } {
+	private _dispatchToFastExecution(route: Routing): { state: LoopState; steer: string } {
 		this._dispatchedFrameIds = new Set();
 		this._fastPathFailure = false;
-		// Surface a minimal plan so the native GUI's plan lane has data on the fast
-		// path, even though the fast path never runs the planner role. The routing
-		// belief carries only routing metadata (no structured intent/question), so
-		// synthesize a single-step plan summary from it.
-		const planCounter = ++this._planCounter;
-		this._emit({
-			type: "PlanProduced",
-			frameId: this._taskId,
-			planId: `plan-${this._taskId}-${planCounter}`,
-			label: `P-${this._taskId}-${planCounter}`,
-			question: `Fast-path: ${route.estimatedSteps ?? 1} step(s), ${route.difficulty ?? "unknown"} difficulty, success p=${route.successProbability ?? "?"}`,
-			intent: `Execute request directly (fast path): ${route.reason ?? route.statement}`,
-		});
+		// A fast-path route takes a fresh frame: if the current frame already selected a
+		// belief-loop body (initial routing) or buffered belief changes, close it and open a new
+		// frame so the fast path is recorded as its own classified frame.
+		const currentFrame =
+			this._currentTaskId === undefined
+				? undefined
+				: this._domainSnapshot.tasks
+						.get(this._currentTaskId)
+						?.frames.find((candidate) => candidate.id === this._currentFrameId);
+		const needsNewFrame =
+			this._pendingDomainBeliefDeltas.length > 0 ||
+			(currentFrame !== undefined && currentFrame.body.kind !== "pending");
+		if (needsNewFrame) {
+			this._ensureDomainPlan([], "Record pre-routing belief changes");
+			this._openNextDomainFrame();
+		}
+		this._selectDomainFrameBody("fast-path", route);
 		this._frameOpenHandoff = this._frameOpenHandoffAuthorized(route)
 			? {
 					route,
@@ -1699,35 +1668,42 @@ export class AgentSession {
 	}
 
 	/**
-	 * Finish a successful frame-open fast-path handoff: synthesize a `proposed` product/code
-	 * outcome belief stating that the authorized framing's tool execution completed without
-	 * error, mark it dispatched so the distill step adjudicates it rather than re-dispatching it
-	 * to execution, keep the framed obligation open, and route to distill via `fastPathDischarge`.
-	 * The distill role then supports/refutes the outcome and discharges the framing per the
-	 * existing `evidenceBeliefIds` rule.
+	 * Settle a completed frame-open fast-path handoff. Propose the synthetic outcome belief
+	 * first so the settle log can correlate it, distill the run, then reopen a belief-loop
+	 * frame to flush the outcome's belief delta and hand the framing discharge to the distill
+	 * role. A failed run is handed back to propose under the same task instead.
 	 */
-	private _finishFrameOpenHandoff(_turn: PrepareNextTurnContext): { state: LoopState; steer: string } {
+	private async _settleFrameOpenHandoff(turn: PrepareNextTurnContext): Promise<{ state: LoopState; steer: string }> {
 		const handoff = this._frameOpenHandoff;
 		if (!handoff) {
-			throw new Error("_finishFrameOpenHandoff called without a frame-open handoff.");
+			throw new Error("_settleFrameOpenHandoff called without a frame-open handoff.");
 		}
-		const outcome = this._beliefSet.apply({
-			op: "propose",
+		const outcomeDelta = {
+			op: "propose" as const,
 			statement: `fast path executed the authorized handoff for framing(s) ${handoff.framingIds.join(", ")} without error`,
-			domain: "product",
+			domain: "product" as const,
 			expectation: "the tool results for the authorized handoff contain no error",
 			evidenceRounds: this._beliefSet.framings().length || 1,
-		});
+		};
+		const outcome = this._beliefSet.apply(outcomeDelta);
 		// Record the outcome id so the settle log can write it as traceability.
-		if (this._frameOpenHandoff) {
-			this._frameOpenHandoff.outcomeBeliefId = outcome.id;
-		}
+		handoff.outcomeBeliefId = outcome.id;
 		// The outcome is a synthetic harness claim; mark it dispatched so the distill step
 		// adjudicates it instead of the undispatched guard re-dispatching it to execution.
 		this._dispatchedFrameIds = new Set([...this._dispatchedFrameIds, outcome.id]);
 		this._fastPathFailure = false;
+		// Distill the run; the settle log now correlates the outcome id.
+		await this._settleFastPath(turn, outcome.id);
+		// Reopen a belief-loop frame for the outcome's belief delta, then flush it.
+		this._openNextDomainFrame();
+		this._selectDomainFrameBody("belief-loop");
+		this._onBeliefDelta(outcomeDelta, outcome, undefined);
+		this._frameOpenHandoff = null;
 		// Keep framing open; do NOT reset the loop. Route to distill so the model decides, on
 		// the structured tool results, whether to support the outcome and discharge the framing.
+		if (this._fastPathFailure) {
+			return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
+		}
 		return { state: { role: "distill" }, steer: TRANSITION_STEERS.fastPathDischarge };
 	}
 
@@ -1760,15 +1736,7 @@ export class AgentSession {
 			},
 			{ triggerTurn: false },
 		);
-		// Feed the native GUI the distilled observations as a phase event. The
-		// belief loop has no structured inputIds/interpretation, so we surface the
-		// human-readable distilled lines as the interpretation text.
-		this._emit({
-			type: "DistillationProduced",
-			frameId: this._taskId,
-			label: `D-${this._taskId}-${++this._distillCounter}`,
-			interpretation: lines.join("\n"),
-		});
+		this._recordDomainDistillation(lines.join("\n"));
 	}
 
 	/**
@@ -1782,6 +1750,7 @@ export class AgentSession {
 			this._fastPathFailure = true;
 		}
 		const summary = await this._distillFastPath(turn);
+		this._recordDomainDistillation(summary);
 		const handoff = this._frameOpenHandoff;
 		try {
 			await this.sendCustomMessage(
@@ -1805,14 +1774,14 @@ export class AgentSession {
 
 	/** Build the traceability details for a frame-open fast-path handoff. */
 	private _fastPathTraceability(
-		handoff: { route: Belief; framingIds: readonly string[]; outcomeBeliefId?: string } | null,
+		handoff: { route: Routing; framingIds: readonly string[]; outcomeBeliefId?: string } | null,
 		outcomeBeliefId?: string,
 	): Record<string, unknown> {
 		if (!handoff) {
 			return {};
 		}
 		return {
-			parentTaskId: handoff.route.parentTaskId ?? this.taskId,
+			parentTaskId: this.taskId,
 			handoffFromBeliefIds: [...handoff.framingIds],
 			reason: handoff.route.reason,
 			outcomeBeliefId: outcomeBeliefId ?? handoff.outcomeBeliefId,
@@ -2079,6 +2048,304 @@ export class AgentSession {
 		return this._beliefSet.beliefs;
 	}
 
+	/** Replayed, immutable domain projection for the active session branch. */
+	get domainSnapshot(): AgentSessionSnapshot {
+		return this._domainSnapshot;
+	}
+
+	private _domainEventBase(): Pick<AgentSessionDomainEvent, "schemaVersion" | "eventId" | "timestamp"> {
+		return {
+			schemaVersion: AGENT_SESSION_DOMAIN_SCHEMA_VERSION,
+			eventId: createDomainId("event"),
+			timestamp: new Date().toISOString(),
+		};
+	}
+
+	private _recordDomainEvent(event: AgentSessionDomainEvent): void {
+		const next = applyAgentSessionDomainEvent(this._domainSnapshot, event);
+		appendAgentSessionDomainEvent(this.sessionManager, event);
+		this._domainSnapshot = next;
+		this._emit(event);
+	}
+
+	private _promptContent(text: string, images?: readonly ImageContent[]): DomainContent {
+		if (!images || images.length === 0) return text;
+		return JSON.parse(JSON.stringify([{ type: "text", text }, ...images])) as JsonValue[];
+	}
+
+	private _beginDomainTask(
+		originalText: string,
+		effectiveText: string,
+		originalImages?: readonly ImageContent[],
+		effectiveImages?: readonly ImageContent[],
+	): void {
+		if (this._currentTaskId) {
+			throw new Error(`Cannot open a new task while ${this._currentTaskId} is active.`);
+		}
+		const taskId = createDomainId("task");
+		const frameId = createDomainId("frame");
+		const inheritedBeliefs = this._activeDomainBeliefIds().filter((beliefId) =>
+			this._domainSnapshot.beliefs.has(beliefId),
+		);
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "TaskOpened",
+			taskId,
+			initialPrompt: {
+				id: createDomainId("prompt"),
+				original: this._promptContent(originalText, originalImages),
+				effective: this._promptContent(effectiveText, effectiveImages),
+			},
+			inheritedBeliefs,
+		});
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "TargetDefined",
+			taskId,
+			target: { id: createDomainId("target"), statement: effectiveText },
+		});
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "FrameOpened",
+			taskId,
+			frameId,
+			ordinal: 1,
+		});
+		this._currentTaskId = taskId;
+		this._currentFrameId = frameId;
+		this._currentPlanId = undefined;
+		this._currentFrameExecutionIds = [];
+		this._currentFrameBeliefDeltaIds = [];
+		this._pendingDomainBeliefDeltas = [];
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "CursorChanged",
+			taskId,
+			frameId,
+			stage: "routing",
+		});
+	}
+
+	private _domainBelief(belief: Belief): DomainBelief {
+		return {
+			id: belief.id,
+			statement: belief.statement,
+			domain: belief.domain,
+			expectation: belief.expectation,
+			evidenceRounds: belief.evidenceRounds,
+			skillRefs: [...(belief.skillRefs ?? [])],
+			supportedBy: belief.supportedBy.map((evidence) => ({
+				evidence: evidence.evidence,
+				beliefIds: evidence.beliefIds ? [...evidence.beliefIds] : undefined,
+			})),
+			refutedBy: belief.refutedBy.map((evidence) => ({ evidence: evidence.evidence })),
+			supersededBy:
+				belief.supersededBy !== undefined && belief.supersededBy !== WITHDRAWN ? belief.supersededBy : undefined,
+			withdrawn: belief.supersededBy === WITHDRAWN,
+		};
+	}
+
+	private _domainRouting(route: Routing): DomainRouting {
+		return {
+			id: route.id,
+			statement: route.statement,
+			decision: route.decision,
+			suitabilityProbability: route.suitabilityProbability,
+			successProbability: route.successProbability,
+			estimatedSteps: route.estimatedSteps,
+			difficulty: route.difficulty,
+			supportingBeliefs: [],
+			handoffFromFramingBeliefs: [...(route.handoffFromBeliefIds ?? [])],
+			reason: route.reason ?? route.statement,
+		};
+	}
+
+	private _activeDomainBeliefIds(): string[] {
+		return this._beliefSet.beliefs
+			.filter((belief) => {
+				const status = statusOf(belief);
+				return status === "proposed" || status === "supported";
+			})
+			.map((belief) => belief.id);
+	}
+
+	private _selectDomainFrameBody(kind: FrameBodyKind, routing?: Routing): void {
+		if (!this._currentTaskId || !this._currentFrameId) return;
+		const frame = this._domainSnapshot.tasks
+			.get(this._currentTaskId)
+			?.frames.find((candidate) => candidate.id === this._currentFrameId);
+		if (!frame || frame.status === "closed") return;
+		if (routing && !frame.routing) {
+			this._recordDomainEvent({
+				...this._domainEventBase(),
+				type: "RoutingDecided",
+				taskId: this._currentTaskId,
+				frameId: this._currentFrameId,
+				routing: this._domainRouting(routing),
+			});
+		}
+		if (frame.body.kind === "pending") {
+			this._recordDomainEvent({
+				...this._domainEventBase(),
+				type: "FrameBodySelected",
+				taskId: this._currentTaskId,
+				frameId: this._currentFrameId,
+				body: kind,
+				openBeliefsAtStart:
+					kind === "belief-loop" ? this._beliefSet.proposed().map((belief) => belief.id) : undefined,
+			});
+		}
+		if (kind === "belief-loop") this._flushPendingDomainBeliefDeltas();
+	}
+
+	private _flushPendingDomainBeliefDeltas(): void {
+		if (!this._currentTaskId || !this._currentFrameId || this._pendingDomainBeliefDeltas.length === 0) return;
+		for (const pending of this._pendingDomainBeliefDeltas) {
+			this._recordDomainEvent({
+				...this._domainEventBase(),
+				type: "BeliefDeltaApplied",
+				taskId: this._currentTaskId,
+				frameId: this._currentFrameId,
+				delta: pending.delta,
+				activeBeliefs: pending.activeBeliefs,
+			});
+			this._currentFrameBeliefDeltaIds.push(pending.delta.id);
+		}
+		this._pendingDomainBeliefDeltas = [];
+	}
+
+	private _ensureDomainPlan(selectedToExplore: readonly string[], intent?: string): string | undefined {
+		if (!this._currentTaskId || !this._currentFrameId) return undefined;
+		this._selectDomainFrameBody("belief-loop");
+		if (this._currentPlanId) return this._currentPlanId;
+		const planId = createDomainId("plan");
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "PlanProduced",
+			taskId: this._currentTaskId,
+			frameId: this._currentFrameId,
+			plan: { id: planId, selectedToExplore: [...selectedToExplore], intent },
+		});
+		this._currentPlanId = planId;
+		return planId;
+	}
+
+	private _changeDomainCursor(stage: FrameStage): void {
+		if (!this._currentTaskId || !this._currentFrameId) return;
+		const frame = this._domainSnapshot.tasks
+			.get(this._currentTaskId)
+			?.frames.find((candidate) => candidate.id === this._currentFrameId);
+		if (!frame || frame.status === "closed") return;
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "CursorChanged",
+			taskId: this._currentTaskId,
+			frameId: this._currentFrameId,
+			stage,
+		});
+	}
+
+	private _addDomainIntervention(contents: DomainContent): void {
+		if (!this._currentTaskId || !this._currentFrameId) return;
+		const stage = this._domainSnapshot.cursor?.stage ?? "proposing";
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "InterventionAdded",
+			taskId: this._currentTaskId,
+			frameId: this._currentFrameId,
+			intervention: {
+				id: createDomainId("intervention"),
+				contents,
+				stage,
+				createdAt: new Date().toISOString(),
+			},
+		});
+	}
+
+	private _closeDomainFrame(): void {
+		if (!this._currentTaskId || !this._currentFrameId) return;
+		const frame = this._domainSnapshot.tasks
+			.get(this._currentTaskId)
+			?.frames.find((candidate) => candidate.id === this._currentFrameId);
+		if (!frame || frame.status === "closed") return;
+		if (frame.body.kind === "pending") {
+			if (this._beliefSetUsable) {
+				this._ensureDomainPlan([], "Conclude the task from the settled belief set");
+			} else {
+				this._selectDomainFrameBody("fast-path");
+			}
+		} else if (frame.body.kind === "belief-loop" && !frame.body.plan) {
+			// A distill-only belief-loop frame (e.g. the post-handoff discharge frame) never ran
+			// the planner, but a closed belief-loop frame must still own a Plan occurrence.
+			this._ensureDomainPlan([], "Conclude the task from the settled belief set");
+		}
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "FrameClosed",
+			taskId: this._currentTaskId,
+			frameId: this._currentFrameId,
+		});
+	}
+
+	private _recordDomainDistillation(contents: string): void {
+		if (!this._currentTaskId || !this._currentFrameId) return;
+		const frame = this._domainSnapshot.tasks
+			.get(this._currentTaskId)
+			?.frames.find((candidate) => candidate.id === this._currentFrameId);
+		if (!frame || frame.status === "closed" || frame.body.kind === "pending" || frame.body.distillation) return;
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "DistillationProduced",
+			taskId: this._currentTaskId,
+			frameId: this._currentFrameId,
+			distillation: {
+				id: createDomainId("distillation"),
+				inputs: [...this._currentFrameExecutionIds],
+				contents,
+				outputs: [...this._currentFrameBeliefDeltaIds],
+			},
+		});
+	}
+
+	private _openNextDomainFrame(): void {
+		if (!this._currentTaskId) return;
+		this._closeDomainFrame();
+		const task = this._domainSnapshot.tasks.get(this._currentTaskId);
+		if (!task || task.status !== "active") return;
+		const frameId = createDomainId("frame");
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "FrameOpened",
+			taskId: task.id,
+			frameId,
+			ordinal: task.frames.length + 1,
+		});
+		this._currentFrameId = frameId;
+		this._currentPlanId = undefined;
+		this._currentFrameExecutionIds = [];
+		this._currentFrameBeliefDeltaIds = [];
+		this._pendingDomainBeliefDeltas = [];
+	}
+
+	private _closeDomainTask(status: "completed" | "cancelled" | "failed" = "completed"): void {
+		if (!this._currentTaskId) return;
+		const task = this._domainSnapshot.tasks.get(this._currentTaskId);
+		if (!task || task.status !== "active") return;
+		this._closeDomainFrame();
+		this._recordDomainEvent({
+			...this._domainEventBase(),
+			type: "TaskClosed",
+			taskId: task.id,
+			status,
+		});
+		this._currentTaskId = undefined;
+		this._currentFrameId = undefined;
+		this._currentPlanId = undefined;
+		this._currentFrameExecutionIds = [];
+		this._currentFrameBeliefDeltaIds = [];
+		this._pendingDomainBeliefDeltas = [];
+	}
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -2126,6 +2393,9 @@ export class AgentSession {
 	private async _emitAgentSettled(): Promise<void> {
 		this._isAgentRunActive = false;
 		try {
+			if (this._currentTaskId && (!this._beliefSetUsable || this._role === "finalReport")) {
+				this._closeDomainTask();
+			}
 			await this._extensionRunner.emit({ type: "agent_settled" });
 			this._emit({ type: "agent_settled" });
 		} finally {
@@ -2548,9 +2818,9 @@ export class AgentSession {
 		return this.sessionManager.getSessionId();
 	}
 
-	/** Current task id (stable, monotonic per task). */
-	get taskId(): string {
-		return `task-${this._taskId}`;
+	/** Stable id of the active task, or undefined before a task is opened. */
+	get taskId(): string | undefined {
+		return this._currentTaskId;
 	}
 
 	/** Current session display name, if set */
@@ -2748,6 +3018,12 @@ export class AgentSession {
 			if (this.isStreaming) {
 				if (this._role === "finalReport") {
 					this._pendingNewTask = true;
+					this._pendingDomainTaskPrompt = {
+						originalText: text,
+						effectiveText: expandedText,
+						originalImages: options?.images,
+						effectiveImages: currentImages,
+					};
 				}
 				if (!options?.streamingBehavior) {
 					throw new Error(
@@ -2757,6 +3033,7 @@ export class AgentSession {
 				if (options.streamingBehavior === "followUp") {
 					await this._queueFollowUp(expandedText, currentImages);
 				} else {
+					this._addDomainIntervention(this._promptContent(expandedText, currentImages));
 					await this._queueSteer(expandedText, currentImages);
 				}
 				preflightResult?.(true);
@@ -2847,6 +3124,11 @@ export class AgentSession {
 			// keeps only settled product/code records — and the loop resets.
 			if (this._role === "finalReport") {
 				this._resetLoopForNewTask();
+			}
+			if (!this._currentTaskId) {
+				this._beginDomainTask(text, expandedText, options?.images, currentImages);
+			} else {
+				this._addDomainIntervention(this._promptContent(expandedText, currentImages));
 			}
 			this._applyRoleSurface();
 		} catch (error) {
@@ -4282,8 +4564,11 @@ export class AgentSession {
 		);
 		this._baseToolDefinitions.set(
 			"declare_belief",
-			createDeclareBeliefToolDefinition(this._beliefSet, (delta, belief, previousStatus, priorBelief) =>
-				this._onBeliefDelta(delta, belief, previousStatus, priorBelief),
+			createDeclareBeliefToolDefinition(
+				this._beliefSet,
+				this._routingSet,
+				(delta, belief, previousStatus, priorBelief) =>
+					this._onBeliefDelta(delta, belief, previousStatus, priorBelief),
 			) as ToolDefinition,
 		);
 		this._baseToolDefinitions.set("view_beliefs", createViewBeliefsToolDefinition(this._beliefSet) as ToolDefinition);

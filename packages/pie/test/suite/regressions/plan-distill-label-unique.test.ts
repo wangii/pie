@@ -3,16 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
 
 /**
- * Regression for the "planID/distillationID stays fixed forever" report.
- *
- * The producer (`agent-session.ts`) emits PlanProduced/DistillationProduced with a
- * display `label` that was previously derived only from `taskId` (`P-<taskId>` /
- * `D-<taskId>`), so every plan/distillation in a session rendered the same ID
- * even though the internal `planId` carried a unique counter. These tests drive a
- * loop that emits multiple plans within one task and assert the labels are unique
- * and that each plan's label correlates with its unique `planId`.
+ * A Task may contain several Frames. Every Plan and Distillation occurrence owns a
+ * stable opaque id and correlates to exactly one runtime-assigned Frame id.
  */
-describe("plan/distillation display label uniqueness", () => {
+describe("plan/distillation domain identity", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -21,7 +15,7 @@ describe("plan/distillation display label uniqueness", () => {
 		}
 	});
 
-	it("emits a unique label per PlanProduced and correlates it with the planId counter", async () => {
+	it("emits unique occurrence ids and explicit frame correlations", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
@@ -100,21 +94,22 @@ describe("plan/distillation display label uniqueness", () => {
 		const plans = harness.eventsOfType("PlanProduced");
 		expect(plans.length).toBeGreaterThan(1);
 
-		// Each plan's label must be unique and must embed the same batch counter as its planId.
-		const labels = plans.map((p) => p.label);
-		expect(new Set(labels).size).toBe(labels.length);
+		const planIds = plans.map((event) => event.plan.id);
+		expect(new Set(planIds).size).toBe(planIds.length);
 		for (const plan of plans) {
-			const counter = plan.planId.split("-")[2];
-			expect(plan.label).toBe(`P-${plan.frameId}-${counter}`);
+			expect(plan.plan.id).toMatch(/^plan-/);
+			expect(typeof plan.frameId).toBe("string");
+			expect(plan.plan.selectedToExplore.length).toBeGreaterThan(0);
 		}
+		expect(new Set(plans.map((event) => event.frameId)).size).toBe(plans.length);
 
-		// A single flow (the current task) must not reuse a label under the previous broken scheme.
 		const distillations = harness.eventsOfType("DistillationProduced");
 		if (distillations.length > 0) {
-			const distLabels = distillations.map((d) => d.label);
-			expect(new Set(distLabels).size).toBe(distLabels.length);
+			const distillationIds = distillations.map((event) => event.distillation.id);
+			expect(new Set(distillationIds).size).toBe(distillationIds.length);
 			for (const dist of distillations) {
-				expect(dist.label).toMatch(/^D-\d+-\d+$/);
+				expect(dist.distillation.id).toMatch(/^distillation-/);
+				expect(typeof dist.frameId).toBe("string");
 			}
 		}
 	});

@@ -1,14 +1,11 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { statusOfDomainBelief } from "../../../src/core/agent-session-domain.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 /**
- * Exercise the belief-loop event family and assert the events introduced/completed by the
- * contract-hardening change fire with the expected shapes and ordering:
- * - BeliefCreated fires at propose time (before BeliefsSelected), not at batch selection.
- * - BeliefUpdated fires when a belief's status actually changes (support/refute/refine/retract).
- * - ProposalCreated / PlanProduced (with planId) / BeliefsSelected fire on a planner batch.
- * - CursorChanged no longer carries a stub `item`.
+ * Exercise the durable domain-event family. The runtime owns ids and correlations;
+ * consumers replay these events instead of reconstructing frames from phase adjacency.
  */
 describe("belief-loop event family", () => {
 	const harnesses: Harness[] = [];
@@ -19,7 +16,7 @@ describe("belief-loop event family", () => {
 		}
 	});
 
-	it("emits BeliefCreated on propose (before batch selection) and BeliefUpdated on a real status change", async () => {
+	it("emits task/frame lifecycle, belief deltas, plan, and distillation correlations", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
@@ -61,59 +58,49 @@ describe("belief-loop event family", () => {
 
 		await harness.session.prompt("is the cache persistent?");
 
-		// BeliefCreated fires at propose time, before BeliefsSelected.
-		const created = harness.eventsOfType("BeliefCreated");
-		expect(created.length).toBeGreaterThan(0);
-		for (const ev of created) {
-			expect(ev.beliefId).toBeGreaterThan(0);
-			expect(ev.statement).toBeTruthy();
-			expect(ev.domain).toBeTruthy();
-			expect(ev.expectation).toBeTruthy();
-			expect(ev.evidenceRounds).toBeGreaterThan(0);
-		}
-		const firstCreated = harness.events.indexOf(created[0]);
-		const selected = harness.eventsOfType("BeliefsSelected");
-		expect(selected.length).toBeGreaterThan(0);
-		const firstSelected = harness.events.indexOf(selected[0]);
-		expect(firstCreated).toBeLessThan(firstSelected);
+		const taskOpened = harness.eventsOfType("TaskOpened");
+		const targetDefined = harness.eventsOfType("TargetDefined");
+		const frameOpened = harness.eventsOfType("FrameOpened");
+		expect(taskOpened).toHaveLength(1);
+		expect(targetDefined[0].taskId).toBe(taskOpened[0].taskId);
+		expect(frameOpened[0].taskId).toBe(taskOpened[0].taskId);
+		expect(typeof frameOpened[0].frameId).toBe("string");
 
-		// BeliefUpdated fires on a real status change with raw status + previousStatus.
-		const updated = harness.eventsOfType("BeliefUpdated");
-		expect(updated.length).toBeGreaterThan(0);
-		for (const ev of updated) {
-			expect(["proposed", "supported", "refuted", "superseded"]).toContain(ev.status);
-			expect(["proposed", "supported", "refuted", "superseded"]).toContain(ev.previousStatus);
-			expect(ev.statement).toBeTruthy();
+		const deltas = harness.eventsOfType("BeliefDeltaApplied");
+		expect(deltas.length).toBeGreaterThan(0);
+		for (const event of deltas) {
+			expect(event.taskId).toBe(taskOpened[0].taskId);
+			expect(event.delta.frameId).toBe(event.frameId);
+			expect(event.delta.resultingBeliefs.length).toBeGreaterThan(0);
 		}
+		expect(deltas.flatMap((event) => event.delta.resultingBeliefs).some((belief) => belief.id === "belief-1")).toBe(
+			true,
+		);
 
-		// ProposalCreated / PlanProduced (with planId) / BeliefsSelected are emitted on a batch.
-		expect(harness.eventsOfType("ProposalCreated").length).toBeGreaterThan(0);
 		const plans = harness.eventsOfType("PlanProduced");
 		expect(plans.length).toBeGreaterThan(0);
 		for (const plan of plans) {
-			expect(plan.planId).toBeTruthy();
+			expect(plan.plan.id).toBeTruthy();
+			expect(plan.plan.selectedToExplore.length).toBeGreaterThan(0);
 		}
 
-		// CursorChanged no longer carries a stub `item`.
 		const cursors = harness.eventsOfType("CursorChanged");
 		expect(cursors.length).toBeGreaterThan(0);
 		for (const cursor of cursors) {
-			expect("item" in cursor).toBe(false);
+			expect(cursor.taskId).toBe(taskOpened[0].taskId);
+			expect(typeof cursor.frameId).toBe("string");
 		}
 
-		// DistillationProduced fires in the distill role with a non-empty interpretation and
-		// no removed `inputIds`/`unexplained` fields.
 		const distillations = harness.eventsOfType("DistillationProduced");
 		expect(distillations.length).toBeGreaterThan(0);
 		for (const dist of distillations) {
-			expect(dist.label).toMatch(/^D-/);
-			expect(dist.interpretation).toBeTruthy();
-			expect("inputIds" in dist).toBe(false);
-			expect("unexplained" in dist).toBe(false);
+			expect(dist.distillation.id).toMatch(/^distillation-/);
+			expect(dist.distillation.contents).toBeTruthy();
+			expect(dist.distillation.outputs.length).toBeGreaterThan(0);
 		}
 	});
 
-	it("emits a BeliefCreated for the refined belief and a BeliefUpdated (superseded) for the prior on refine", async () => {
+	it("records both immutable belief records changed by refine", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
@@ -157,18 +144,13 @@ describe("belief-loop event family", () => {
 
 		await harness.session.prompt("how long does the cache survive logout?");
 
-		const created = harness.eventsOfType("BeliefCreated");
-		expect(created.length).toBeGreaterThan(0);
-
-		const updated = harness.eventsOfType("BeliefUpdated");
-		expect(updated.length).toBeGreaterThan(0);
-		// The refine supersedes the prior (was proposed) and surfaces it as a `superseded` update.
-		const superseded = updated.find((ev) => ev.status === "superseded");
-		expect(superseded).toBeDefined();
-		expect(superseded?.previousStatus).toBe("proposed");
+		const refine = harness.eventsOfType("BeliefDeltaApplied").find((event) => event.delta.operation === "refine");
+		expect(refine).toBeDefined();
+		expect(refine?.delta.resultingBeliefs).toHaveLength(2);
+		expect(refine?.delta.resultingBeliefs.map(statusOfDomainBelief)).toEqual(["superseded", "proposed"]);
 	});
 
-	it("emits a BeliefCreated for the routing belief so the native GUI registers it", async () => {
+	it("records routing as a frame decision rather than a belief", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
@@ -194,16 +176,11 @@ describe("belief-loop event family", () => {
 
 		await harness.session.prompt("please echo hello");
 
-		// A routing belief must surface as a BeliefCreated so the GUI registers it in the
-		// belief registry (otherwise it would only reach the GUI as a ProposalCreated and
-		// never appear in the belief-set pane).
-		const routingCreated = harness.eventsOfType("BeliefCreated").filter((ev) => ev.domain === "routing");
-		expect(routingCreated.length).toBe(1);
-		expect(routingCreated[0].beliefId).toBeGreaterThan(0);
-		expect(routingCreated[0].statement).toBeTruthy();
-		expect(routingCreated[0].evidenceRounds).toBeGreaterThan(0);
-		// The `BeliefCreated` event schema carries no status field; the GUI defaults a
-		// new belief to `proposed`, and since only the `open` status maps to the accent
-		// color, a routing belief renders as default text (never as open).
+		const routing = harness.eventsOfType("RoutingDecided");
+		expect(routing).toHaveLength(1);
+		expect(routing[0].routing.id).toMatch(/^routing-/);
+		expect(routing[0].routing.decision).toBe("fast-path");
+		expect(harness.eventsOfType("BeliefDeltaApplied")).toHaveLength(0);
+		expect(harness.eventsOfType("FrameBodySelected")[0].body).toBe("fast-path");
 	});
 });
