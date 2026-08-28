@@ -8,15 +8,14 @@
 // runtime, it does not fabricate epistemic meaning.
 //
 // Contract invariants (see roadmap/phase-2-node-graph-contract.md):
-//  - A ProposalCreated occurrence (a distillation's belief write-back) is
+//  - A BeliefDeltaApplied occurrence (a distillation's belief write-back) is
 //    projected as a Propose node on the chain Distill -> Propose -> Belief.
-//    Old data without a Proposal record keeps the direct Distill -> Belief edge.
 //  - No synthetic Observation/ExecutionStep wrapper.
 //  - A tool call and its result are merged into a single Execution node.
 //  - Beliefs are global (no owning frame); frames do not own Belief nodes.
 //  - All edges are typed, directed, explicit, and runtime-supplied.
-//  - The epistemic result is encoded as Distill -> Propose -> Propose -> Belief,
-//    or as the Distill -> Belief fallback; a create edge is drawn dashed.
+//  - The epistemic result is encoded as Distill -> Propose -> Belief; a create
+//    edge is drawn dashed.
 
 #pragma once
 
@@ -86,11 +85,11 @@ struct NodeId {
 struct GraphNode {
     NodeId id;
     NodeFamily family = NodeFamily::Belief;
-    // The owning frame, or nullopt for a global Belief node.
-    std::optional<int> frameId;
+    // The owning frame (stable string id), or nullopt for a global Belief node.
+    std::optional<std::string> frameId;
     // Creation provenance for a global Belief. This positions the Belief in the
     // corresponding LoopFrame row without making the frame its owner.
-    std::optional<int> createdInFrame;
+    std::optional<std::string> createdInFrame;
     std::string displayType;
     // Belief domain (world / routing / framing) for a Belief node; empty for
     // non-Belief families. Lets the renderer color routing and framing beliefs
@@ -115,10 +114,14 @@ struct GraphEdge {
 // Container summary for a LoopFrame in the graph, used by the frame container
 // header and the horizontal frame strip.
 struct LoopFrameInfo {
-    int id = -1;
-    std::string label;  // "LoopFrame #8"
+    std::string id;       // stable frame id
+    std::string label;    // "LoopFrame #8"
     bool executing = false;  // active runtime state (EXECUTING marker)
     bool closed = false;     // frame has reached a terminal close event
+    // Routing decision recorded by the RoutingDecided event. Rendered in the
+    // frame header so the loop's routing step is visible in the graph.
+    std::string routingDecision;  // "belief-loop" | "fast-path" | "" (pending)
+    std::string routingReason;
 };
 
 // The read-only semantic task state the graph renders.

@@ -10,7 +10,7 @@
 
 namespace pie::gui {
 
-void renderExecutionLane(const pie::gui::NativeGuiModel& m, int viewId) {
+void renderExecutionLane(const pie::gui::NativeGuiModel& m, const std::string& viewId) {
     const auto* f = displayedFrame(m, viewId);
     const auto& cur = m.cursor();
     ImGui::TextUnformatted("EXECUTION");
@@ -21,13 +21,14 @@ void renderExecutionLane(const pie::gui::NativeGuiModel& m, int viewId) {
     if (f->trajectory.empty()) { ImGui::TextDisabled("(no execution steps)"); ImGui::EndChild(); return; }
 
     for (auto& t : f->trajectory) {
-        // The runtime never provides CursorChanged.item, so a tool is "current"
-        // when it is in flight (status == running) during the EXECUTING stage.
+        // A tool is "current" when it is in flight (status == running) during
+        // the EXECUTING stage.
         bool isCurrent = (cur.valid() && cur.stage == pie::gui::FrameStage::EXECUTING && t.status == "running");
         std::string statusSym = "○";
         if (t.status == "ok") statusSym = "✓";
         else if (t.status == "running") statusSym = "●";
         else if (t.status == "failed") statusSym = "✗";
+        else if (t.status == "cancelled") statusSym = "✗";
         else if (t.status == "pending") statusSym = "○";
 
         std::string label = std::string(statusSym) + " " + t.tool + ": " + t.command;

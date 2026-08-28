@@ -38,6 +38,7 @@ constexpr const GraphStyle& st = kGraphStyle;  // single style entry point
 // stage comes only from the runtime (model.cursor().stage), never inferred here.
 const char* stageLabel(FrameStage s) {
     switch (s) {
+        case FrameStage::ROUTING: return "Route";
         case FrameStage::PROPOSING: return "Propose";
         case FrameStage::PLANNING: return "Plan";
         case FrameStage::EXECUTING: return "Execution";
@@ -51,6 +52,7 @@ const char* stageLabel(FrameStage s) {
 ImU32 stageColor(FrameStage s) {
     auto rgb = [](const GraphStyle::Rgb& c) { return IM_COL32(c.r, c.g, c.b, 255); };
     switch (s) {
+        case FrameStage::ROUTING: return rgb(st.beliefRegionLabel);
         case FrameStage::PROPOSING: return rgb(st.beliefRegionLabel);
         case FrameStage::PLANNING: return rgb(st.planRegionLabel);
         case FrameStage::EXECUTING: return rgb(st.executionRegionLabel);
@@ -67,15 +69,14 @@ ImU32 cardColor(NodeFamily f, const GraphNode& n, bool selected, bool current) {
     if (current) return IM_COL32(st.cardCurrent.r, st.cardCurrent.g, st.cardCurrent.b, 255);
     switch (f) {
         case NodeFamily::Belief:
-            // Domain wins over status for routing / framing cards so the belief
-            // element itself, not a side tag, carries the domain color.
-            if (n.domain == "routing") return IM_COL32(st.cardBeliefRouting.r, st.cardBeliefRouting.g, st.cardBeliefRouting.b, 255);
+            // Framing beliefs (the revisable "target" obligations) carry a
+            // distinct domain color; routing is no longer a belief domain.
             if (n.domain == "framing") return IM_COL32(st.cardBeliefFraming.r, st.cardBeliefFraming.g, st.cardBeliefFraming.b, 255);
-            if (n.displayType == "falsified") return IM_COL32(st.cardBeliefFalsified.r, st.cardBeliefFalsified.g, st.cardBeliefFalsified.b, 255);
+            if (n.displayType == "refuted" || n.displayType == "falsified") return IM_COL32(st.cardBeliefFalsified.r, st.cardBeliefFalsified.g, st.cardBeliefFalsified.b, 255);
             if (n.displayType == "revised") return IM_COL32(st.cardBeliefRevised.r, st.cardBeliefRevised.g, st.cardBeliefRevised.b, 255);
             if (n.displayType == "closed") return IM_COL32(st.cardBeliefClosed.r, st.cardBeliefClosed.g, st.cardBeliefClosed.b, 255);
             if (n.displayType == "supported") return IM_COL32(st.cardBeliefSupported.r, st.cardBeliefSupported.g, st.cardBeliefSupported.b, 255);
-            if (n.displayType == "superseded" || n.displayType == "supercede" || n.displayType == "supersede") return IM_COL32(st.cardBeliefSuperseded.r, st.cardBeliefSuperseded.g, st.cardBeliefSuperseded.b, 255);
+            if (n.displayType == "superseded" || n.displayType == "supersede") return IM_COL32(st.cardBeliefSuperseded.r, st.cardBeliefSuperseded.g, st.cardBeliefSuperseded.b, 255);
             return IM_COL32(st.cardBelief.r, st.cardBelief.g, st.cardBelief.b, 255);
         case NodeFamily::Plan: return IM_COL32(st.cardPlan.r, st.cardPlan.g, st.cardPlan.b, 255);
         case NodeFamily::Execution:
@@ -232,6 +233,17 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         dl->AddText(ImVec2(p1.x + st.frameLabelPadX,
                            (p0.y + p1.y) * 0.5f - 7.0f),
                     IM_COL32(st.frameLabel.r, st.frameLabel.g, st.frameLabel.b, st.frameLabelAlpha), fi.label.c_str());
+        // Routing decision (from the RoutingDecided event) shown under the frame
+        // label so the loop's routing step is visible in the graph.
+        if (!fi.routingDecision.empty() || !fi.routingReason.empty()) {
+            std::string route = "Route: " + (fi.routingDecision.empty() ? "?" : fi.routingDecision);
+            if (!fi.routingReason.empty()) route += "  (" + fi.routingReason + ")";
+            dl->AddText(ImVec2(p1.x + st.frameLabelPadX,
+                               (p0.y + p1.y) * 0.5f + 7.0f),
+                        IM_COL32(st.beliefRoutingLabel.r, st.beliefRoutingLabel.g,
+                                 st.beliefRoutingLabel.b, 230),
+                        route.c_str());
+        }
     }
 
     // Each new-belief group is marked at the top of the LoopFrame that created
@@ -336,11 +348,15 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         std::string title;
         const char* execGlyph = nullptr;
         if (n.family == NodeFamily::Belief) {
-            if (n.domain == "framing") title = std::string("Target ") + n.id.value;
-            else if (n.domain == "routing") title = std::string("Routing ") + n.id.value;
-            else title = n.id.value;  // no "Belief " prefix; status shown by dot color
+            // Belief nodes show a display category + number (B<n>); the
+            // descriptive content lives in the hover tooltip below.
+            const char* cat = "Belief";
+            if (n.domain == "framing") cat = "Target";
+            else if (n.domain == "routing") cat = "Route";
+            const std::string num = n.title.empty() ? n.id.value : n.title;
+            title = std::string(cat) + " " + num;
         } else if (n.family == NodeFamily::Plan) {
-            title = n.id.value;  // no "Plan " prefix
+            title = "Plan";
         } else if (n.family == NodeFamily::Execution) {
             // Simplified "<tool> <command>" label (no "exec:" prefix, no wrap).
             title = n.title.empty() ? n.id.value : n.title;
@@ -350,7 +366,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         } else if (n.family == NodeFamily::Propose) {
             title = n.title.empty() ? n.id.value : n.title;
         } else {
-            title = n.id.value;  // no "Distill " prefix; status shown by dot color
+            title = "Distill";  // no "Distill " prefix; status shown by dot color
         }
 
         // Indicator dot, vertically centered at the node's left edge; the

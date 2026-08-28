@@ -2,8 +2,8 @@
 //
 // Headless, ImGui-free, unit-testable. It turns a GraphTaskState + a
 // PieGraphLayout into a polyline route per edge. Belief -> Plan and Distill ->
-// Belief use two-elbow orthogonal routes within their semantic row; local Plan
-// -> Execution and Execution -> Distill edges keep a short curve. The
+// Belief use a direct single-segment line; local Plan -> Execution and
+// Execution -> Distill edges keep a short curve. The
 // GUI never infers cognition: the routing only uses the runtime-supplied edge
 // semantic type and the geometry produced by the layout engine.
 //

@@ -63,7 +63,7 @@ struct AppSession {
     std::atomic<bool> stopReader{false};
     std::thread reader;
     bool live = true;
-    int viewId = -1;
+    std::string viewId;  // empty = follow the active frame
     bool promptOpen = false;
     PromptPaletteState promptState;
     bool fileListOpen = false;

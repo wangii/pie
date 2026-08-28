@@ -5,37 +5,32 @@
 
 #include <string>
 
-#include "Theme.h"
 #include "UiShared.h"
 
 namespace pie::gui {
 
-void renderSummary(const pie::gui::NativeGuiModel& m, int viewId) {
+void renderSummary(const pie::gui::NativeGuiModel& m, const std::string& viewId) {
     const auto* f = displayedFrame(m, viewId);
-    // ImGui::TextUnformatted("CURRENT FRAME");
-    // ImGui::SameLine();
-    // if (f) ImGui::TextDisabled("#%d", f->id);
-    // ImGui::Separator();
     if (!f) { ImGui::TextDisabled("(no task)"); return; }
-    
-    // B42 + B47 -> intent -> N steps -> distillation -> {proposals}
+
+    // B1 + B2 -> intent -> N steps -> distillation -> {deltas}
     std::string sel;
-    for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
+    for (size_t i = 0; i < f->plan.selectedToExplore.size(); ++i) {
         if (i) sel += " + ";
-        sel += beliefLabel(f->selectedBeliefs[i].value);
+        sel += m.beliefLabel(f->plan.selectedToExplore[i]);
     }
     if (sel.empty()) sel = "(none)";
     std::string line = sel + "  →  ";
-    line += f->plan.valid() ? f->plan.intent : "(planning)";
+    line += f->plan.valid() ? (f->plan.intent.empty() ? "planned" : f->plan.intent) : "(planning)";
     line += "  →  ";
     line += std::to_string(f->trajectory.size()) + " execution step(s)";
     line += "  →  ";
-    line += f->distillation.valid() ? (f->distillation.unexplained.empty() ? "distilled" : f->distillation.unexplained) : "(pending)";
-    if (!f->proposals.empty()) {
+    line += f->distillation.valid() ? (f->distillation.contents.empty() ? "distilled" : f->distillation.contents) : "(pending)";
+    if (!f->beliefDeltas.empty()) {
         line += "  →  {";
-        for (size_t i = 0; i < f->proposals.size(); ++i) {
+        for (size_t i = 0; i < f->beliefDeltas.size(); ++i) {
             if (i) line += ", ";
-            line += std::string(1, f->proposals[i].op) + f->proposals[i].belief;
+            line += f->beliefDeltas[i].operation + " " + m.beliefLabel(f->beliefDeltas[i].beliefId);
         }
         line += "}";
     }

@@ -3,6 +3,7 @@
 
 #include <imgui.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -11,14 +12,14 @@
 
 namespace pie::gui {
 
-void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
+void renderBeliefLane(const pie::gui::NativeGuiModel& m, const std::string& viewId) {
     const auto* f = displayedFrame(m, viewId);
 
-    std::vector<int> changedIds;
+    // Beliefs changed by this frame's explicit belief deltas (highlight amber).
+    std::set<std::string> changedIds;
     if (f) {
-        for (auto& p : f->proposals) {
-            int id = beliefIdFromLabel(p.belief);
-            if (id > 0) changedIds.push_back(id);
+        for (const auto& d : f->beliefDeltas) {
+            if (!d.beliefId.empty()) changedIds.insert(d.beliefId);
         }
     }
 
@@ -28,18 +29,15 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
     ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
     const auto& beliefs = m.beliefs();
     for (const auto& b : beliefs) {
-        bool isSel = false;
-        if (f) for (auto s : f->selectedBeliefs) if (s.value == b.id.value) { isSel = true; break; }
-        bool isChanged = false;
-        for (int id : changedIds) if (id == b.id.value) { isChanged = true; break; }
+        bool isSel = m.isSelectedInCurrentFrame(b.id);
+        bool isChanged = changedIds.count(b.id) != 0;
 
         ImVec2 start = ImGui::GetCursorScreenPos();
-        ImGui::PushID(b.id.value);
+        ImGui::PushID(b.id.c_str());
 
-        // Visible belief ID as the header title. Items default to open so the statement
-        // is visible without extra clicks; DefaultOpen only sets the initial state, so a
-        // manual collapse afterward is preserved (ImGui TreeNodeUpdateNextOpen stores it).
-        const std::string title = beliefLabel(b.id.value) + " " + b.status;
+        // Visible belief label as the header title. Items default to open so the
+        // statement is visible without extra clicks.
+        const std::string title = m.beliefLabel(b.id) + " " + b.status;
         ImVec4 c = beliefStatusColor(b.status);
         if (isSel) c = kAccent;
         if (isChanged) c = kAmber;
@@ -52,23 +50,12 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, int viewId) {
 
         if (open) {
             ImGui::Indent();
-            if (b.confidence >= 0.0) {
-                ImGui::TextDisabled("%.2f", b.confidence);
+            ImGui::TextWrapped("%s", b.statement.c_str());
+            if (!b.expectation.empty()) {
+                ImGui::TextDisabled("expects: %s", b.expectation.c_str());
             }
-            // Live mode carries the prose belief statement; the demo/headless
-            // fixture uses the structured lhs/relation/rhs.
-            if (!b.statement.empty()) {
-                ImGui::TextWrapped("%s", b.statement.c_str());
-            } else {
-                ImGui::TextUnformatted((b.lhs + " ──" + b.relation + "──> " + b.rhs).c_str());
-            }
-            if (!b.sourceFrames.empty()) {
-                std::string src = "source: ";
-                for (size_t i = 0; i < b.sourceFrames.size(); ++i) {
-                    if (i) src += ", ";
-                    src += "#" + std::to_string(b.sourceFrames[i]);
-                }
-                ImGui::TextDisabled("%s", src.c_str());
+            if (!b.createdInFrame.empty()) {
+                ImGui::TextDisabled("source: %s", b.createdInFrame.c_str());
             }
             ImGui::Unindent();
         }

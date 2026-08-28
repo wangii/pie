@@ -18,6 +18,14 @@ uint64_t hashMix(uint64_t h, uint64_t v) {
     h ^= (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
     return h;
 }
+
+// Fold a string into the hash, byte by byte, so string ids (frame ids, node
+// ids) participate in the fingerprint without truncation.
+uint64_t hashMixStr(uint64_t h, const std::string& s) {
+    for (unsigned char c : s) h = hashMix(h, c);
+    h = hashMix(h, 0xFF);  // terminator distinguishes "ab" from "a"+"b"
+    return h;
+}
 } // namespace
 
 uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
@@ -27,8 +35,8 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
         // Fold the id and the fractionally-relevant fields.
         for (unsigned char c : n.id.value) h = hashMix(h, c);
         h = hashMix(h, static_cast<uint64_t>(n.family));
-        h = hashMix(h, n.frameId.has_value() ? static_cast<uint64_t>(*n.frameId) : 0xFFFFFFFFFFFFFFFFULL);
-        h = hashMix(h, n.createdInFrame.has_value() ? static_cast<uint64_t>(*n.createdInFrame) : 0xFFFFFFFFFFFFFFFFULL);
+        h = hashMixStr(h, n.frameId.has_value() ? *n.frameId : std::string());
+        h = hashMixStr(h, n.createdInFrame.has_value() ? *n.createdInFrame : std::string());
         h = hashMix(h, n.creationOrder);
         h = hashMix(h, n.executionOrder.value_or(0));
         h = hashMix(h, n.displayType.empty() ? 0 : static_cast<unsigned char>(n.displayType[0]));
@@ -42,7 +50,7 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
     }
     h = hashMix(h, state.frames.size());
     for (const LoopFrameInfo& frame : state.frames) {
-        h = hashMix(h, static_cast<uint64_t>(frame.id));
+        h = hashMixStr(h, frame.id);
         h = hashMix(h, frame.closed ? 1 : 0);
         h = hashMix(h, frame.executing ? 1 : 0);
     }
@@ -61,7 +69,7 @@ uint64_t GraphCache::layoutFingerprint(const PieGraphLayout& layout) const {
     }
     h = hashMix(h, layout.frameRects.size());
     for (const auto& [fid, r] : layout.frameRects) {
-        h = hashMix(h, static_cast<uint64_t>(fid));
+        h = hashMixStr(h, fid);
         h = hashMix(h, static_cast<uint64_t>(r.x * 100.0f));
         h = hashMix(h, static_cast<uint64_t>(r.y * 100.0f));
         h = hashMix(h, static_cast<uint64_t>(r.w * 100.0f));

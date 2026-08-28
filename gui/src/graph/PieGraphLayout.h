@@ -35,12 +35,12 @@ struct GraphRect {
 // and the total canvas size.
 struct PieGraphLayout {
     std::map<std::string, GraphRect> nodeRects;   // keyed by NodeId value
-    std::map<int, GraphRect> frameRects;          // keyed by frame id
-    std::map<int, GraphRect> beliefRegionRects;   // newly-created Beliefs, keyed by frame id
-    std::map<int, GraphRect> planRegionRects;     // upper middle band, keyed by frame id
-    std::map<int, GraphRect> proposeRegionRects;  // middle band, keyed by frame id
-    std::map<int, GraphRect> distillRegionRects;  // lower middle band, keyed by frame id
-    std::map<int, GraphRect> executionRegionRects;// right column, keyed by frame id
+    std::map<std::string, GraphRect> frameRects;          // keyed by frame id
+    std::map<std::string, GraphRect> beliefRegionRects;   // newly-created Beliefs, keyed by frame id
+    std::map<std::string, GraphRect> planRegionRects;     // upper middle band, keyed by frame id
+    std::map<std::string, GraphRect> proposeRegionRects;  // middle band, keyed by frame id
+    std::map<std::string, GraphRect> distillRegionRects;  // lower middle band, keyed by frame id
+    std::map<std::string, GraphRect> executionRegionRects;// right column, keyed by frame id
     GraphRect beliefColumnRect;                   // global left column
     float canvasWidth = 0.0f;
     float canvasHeight = 0.0f;

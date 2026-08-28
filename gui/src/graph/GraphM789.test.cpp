@@ -29,9 +29,9 @@ static void check(bool cond, const char* what) {
 // A small, deterministic task graph (mirrors the M456 fixture topology).
 static GraphTaskState buildSmallState() {
     GraphTaskState s;
-    auto node = [&](const std::string& id, NodeFamily f, int frame) {
+    auto node = [&](const std::string& id, NodeFamily f, const std::string& frame) {
         GraphNode n; n.id.value = id; n.family = f;
-        if (frame >= 0) n.frameId = frame;
+        if (!frame.empty()) n.frameId = frame;
         n.title = id; n.compactText = id; n.fullText = id;
         s.nodes.push_back(n);
     };
@@ -39,14 +39,14 @@ static GraphTaskState buildSmallState() {
         GraphEdge e; e.source.value = src; e.target.value = dst; e.type = t; e.beliefOperation = op;
         s.edges.push_back(e);
     };
-    node("B1", NodeFamily::Belief, -1);
-    node("B2", NodeFamily::Belief, -1);
-    node("P10", NodeFamily::Plan, 10);
-    node("E10a", NodeFamily::Execution, 10);
-    node("D10", NodeFamily::Distill, 10);
-    node("P20", NodeFamily::Plan, 20);
-    node("E20", NodeFamily::Execution, 20);
-    node("D20", NodeFamily::Distill, 20);
+    node("B1", NodeFamily::Belief, "");
+    node("B2", NodeFamily::Belief, "");
+    node("P10", NodeFamily::Plan, "10");
+    node("E10a", NodeFamily::Execution, "10");
+    node("D10", NodeFamily::Distill, "10");
+    node("P20", NodeFamily::Plan, "20");
+    node("E20", NodeFamily::Execution, "20");
+    node("D20", NodeFamily::Distill, "20");
     edge("B1", "P10", EdgeSemanticType::BeliefToPlan);
     edge("P10", "E10a", EdgeSemanticType::PlanToExecution);
     edge("E10a", "D10", EdgeSemanticType::ExecutionToDistill);
@@ -55,8 +55,8 @@ static GraphTaskState buildSmallState() {
     edge("P20", "E20", EdgeSemanticType::PlanToExecution);
     edge("E20", "D20", EdgeSemanticType::ExecutionToDistill);
     edge("D20", "B1", EdgeSemanticType::DistillToBelief, BeliefOperation::Create);
-    LoopFrameInfo f10; f10.id = 10; f10.label = "LoopFrame #10"; f10.closed = true;
-    LoopFrameInfo f20; f20.id = 20; f20.label = "LoopFrame #20"; f20.closed = false;
+    LoopFrameInfo f10; f10.id = "10"; f10.label = "LoopFrame #10"; f10.closed = true;
+    LoopFrameInfo f20; f20.id = "20"; f20.label = "LoopFrame #20"; f20.closed = false;
     s.frames.push_back(f10); s.frames.push_back(f20);
     return s;
 }
@@ -67,14 +67,14 @@ static GraphTaskState buildBigState(int frames, int nodesPerFrame) {
     GraphTaskState s;
     int idc = 0;
     for (int f = 1; f <= frames; ++f) {
-        LoopFrameInfo fi; fi.id = f; fi.label = "LoopFrame #" + std::to_string(f);
+        LoopFrameInfo fi; fi.id = std::to_string(f); fi.label = "LoopFrame #" + std::to_string(f);
         fi.closed = (f < frames);
         s.frames.push_back(fi);
         std::vector<std::string> ids;
         for (int j = 0; j < nodesPerFrame; ++j) {
             GraphNode n;
             n.id.value = "N" + std::to_string(idc++);
-            n.frameId = f;
+            n.frameId = std::to_string(f);
             n.family = (j == 0) ? NodeFamily::Plan
                           : (j == nodesPerFrame - 1) ? NodeFamily::Distill
                           : NodeFamily::Execution;
@@ -102,7 +102,7 @@ static GraphTaskState buildBigState(int frames, int nodesPerFrame) {
 
     std::string frame1Plan, frame1Distill;
     for (const GraphNode& n : s.nodes) {
-        if (n.frameId == 1) {
+        if (n.frameId == "1") {
             if (frame1Plan.empty()) frame1Plan = n.id.value;
             frame1Distill = n.id.value;
         }
@@ -154,12 +154,12 @@ static void testStyle() {
 static void testRoutingFramingPlacement() {
     GraphTaskState s = buildSmallState();  // frames 10, 20; beliefs B1, B2 (no domain)
     for (GraphNode& n : s.nodes) {
-        if (n.id.value == "B1") { n.domain = "routing"; n.createdInFrame = 10; }
-        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = 10; }
+        if (n.id.value == "B1") { n.domain = "routing"; n.createdInFrame = "10"; }
+        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = "10"; }
     }
     PieGraphLayout layout = computeGraphLayout(s);
-    auto fr10 = layout.frameRects.find(10);
-    auto fr20 = layout.frameRects.find(20);
+    auto fr10 = layout.frameRects.find("10");
+    auto fr20 = layout.frameRects.find("20");
     auto r1 = layout.nodeRects.find("B1");
     auto r2 = layout.nodeRects.find("B2");
     check(fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end(),
@@ -170,15 +170,18 @@ static void testRoutingFramingPlacement() {
         const GraphRect& f20 = fr20->second;
         const GraphRect& rb = r1->second;
         const GraphRect& rf = r2->second;
-        // Routing anchors to the union top of the loop-frame area: it sits above
-        // the topmost frame (frame 10), not above its creating frame.
-        check(rb.y + rb.h <= f10.y + 1e-3f, "RF: routing card sits above the loop-frame area top");
-        // Framing anchors to a boundary, never fixed to the current frame. With no
-        // loopframe after the current frame (frame 20 is last, so no next frame), it
-        // aligns with the loop-frame area top border, i.e. the topmost frame's top.
-        check(std::fabs(rf.y - f10.y) <= 1e-3f, "RF: framing card aligns with the loop-frame area top border");
-        check(rf.y < f20.y, "RF: framing card is not fixed below the current frame");
-        check(rf.y < f10.y + f10.h, "RF: framing card is not below its creating frame");
+        // Fix 1: a routing belief is the first item in its frame's belief set,
+        // so it sits inside the frame that created it (frame 10), at the top of
+        // that frame's belief column -- not in a global slot above the loop area.
+        check(rb.y + rb.h <= f10.y + f10.h + 1e-3f && rb.y >= f10.y - 1e-3f,
+              "RF: routing card sits inside its frame (frame 10)");
+        check(rb.y <= f10.y + f10.h + 1e-3f,
+              "RF: routing card is not above the loop-frame area top");
+        // Fix 4: framing (target) beliefs anchor below the LATEST episode/loopframe
+        // (frame 20 is the last one), so the framing card sits below frame 10's
+        // bottom edge and above/at frame 20's region, not pinned to the loop area top.
+        check(rf.y >= f10.y + f10.h - 1e-3f,
+              "RF: framing card is below its creating frame (frame 10)");
     } else {
         check(false, "RF: routing/framing cards were placed");
     }
@@ -200,10 +203,10 @@ static void testRoutingFramingPlacement() {
     check(l2.nodeRects.count("B1") == 1, "RF: plain belief remains laid out");
 }
 
-// --- Current-frame selection paths for the framing/target anchor ---
-// computeGraphLayout chooses the frame the framing belief anchors below via the
-// order: executing frame -> last non-closed frame -> last frame. These three
-// paths must all place the framing card below that chosen frame.
+// --- Framing/target anchor: always below the LAST (latest) episode ---
+// Fix 4: the framing (target) beliefs are anchored below the latest episode/
+// loop-frame, so their y position must sit below the last frame's bottom edge,
+// independent of which frame is "current".
 static void testCurrentFrameSelection() {
     auto make = [](bool f10closed, bool f20closed, bool f20exec) {
         GraphTaskState s = buildSmallState();
@@ -212,7 +215,7 @@ static void testCurrentFrameSelection() {
                 n.domain = "routing";
             } else if (n.id.value == "B2") {
                 n.domain = "framing";
-                n.createdInFrame = 10;
+                n.createdInFrame = "10";
             }
         }
         s.frames[0].closed = f10closed;
@@ -222,44 +225,22 @@ static void testCurrentFrameSelection() {
     };
     auto bottom = [](const GraphRect& r) { return r.y + r.h; };
 
-    // Path 1: an executing frame is the current frame.
-    {
-        PieGraphLayout layout = computeGraphLayout(make(true, false, true));
-        auto f20 = layout.frameRects.find(20);
+    // Every current-frame path must place the framing card below the LAST frame.
+    for (int path = 0; path < 3; ++path) {
+        bool f10closed, f20closed, f20exec;
+        switch (path) {
+            case 0: f10closed = true;  f20closed = false; f20exec = true;  break;  // executing
+            case 1: f10closed = true;  f20closed = false; f20exec = false; break;  // last non-closed
+            default: f10closed = true; f20closed = true;  f20exec = false; break;  // all closed -> last frame
+        }
+        PieGraphLayout layout = computeGraphLayout(make(f10closed, f20closed, f20exec));
+        auto f20 = layout.frameRects.find("20");
         auto rf = layout.nodeRects.find("B2");
         check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
-              "CUR: executing path places the framing card");
-        auto f10 = layout.frameRects.find(10);
-        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end() &&
-            f10 != layout.frameRects.end())
-            check(std::fabs(rf->second.y - f10->second.y) <= 1e-3f,
-                  "CUR: no next frame -> framing aligns to the loop-frame area top border");
-    }
-    // Path 2: no executing -> the last non-closed frame.
-    {
-        PieGraphLayout layout = computeGraphLayout(make(true, false, false));
-        auto f20 = layout.frameRects.find(20);
-        auto rf = layout.nodeRects.find("B2");
-        check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
-              "CUR: last-open path places the framing card");
-        auto f10 = layout.frameRects.find(10);
-        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end() &&
-            f10 != layout.frameRects.end())
-            check(std::fabs(rf->second.y - f10->second.y) <= 1e-3f,
-                  "CUR: no next frame -> framing aligns to the loop-frame area top border");
-    }
-    // Path 3: all frames closed -> the last frame.
-    {
-        PieGraphLayout layout = computeGraphLayout(make(true, true, false));
-        auto f20 = layout.frameRects.find(20);
-        auto rf = layout.nodeRects.find("B2");
-        check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
-              "CUR: all-closed path places the framing card");
-        auto f10 = layout.frameRects.find(10);
-        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end() &&
-            f10 != layout.frameRects.end())
-            check(std::fabs(rf->second.y - f10->second.y) <= 1e-3f,
-                  "CUR: no next frame -> framing aligns to the loop-frame area top border");
+              "CUR: path places the framing card");
+        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
+            check(rf->second.y >= bottom(f20->second) - 1e-3f,
+                  "CUR: framing card is below the last (latest) episode");
     }
 }
 
@@ -352,15 +333,15 @@ static void testCache() {
     check(none.empty(), "M8: empty selection yields empty dependency set");
 }
 
-// --- Next-loopframe branch: a current frame with a real successor must align the
-// framing/Target card to that successor's top border, not fall back to the
-// loop-area top border. The two-frame fixture never exercises this path because
-// the current frame (20) is always the last frame.
+// --- Framing/target anchor with a real successor: the framing stack hugs the
+// LAST (latest) episode's bottom border, not the current frame's successor. ---
+// Fix 4: the framing (target) cards always anchor below the last episode, so with
+// three frames the stack sits below frame 30, not below frame 20's successor.
 static void testFramingNextLoopframe() {
     GraphTaskState s;
-    auto node = [&](const std::string& id, NodeFamily f, int frame) {
+    auto node = [&](const std::string& id, NodeFamily f, const std::string& frame) {
         GraphNode n; n.id.value = id; n.family = f;
-        if (frame >= 0) n.frameId = frame;
+        if (!frame.empty()) n.frameId = frame;
         n.title = id; n.compactText = id; n.fullText = id;
         s.nodes.push_back(n);
     };
@@ -369,15 +350,15 @@ static void testFramingNextLoopframe() {
         s.edges.push_back(e);
     };
     // Beliefs B1/B2/B3 plus one plan-distill cycle per frame 10/20/30.
-    node("B1", NodeFamily::Belief, -1);
-    node("B2", NodeFamily::Belief, -1);
-    node("B3", NodeFamily::Belief, -1);
-    node("P10", NodeFamily::Plan, 10);
-    node("D10", NodeFamily::Distill, 10);
-    node("P20", NodeFamily::Plan, 20);
-    node("D20", NodeFamily::Distill, 20);
-    node("P30", NodeFamily::Plan, 30);
-    node("D30", NodeFamily::Distill, 30);
+    node("B1", NodeFamily::Belief, "");
+    node("B2", NodeFamily::Belief, "");
+    node("B3", NodeFamily::Belief, "");
+    node("P10", NodeFamily::Plan, "10");
+    node("D10", NodeFamily::Distill, "10");
+    node("P20", NodeFamily::Plan, "20");
+    node("D20", NodeFamily::Distill, "20");
+    node("P30", NodeFamily::Plan, "30");
+    node("D30", NodeFamily::Distill, "30");
     edge("B1", "P10", EdgeSemanticType::BeliefToPlan);
     edge("P10", "D10", EdgeSemanticType::PlanToExecution);
     edge("D10", "B1", EdgeSemanticType::DistillToBelief, BeliefOperation::Update);
@@ -389,29 +370,30 @@ static void testFramingNextLoopframe() {
     edge("P30", "D30", EdgeSemanticType::PlanToExecution);
     edge("D30", "B1", EdgeSemanticType::DistillToBelief, BeliefOperation::Update);
 
-    LoopFrameInfo f10; f10.id = 10; f10.label = "LoopFrame #10"; f10.closed = true;
-    LoopFrameInfo f20; f20.id = 20; f20.label = "LoopFrame #20"; f20.closed = false;
-    LoopFrameInfo f30; f30.id = 30; f30.label = "LoopFrame #30"; f30.closed = true;
+    LoopFrameInfo f10; f10.id = "10"; f10.label = "LoopFrame #10"; f10.closed = true;
+    LoopFrameInfo f20; f20.id = "20"; f20.label = "LoopFrame #20"; f20.closed = false;
+    LoopFrameInfo f30; f30.id = "30"; f30.label = "LoopFrame #30"; f30.closed = true;
     s.frames.push_back(f10); s.frames.push_back(f20); s.frames.push_back(f30);
 
-    // B2 is the framing card, created in frame 10; frame 20 is the current
-    // (last non-closed) frame, so a real successor (frame 30) exists.
+    // B2 is the framing card, created in frame 10; B3 created in frame 20. With
+    // Fix 1, the routing belief B1 sits inside the frame that created it.
     for (GraphNode& n : s.nodes) {
         if (n.id.value == "B1") n.domain = "routing";
-        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = 10; }
-        else if (n.id.value == "B3") { n.domain = "framing"; n.createdInFrame = 20; }
+        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = "10"; }
+        else if (n.id.value == "B3") { n.domain = "framing"; n.createdInFrame = "20"; }
     }
 
     PieGraphLayout layout = computeGraphLayout(s);
-    auto fr10 = layout.frameRects.find(10);
-    auto fr20 = layout.frameRects.find(20);
-    auto fr30 = layout.frameRects.find(30);
+    auto fr10 = layout.frameRects.find("10");
+    auto fr20 = layout.frameRects.find("20");
+    auto fr30 = layout.frameRects.find("30");
+    auto rb = layout.nodeRects.find("B1");
     auto rf = layout.nodeRects.find("B2");
     auto rf2 = layout.nodeRects.find("B3");
     check(fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end() &&
-          fr30 != layout.frameRects.end() && rf != layout.nodeRects.end() &&
-          rf2 != layout.nodeRects.end(),
-          "NLF: three-frame layout plus two framing cards produced");
+          fr30 != layout.frameRects.end() && rb != layout.nodeRects.end() &&
+          rf != layout.nodeRects.end() && rf2 != layout.nodeRects.end(),
+          "NLF: three-frame layout plus routing/two framing cards produced");
     if (fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end() &&
         fr30 != layout.frameRects.end() && rf != layout.nodeRects.end() &&
         rf2 != layout.nodeRects.end()) {
@@ -420,19 +402,14 @@ static void testFramingNextLoopframe() {
         const GraphRect& f30 = fr30->second;
         const GraphRect& rfrect = rf->second;
         const GraphRect& rf2rect = rf2->second;
-        // With a successor frame, the framing stack (a whole, not each card) hugs
-        // the NEXT loopframe's top border (frame 30): the stack's bottom card sits
-        // on that border without overlapping the next frame's own content, and the
-        // whole stack stays below the current frame 20 (not pinned to the
-        // loop-area top). Only the bottommost card touches the border.
-        check(rfrect.y < f30.y,
-              "NLF: framing card is not below the next loopframe");
-        check(rfrect.y > f20.y - 1e-3f,
-              "NLF: framing card is not at the loop-frame area top");
-        check(rfrect.y != f10.y,
-              "NLF: framing card is not pinned to the topmost frame");
-        check(rfrect.y >= f20.y + f20.h - 1e-3f,
-              "NLF: framing card sits below the current frame");
+        // Fix 1: the routing card B1 (no createdInFrame) is inferred into frame 20
+        // (the frame whose plan reads it), so it sits inside frame 20's belief row.
+        check(rb != layout.nodeRects.end() && rb->second.y >= f20.y - 1e-3f && rb->second.y < f20.y + f20.h + 1e-3f,
+              "NLF: routing card sits inside its inferred frame");
+        // Fix 4: the framing (target) cards anchor below the LAST episode (frame 30),
+        // so the stack's TOP card sits at frame 30's bottom edge.
+        check(rfrect.y >= f30.y + f30.h - 1e-3f,
+              "NLF: framing card is not above the latest episode bottom");
 
         // Two framing cards must stack as a whole: one is the top-of-stack card,
         // the other below it (distinct y, creation order), neither overlapping.
@@ -440,8 +417,10 @@ static void testFramingNextLoopframe() {
               "NLF: multiple framing cards occupy distinct stack slots");
         const float topOfStack = std::min(rf2rect.y, rfrect.y);
         const float bottomOfStack = std::max(rf2rect.y + rf2rect.h, rfrect.y + rfrect.h);
-        check(std::fabs(bottomOfStack - f30.y) <= 1e-3f,
-              "NLF: framing stack bottom aligns to the next loopframe top border");
+        // The whole stack hangs below the latest episode (frame 30) bottom: the
+        // top-of-stack card starts at (or just after) frame 30's bottom edge.
+        check(std::fabs(topOfStack - (f30.y + f30.h)) <= 1e-3f,
+              "NLF: framing stack top aligns below the latest episode");
         check(rf2rect.y + rf2rect.h <= rfrect.y + 1e-3f ||
               rfrect.y + rfrect.h <= rf2rect.y + 1e-3f,
               "NLF: two framing cards do not overlap each other");

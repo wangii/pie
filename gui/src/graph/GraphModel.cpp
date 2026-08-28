@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <set>
 
 #include "Model.h"
 
@@ -44,37 +45,13 @@ const char* edgeSemanticTypeToString(EdgeSemanticType t) {
 
 namespace {
 
-// A runtime LabelId ("B42", "P-128", ...) is carried into the graph verbatim.
-NodeId makeNodeId(const std::string& label) { return NodeId{label}; }
-
-// The graph node id for a plan occurrence: the authoritative runtime planId when
-// present (live mode), else the label (demo/headless and the text-view key).
-NodeId planNodeId(const PlannerOutput& p) {
-    return makeNodeId(!p.id.empty() ? p.id : p.label);
-}
-
-// The graph node id for a distillation occurrence: the runtime emits no separate
-// distillId, so the (unique) label is the id. Demo/headless labels are distinct.
-NodeId distillNodeId(const DistillationOutput& d) {
-    return makeNodeId(d.label);
-}
-
-// Belief-mutation / belief-read surface tools are not execution probes. The
-// runtime classifies declare_belief / view_beliefs / conclude as the belief
-// surface (not probe/execution tools), so they must not project as Execution
-// nodes nor produce Plan->Execution edges.
-bool isBeliefSurfaceTool(const std::string& tool) {
-    return tool == "declare_belief" || tool == "view_beliefs" || tool == "conclude";
-}
+// A stable id is carried into the graph verbatim (never remapped).
+NodeId makeNodeId(const std::string& id) { return NodeId{id}; }
 
 // Simplified Execution-node label: "<tool> <command>" (no "exec:" prefix), so an
-// Execution node reads as one concise line ("read requirements.txt",
-// "bash pip show pytest"). The command is trimmed and the tool verb is not
-// duplicated when the command already begins with it (tool="grep" command=
-// "grep pytest ." -> "grep pytest ."). Falls back to the bare tool name when the
-// command is empty. Belief-surface tools are filtered out before this point.
-std::string execSummary(const ToolCall& t) {
-    std::string cmd = t.command;
+// Execution node reads as one concise line. The command is trimmed and the tool
+// verb is not duplicated when the command already begins with it.
+std::string execSummary(const std::string& tool, std::string cmd) {
     auto trim = [](std::string& s) {
         const std::size_t b = s.find_first_not_of(" \t\r\n");
         if (b == std::string::npos) { s.clear(); return; }
@@ -82,10 +59,16 @@ std::string execSummary(const ToolCall& t) {
         s = s.substr(b, e - b + 1);
     };
     trim(cmd);
-    if (cmd.empty()) return t.tool;
-    // Do not repeat the tool verb if the command already starts with it.
-    if (cmd.rfind(t.tool, 0) == 0 || cmd.rfind(t.tool + " ", 0) == 0) return cmd;
-    return t.tool + " " + cmd;
+    if (cmd.empty()) return tool;
+    if (cmd.rfind(tool, 0) == 0 || cmd.rfind(tool + " ", 0) == 0) return cmd;
+    return tool + " " + cmd;
+}
+
+// Map a BeliefDelta operation to the edge's create/update/remove encoding.
+BeliefOperation beliefOperationFromDelta(const std::string& operation) {
+    if (operation == "propose") return BeliefOperation::Create;
+    if (operation == "retract") return BeliefOperation::Remove;
+    return BeliefOperation::Update; // support / refute / refine
 }
 
 } // namespace
@@ -98,303 +81,174 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     uint64_t beliefOrder = 1;
     for (const Belief& b : model.beliefs()) {
         GraphNode node;
-        // The runtime's belief register uses "B" prefix as seen in the demo
-        // Proposal events (e.g. "B42"). If the belief id has no string label,
-        // synthesize one from the numeric id for display stability.
-        node.id = makeNodeId("B" + std::to_string(b.id.value >= 0 ? b.id.value : beliefOrder));
+        node.id = makeNodeId(b.id);
         projectedBeliefIds.insert(node.id.value);
         node.family = NodeFamily::Belief;
         node.displayType = b.status.empty() ? "belief" : b.status;
         node.domain = b.domain;
-        node.title = b.statement.empty()
-            ? (b.lhs + " " + b.relation + " " + b.rhs)
-            : b.statement;
-        node.compactText = node.title;
-        node.fullText = node.title;
-        if (b.confidence >= 0.0) {
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%.2f", b.confidence);
-            node.fullText += std::string("  (confidence ") + buf + ")";
-        }
+        // Belief nodes show a display category + number; the descriptive
+        // statement lives in the hover tooltip (compact/full text).
+        node.title = b.label.empty() ? b.id : b.label;
+        node.compactText = b.statement;
+        node.fullText = b.statement;
+        if (!b.expectation.empty()) node.fullText += std::string("  (expects ") + b.expectation + ")";
         node.creationOrder = beliefOrder++;
-        if (b.createdInFrame >= 0) node.createdInFrame = b.createdInFrame;
-        // Default belief visual state; a later selection/dependency pass or the
-        // runtime supplies Current/Selected. The GUI never fabricates state.
+        if (!b.createdInFrame.empty()) node.createdInFrame = b.createdInFrame;
         node.state = NodeVisualState::Default;
         state.nodes.push_back(std::move(node));
     }
 
-    // --- Frames as containers; one frame's plan/execution/distill become nodes ---
+    // --- Frames as containers; one frame's plan/execution/distillation/deltas
+    // become nodes. A frame carries at most one plan and one distillation. ---
     const std::vector<LoopFrame> frames = model.frames();
     for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
         const LoopFrame& f = frames[frameIndex];
+        const uint64_t frameBase = static_cast<uint64_t>(frameIndex) * 1000;
+
         LoopFrameInfo info;
         info.id = f.id;
         info.label = "#" + std::to_string(frameIndex + 1);
-        // The active (open) frame shows the EXECUTING marker when the cursor is
-        // executing within it, matching the runtime's current frame.
         info.executing = model.activeFrame() && model.activeFrame()->id == f.id &&
                          model.cursor().stage == FrameStage::EXECUTING;
         info.closed = f.closed;
+        info.routingDecision = f.routingDecision;
+        info.routingReason = f.routingReason;
         state.frames.push_back(info);
 
-        // --- Plan nodes: one per occurrence. A LoopFrame carries at most one
-        // plan (a second PlanProduced splits into a fresh frame), so this renders
-        // the frame's single plan; the fallback covers the demo/headless
-        // single-value `plan` when no occurrence list was accumulated. ---
-        if (!f.plans.empty()) {
-            uint64_t planIdx = 0;
-            for (const PlannerOutput& po : f.plans) {
-                GraphNode plan;
-                plan.id = planNodeId(po);
-                plan.family = NodeFamily::Plan;
-                plan.frameId = f.id;
-                plan.displayType = "plan";
-                plan.title = po.label;
-                plan.compactText = po.intent.empty() ? po.question : po.intent;
-                plan.fullText = po.question;
-                plan.creationOrder = static_cast<uint64_t>(f.id) * 1000 + planIdx;
-                plan.state = NodeVisualState::Default;
-                state.nodes.push_back(std::move(plan));
-                ++planIdx;
-            }
-        } else if (f.plan.valid()) {
+        // --- Plan node ---
+        if (f.plan.valid()) {
             GraphNode plan;
-            plan.id = planNodeId(f.plan);
+            plan.id = makeNodeId(f.plan.id);
             plan.family = NodeFamily::Plan;
             plan.frameId = f.id;
             plan.displayType = "plan";
-            plan.title = f.plan.label;
-            plan.compactText = f.plan.intent.empty() ? f.plan.question : f.plan.intent;
-            plan.fullText = f.plan.question;
-            plan.creationOrder = static_cast<uint64_t>(f.id) * 1000;
+            plan.title = f.plan.label.empty() ? f.plan.id : f.plan.label;
+            plan.compactText = f.plan.intent.empty() ? plan.title : f.plan.intent;
+            plan.fullText = f.plan.intent;
+            plan.creationOrder = frameBase;
             plan.state = NodeVisualState::Default;
             state.nodes.push_back(std::move(plan));
         }
 
         // --- Execution nodes (right region). Tool call + result merged into one
-        // node per call; no Observation / ExecutionStep wrapper. ---
+        // node per call. ---
         uint64_t execOrder = 1;
-        for (const ToolCall& t : f.trajectory) {
-            // Belief-surface tools (declare_belief / view_beliefs / conclude) are
-            // not execution probes; skip them so they never render as Execution.
-            if (isBeliefSurfaceTool(t.tool)) continue;
+        for (const Execution& t : f.trajectory) {
             GraphNode exec;
             exec.id = makeNodeId(t.id);
             exec.family = NodeFamily::Execution;
             exec.frameId = f.id;
             exec.displayType = t.status.empty() ? "execution" : t.status;
-            exec.title = execSummary(t);
+            exec.title = execSummary(t.tool, t.command);
             exec.compactText = t.command;
             exec.fullText = t.result;
             if (!t.warning.empty()) exec.fullText += "\n" + t.warning;
-            exec.creationOrder = static_cast<uint64_t>(f.id) * 1000 + execOrder;
+            exec.creationOrder = frameBase + 200 + execOrder;
             exec.executionOrder = execOrder;
             exec.state = NodeVisualState::Default;
             state.nodes.push_back(std::move(exec));
             ++execOrder;
         }
 
-        // --- Distill nodes: one per occurrence. A LoopFrame carries at most one
-        // distillation (a second DistillationProduced splits into a fresh frame), so
-        // this renders the frame's single distillation. ---
-        if (!f.distillations.empty()) {
-            uint64_t distillIdx = 0;
-            for (const DistillationOutput& do_ : f.distillations) {
-                GraphNode distill;
-                distill.id = distillNodeId(do_);
-                distill.family = NodeFamily::Distill;
-                distill.frameId = f.id;
-                distill.displayType = "distill";
-                distill.title = do_.label;
-                distill.compactText = do_.interpretation;
-                distill.fullText = do_.unexplained;
-                distill.creationOrder = static_cast<uint64_t>(f.id) * 1000 + 500 + distillIdx;
-                distill.state = NodeVisualState::Default;
-                state.nodes.push_back(std::move(distill));
-                ++distillIdx;
-            }
-        } else if (f.distillation.valid()) {
+        // --- Distill node ---
+        if (f.distillation.valid()) {
             GraphNode distill;
-            distill.id = distillNodeId(f.distillation);
+            distill.id = makeNodeId(f.distillation.id);
             distill.family = NodeFamily::Distill;
             distill.frameId = f.id;
             distill.displayType = "distill";
-            distill.title = f.distillation.label;
-            distill.compactText = f.distillation.interpretation;
-            distill.fullText = f.distillation.unexplained;
-            distill.creationOrder = static_cast<uint64_t>(f.id) * 1000 + 500;
+            distill.title = f.distillation.label.empty() ? f.distillation.id : f.distillation.label;
+            distill.compactText = f.distillation.contents;
+            distill.fullText = f.distillation.contents;
+            distill.creationOrder = frameBase + 500;
             distill.state = NodeVisualState::Default;
             state.nodes.push_back(std::move(distill));
         }
+
+        // --- Propose nodes (one per belief delta: the hypothesis-formation
+        // step between distillation and the belief it writes back). ---
+        uint64_t proposeIdx = 0;
+        for (const BeliefDelta& d : f.beliefDeltas) {
+            if (d.beliefId.empty()) continue;
+            GraphNode propose;
+            propose.id = makeNodeId(d.id.empty()
+                ? ("PR-" + f.id + "-" + std::to_string(proposeIdx))
+                : d.id);
+            propose.family = NodeFamily::Propose;
+            propose.frameId = f.id;
+            propose.displayType = "propose";
+            propose.title = "Propose " + d.operation;
+            propose.compactText = d.evidence;
+            propose.fullText = d.evidence;
+            propose.creationOrder = frameBase + 400 + proposeIdx;
+            propose.state = NodeVisualState::Default;
+            state.nodes.push_back(std::move(propose));
+            ++proposeIdx;
+        }
     }
 
-    // --- Edges (typed, directed, runtime-supplied). Cross-frame cognition passes
-    // only through Belief; direct Distill(frame A) -> Plan(frame B) is forbidden.
+    // --- Edges (typed, directed, runtime-supplied). ---
     for (const LoopFrame& f : frames) {
-        std::vector<const PlannerOutput*> plans;
-        if (!f.plans.empty()) {
-            for (const PlannerOutput& plan : f.plans) plans.push_back(&plan);
-        } else if (f.plan.valid()) {
-            plans.push_back(&f.plan);
-        }
-
-        // Each explicit BeliefsSelected occurrence feeds the plan occurrence at
-        // the same stream position. The single-value fields remain a fallback
-        // for demo streams that expose only one batch.
-        for (std::size_t i = 0; i < plans.size(); ++i) {
-            const std::vector<BeliefId>* selected = nullptr;
-            if (i < f.selectedBeliefBatches.size()) selected = &f.selectedBeliefBatches[i];
-            else if (plans.size() == 1) selected = &f.selectedBeliefs;
-            if (!selected) continue;
-            for (const BeliefId& bid : *selected) {
+        // Belief -> Plan: the plan's authoritative selectedToExplore.
+        if (f.plan.valid()) {
+            for (const BeliefId& b : f.plan.selectedToExplore) {
                 GraphEdge edge;
-                edge.source = makeNodeId("B" + std::to_string(bid.value));
-                edge.target = planNodeId(*plans[i]);
+                edge.source = makeNodeId(b);
+                edge.target = makeNodeId(f.plan.id);
                 edge.type = EdgeSemanticType::BeliefToPlan;
                 state.edges.push_back(std::move(edge));
             }
         }
 
-        // A ToolCall records the plan occurrence active when it was dispatched.
-        // Fall back to the latest plan for older/demo events.
-        for (const ToolCall& call : f.trajectory) {
-            if (call.id.empty() || plans.empty() || isBeliefSurfaceTool(call.tool)) continue;
-            GraphEdge edge;
-            edge.source = !call.planId.empty() ? makeNodeId(call.planId) : planNodeId(*plans.back());
-            edge.target = makeNodeId(call.id);
-            edge.type = EdgeSemanticType::PlanToExecution;
-            state.edges.push_back(std::move(edge));
+        // Plan -> Execution: the execution's planId, else the frame plan.
+        if (f.plan.valid()) {
+            for (const Execution& call : f.trajectory) {
+                GraphEdge edge;
+                edge.source = makeNodeId(call.planId.empty() ? f.plan.id : call.planId);
+                edge.target = makeNodeId(call.id);
+                edge.type = EdgeSemanticType::PlanToExecution;
+                state.edges.push_back(std::move(edge));
+            }
         }
 
-        std::vector<const DistillationOutput*> distillations;
-        if (!f.distillations.empty()) {
-            for (const DistillationOutput& distillation : f.distillations) {
-                distillations.push_back(&distillation);
-            }
-        } else if (f.distillation.valid()) {
-            distillations.push_back(&f.distillation);
-        }
-
-        for (const DistillationOutput* distillation : distillations) {
-            std::vector<std::string> inputIds = distillation->inputIds;
-            if (inputIds.empty() && distillations.size() == 1) {
-                for (const ToolCall& call : f.trajectory) inputIds.push_back(call.id);
-            }
-            for (const std::string& inputId : inputIds) {
+        // Execution -> Distill: the distillation's explicit input ids.
+        if (f.distillation.valid()) {
+            for (const ExecutionId& inputId : f.distillation.inputs) {
                 if (inputId.empty()) continue;
                 GraphEdge edge;
                 edge.source = makeNodeId(inputId);
-                edge.target = distillNodeId(*distillation);
+                edge.target = makeNodeId(f.distillation.id);
                 edge.type = EdgeSemanticType::ExecutionToDistill;
                 state.edges.push_back(std::move(edge));
             }
         }
 
-        // Distill -> Belief write-back edges. The runtime expresses a distillation's
-        // created/updated beliefs as BeliefCreated / BeliefUpdated (via declare_belief),
-        // so these are carried on the belief record's explicit provenance
-        // (createdInFrame / sourceFrames) rather than as ProposalCreated events. The
-        // demo/headless path instead emits explicit ProposalCreated events, so we
-        // also consume f.proposals. Both sources are deduped by (distill label, belief)
-        // so a belief written back by both is not double-linked.
-        // Distill -> Propose -> Belief write-back. A ProposalCreated occurrence is a
-        // hypothesis-formation step between the distillation and the belief it
-        // writes back, so it projects as a Propose node on the chain
-        // Distill -> Propose -> Belief. The node id is deterministic per frame and
-        // proposal index. The create/update operation rides on Propose -> Belief.
-        std::set<std::pair<std::string, std::string>> writtenBack;
-        uint64_t proposalIdx = 0;
-        for (const Proposal& proposal : f.proposals) {
-            if (proposal.belief.empty()) continue;
-            std::string distillationLabel = proposal.distillationLabel;
-            if (distillationLabel.empty() && distillations.size() == 1) {
-                distillationLabel = distillations.front()->label;
+        // Distill -> Propose -> Belief: explicit provenance. Distillation names
+        // the belief-delta ids it produced (outputs); each delta names the belief
+        // it wrote back (beliefId) and its operation. Only deltas whose belief is
+        // projected are linked (a dangling target is dropped).
+        std::set<std::string> distillOutputs;
+        if (f.distillation.valid()) {
+            for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
+        }
+        for (const BeliefDelta& d : f.beliefDeltas) {
+            if (d.beliefId.empty() || !projectedBeliefIds.count(d.beliefId)) continue;
+            const std::string proposeId = d.id;
+            // Distill -> Propose when the distillation names this delta.
+            if (f.distillation.valid() && distillOutputs.count(d.id)) {
+                GraphEdge distillToPropose;
+                distillToPropose.source = makeNodeId(f.distillation.id);
+                distillToPropose.target = makeNodeId(proposeId);
+                distillToPropose.type = EdgeSemanticType::DistillToPropose;
+                state.edges.push_back(std::move(distillToPropose));
             }
-            if (distillationLabel.empty()) continue;
-            // Drop proposals whose target belief is not in the projected belief set:
-            // a Distill -> Propose -> Belief chain to a missing belief node would
-            // leave a dangling edge (the proposal was never materialized as a
-            // BeliefCreated / BeliefUpdated in the runtime).
-            if (!projectedBeliefIds.count(proposal.belief)) continue;
-            writtenBack.insert({distillationLabel, proposal.belief});
-
-            const std::string proposeId = "PR-" + std::to_string(f.id) + "-" + std::to_string(proposalIdx);
-            GraphNode proposeNode;
-            proposeNode.id = makeNodeId(proposeId);
-            proposeNode.family = NodeFamily::Propose;
-            proposeNode.frameId = f.id;
-            proposeNode.displayType = "propose";
-            proposeNode.title = "Propose " + proposal.belief;
-            proposeNode.compactText = proposal.detail;
-            proposeNode.fullText = proposal.detail;
-            if (!proposal.lhs.empty()) {
-                proposeNode.fullText += "\n" + proposal.lhs + " " + proposal.relation + " " + proposal.rhs;
-            }
-            proposeNode.creationOrder = static_cast<std::uint64_t>(f.id) * 1000 + 400 + proposalIdx;
-            proposeNode.state = NodeVisualState::Default;
-            state.nodes.push_back(std::move(proposeNode));
-            ++proposalIdx;
-
-            GraphEdge distillToPropose;
-            distillToPropose.source = makeNodeId(distillationLabel);
-            distillToPropose.target = makeNodeId(proposeId);
-            distillToPropose.type = EdgeSemanticType::DistillToPropose;
-            state.edges.push_back(std::move(distillToPropose));
-
+            // Propose -> Belief with the operation encoding.
             GraphEdge proposeToBelief;
             proposeToBelief.source = makeNodeId(proposeId);
-            proposeToBelief.target = makeNodeId(proposal.belief);
+            proposeToBelief.target = makeNodeId(d.beliefId);
             proposeToBelief.type = EdgeSemanticType::ProposeToBelief;
-            switch (proposal.op) {
-                case '+': proposeToBelief.beliefOperation = BeliefOperation::Create; break;
-                case '-': proposeToBelief.beliefOperation = BeliefOperation::Remove; break;
-                case '?': proposeToBelief.beliefOperation = BeliefOperation::Unresolved; break;
-                default:  proposeToBelief.beliefOperation = BeliefOperation::Update; break;  // '~' and unknown
-            }
+            proposeToBelief.beliefOperation = beliefOperationFromDelta(d.operation);
             state.edges.push_back(std::move(proposeToBelief));
-        }
-
-        // Live-path provenance: a belief created or updated while this frame was the
-        // active DISTILLING frame points back via createdInFrame / sourceFrames, and
-        // (since the RPC adapter binds a distillation label in DistillationProduced)
-        // via distillationLabel when the mutation was attributed to a specific
-        // distillation occurrence. Prefer the label (exact attribution in a frame
-        // with several distillations); fall back to the frame's single distillation
-        // when the label is empty or names no distillation in this frame. A pair
-        // already written back by a proposal is not repeated.
-        for (const Belief& belief : model.beliefs()) {
-            bool createdHere = belief.createdInFrame == f.id;
-            bool updatedHere = false;
-            for (int src : belief.sourceFrames) {
-                if (src == f.id) { updatedHere = true; break; }
-            }
-            if (!createdHere && !updatedHere && belief.distillationLabel.empty()) continue;
-            const std::string beliefLabel = "B" + std::to_string(belief.id.value);
-            // Resolve the distillation to link: the specific label when it names a
-            // distillation in this frame, else the sole distillation (frame ==
-            // distillation).
-            const DistillationOutput* distillation = nullptr;
-            if (!belief.distillationLabel.empty()) {
-                for (const DistillationOutput* d : distillations) {
-                    if (d->label == belief.distillationLabel) { distillation = d; break; }
-                }
-            }
-            if (!distillation && distillations.size() == 1) {
-                distillation = distillations.front();
-            }
-            if (!distillation) continue;
-            const std::pair<std::string, std::string> key{distillation->label, beliefLabel};
-            if (writtenBack.count(key)) continue;
-            writtenBack.insert(key);
-            GraphEdge edge;
-            edge.source = distillNodeId(*distillation);
-            edge.target = makeNodeId(beliefLabel);
-            edge.type = EdgeSemanticType::DistillToBelief;
-            edge.beliefOperation = createdHere
-                ? BeliefOperation::Create
-                : BeliefOperation::Update;
-            state.edges.push_back(std::move(edge));
         }
     }
 

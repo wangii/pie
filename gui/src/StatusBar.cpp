@@ -19,37 +19,16 @@ void renderStatusBar(const pie::gui::NativeGuiModel& m) {
     ImGui::Separator();
 
     if (c.valid()) {
-        ImGui::TextUnformatted(("Task #" + std::to_string(c.frameId)).c_str());
+        const auto* task = m.selectedTask();
+        std::string taskLabel =
+            (task && !task->targetStatement.empty()) ? task->targetStatement : c.taskId;
+        ImGui::TextUnformatted(("Task: " + taskLabel).c_str());
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
         ImGui::TextUnformatted(pie::gui::frameStageToString(c.stage));
         ImGui::PopStyleColor();
         ImGui::SameLine();
         ImGui::Separator();
-
-        // if (const auto* f = m.frameById(c.frameId); f && !f->selectedBeliefs.empty()) {
-        //     std::string sel = "Selected: ";
-        //     for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
-        //         if (i) sel += ", ";
-        //         sel += beliefLabel(f->selectedBeliefs[i].value);
-        //     }
-        //     ImGui::TextUnformatted(sel.c_str());
-        //     ImGui::SameLine();
-        //     ImGui::Separator();
-        // }
-        // // The runtime never provides CursorChanged.item (rpc.md and the runtime
-        // // emit only frameId+stage), so derive the "current" tool from the active
-        // // frame's in-flight trajectory instead of a static, never-populated field.
-        // if (c.stage == pie::gui::FrameStage::EXECUTING) {
-        //     if (const auto* f = m.frameById(c.frameId)) {
-        //         for (const auto& t : f->trajectory) {
-        //             if (t.status == "running") {
-        //                 ImGui::TextUnformatted(("Current: " + t.id).c_str());
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // }
     } else {
         ImGui::TextUnformatted("(no active frame)");
     }

@@ -19,9 +19,7 @@ const ImVec4 kPaneBgDark(0.22f, 0.23f, 0.25f, 1.0f);
 // Animated background for the current flow-step pane. The active pane's
 // background oscillates between black and kPaneBgDark following a sinusoidal
 // (non-linear) time relationship, per the user's explicit request overriding
-// the gui no-animation rule for this highlight. The factor cycles smoothly
-// through 0..1 over time and never exceeds that range; inactive panes keep the
-// default child background.
+// the gui no-animation rule for this highlight.
 ImVec4 paneBg(bool active) {
     if (!active) return ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
     const float kSpeed = 1.0f;  // radians per second; full cycle ~ 6.28 s
@@ -41,19 +39,12 @@ const char* historySymbol(pie::gui::LoopFrame::History h) {
     return "";
 }
 
-int beliefIdFromLabel(const std::string& label) {
-    if (label.empty() || label[0] != 'B') return -1;
-    int id = 0;
-    for (size_t i = 1; i < label.size(); ++i) {
-        if (label[i] < '0' || label[i] > '9') break;
-        id = id * 10 + (label[i] - '0');
-    }
-    return id;
-}
-
-std::string beliefLabel(int id) { return "B" + std::to_string(id); }
-
 ImVec4 beliefStatusColor(const std::string& status) {
+    if (status == "proposed") return kAccent;
+    if (status == "supported") return kGreen;
+    if (status == "refuted") return kRed;
+    if (status == "superseded") return kAmber;
+    // Legacy demo statuses retained for back-compat with older fixtures.
     if (status == "open") return kAccent;
     if (status == "closed") return kGreen;
     if (status == "falsified") return kRed;

@@ -13,17 +13,13 @@
 
 namespace pie::gui {
 
-void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool enableScroll) {
+void renderCognitiveLane(const pie::gui::NativeGuiModel& m, const std::string& viewId, bool enableScroll) {
     const auto* f = displayedFrame(m, viewId);
     ImGui::TextUnformatted("COGNITIVE PROCESS");
     ImGui::Separator();
     ImGui::BeginChild("cog_scroll", ImVec2(0, 0), false);
-    // Cmd/Ctrl+Up/Down (macOS Cmd, elsewhere Ctrl) page-scroll the cognitive
-    // lane, mirroring the user prompt palette's in-message scroll. Read while
-    // the cog_scroll child is the current window so GetScrollY/SetScrollY target
-    // this region, not any other. `enableScroll` is false while the user-
-    // prompt pane is open (the palette then owns the chord), preserving its
-    // own Cmd/Ctrl+Up/Down behavior.
+    // Cmd/Ctrl+Up/Down page-scroll the cognitive lane (mirrors the user prompt
+    // palette's in-message scroll).
     if (enableScroll) {
         auto& io = ImGui::GetIO();
         const float maxScroll = ImGui::GetScrollMaxY();
@@ -37,9 +33,9 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool ena
     }
     if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
 
-    // The CursorChanged stage of the active frame drives which paragraph in the
-    // cognitive lane is the current flow step. Only the matching paragraph gets
-    // the dark-gray background; the other two keep the default child background.
+    // The CursorChanged stage of the active frame drives which paragraph is the
+    // current flow step. Only the matching paragraph gets the dark-gray
+    // background; the others keep the default child background.
     const pie::gui::FrameStage stage = m.cursor().valid() ? m.cursor().stage : pie::gui::FrameStage::NONE;
 
     // PLAN
@@ -51,17 +47,18 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool ena
         ImGui::TextUnformatted("PLAN");
         ImGui::PopStyleColor();
         if (f->plan.valid()) {
-            ImGui::TextUnformatted(("Intent " + f->plan.label).c_str());
-            if (!f->selectedBeliefs.empty()) {
+            ImGui::TextUnformatted(("Plan " + f->plan.label).c_str());
+            if (!f->plan.selectedToExplore.empty()) {
                 std::string sel = "Selected: ";
-                for (size_t i = 0; i < f->selectedBeliefs.size(); ++i) {
+                for (size_t i = 0; i < f->plan.selectedToExplore.size(); ++i) {
                     if (i) sel += ", ";
-                    sel += beliefLabel(f->selectedBeliefs[i].value);
+                    sel += m.beliefLabel(f->plan.selectedToExplore[i]);
                 }
                 ImGui::TextDisabled("%s", sel.c_str());
             }
-            ImGui::TextUnformatted(("Q: " + f->plan.question).c_str());
-            ImGui::TextWrapped("%s", ("Intent: " + f->plan.intent).c_str());
+            if (!f->plan.intent.empty()) {
+                ImGui::TextWrapped("%s", ("Intent: " + f->plan.intent).c_str());
+            }
         } else {
             ImGui::TextDisabled("(no plan yet)");
         }
@@ -81,20 +78,21 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, int viewId, bool ena
         ImGui::TextUnformatted("DISTILLATION");
         ImGui::PopStyleColor();
         if (f->distillation.valid()) {
-            ImGui::TextUnformatted(("D-42 " + f->distillation.label).c_str());
+            ImGui::TextUnformatted(("Distillation " + f->distillation.label).c_str());
             ImGui::TextUnformatted("Input:");
-            for (auto& id : f->distillation.inputIds) {
+            for (auto& id : f->distillation.inputs) {
                 ImGui::BulletText("%s", id.c_str());
             }
-            if (!f->distillation.unexplained.empty()) {
-                ImGui::TextWrapped("Unexplained:");
-                ImGui::NewLine();
-                renderMarkdownMessage(f->distillation.unexplained);
-            }
-            if (!f->distillation.interpretation.empty()) {
+            if (!f->distillation.contents.empty()) {
                 ImGui::TextWrapped("Interpretation:");
                 ImGui::NewLine();
-                renderMarkdownMessage(f->distillation.interpretation);
+                renderMarkdownMessage(f->distillation.contents);
+            }
+            if (!f->distillation.outputs.empty()) {
+                ImGui::TextUnformatted("Outputs:");
+                for (auto& id : f->distillation.outputs) {
+                    ImGui::BulletText("%s", id.c_str());
+                }
             }
         } else {
             ImGui::TextDisabled("(no distillation yet)");

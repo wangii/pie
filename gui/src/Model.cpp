@@ -34,9 +34,7 @@ bool findKey(const std::string& s, const std::string& key, std::string& raw) {
 }
 
 // Encode a code point as UTF-8. Surrogate values must not reach here: JSON
-// surrogate pairs are combined by decodeEscapes before encoding, so an isolated
-// surrogate is preserved as its original escape instead of yielding invalid
-// UTF-8 (the old BMP-only branch encoded D800-DFFF as a lone 3-byte sequence).
+// surrogate pairs are combined by decodeEscapes before encoding.
 void appendUtf8(std::string& out, unsigned cp) {
     if (cp < 0x80) {
         out += static_cast<char>(cp);
@@ -55,10 +53,7 @@ void appendUtf8(std::string& out, unsigned cp) {
     }
 }
 
-// Decode JSON escape sequences in a raw (unquoted) string body. The previous
-// implementation dropped the leading backslash and blindly appended the escaped
-// character, so "\n\n" collapsed to "nn" instead of the two newlines it
-// encodes. Decode the standard JSON escapes so message content round-trips.
+// Decode JSON escape sequences in a raw (unquoted) string body.
 std::string decodeEscapes(const std::string& body) {
     std::string out;
     for (size_t i = 0; i < body.size(); ++i) {
@@ -75,7 +70,6 @@ std::string decodeEscapes(const std::string& body) {
                 case '/': out += '/'; break;
                 case '"': out += '"'; break;
                 case 'u': {
-                    // Parse one \uXXXX escape into a code unit.
                     auto hex4 = [&](size_t start, unsigned& out4) -> bool {
                         if (start + 4 > body.size()) return false;
                         out4 = 0;
@@ -92,11 +86,8 @@ std::string decodeEscapes(const std::string& body) {
                     };
                     unsigned first = 0;
                     if (!hex4(i + 1, first)) { out += '\\'; out += 'u'; break; }
-                    i += 4;  // i now at the last hex digit of the first escape.
+                    i += 4;
                     if (first >= 0xD800 && first <= 0xDBFF) {
-                        // High surrogate: if a low surrogate \uXXXX follows,
-                        // combine into a single code point; otherwise preserve
-                        // the high surrogate's escape (invalid UTF-8 otherwise).
                         unsigned second = 0;
                         if (i + 6 < body.size() && body[i + 1] == '\\' && body[i + 2] == 'u' &&
                             hex4(i + 3, second) && second >= 0xDC00 && second <= 0xDFFF) {
@@ -108,7 +99,6 @@ std::string decodeEscapes(const std::string& body) {
                             for (int k = 3; k >= 0; --k) out += body[i - k];
                         }
                     } else if (first >= 0xDC00 && first <= 0xDFFF) {
-                        // Isolated low surrogate: preserve its escape.
                         out += '\\'; out += 'u';
                         for (int k = 3; k >= 0; --k) out += body[i - k];
                     } else {
@@ -116,8 +106,6 @@ std::string decodeEscapes(const std::string& body) {
                     }
                     break;
                 }
-                // Unknown escapes keep the backslash rather than silently
-                // dropping it, which is closer to the original input.
                 default: out += '\\'; out += e; break;
             }
             continue;
@@ -156,28 +144,14 @@ double doubleVal(const std::string& s, const std::string& key, double def = -1.0
     return std::strtod(raw.c_str(), nullptr);
 }
 
-// Like doubleVal, but a literal JSON null is treated as the default (-> the
-// unknown placeholder) rather than strtod's 0.0. The runtime reports context
-// usage tokens/percent as null when unknown, e.g. right after compaction.
 double nullableDoubleVal(const std::string& s, const std::string& key, double def = -1.0) {
     std::string raw;
     if (!findKey(s, key, raw)) return def;
     std::string t = trim(raw);
     if (t.empty()) return def;
-    if (t[0] == '\"') return doubleVal(s, key, def);  // quoted string value
+    if (t[0] == '\"') return doubleVal(s, key, def);
     if (std::strncmp(t.c_str(), "null", 4) == 0) return def;
     return std::strtod(t.c_str(), nullptr);
-}
-
-char charVal(const std::string& s, const std::string& key, char def = '?') {
-    std::string raw;
-    if (!findKey(s, key, raw)) return def;
-    if (raw.empty()) return def;
-    if (raw[0] == '"') {  // quoted single-char value
-        std::string v = stringValue(raw);
-        return v.empty() ? def : v[0];
-    }
-    return raw[0];
 }
 
 // Split a top-level array substring "[a,b,c]" into trimmed element substrings.
@@ -206,31 +180,27 @@ std::vector<std::string> arrayElements(const std::string& v) {
     return out;
 }
 
-std::vector<BeliefId> beliefsArray(const std::string& v) {
-    std::vector<BeliefId> out;
-    for (auto& e : arrayElements(v)) {
-        // Element may be quoted or a bare number; strip quotes then parse.
-        std::string raw = e;
-        if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"')
-            raw = raw.substr(1, raw.size() - 2);
-        out.push_back(BeliefId{static_cast<int>(std::strtol(raw.c_str(), nullptr, 10))});
-    }
-    return out;
-}
-
-FrameStage parseStage(const std::string& s) {
-    if (s == "PLANNING") return FrameStage::PLANNING;
-    if (s == "EXECUTING") return FrameStage::EXECUTING;
-    if (s == "DISTILLING") return FrameStage::DISTILLING;
-    if (s == "PROPOSING") return FrameStage::PROPOSING;
-    if (s == "CLOSED") return FrameStage::CLOSED;
-    return FrameStage::NONE;
-}
-
 std::vector<std::string> strArray(const std::string& v) {
     std::vector<std::string> out;
     for (auto& e : arrayElements(v)) out.push_back(stringValue(e));
     return out;
+}
+
+// Read a top-level string-array field (["a","b"]).
+std::vector<std::string> strArrayField(const std::string& s, const std::string& key) {
+    std::string raw;
+    if (!findKey(s, key, raw)) return {};
+    return strArray(raw);
+}
+
+FrameStage parseStage(const std::string& s) {
+    if (s == "routing" || s == "ROUTING") return FrameStage::ROUTING;
+    if (s == "planning" || s == "PLANNING") return FrameStage::PLANNING;
+    if (s == "executing" || s == "EXECUTING") return FrameStage::EXECUTING;
+    if (s == "distilling" || s == "DISTILLING") return FrameStage::DISTILLING;
+    if (s == "proposing" || s == "PROPOSING") return FrameStage::PROPOSING;
+    if (s == "closed" || s == "CLOSED") return FrameStage::CLOSED;
+    return FrameStage::NONE;
 }
 
 // Case-insensitive substring test. An empty needle matches anything.
@@ -247,15 +217,7 @@ bool containsFold(const std::string& hay, std::string_view needle) {
     return hl.find(nl) != std::string::npos;
 }
 
-bool hasLoopCycleContent(const LoopFrame& frame) {
-    return !frame.selectedBeliefs.empty() || !frame.plans.empty() || frame.plan.valid() ||
-           !frame.trajectory.empty() || !frame.distillations.empty() ||
-           frame.distillation.valid() || !frame.proposals.empty();
-}
-
 // Extract the raw value (object/array/string/number) for a top-level key.
-// Handles nested {}[] and strings. Used to read args/result/content objects
-// that the minimal scalar helpers cannot parse.
 bool rawValue(const std::string& s, const std::string& key, std::string& out) {
     const std::string pat = "\"" + key + "\"";
     size_t p = s.find(pat);
@@ -289,24 +251,25 @@ bool rawValue(const std::string& s, const std::string& key, std::string& out) {
     return true;
 }
 
-// Join all `"text":"..."` and `"thinking":"..."` string values found within
-// a `content` array so the ⌘T pane seeds the assistant's reply with both
-// visible text and reasoning blocks (thinking is a separate content field).
-std::string extractMessageText(const std::string& line) {
-    std::string content;
-    if (!rawValue(line, "content", content)) return {};
+// Join all `"text":"..."` and `"thinking":"..."` string values found within a
+// raw value (string or content array) so tool output / intervention content is
+// reduced to a readable single line.
+std::string extractTextFromValue(const std::string& raw) {
+    std::string t = trim(raw);
+    if (t.empty()) return {};
+    if (t[0] == '"') return stringValue(t);
     std::string out;
     auto extractKey = [&](const std::string& keyLiteral) {
         size_t p = 0;
-        while ((p = content.find(keyLiteral, p)) != std::string::npos) {
+        while ((p = t.find(keyLiteral, p)) != std::string::npos) {
             p += keyLiteral.size();
             size_t q = p;
-            while (q < content.size() && content[q] != '"') {
-                if (content[q] == '\\') ++q;
+            while (q < t.size() && t[q] != '"') {
+                if (t[q] == '\\') ++q;
                 ++q;
             }
-            std::string t = decodeEscapes(content.substr(p, q - p));
-            if (!t.empty()) { if (!out.empty()) out += " "; out += t; }
+            std::string v = decodeEscapes(t.substr(p, q - p));
+            if (!v.empty()) { if (!out.empty()) out += " "; out += v; }
             p = q + 1;
         }
     };
@@ -315,10 +278,79 @@ std::string extractMessageText(const std::string& line) {
     return out;
 }
 
+// Extract a readable tool-input summary from an ExecutionStarted `input` value:
+// prefer `command`, then `path`/`file_path`, else the raw text.
+std::string inputToSummary(const std::string& raw) {
+    std::string t = trim(raw);
+    if (t.empty()) return {};
+    if (t[0] == '"') return stringValue(t);
+    std::string command = str(raw, "command");
+    if (!command.empty()) return command;
+    std::string path = str(raw, "path");
+    if (!path.empty()) return path;
+    std::string filePath = str(raw, "file_path");
+    if (!filePath.empty()) return filePath;
+    return extractTextFromValue(t);
+}
+
+// Derive the Belief status from append-only provenance (domain-model.md).
+std::string deriveBeliefStatus(const Belief& b) {
+    if (b.withdrawn || !b.supersededBy.empty()) return "superseded";
+    if (!b.refutedBy.empty()) return "refuted";
+    if (!b.supportedBy.empty()) return "supported";
+    return "proposed";
+}
+
+// Fill a Belief record from a raw JSON belief object. Does not touch `label`
+// (set by upsertBelief) or `createdInFrame` (set from the delta's frameId).
+void parseBeliefRecord(const std::string& raw, Belief& b) {
+    b.id = str(raw, "id", b.id);
+    b.statement = str(raw, "statement", b.statement);
+    b.domain = str(raw, "domain", b.domain);
+    b.expectation = str(raw, "expectation", b.expectation);
+    b.evidenceRounds = intVal(raw, "evidenceRounds", b.evidenceRounds);
+    b.supersededBy = str(raw, "supersededBy", "");
+    b.withdrawn = str(raw, "withdrawn") == "true";
+    b.skillRefs = strArrayField(raw, "skillRefs");
+
+    b.supportedBy.clear();
+    std::string supRaw;
+    if (rawValue(raw, "supportedBy", supRaw)) {
+        for (auto& e : arrayElements(supRaw)) {
+            std::string ev = str(e, "evidence");
+            if (!ev.empty()) b.supportedBy.push_back(ev);
+        }
+    }
+    b.refutedBy.clear();
+    std::string refRaw;
+    if (rawValue(raw, "refutedBy", refRaw)) {
+        for (auto& e : arrayElements(refRaw)) {
+            std::string ev = str(e, "evidence");
+            if (!ev.empty()) b.refutedBy.push_back(ev);
+        }
+    }
+    b.status = deriveBeliefStatus(b);
+}
+
+// Derive the navigator history flag from a frame's belief deltas (display only).
+LoopFrame::History deriveHistory(const LoopFrame& f) {
+    bool hasAdd = false, hasRevise = false, hasRemove = false;
+    for (const BeliefDelta& d : f.beliefDeltas) {
+        if (d.operation == "retract") hasRemove = true;
+        else if (d.operation == "refine") hasRevise = true;
+        else if (d.operation == "propose") hasAdd = true;
+    }
+    if (hasRemove) return LoopFrame::History::Falsified;
+    if (hasAdd && hasRevise) return LoopFrame::History::Revised;
+    if (hasAdd) return LoopFrame::History::NewBelief;
+    return LoopFrame::History::Closed;
+}
+
 } // namespace
 
 const char* frameStageToString(FrameStage s) {
     switch (s) {
+        case FrameStage::ROUTING: return "ROUTING";
         case FrameStage::PLANNING: return "PLANNING";
         case FrameStage::EXECUTING: return "EXECUTING";
         case FrameStage::DISTILLING: return "DISTILLING";
@@ -331,38 +363,414 @@ const char* frameStageToString(FrameStage s) {
 
 bool frameMatchesQuery(const LoopFrame& f, std::string_view query) {
     if (query.empty()) return true;
-    if (containsFold(std::to_string(f.id), query)) return true;
+    if (containsFold(f.id, query)) return true;
     if (containsFold(f.summary, query)) return true;
-    if (containsFold(f.plan.label, query)) return true;
-    if (containsFold(f.plan.question, query)) return true;
     if (containsFold(f.plan.intent, query)) return true;
+    for (auto& id : f.plan.selectedToExplore) if (containsFold(id, query)) return true;
     for (auto& t : f.trajectory) {
         if (containsFold(t.tool, query)) return true;
         if (containsFold(t.command, query)) return true;
         if (containsFold(t.result, query)) return true;
         if (containsFold(t.status, query)) return true;
     }
-    if (containsFold(f.distillation.label, query)) return true;
-    for (auto& id : f.distillation.inputIds) if (containsFold(id, query)) return true;
-    if (containsFold(f.distillation.unexplained, query)) return true;
-    if (containsFold(f.distillation.interpretation, query)) return true;
-    for (auto& p : f.proposals) {
-        if (containsFold(std::string(1, p.op), query)) return true;
-        if (containsFold(p.belief, query)) return true;
-        if (containsFold(p.lhs, query)) return true;
-        if (containsFold(p.relation, query)) return true;
-        if (containsFold(p.rhs, query)) return true;
-        if (containsFold(p.detail, query)) return true;
+    if (containsFold(f.distillation.contents, query)) return true;
+    for (auto& id : f.distillation.inputs) if (containsFold(id, query)) return true;
+    for (auto& d : f.beliefDeltas) {
+        if (containsFold(d.operation, query)) return true;
+        if (containsFold(d.beliefId, query)) return true;
+        if (containsFold(d.evidence, query)) return true;
     }
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Frame / belief / task accessors
+// ---------------------------------------------------------------------------
+void NativeGuiModel::reset() {
+    frames_.clear();
+    frameOrder_.clear();
+    tasks_.clear();
+    taskOrder_.clear();
+    activeTaskId_.clear();
+    selectedTaskId_.clear();
+    beliefById_.clear();
+    beliefs_.clear();
+    activeBeliefs_.clear();
+    cursor_ = FrameCursor{};
+    nextBeliefOrdinal_ = 0;
+    nextPlanOrdinal_ = 0;
+    nextDistillOrdinal_ = 0;
+    roleContext_ = RoleContextUsagePair{};
+    clearFileList();
+}
+
+LoopFrame* NativeGuiModel::frame(FrameId id) {
+    auto it = frames_.find(id);
+    return it == frames_.end() ? nullptr : &it->second;
+}
+const LoopFrame* NativeGuiModel::frame(FrameId id) const {
+    auto it = frames_.find(id);
+    return it == frames_.end() ? nullptr : &it->second;
+}
+
+const LoopFrame* NativeGuiModel::activeFrame() const {
+    return cursor_.frameId.empty() ? nullptr : frame(cursor_.frameId);
+}
+const LoopFrame* NativeGuiModel::frameById(FrameId id) const { return frame(id); }
+
+std::vector<LoopFrame> NativeGuiModel::frames() const {
+    std::vector<LoopFrame> out;
+    out.reserve(frameOrder_.size());
+    for (const FrameId& id : frameOrder_) {
+        auto it = frames_.find(id);
+        if (it != frames_.end()) out.push_back(it->second);
+    }
+    return out;
+}
+
+const Task* NativeGuiModel::taskById(TaskId id) const {
+    auto it = tasks_.find(id);
+    return it == tasks_.end() ? nullptr : &it->second;
+}
+
+std::vector<Task> NativeGuiModel::tasks() const {
+    std::vector<Task> out;
+    out.reserve(taskOrder_.size());
+    for (const TaskId& id : taskOrder_) {
+        auto it = tasks_.find(id);
+        if (it != tasks_.end()) out.push_back(it->second);
+    }
+    return out;
+}
+
+const Task* NativeGuiModel::activeTask() const {
+    return activeTaskId_.empty() ? nullptr : taskById(activeTaskId_);
+}
+
+const Task* NativeGuiModel::selectedTask() const {
+    const TaskId& id = selectedTaskId_.empty() ? activeTaskId_ : selectedTaskId_;
+    return taskById(id);
+}
+
+const Belief* NativeGuiModel::belief(BeliefId id) const {
+    auto it = beliefById_.find(id);
+    if (it == beliefById_.end()) return nullptr;
+    return &beliefs_[static_cast<size_t>(it->second)];
+}
+
+Belief& NativeGuiModel::upsertBelief(const BeliefId& id) {
+    auto it = beliefById_.find(id);
+    if (it != beliefById_.end()) return beliefs_[static_cast<size_t>(it->second)];
+    Belief b;
+    b.id = id;
+    b.label = "B" + std::to_string(++nextBeliefOrdinal_);
+    b.status = "proposed";
+    const int idx = static_cast<int>(beliefs_.size());
+    beliefs_.push_back(std::move(b));
+    beliefById_[id] = idx;
+    return beliefs_[static_cast<size_t>(idx)];
+}
+
+bool NativeGuiModel::isSelectedInCurrentFrame(const BeliefId& b) const {
+    const LoopFrame* f = activeFrame();
+    if (!f) return false;
+    for (const BeliefId& s : f->plan.selectedToExplore)
+        if (s == b) return true;
+    return false;
+}
+
+std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
+    const Belief* b = belief(id);
+    return b && !b->label.empty() ? b->label : id;
+}
+
+// ---------------------------------------------------------------------------
+// Live in-message stream (⌘T pane)
+// ---------------------------------------------------------------------------
+void NativeGuiModel::beginInMessage(const std::string& text) {
+    inMessage_ = text;
+}
+void NativeGuiModel::appendInMessage(const std::string& delta) {
+    inMessage_ += delta;
+}
+void NativeGuiModel::endInMessage() {
+    // The buffer already holds the accumulated text; nothing more to do.
+}
+void NativeGuiModel::setInMessageThinking(bool thinking) {
+    inMessageThinking_ = thinking;
+}
+
+// ---------------------------------------------------------------------------
+// Domain event application
+// ---------------------------------------------------------------------------
+void NativeGuiModel::openTask(TaskId id, TaskId parentTaskId, const std::string& prompt) {
+    if (tasks_.count(id)) return;
+    Task t;
+    t.id = id;
+    t.parentTaskId = parentTaskId;
+    t.status = "active";
+    t.prompt = prompt;
+    tasks_[id] = std::move(t);
+    taskOrder_.push_back(id);
+    activeTaskId_ = id;
+    if (selectedTaskId_.empty()) selectedTaskId_ = id;
+}
+
+void NativeGuiModel::openFrame(FrameId id, TaskId taskId, uint64_t ordinal, const std::string& openedAt) {
+    LoopFrame f;
+    f.id = id;
+    f.taskId = taskId;
+    f.ordinal = ordinal;
+    f.openedAt = openedAt;
+    f.stage = FrameStage::ROUTING;
+    f.history = LoopFrame::History::Current;
+    frames_[id] = std::move(f);
+    frameOrder_.push_back(id);
+    cursor_.taskId = taskId;
+    cursor_.frameId = id;
+    cursor_.stage = FrameStage::ROUTING;
+    cursor_.item.clear();
+    auto* task = taskById(taskId);
+    if (task) {
+        auto& frames = const_cast<std::vector<FrameId>&>(task->frames);
+        frames.push_back(id);
+    }
+    // A new frame supersedes any pending terminal-close signal from a prior
+    // mid-loop FrameClosed (only the final close is not followed by FrameOpened).
+    finalReportPending_ = false;
+}
+
+void NativeGuiModel::closeFrame(FrameId id, bool failed) {
+    LoopFrame* f = frame(id);
+    if (!f || f->closed) return;
+    f->closed = true;
+    f->failed = failed;
+    f->stage = FrameStage::CLOSED;
+    f->history = deriveHistory(*f);
+    // A frame close is the belief loop's terminal boundary (finalReport). The
+    // flag is cleared on the next FrameOpened, so only the terminal close keeps
+    // it until the conclusion message_end.
+    finalReportPending_ = true;
+}
+
+bool NativeGuiModel::applyDomainLine(const std::string& line) {
+    if (line.empty() || line[0] != '{') return false;
+    const std::string type = str(line, "type");
+    if (type.empty()) return false;
+
+    if (type == "TaskOpened") {
+        const std::string taskId = str(line, "taskId");
+        const std::string parent = str(line, "parentTaskId");
+        if (taskId.empty()) return true;
+        openTask(taskId, parent, "");
+        auto* task = const_cast<Task*>(taskById(taskId));
+        if (task) task->inheritedBeliefs = strArrayField(line, "inheritedBeliefs");
+        return true;
+    }
+    if (type == "TargetDefined") {
+        const std::string taskId = str(line, "taskId");
+        auto* task = const_cast<Task*>(taskById(taskId));
+        std::string targetRaw;
+        if (task && rawValue(line, "target", targetRaw)) {
+            task->targetStatement = str(targetRaw, "statement");
+            if (task->prompt.empty()) task->prompt = task->targetStatement;
+        }
+        return true;
+    }
+    if (type == "FrameOpened") {
+        const std::string taskId = str(line, "taskId");
+        const std::string frameId = str(line, "frameId");
+        if (frameId.empty()) return true;
+        openFrame(frameId, taskId, static_cast<uint64_t>(intVal(line, "ordinal", 0)), "");
+        // Seed the display summary from the task's target statement.
+        if (const Task* task = taskById(taskId); task && !task->targetStatement.empty()) {
+            frame(frameId)->summary = task->targetStatement;
+        }
+        return true;
+    }
+    if (type == "RoutingDecided") {
+        LoopFrame* f = frame(str(line, "frameId"));
+        std::string routingRaw;
+        if (f && rawValue(line, "routing", routingRaw)) {
+            f->routingDecision = str(routingRaw, "decision");
+            f->routingReason = str(routingRaw, "reason");
+        }
+        return true;
+    }
+    if (type == "FrameBodySelected") {
+        LoopFrame* f = frame(str(line, "frameId"));
+        if (f) {
+            f->bodyKind = str(line, "body");
+            f->openBeliefsAtStart = strArrayField(line, "openBeliefsAtStart");
+        }
+        return true;
+    }
+    if (type == "CursorChanged") {
+        const FrameStage st = parseStage(str(line, "stage"));
+        cursor_.taskId = str(line, "taskId", cursor_.taskId);
+        cursor_.frameId = str(line, "frameId", cursor_.frameId);
+        cursor_.stage = st;
+        LoopFrame* f = frame(cursor_.frameId);
+        if (f && st != FrameStage::NONE) f->stage = st;
+        return true;
+    }
+    if (type == "InterventionAdded") {
+        LoopFrame* f = frame(str(line, "frameId"));
+        std::string raw;
+        if (f && rawValue(line, "intervention", raw)) {
+            Intervention iv;
+            iv.id = str(raw, "id");
+            iv.stage = str(raw, "stage");
+            iv.createdAt = str(raw, "createdAt");
+            std::string contents;
+            if (rawValue(raw, "contents", contents)) iv.contents = extractTextFromValue(contents);
+            f->steering.push_back(std::move(iv));
+        }
+        return true;
+    }
+    if (type == "BeliefDeltaApplied") {
+        const std::string frameId = str(line, "frameId");
+        LoopFrame* f = frame(frameId);
+        std::string deltaRaw;
+        if (!rawValue(line, "delta", deltaRaw)) return true;
+
+        BeliefDelta d;
+        d.id = str(deltaRaw, "id");
+        d.frameId = str(deltaRaw, "frameId", frameId);
+        d.distillationId = str(deltaRaw, "distillationId");
+        d.operation = str(deltaRaw, "operation");
+        d.beliefId = str(deltaRaw, "beliefId");
+        d.evidence = str(deltaRaw, "evidence");
+        d.evidenceBeliefIds = strArrayField(deltaRaw, "evidenceBeliefIds");
+
+        std::string resultingRaw;
+        if (rawValue(deltaRaw, "resultingBeliefs", resultingRaw)) {
+            for (auto& e : arrayElements(resultingRaw)) {
+                Belief parsed;
+                parseBeliefRecord(e, parsed);
+                if (parsed.id.empty()) continue;
+                const bool isNew = beliefById_.find(parsed.id) == beliefById_.end();
+                Belief& stored = upsertBelief(parsed.id);
+                stored.statement = parsed.statement;
+                stored.domain = parsed.domain;
+                stored.expectation = parsed.expectation;
+                stored.evidenceRounds = parsed.evidenceRounds;
+                stored.skillRefs = std::move(parsed.skillRefs);
+                stored.supportedBy = std::move(parsed.supportedBy);
+                stored.refutedBy = std::move(parsed.refutedBy);
+                stored.supersededBy = std::move(parsed.supersededBy);
+                stored.withdrawn = parsed.withdrawn;
+                stored.status = parsed.status;
+                if (isNew || stored.createdInFrame.empty()) stored.createdInFrame = frameId;
+            }
+        }
+        if (f) f->beliefDeltas.push_back(std::move(d));
+        activeBeliefs_ = strArrayField(line, "activeBeliefs");
+        return true;
+    }
+    if (type == "PlanProduced") {
+        LoopFrame* f = frame(str(line, "frameId"));
+        std::string planRaw;
+        if (f && rawValue(line, "plan", planRaw)) {
+            Plan p;
+            p.id = str(planRaw, "id");
+            p.selectedToExplore = strArrayField(planRaw, "selectedToExplore");
+            p.intent = str(planRaw, "intent");
+            p.label = "P-" + std::to_string(++nextPlanOrdinal_);
+            f->plan = std::move(p);
+        }
+        return true;
+    }
+    if (type == "ExecutionStarted") {
+        const std::string frameId = str(line, "frameId");
+        LoopFrame* f = frame(frameId);
+        std::string execRaw;
+        if (!f || !rawValue(line, "execution", execRaw)) return true;
+        Execution ex;
+        ex.id = str(execRaw, "id");
+        ex.planId = str(execRaw, "planId");
+        ex.tool = str(execRaw, "tool");
+        ex.status = "running";
+        std::string input;
+        if (rawValue(execRaw, "input", input)) ex.command = inputToSummary(input);
+        std::string filePath = str(execRaw, "filePath");
+        f->trajectory.push_back(std::move(ex));
+        // Session file list: read/write/edit tools carry a path (or file_path).
+        if (f->trajectory.back().tool == "read" || f->trajectory.back().tool == "write" ||
+            f->trajectory.back().tool == "edit") {
+            std::string p;
+            if (rawValue(execRaw, "input", input)) {
+                p = str(input, "path");
+                if (p.empty()) p = str(input, "file_path");
+            }
+            if (p.empty()) p = filePath;
+            recordFileOp(f->trajectory.back().tool, p);
+        }
+        return true;
+    }
+    if (type == "ExecutionCompleted") {
+        const std::string frameId = str(line, "frameId");
+        LoopFrame* f = frame(frameId);
+        if (!f) return true;
+        const std::string execId = str(line, "executionId");
+        const std::string status = str(line, "status");
+        std::string output;
+        rawValue(line, "output", output);
+        for (Execution& t : f->trajectory) {
+            if (t.id == execId) {
+                t.result = extractTextFromValue(output);
+                if (status == "succeeded") t.status = "ok";
+                else if (status == "cancelled") t.status = "cancelled";
+                else t.status = "failed"; // "failed"
+                t.warning = str(line, "error");
+                break;
+            }
+        }
+        return true;
+    }
+    if (type == "DistillationProduced") {
+        LoopFrame* f = frame(str(line, "frameId"));
+        std::string distRaw;
+        if (f && rawValue(line, "distillation", distRaw)) {
+            Distillation d;
+            d.id = str(distRaw, "id");
+            d.inputs = strArrayField(distRaw, "inputs");
+            d.contents = str(distRaw, "contents");
+            d.outputs = strArrayField(distRaw, "outputs");
+            d.label = "D-" + std::to_string(++nextDistillOrdinal_);
+            f->distillation = std::move(d);
+        }
+        return true;
+    }
+    if (type == "FrameClosed") {
+        closeFrame(str(line, "frameId"), false);
+        return true;
+    }
+    if (type == "TaskClosed") {
+        const std::string taskId = str(line, "taskId");
+        auto* task = const_cast<Task*>(taskById(taskId));
+        if (task) task->status = str(line, "status", "completed");
+        if (taskId == activeTaskId_) {
+            activeTaskId_.clear();
+            cursor_ = FrameCursor{};
+        }
+        return true;
+    }
+    // Not a domain event.
+    return false;
+}
+
+void NativeGuiModel::applyLine(const std::string& line) {
+    applyDomainLine(line);
+}
+
+// ---------------------------------------------------------------------------
+// RPC event adapter (live mode)
+// ---------------------------------------------------------------------------
 RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     if (line.empty() || line[0] != '{') return RpcApplyResult::Error;
     std::string type = str(line, "type");
     if (type.empty()) return RpcApplyResult::Error;
-
-    const LoopFrame* active = model.activeFrame();
 
     // Benign RPC control events: no model state.
     if (type == "response")
@@ -370,9 +778,6 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
 
     // Bottom-footer telemetry: per-role model + cache hit rate and session cost.
     if (type == "session_status") {
-        // roleStatus is the object under the "roleStatus" key; each phase entry is
-        // { model: { provider, id, ... }, latestCacheHitRate }. The footer shows the
-        // bare model id (provider is intentionally not surfaced).
         auto parseRole = [&](const std::string& roleName) -> RoleFooterSlot {
             RoleFooterSlot slot;
             std::string rawStatus;
@@ -380,7 +785,6 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
                 slot.cacheHitRate = doubleVal(rawStatus, "latestCacheHitRate", -1.0f);
                 std::string rawModel;
                 if (rawValue(rawStatus, "model", rawModel)) {
-                    // std::string provider = str(rawModel, "provider");
                     std::string id = str(rawModel, "id");
                     if (!id.empty()) slot.model = id;
                 }
@@ -388,7 +792,6 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
             return slot;
         };
         Footer f;
-        // roleStatus is nested under the top-level "roleStatus" key.
         std::string rawRoleStatus;
         if (rawValue(line, "roleStatus", rawRoleStatus)) {
             f.epistemic = parseRole("epistemic");
@@ -396,8 +799,6 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
             f.distillation = parseRole("distillation");
             f.execution = parseRole("execution");
         }
-        // Fall back to reading the phase keys directly off the top-level line when
-        // roleStatus is not nested (robustness for a plain session_status payload).
         if (rawRoleStatus.empty()) {
             f.epistemic = parseRole("epistemic");
             f.planner = parseRole("planner");
@@ -408,10 +809,6 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         f.hasData = true;
         model.setFooter(std::move(f));
 
-        // Per-role context length (epistemic vs execution projections).
-        // roleUsage is {epistemic: {tokens, contextWindow, percent}, execution: {...}};
-        // tokens/percent are null when unknown. The GUI renders an em-dash when a
-        // role's tokens are unavailable (negative placeholder).
         std::string rawRoleUsage;
         if (rawValue(line, "roleUsage", rawRoleUsage)) {
             auto parseUsage = [&](const std::string& role) -> RoleContextUsage {
@@ -430,82 +827,50 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
             rcu.hasData = true;
             model.setRoleContext(std::move(rcu));
         } else {
-            // The runtime emits no roleUsage when the belief loop is not usable
-            // (e.g. after a reload, before new projections exist). Clear any
-            // previously cached role context so the status bar does not keep
-            // showing a stale context length.
             model.setRoleContext(RoleContextUsagePair{});
         }
         return RpcApplyResult::Applied;
     }
 
-    if (type == "agent_start") {
-        // A new turn begins: only block if there is an *open* frame. A frame
-        // closed by the previous turn_end must not swallow the new turn's
-        // records (it would overwrite the prior frame's plan/distillation,
-        // collapsing multiple turns into one node in the Graph View).
-        if (active && !active->closed) return RpcApplyResult::Ignored;
-        model.openRpcFrame("");
-        return RpcApplyResult::Applied;
+    // AgentEvent turn boundaries. The domain events (TaskOpened/FrameOpened/
+    // FrameClosed) are authoritative for frame lifecycles; these only mark a
+    // model turn and never open or close a belief-loop frame.
+    if (type == "agent_start" || type == "turn_start" || type == "turn_end" ||
+        type == "agent_settled") {
+        return RpcApplyResult::Ignored;
     }
-    if (type == "turn_start") {
-        // Same rule as agent_start: ignore only while a frame is still open.
-        const LoopFrame* act = model.activeFrame();
-        if (act && !act->closed) return RpcApplyResult::Ignored;
-        model.openRpcFrame("");
-        return RpcApplyResult::Applied;
-    }
+
     if (type == "message_start") {
         std::string role = str(line, "role");
-        std::string text = extractMessageText(line);
-        // Fast-path distillation custom message: sendCustomMessage emits
-        // message_start/message_end with role="custom" and a customType
-        // (e.g. "fast_path_distillation"); its content is the distillation
-        // summary. Project it into the user prompt pane's incoming-message
-        // area (the in-message stream) so it is visible there, rather than
-        // fabricating a DistillationOutput (the fast path never emits a
-        // DistillationProduced phase event).
+        std::string text;
+        std::string content;
+        if (rawValue(line, "content", content)) text = extractTextFromValue(content);
+        else text = extractTextFromValue(line);
+
+        // Fast-path distillation custom message (legacy): its content is the
+        // distillation summary. Surface it in the in-message stream rather than
+        // fabricating a Distillation occurrence.
         std::string customType = str(line, "customType");
         if (role == "custom" && customType == "fast_path_distillation") {
-            // Fast-path distillation summary: surface it in the user prompt
-            // pane's incoming-message area (the in-message stream) rather than
-            // the distillation lane. The fast path never emits a
-            // DistillationProduced phase event, so projecting here keeps the
-            // content visible without fabricating a DistillationOutput.
             std::string distText;
-            std::string rawContent;
-            if (rawValue(line, "content", rawContent)) {
-                std::string v = stringValue(rawContent);
+            if (rawValue(line, "content", content)) {
+                std::string v = stringValue(content);
                 if (!v.empty()) distText = v;
             }
             if (distText.empty()) distText = text;
             model.beginInMessage(distText);
             return RpcApplyResult::Applied;
         }
-        // Live in-message for the ⌘T pane is independent of any frame, but the
-        // pane should show the assistant's reply, not the user's prompt or the
-        // routing/fast-path scaffolding. Seed only on an assistant message; on a
-        // user message clear the buffer so the previous reply does not linger.
+        // Seed the ⌘T in-message stream on an assistant message; clear it on a
+        // user message so the previous reply does not linger.
         if (role == "assistant") {
             model.beginInMessage(text);
         } else if (role == "user") {
             model.beginInMessage("");
         }
-        // Frame summary folding only applies when a frame is actually active.
-        active = model.activeFrame();
-        if (active && !active->closed && !text.empty()) {
-            model.appendRpcFrameSummary(active->id, text);
-        }
         return RpcApplyResult::Applied;
     }
     if (type == "message_update") {
-        // Streaming assistant delta. toJsonEvent remaps message_update to
-        // {type, usage, assistantMessageEvent}; append both text and thinking
-        // deltas so the ⌘T pane's in-message stream updates incrementally for
-        // visible content and reasoning alike. thinking_start flags the live
-        // message as being in the thinking phase (the pane renders the
-        // accumulated deltas, falling back to a "thinking" placeholder only
-        // while the buffer is empty), and thinking_end / text_start clear it.
         std::string evt;
         if (rawValue(line, "assistantMessageEvent", evt)) {
             std::string deltaType = str(evt, "type");
@@ -526,21 +891,17 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     }
     if (type == "message_end") {
         model.endInMessage();
-        // If the loop is in the terminal finalReport role, this message_end
-        // finalizes the conclusion text. Request the render loop reopen the user
-        // prompt pane so the user can view the answer, even if they closed it.
         if (model.finalReportPending()) model.requestAutoOpenPrompt();
         return RpcApplyResult::Applied;
     }
+
+    // Tool call/result telemetry: only feed the session file list here; the
+    // execution trajectory is built from the domain ExecutionStarted/Completed
+    // events so non-probe tools never appear as execution probes.
     if (type == "tool_execution_start") {
-        active = model.activeFrame();
-        if (!active || active->closed) return RpcApplyResult::Ignored;
         std::string args;
         rawValue(line, "args", args);
         std::string tool = str(line, "toolName");
-        model.addRpcToolCall(active->id, str(line, "toolCallId"), tool, args);
-        // Session file list: read/write/edit tool calls carry a path (or
-        // file_path) in args; record it normalized relative to the session cwd.
         if (tool == "read" || tool == "write" || tool == "edit") {
             std::string p = str(args, "path");
             if (p.empty()) p = str(args, "file_path");
@@ -549,612 +910,13 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         return RpcApplyResult::Applied;
     }
     if (type == "tool_execution_end") {
-        active = model.activeFrame();
-        if (!active || active->closed) return RpcApplyResult::Ignored;
-        std::string result;
-        rawValue(line, "result", result);
-        std::string isErr;
-        rawValue(line, "isError", isErr);
-        model.setRpcToolResult(active->id, str(line, "toolCallId"), result, isErr == "true" ? "failed" : "ok");
-        return RpcApplyResult::Applied;
+        return RpcApplyResult::Ignored;
     }
-    // Belief-loop phase events (live mode). These carry the epistemic state the
-    // demo/headless path produces via applyLine(): the selected belief ids, the
-    // planner's plan, the distillation output, and the execution stage. Live mode
-    // builds its frame via openRpcFrame (agent_start/turn_start) as a synthetic
-    // placeholder; runtime frameId is a task id, so each phase event resolves to
-    // the active logical LoopFrame for that task via model.rpcFrame(frameId).
-    // Stage comes only from CursorChanged. DistillationProduced consumes its
-    // documented label/interpretation and correlates the tool calls collected
-    // since the explicit DISTILLING boundary for Graph View edges.
-    auto phaseFrame = [&]() -> LoopFrame* {
-        return model.rpcFrame(intVal(line, "frameId", model.cursor().frameId));
-    };
-    if (type == "BeliefsSelected") {
-        LoopFrame* p = phaseFrame();
-        if (!p) return RpcApplyResult::Ignored;
-        std::string raw;
-        if (!findKey(line, "beliefs", raw)) return RpcApplyResult::Ignored;
-        p->selectedBeliefs = beliefsArray(raw);
-        p->selectedBeliefBatches.push_back(p->selectedBeliefs);
-        return RpcApplyResult::Applied;
-    }
-    if (type == "BeliefCreated") {
-        // A new belief record from the runtime (declare_belief op propose/refine).
-        // Register it so the Belief pane shows it immediately, before any later
-        // support/refute/retract emits a BeliefUpdated for the same id. The event
-        // carries statement/domain/expectation (no status); a new record is proposed.
-        BeliefId id{intVal(line, "beliefId")};
-        if (!id.valid()) return RpcApplyResult::Ignored;
-        Belief& b = model.upsertBeliefRpc(id);
-        b.status = str(line, "status", "proposed");
-        b.domain = str(line, "domain", b.domain);
-        b.statement = str(line, "statement", b.statement);
-        const LoopFrame* current = model.activeFrame();
-        if (current && b.createdInFrame < 0) b.createdInFrame = current->id;
-        return RpcApplyResult::Applied;
-    }
-    if (type == "BeliefUpdated") {
-        // Register (or update) a belief with its prose statement from the runtime's
-        // belief model. The demo/headless path uses lhs/relation/rhs/confidence via
-        // applyLine's BeliefUpdated branch; live mode carries the prose statement.
-        BeliefId id{intVal(line, "beliefId")};
-        if (!id.valid()) return RpcApplyResult::Ignored;
-        Belief& b = model.upsertBeliefRpc(id);
-        b.status = str(line, "status", b.status);
-        b.statement = str(line, "statement", b.statement);
-        const LoopFrame* current = model.activeFrame();
-        if (current && current->stage == FrameStage::DISTILLING &&
-            (b.sourceFrames.empty() || b.sourceFrames.back() != current->id)) {
-            b.sourceFrames.push_back(current->id);
-        }
-        return RpcApplyResult::Applied;
-    }
-    if (type == "PlanProduced") {
-        // Each LoopFrame carries at most one plan: a frame that already holds a
-        // plan is closed and a fresh LoopFrame is opened for this new plan.
-        LoopFrame* p = model.enterRpcPlanFrame(intVal(line, "frameId", model.cursor().frameId));
-        if (!p) return RpcApplyResult::Ignored;
-        PlannerOutput po;
-        po.id = str(line, "planId");
-        po.label = str(line, "label");
-        po.question = str(line, "question");
-        po.intent = str(line, "intent");
-        if (!po.label.empty()) p->plans.push_back(po);
-        p->plan = std::move(po);
-        return RpcApplyResult::Applied;
-    }
-    if (type == "DistillationProduced") {
-        // Consume the documented rpc.md fields (label, interpretation). The
-        // runtime omits inputIds, so correlate the executions bracketed by the
-        // explicit phase events; unexplained remains empty. Each LoopFrame carries
-        // at most one distillation, so a frame that already holds one is closed
-        // and a fresh LoopFrame is opened.
-        LoopFrame* p = model.enterRpcDistillFrame(intVal(line, "frameId", model.cursor().frameId));
-        if (!p) return RpcApplyResult::Ignored;
-        DistillationOutput do_;
-        do_.label = str(line, "label");
-        do_.interpretation = str(line, "interpretation");
-        // Live events omit inputIds. Attribute the execution calls not already
-        // consumed by an earlier distillation in this LoopFrame.
-        std::set<std::string> consumed;
-        for (const DistillationOutput& prior : p->distillations) {
-            consumed.insert(prior.inputIds.begin(), prior.inputIds.end());
-        }
-        for (const ToolCall& call : p->trajectory) {
-            if (!call.id.empty() && !consumed.count(call.id)) do_.inputIds.push_back(call.id);
-        }
-        if (!do_.label.empty()) {
-            for (std::size_t i = p->distillationProposalStart; i < p->proposals.size(); ++i) {
-                if (p->proposals[i].distillationLabel.empty()) {
-                    p->proposals[i].distillationLabel = do_.label;
-                }
-            }
-            p->distillationProposalStart = p->proposals.size();
-            // Bind beliefs created/updated during this distillation's DISTILLING
-            // stage to this distillation occurrence. The distill mutation events
-            // arrive before DistillationProduced and only carry a frame id.
-            model.bindDistillationLabel(p->id, do_.label);
-            p->distillations.push_back(do_);
-        }
-        p->distillation = std::move(do_);
-        return RpcApplyResult::Applied;
-    }
-    if (type == "ProposalCreated") {
-        LoopFrame* p = phaseFrame();
-        if (!p) return RpcApplyResult::Ignored;
-        Proposal prop;
-        prop.op = charVal(line, "op", '?');
-        prop.belief = str(line, "belief");
-        prop.lhs = str(line, "lhs");
-        prop.relation = str(line, "relation");
-        prop.rhs = str(line, "rhs");
-        prop.detail = str(line, "detail");
-        if (p->stage == FrameStage::DISTILLING && p->distillation.valid()) {
-            prop.distillationLabel = p->distillation.label;
-        }
-        p->proposals.push_back(std::move(prop));
-        return RpcApplyResult::Applied;
-    }
-    if (type == "CursorChanged") {
-        // Resolve the runtime task to its active logical LoopFrame, then drive
-        // stage/item from this single event. Stage is never
-        // inferred from Execution* / Distillation* events (those are not emitted
-        // by the runtime).
-        const FrameStage st = parseStage(str(line, "stage"));
-        const int runtimeTaskId = intVal(line, "frameId", model.cursor().frameId);
-        LoopFrame* p = st == FrameStage::PROPOSING
-            ? model.enterRpcProposeFrame(runtimeTaskId)
-            : model.rpcFrame(runtimeTaskId);
-        model.mutableCursor().stage = st;
-        model.mutableCursor().item = str(line, "item");
-        if (p && st != FrameStage::NONE) {
-            p->stage = st;
-            if (st == FrameStage::DISTILLING) {
-                p->distillationProposalStart = p->proposals.size();
-            } else if (st == FrameStage::CLOSED) {
-                model.closeRpcFrame(p->id, false);
-            }
-        }
-        // The belief loop enters the terminal finalReport role by emitting a
-        // CursorChanged with stage CLOSED. Mark the model so the next message_end
-        // (the final conclusion text) can request the auto-reopen of the pane.
-        if (st == FrameStage::CLOSED) model.markFinalReportPending();
-        return RpcApplyResult::Applied;
-    }
-    if (type == "turn_end" || type == "agent_settled") {
-        active = model.activeFrame();
-        if (!active) return RpcApplyResult::Ignored;
-        // A belief-loop LoopFrame spans several model turns. Its boundary is an
-        // explicit entry into PROPOSING (or CLOSED), not turn_end. Preserve the
-        // legacy fallback for plain RPC streams that never supplied a task id.
-        if (active->runtimeTaskId < 0) model.closeRpcFrame(active->id, false);
-        return RpcApplyResult::Applied;
-    }
+
+    // Domain events (Task/Frame/Belief/Plan/Execution/Distillation lifecycle).
+    if (model.applyDomainLine(line)) return RpcApplyResult::Applied;
+
     return RpcApplyResult::Ignored;
-}
-
-// ---------------------------------------------------------------------------
-// Frame / belief accessors
-// ---------------------------------------------------------------------------
-void NativeGuiModel::reset() {
-    frames_.clear();
-    frameOrder_.clear();
-    beliefById_.clear();
-    beliefs_.clear();
-    cursor_ = FrameCursor{};
-    nextRpcFrameId_ = 1000;
-    roleContext_ = RoleContextUsagePair{};
-    clearFileList();
-}
-
-LoopFrame* NativeGuiModel::frame(int id) {
-    auto it = frames_.find(id);
-    return it == frames_.end() ? nullptr : &it->second;
-}
-const LoopFrame* NativeGuiModel::frame(int id) const {
-    auto it = frames_.find(id);
-    return it == frames_.end() ? nullptr : &it->second;
-}
-
-const LoopFrame* NativeGuiModel::activeFrame() const {
-    return cursor_.frameId >= 0 ? frame(cursor_.frameId) : nullptr;
-}
-const LoopFrame* NativeGuiModel::frameById(int id) const { return frame(id); }
-
-Belief* NativeGuiModel::belief(BeliefId id) {
-    auto it = beliefById_.find(id.value);
-    if (it == beliefById_.end()) return nullptr;
-    return &beliefs_[it->second];
-}
-
-Belief& NativeGuiModel::upsertBelief(BeliefId id) {
-    auto it = beliefById_.find(id.value);
-    if (it != beliefById_.end()) return beliefs_[it->second];
-    Belief b;
-    b.id = id;
-    const int idx = static_cast<int>(beliefs_.size());
-    beliefs_.push_back(std::move(b));
-    beliefById_[id.value] = idx;
-    return beliefs_[idx];
-}
-
-void NativeGuiModel::bindDistillationLabel(int frameId, const std::string& label) {
-    if (label.empty()) return;
-    // Bind the distillation occurrence to beliefs created/updated within frameId
-    // that have not yet been attributed to a distillation. The distill mutation
-    // events (BeliefCreated/BeliefUpdated) arrive before DistillationProduced and
-    // only carry a frame id, so we match on provenance here.
-    for (Belief& belief : beliefs_) {
-        if (!belief.distillationLabel.empty()) continue;
-        const bool touchesFrame = belief.createdInFrame == frameId ||
-            (!belief.sourceFrames.empty() && belief.sourceFrames.back() == frameId);
-        if (touchesFrame) belief.distillationLabel = label;
-    }
-}
-
-bool NativeGuiModel::isSelectedInCurrentFrame(BeliefId b) const {
-    const LoopFrame* f = activeFrame();
-    if (!f) return false;
-    for (auto s : f->selectedBeliefs) if (s.value == b.value) return true;
-    return false;
-}
-
-// --- RPC event adapter support -------------------------------------------------
-
-int NativeGuiModel::openRpcFrame(const std::string& summary) {
-    int id = nextRpcFrameId_++;
-    openFrame(id, summary, "rpc");
-    return id;
-}
-
-LoopFrame* NativeGuiModel::rpcFrame(int runtimeFrameId) {
-    if (runtimeFrameId < 0) return frame(cursor_.frameId);
-    // Prefer the active LoopFrame for this runtime task. A task may have several
-    // historical LoopFrames, so looking up frames_[runtimeFrameId] first would
-    // incorrectly route later cycles back into the first one.
-    const int cur = cursor_.frameId;
-    if (cur >= 0 && frames_.count(cur)) {
-        LoopFrame* current = frame(cur);
-        if (!current->closed &&
-            (current->runtimeTaskId < 0 || current->runtimeTaskId == runtimeFrameId)) {
-            current->runtimeTaskId = runtimeFrameId;
-            // Preserve the first loop's historical lookup by runtime task id
-            // when the current record is only the synthetic placeholder.
-            if (cur != runtimeFrameId && !frames_.count(runtimeFrameId)) {
-                LoopFrame f = std::move(frames_[cur]);
-                f.id = runtimeFrameId;
-                frames_.erase(cur);
-                for (int& id : frameOrder_) {
-                    if (id == cur) { id = runtimeFrameId; break; }
-                }
-                for (Belief& belief : beliefs_) {
-                    if (belief.createdInFrame == cur) belief.createdInFrame = runtimeFrameId;
-                    for (int& sourceFrame : belief.sourceFrames) {
-                        if (sourceFrame == cur) sourceFrame = runtimeFrameId;
-                    }
-                }
-                frames_[runtimeFrameId] = std::move(f);
-                cursor_.frameId = runtimeFrameId;
-                return frame(runtimeFrameId);
-            }
-            return current;
-        }
-    }
-
-    // No active frame for this task. Use the runtime id when available, else a
-    // synthetic id because an earlier LoopFrame from the same task owns it.
-    const int id = frames_.count(runtimeFrameId) ? nextRpcFrameId_++ : runtimeFrameId;
-    openFrame(id, "", "rpc");
-    LoopFrame* opened = frame(id);
-    opened->runtimeTaskId = runtimeFrameId;
-    return opened;
-}
-
-LoopFrame* NativeGuiModel::enterRpcProposeFrame(int runtimeTaskId) {
-    LoopFrame* current = rpcFrame(runtimeTaskId);
-    if (!current) return nullptr;
-
-    // Repeated PROPOSING notifications do not split a frame. A transition back
-    // into propose after any concrete cycle content does.
-    if (!current->closed && current->stage != FrameStage::PROPOSING &&
-        hasLoopCycleContent(*current)) {
-        closeRpcFrame(current->id, false);
-        const int id = nextRpcFrameId_++;
-        openFrame(id, "", "rpc");
-        current = frame(id);
-        current->runtimeTaskId = runtimeTaskId;
-    }
-    current->stage = FrameStage::PROPOSING;
-    cursor_.frameId = current->id;
-    cursor_.stage = FrameStage::PROPOSING;
-    cursor_.item.clear();
-    return current;
-}
-
-LoopFrame* NativeGuiModel::enterRpcPlanFrame(int runtimeTaskId) {
-    LoopFrame* current = rpcFrame(runtimeTaskId);
-    if (!current) return nullptr;
-    // A frame that already holds a plan is a complete cycle: close it and open a
-    // fresh LoopFrame so each LoopFrame carries at most one plan.
-    if (!current->closed && (current->plan.valid() || !current->plans.empty())) {
-        closeRpcFrame(current->id, false);
-        const int id = nextRpcFrameId_++;
-        openFrame(id, "", "rpc");
-        current = frame(id);
-        current->runtimeTaskId = runtimeTaskId;
-    }
-    return current;
-}
-
-LoopFrame* NativeGuiModel::enterRpcDistillFrame(int runtimeTaskId) {
-    LoopFrame* current = rpcFrame(runtimeTaskId);
-    if (!current) return nullptr;
-    // A frame that already holds a distillation is a complete cycle: close it and
-    // open a fresh LoopFrame so each LoopFrame carries at most one distillation.
-    if (!current->closed && (current->distillation.valid() || !current->distillations.empty())) {
-        closeRpcFrame(current->id, false);
-        const int id = nextRpcFrameId_++;
-        openFrame(id, "", "rpc");
-        current = frame(id);
-        current->runtimeTaskId = runtimeTaskId;
-    }
-    return current;
-}
-
-void NativeGuiModel::appendRpcFrameSummary(int id, const std::string& text) {
-    if (text.empty()) return;
-    LoopFrame* f = frame(id);
-    if (!f || f->closed) return;
-    if (!f->summary.empty()) f->summary += " ";
-    f->summary += text;
-}
-
-void NativeGuiModel::addRpcToolCall(int id, const std::string& toolCallId, const std::string& tool, const std::string& command) {
-    LoopFrame* f = frame(id);
-    if (!f || f->closed) return;
-    ToolCall t;
-    t.id = toolCallId;
-    t.tool = tool;
-    t.command = command;
-    t.status = "running";
-    if (!f->plans.empty()) {
-        const PlannerOutput& plan = f->plans.back();
-        t.planId = !plan.id.empty() ? plan.id : plan.label;
-    } else if (f->plan.valid()) {
-        t.planId = !f->plan.id.empty() ? f->plan.id : f->plan.label;
-    }
-    f->trajectory.push_back(std::move(t));
-}
-
-void NativeGuiModel::setRpcToolResult(int id, const std::string& toolCallId, const std::string& result, const std::string& status) {
-    LoopFrame* f = frame(id);
-    if (!f || f->closed) return;
-    for (auto& t : f->trajectory) {
-        if (t.id == toolCallId) {
-            t.result = result;
-            t.status = status;
-            break;
-        }
-    }
-}
-
-void NativeGuiModel::closeRpcFrame(int id, bool failed) {
-    LoopFrame* f = frame(id);
-    if (!f) return;
-    f->closed = true;
-    if (failed) f->failed = true;
-    f->stage = FrameStage::CLOSED;
-    f->history = LoopFrame::History::Closed;
-    // Keep the cursor pointing at the just-closed frame so the execution lane
-    // and summary continue to render its trajectory after the turn ends. The
-    // demo/headless path clears the cursor explicitly via its own FrameClosed
-    // event, so this retention only affects the live RPC viewer.
-}
-
-// ---------------------------------------------------------------------------
-// Live in-message stream (⌘T pane)
-// ---------------------------------------------------------------------------
-void NativeGuiModel::beginInMessage(const std::string& text) {
-    // message_start carries the initial authoritative text (may be empty if the
-    // turn streams through message_update deltas); seeding here reflects the
-    // contentText semantics for the initial content blocks only.
-    inMessage_ = text;
-}
-
-void NativeGuiModel::appendInMessage(const std::string& delta) {
-    inMessage_ += delta;
-}
-
-void NativeGuiModel::endInMessage() {
-    // Finalize. The buffer already holds the accumulated text; nothing more to
-    // do but keep it available for the pane until the next message_start.
-}
-
-void NativeGuiModel::setInMessageThinking(bool thinking) {
-    inMessageThinking_ = thinking;
-}
-
-// ---------------------------------------------------------------------------
-// Event application
-// ---------------------------------------------------------------------------
-void NativeGuiModel::openFrame(int id, const std::string& summary, const std::string& openedAt) {
-    LoopFrame f;
-    f.id = id;
-    f.summary = summary;
-    f.openedAt = openedAt;
-    f.stage = FrameStage::PLANNING;
-    f.history = LoopFrame::History::Current;
-    frames_[id] = std::move(f);
-    frameOrder_.push_back(id);
-    cursor_.frameId = id;
-    cursor_.stage = FrameStage::PLANNING;
-    cursor_.item.clear();
-}
-
-void NativeGuiModel::applyLine(const std::string& line) {
-    if (line.empty()) return;
-    if (line[0] != '{') return;  // not a JSON event; ignore
-
-    std::string type = str(line, "type");
-    if (type.empty()) return;
-
-    if (type == "FrameOpened") {
-        openFrame(intVal(line, "id"), str(line, "summary"), str(line, "opened_at"));
-        return;
-    }
-    if (type == "BeliefsSelected") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        std::string raw;
-        if (!findKey(line, "beliefs", raw)) return;
-        f->selectedBeliefs = beliefsArray(raw);
-        f->selectedBeliefBatches.push_back(f->selectedBeliefs);
-        return;
-    }
-    if (type == "PlanProduced") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        PlannerOutput plan;
-        plan.id = str(line, "planId");
-        plan.label = str(line, "label");
-        plan.question = str(line, "question");
-        plan.intent = str(line, "intent");
-        if (plan.valid()) f->plans.push_back(plan);
-        f->plan = std::move(plan);
-        return;
-    }
-    if (type == "ExecutionStarted") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        f->stage = FrameStage::EXECUTING;
-        return;
-    }
-    if (type == "ToolCalled") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        ToolCall t;
-        t.id = str(line, "id");
-        t.tool = str(line, "tool");
-        t.command = str(line, "command");
-        t.status = str(line, "status", "pending");
-        if (!f->plans.empty()) {
-            const PlannerOutput& plan = f->plans.back();
-            t.planId = !plan.id.empty() ? plan.id : plan.label;
-        }
-        // Session file list: demo read/write/edit tool calls carry the path in
-        // the `command` field; record it normalized relative to the session cwd.
-        // Record BEFORE the move: std::move leaves t.tool/t.command moved-from.
-        if (t.tool == "read" || t.tool == "write" || t.tool == "edit") {
-            recordFileOp(t.tool, t.command);
-        }
-        f->trajectory.push_back(std::move(t));
-        return;
-    }
-    if (type == "ToolReturned") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        std::string id = str(line, "id");
-        for (auto& t : f->trajectory) {
-            if (t.id == id) {
-                t.result = str(line, "result");
-                t.warning = str(line, "warning");
-                if (t.status.empty() || t.status == "running" || t.status == "pending")
-                    t.status = str(line, "status", "ok");
-                break;
-            }
-        }
-        return;
-    }
-    if (type == "ExecutionCompleted") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        f->stage = FrameStage::DISTILLING;
-        return;
-    }
-    if (type == "DistillationStarted") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        f->stage = FrameStage::DISTILLING;
-        return;
-    }
-    if (type == "DistillationProduced") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        DistillationOutput distillation;
-        distillation.label = str(line, "label");
-        distillation.inputIds = [&] {
-            std::string raw;
-            return findKey(line, "inputIds", raw) ? strArray(raw) : std::vector<std::string>{};
-        }();
-        distillation.unexplained = str(line, "unexplained");
-        distillation.interpretation = str(line, "interpretation");
-        if (distillation.valid()) f->distillations.push_back(distillation);
-        f->distillation = std::move(distillation);
-        f->stage = FrameStage::PROPOSING;
-        return;
-    }
-    if (type == "ProposalCreated") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        Proposal p;
-        p.op = charVal(line, "op", '?');
-        p.belief = str(line, "belief");
-        p.lhs = str(line, "lhs");
-        p.relation = str(line, "relation");
-        p.rhs = str(line, "rhs");
-        p.detail = str(line, "detail");
-        if (f->distillation.valid()) p.distillationLabel = f->distillation.label;
-        f->proposals.push_back(std::move(p));
-        return;
-    }
-    if (type == "CursorChanged") {
-        cursor_.frameId = intVal(line, "frameId", cursor_.frameId);
-        cursor_.stage = parseStage(str(line, "stage"));
-        cursor_.item = str(line, "item");
-        LoopFrame* f = frame(cursor_.frameId);
-        if (f && cursor_.stage != FrameStage::NONE) f->stage = cursor_.stage;
-        return;
-    }
-    if (type == "FrameClosed") {
-        LoopFrame* f = frame(intVal(line, "frameId", cursor_.frameId));
-        if (!f) return;
-        f->closed = true;
-        f->closedAt = str(line, "closed_at");
-        std::string st = str(line, "status", "CLOSED");
-        f->stage = FrameStage::CLOSED;
-        if (st == "FAILED") f->failed = true;
-        // If the active frame just closed, there is no active frame until a
-        // new one opens (the model never guesses an active frame).
-        if (cursor_.frameId == f->id) {
-            cursor_.frameId = -1;
-            cursor_.stage = FrameStage::NONE;
-            cursor_.item.clear();
-        }
-        // Derive a navigator summary from the frame's proposals (display only).
-        if (f->proposals.empty()) {
-            f->history = LoopFrame::History::Closed;
-        } else {
-            bool hasAdd = false, hasRevise = false, hasRemove = false;
-            for (auto& p : f->proposals) {
-                if (p.op == '+') hasAdd = true;
-                else if (p.op == '~') hasRevise = true;
-                else if (p.op == '-') hasRemove = true;
-            }
-            if (hasRemove) f->history = LoopFrame::History::Falsified;
-            else if (hasAdd && hasRevise) f->history = LoopFrame::History::Revised;
-            else if (hasAdd) f->history = LoopFrame::History::NewBelief;
-            else f->history = LoopFrame::History::Closed;
-        }
-        return;
-    }
-    if (type == "BeliefUpdated") {
-        BeliefId id{intVal(line, "beliefId")};
-        if (!id.valid()) return;
-        Belief& b = upsertBelief(id);
-        b.lhs = str(line, "lhs");
-        b.relation = str(line, "relation");
-        b.rhs = str(line, "rhs");
-        b.confidence = doubleVal(line, "confidence", b.confidence);
-        b.status = str(line, "status", b.status);
-        int src = intVal(line, "sourceFrame", -1);
-        if (src > 0 && (b.sourceFrames.empty() || b.sourceFrames.back() != src))
-            b.sourceFrames.push_back(src);
-        if (src > 0 && b.createdInFrame < 0) {
-            const LoopFrame* source = frame(src);
-            const std::string beliefLabel = "B" + std::to_string(id.value);
-            if (source) {
-                for (const Proposal& proposal : source->proposals) {
-                    if (proposal.op == '+' && proposal.belief == beliefLabel) {
-                        b.createdInFrame = src;
-                        break;
-                    }
-                }
-            }
-        }
-        return;
-    }
-    // Unknown event: ignored, model state unchanged.
 }
 
 } // namespace pie::gui

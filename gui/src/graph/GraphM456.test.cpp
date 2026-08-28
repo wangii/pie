@@ -49,11 +49,11 @@ static void check(bool cond, const char* what) {
 //                       so a DFS that isn't cycle-safe would loop E20->E10b->D10->B1->P20->E20).
 static GraphTaskState buildState() {
     GraphTaskState s;
-    auto node = [&](const std::string& id, NodeFamily f, int frame, bool closedFrame) {
+    auto node = [&](const std::string& id, NodeFamily f, const std::string& frame, bool closedFrame) {
         GraphNode n;
         n.id.value = id;
         n.family = f;
-        if (frame >= 0) n.frameId = frame;
+        if (!frame.empty()) n.frameId = frame;
         n.title = id;
         n.compactText = id;
         n.fullText = id;
@@ -67,17 +67,17 @@ static GraphTaskState buildState() {
         s.edges.push_back(e);
     };
 
-    node("B1", NodeFamily::Belief, -1, false);
-    node("B2", NodeFamily::Belief, -1, false);
+    node("B1", NodeFamily::Belief, "", false);
+    node("B2", NodeFamily::Belief, "", false);
     // Frame 10 (closed).
-    node("P10", NodeFamily::Plan, 10, false);
-    node("E10a", NodeFamily::Execution, 10, false);
-    node("E10b", NodeFamily::Execution, 10, false);
-    node("D10", NodeFamily::Distill, 10, false);
+    node("P10", NodeFamily::Plan, "10", false);
+    node("E10a", NodeFamily::Execution, "10", false);
+    node("E10b", NodeFamily::Execution, "10", false);
+    node("D10", NodeFamily::Distill, "10", false);
     // Frame 20 (open).
-    node("P20", NodeFamily::Plan, 20, false);
-    node("E20", NodeFamily::Execution, 20, false);
-    node("D20", NodeFamily::Distill, 20, false);
+    node("P20", NodeFamily::Plan, "20", false);
+    node("E20", NodeFamily::Execution, "20", false);
+    node("D20", NodeFamily::Distill, "20", false);
 
     edge("B1", "P10", EdgeSemanticType::BeliefToPlan);
     edge("B2", "P10", EdgeSemanticType::BeliefToPlan);
@@ -96,11 +96,11 @@ static GraphTaskState buildState() {
     edge("E20", "E10b", EdgeSemanticType::ExecutionToDistill);
 
     LoopFrameInfo f10;
-    f10.id = 10;
+    f10.id = "10";
     f10.label = "LoopFrame #10";
     f10.closed = true;
     LoopFrameInfo f20;
-    f20.id = 20;
+    f20.id = "20";
     f20.label = "LoopFrame #20";
     f20.closed = false;
     s.frames.push_back(f10);
@@ -117,12 +117,8 @@ static void testRouting(const GraphTaskState& s, const PieGraphLayout& layout) {
     for (const EdgeRoute& r : routes) {
         if (r.type == EdgeSemanticType::BeliefToPlan) {
             haveForward = true;
-            check(r.longRoute, "M4: Belief->Plan uses an orthogonal cross-region route");
-            check(r.points.size() == 4, "M4: Belief->Plan route has two elbows");
-            check(r.points[0].second == r.points[1].second &&
-                  r.points[1].first == r.points[2].first &&
-                  r.points[2].second == r.points[3].second,
-                  "M4: Belief->Plan stays inside its semantic row");
+            check(r.longRoute, "M4: Belief->Plan is a long cross-region route");
+            check(r.points.size() == 2, "M4: Belief->Plan is a direct line, not a polyline");
         } else if (r.type == EdgeSemanticType::DistillToBelief) {
             haveReturn = true;
             check(r.longRoute, "M4: Distill->Belief is a long cross-region return route");
@@ -201,12 +197,12 @@ static void testLive(const GraphTaskState& s) {
     GraphNode n;
     n.id.value = "E21";
     n.family = NodeFamily::Execution;
-    n.frameId = 20;
+    n.frameId = "20";
     n.title = "E21";
     s2.nodes.push_back(n);
     s2.currentNode = NodeId{"E21"};
     LoopFrameInfo g20;
-    g20.id = 20; g20.label = "LoopFrame #20"; g20.closed = false;
+    g20.id = "20"; g20.label = "LoopFrame #20"; g20.closed = false;
     s2.frames.clear();
     s2.frames.push_back(s.frames[0]);  // frame 10 (closed)
     s2.frames.push_back(g20);          // frame 20 (open)
@@ -216,7 +212,7 @@ static void testLive(const GraphTaskState& s) {
 
     bool settledFrozen = true;
     for (const GraphNode& node : s2.nodes) {
-        bool settled = node.family == NodeFamily::Belief || (node.frameId && node.frameId == 10);
+        bool settled = node.family == NodeFamily::Belief || (node.frameId && node.frameId == "10");
         if (!settled) continue;
         auto it1 = stable1.nodeRects.find(node.id.value);
         auto it2 = stable2.nodeRects.find(node.id.value);

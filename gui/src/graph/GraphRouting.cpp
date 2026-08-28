@@ -31,11 +31,12 @@ std::vector<EdgeRoute> computeEdgeRoutes(const GraphTaskState& state,
         route.beliefOperation = edge.beliefOperation;
 
         if (edge.type == EdgeSemanticType::BeliefToPlan) {
+            // Belief -> Plan is a direct straight line, not a two-elbow
+            // orthogonal polyline: the plan directly reads the beliefs it
+            // selected, so the connection is a single segment.
             const auto source = right(*sourceRect);
             const auto target = left(*targetRect);
-            const float midX = (source.first + target.first) * 0.5f;
-            route.points = {source, {midX, source.second},
-                            {midX, target.second}, target};
+            route.points = {source, target};
             route.longRoute = true;
         } else if (edge.type == EdgeSemanticType::DistillToBelief) {
             // Distill -> Belief is a direct line, not a two-elbow orthogonal

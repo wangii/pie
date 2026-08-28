@@ -109,7 +109,7 @@ belief set is dropped rather than leaving a dangling edge.
 All graph edges are typed and directed. The UI includes a compact legend but
 does not put labels on individual edges. Cross-frame cognition passes only
 through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
-`Belief → Plan` uses an orthogonal cross-region route; `Distill → Belief` and
+`Belief → Plan` uses a direct single-segment line; `Distill → Belief` and
 `Propose → Belief` are direct two-point lines (the write-back returns to the
 belief column as a single straight segment). `Plan → Execution`, `Execution →
 Distill`, and `Distill → Propose` remain local curves. Create write-backs are
@@ -246,7 +246,7 @@ M2 Nodes         belief/plan/execution/distill indicator+label renderers (status
                  colors, hidden pins, current/selected highlight, tooltip, "..." popup)  [implemented]
 M3 Layout v1     deterministic three-column semantic layout; LoopFrame rows
                  stacked top-to-bottom; valid, non-overlapping region geometry  [implemented]
-M4 Edge Routing  local curves + orthogonal Belief->Plan route; direct
+M4 Edge Routing  local curves + direct Belief->Plan line; direct
                  Distill->Belief line, default dim, dashed-create/solid-update
                  styling (no on-link operation glyph)  [implemented]
 M5 Selection     click node -> ancestor + descendant dependency path (cycle-safe

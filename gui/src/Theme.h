@@ -1,9 +1,9 @@
 // PIE Native GUI - theme / palette + small display helpers.
 //
 // Color constants, the animated flow-step pane background, and the small
-// belief-label/status helpers shared by the UI components. Font resources for
-// the markdown renderer also live here so a single theme/resources module owns
-// them and the markdown component only reads them.
+// belief-status helpers shared by the UI components. Font resources for the
+// markdown renderer also live here so a single theme/resources module owns them
+// and the markdown component only reads them.
 #pragma once
 
 #include <imgui.h>
@@ -29,13 +29,8 @@ ImVec4 paneBg(bool active);
 // legend; retained for completeness/tests.
 const char* historySymbol(pie::gui::LoopFrame::History h);
 
-// Parse "B<n>" labels to the numeric belief id (or -1).
-int beliefIdFromLabel(const std::string& label);
-
-// Render a belief id as "B<n>".
-std::string beliefLabel(int id);
-
-// Status -> row color for the belief set pane.
+// Status -> row color for the belief set pane (proposed/supported/refuted/
+// superseded).
 ImVec4 beliefStatusColor(const std::string& status);
 
 // Markdown renderer font resources, loaded by main and read by UiMarkdown.
