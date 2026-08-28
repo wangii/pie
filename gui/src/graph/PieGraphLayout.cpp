@@ -1,9 +1,10 @@
 // PieGraphLayout.cpp: deterministic semantic Graph View layout.
 //
 // LoopFrames are stacked as rows. Beliefs stay in one global left column;
-// Plan and Distillation occupy the upper/lower middle bands; Execution occupies
-// the right column. A row grows to fit every region, including the beliefs first
-// created in that frame, so regions never overlap across frame boundaries.
+// the middle bands run Propose (top) -> Plan (middle) -> Distillation (bottom)
+// in the loop's time sequence; Execution occupies the right column. A row grows
+// to fit every region, including the beliefs first created in that frame, so
+// regions never overlap across frame boundaries.
 
 #include "graph/PieGraphLayout.h"
 
@@ -223,10 +224,17 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         const float frameTop = rowTop + routingSlotH;
         const float frameBottom = frameTop + blockH;
         const float nodeTop = frameTop + st.framePad;
-        // Middle band vertical order: Plan (top), Distillation (middle),
-        // Propose (bottom). Distillation sits directly below the Plan band;
-        // the Propose stack is anchored to the block bottom.
-        const float distillY = nodeTop + planH + (planH > 0.0f ? st.phaseBandGap : 0.0f);
+        // Middle band vertical order (time sequence): Propose (top),
+        // Plan (middle), Distill (bottom). A running cursor walks the top of
+        // each non-empty band so only adjacent present bands are separated by a
+        // phase gap; propose is a vertical stack, plan/distill are single rows.
+        float bandCursor = nodeTop;
+        float proposeY = 0.0f;
+        float planY = 0.0f;
+        float distillY = 0.0f;
+        if (proposeH > 0.0f) { proposeY = bandCursor; bandCursor += proposeH + st.phaseBandGap; }
+        if (planH > 0.0f) { planY = bandCursor; bandCursor += planH + st.phaseBandGap; }
+        if (distillH > 0.0f) { distillY = bandCursor; }
         const bool isLastFrame = &frame == &state.frames.back();
         const float framingSlotH = (isLastFrame && !globalFraming.empty()) ? framingH : 0.0f;
 
@@ -252,12 +260,11 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         for (std::size_t i = 0; i < planNodes.size(); ++i) {
             out.nodeRects[planNodes[i]->id.value] = GraphRect{
                 middleX + static_cast<float>(i) * (st.nodeW + st.nodeGapH),
-                nodeTop,
+                planY,
                 st.nodeW,
                 st.nodeH,
             };
         }
-        float proposeY = frameTop + blockH - st.framePad - proposeH;
         for (std::size_t i = 0; i < proposeNodes.size(); ++i) {
             out.nodeRects[proposeNodes[i]->id.value] = GraphRect{
                 middleX,
@@ -291,18 +298,10 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
             executionX + st.nodeW - middleX + st.framePad * 2.0f,
             blockH,
         };
-        out.planRegionRects[frame.id] = GraphRect{
-            middleX - st.framePad * 0.5f,
-            frameTop + st.framePad * 0.5f,
-            middleW + st.framePad,
-            blockH * 0.5f - st.framePad * 0.5f,
-        };
-        out.distillRegionRects[frame.id] = GraphRect{
-            middleX - st.framePad * 0.5f,
-            frameTop + blockH * 0.5f,
-            middleW + st.framePad,
-            blockH * 0.5f - st.framePad * 0.5f,
-        };
+        GraphRect planBounds = paddedBounds(planNodes, out.nodeRects, st.framePad * 0.5f);
+        if (planBounds.w > 0.0f) out.planRegionRects[frame.id] = planBounds;
+        GraphRect distillBounds = paddedBounds(distillNodes, out.nodeRects, st.framePad * 0.5f);
+        if (distillBounds.w > 0.0f) out.distillRegionRects[frame.id] = distillBounds;
         out.executionRegionRects[frame.id] = GraphRect{
             executionX - st.framePad * 0.5f,
             frameTop + st.framePad * 0.5f,

@@ -51,6 +51,9 @@ The core idea of Pie in this iteration is to model "how the agent answers a ques
 
 Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (product behavior or documented claim), `[user]` (user intent/requirement), `[convention]` (repo idiom/naming/pattern) — and are written in the language set by `pie.beliefLang` (default `English`). Use `/bs` to view the current belief set and `/thinking` to set the thinking level. See [belief-loop-roles.md](packages/pie/docs/belief-loop-roles.md).
 
+The belief-loop harness renders the four-phase loop and its proposal/plan/distill nodes in the native GUI (see the screenshot below):
+
+![belief-loop-harness](screenshots/1.jpg)
 
 ### 角色模型配置（Role model configuration）
 

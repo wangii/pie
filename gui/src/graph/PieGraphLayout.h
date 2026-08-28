@@ -3,8 +3,9 @@
 // Headless, ImGui-free, unit-testable. It projects the PIE cognition ontology
 // (nodes/edges) into a deterministic custom layout: LoopFrames are stacked as
 // vertical rows, Beliefs occupy a fixed left column ordered by creation order,
-// Plan / Propose / Distillation occupy the middle (top / middle / bottom)
-// regions, and Execution occupies the right column ordered by execution order.
+// Plan / Propose / Distillation occupy the middle regions (Propose at the top,
+// Plan in the middle, Distillation at the bottom, i.e. the loop's time sequence)
+// and Execution occupies the right column ordered by execution order.
 // It does not infer
 // cognition: node/edge semantic types and creation/execution orders are
 // runtime-supplied, only positions come from the engine.
