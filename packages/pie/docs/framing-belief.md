@@ -9,6 +9,11 @@ execution→epistemic residual pipeline in `agent-session.ts`. This doc proposes
 **minimal** addition that gives the loop a revisable notion of "what counts as answered",
 without introducing a second belief class.
 
+The target shared domain model additionally defines an immutable Task `Target` for the
+user's initial intended outcome. `Target` does not replace this primitive: framing beliefs
+remain the revisable completion obligations and the conclude gate. See
+[Agent session domain model](domain-model.md#target-versus-framing-beliefs).
+
 ## The problem
 
 Three concrete gaps exist today:

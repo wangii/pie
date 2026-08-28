@@ -5,6 +5,11 @@ spec by delivery phase (Phase 0 through Phase 4) and tracks the current
 implementation status, cross-phase dependencies, and links to the underlying
 spec sections and source files.
 
+The target cross-runtime/GUI Session/Task/TaskFrame business contract lives in
+[`packages/pie/docs/domain-model.md`](../../packages/pie/docs/domain-model.md).
+This roadmap tracks the current GUI implementation and its migration gaps; its
+rendering structures are not a second source of business truth.
+
 ## Spec reference
 
 - **Source of truth**: the PIE Native GUI Layer spec. Section numbers below refer

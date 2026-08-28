@@ -3,6 +3,10 @@
 > **Status: current.** Describes the implemented loop in `agent-session.ts`,
 > `role-specs.ts`, `belief-set.ts`, and the belief tools.
 
+The target cross-runtime/GUI ownership and event contract is documented in
+[Agent session domain model](domain-model.md). This page continues to describe
+the current loop behavior until that migration is implemented.
+
 The belief loop has four phases plus a batching planner step between propose and
 execution (propose → planner → execution → distill → finalReport). Their policy is
 declared centrally in `src/core/role-specs.ts` (`ROLE_SPECS` + `TRANSITION_STEERS`)
@@ -16,18 +20,18 @@ apart.
 > execution role to execute the request directly on `pie.fastPathModel` and answer the user;
 > the run is then distilled with `pie.distillationModel` into a `fast_path_distillation`
 > custom summary and the loop resets to the next task's propose. Each `route` belief is
-> consumed by id on first evaluation, and only the latest unconsumed route decides; a
-> `fast-path` route dispatches when no open framing obligation blocks it. Open world beliefs
-> do not block this one-shot path, but they are not carried into it: the run executes without
+> consumed by id on first evaluation, and only the latest unconsumed route decides. An
+> initial `fast-path` route dispatches directly; open framing and world beliefs do not block
+> this one-shot path, but they are not carried into it: the run executes without
 > seeing them, and on success `_resetLoopForNewTask()` prunes any still-open hypotheses (only
 > `supported` product/code knowledge survives). Snapshotting open world beliefs as unverified
 > hypotheses and re-adjudicating them after the run is specific to the authorized frame-open
 > handoff below. A later propose turn (after a distill batch
 > settles) may therefore declare a one-shot `fast-path` handoff for the remaining work. A tool
 > failure hands the same task back to propose with the summary (no `_resetLoopForNewTask()`);
-> the consumed route is not re-dispatched. A `belief-loop` decision — or a missing/rejected
-> route, or a route evaluated while an uncovered framing obligation is open — keeps the
-> four-phase loop below.
+> the consumed route is not re-dispatched. A `belief-loop` decision or a missing/rejected
+> route keeps the four-phase loop below. Coverage of open framing beliefs is required only
+> for the authorized mid-task handoff described next.
 
 > **Task boundaries.** At every task-boundary reset (`_resetLoopForNewTask()` — a fast-path
 > success, or the next task arriving after a concluded one) the belief set is pruned to
@@ -74,9 +78,9 @@ apart.
 | tools | `declare_belief` `view_beliefs` `conclude` | none (open beliefs injected directly) | all active tools except `declare_belief`/`conclude` + `view_beliefs` | `declare_belief` `view_beliefs` `conclude` | none |
 | `view_beliefs` scope | `all` | n/a | `all` | `all` | n/a |
 | model | session default | `pie.plannerModel` (settings) | `pie.executionModel` (settings) | `pie.distillationModel` (settings) | `pie.fastPathModel` (settings) |
-| thinking | session default | session default | `pie.distillationThinkingLevel` (settings, default `low`) | session default |
-| projection | operational detail masked unconditionally; probe calls and epistemic thinking elided | belief bookkeeping masked (`declare_belief`/`conclude`) | like `propose`, except the current episode's raw evidence is shown exactly once above the watermark, then masked; epistemic thinking elided | all operational detail, belief-tool echoes, and thinking masked |
-| output | proposed beliefs, framing obligations, `conclude` | a one-sentence raw observation of the probe or intervention result | `support`/`refute`/`refine`/`retract` | the conclusion text |
+| thinking | session default | session default | session default | `pie.distillationThinkingLevel` (settings, default `low`) | session default |
+| projection | operational detail masked unconditionally; probe calls and epistemic thinking elided | belief projection with open beliefs injected in the role prompt | current episode's raw evidence shown once above the watermark; epistemic thinking elided | operational detail, belief-tool echoes, and thinking masked | raw operations and belief echoes masked; explicit final-report snapshot injected |
+| output | proposed beliefs, framing obligations, `conclude` | one `Batch:` line | raw probe/intervention observation | `support`/`refute`/`refine`/`retract` deltas | conclusion text |
 
 Each row is a `RoleSpec` in `role-specs.ts` (`instruction`, `tools`,
 `modelPolicy`, `projection`, `strayToolSteer`). The execution tool list is derived from the

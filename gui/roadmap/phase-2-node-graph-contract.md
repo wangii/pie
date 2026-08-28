@@ -11,9 +11,13 @@ what order, with what content"; the Graph View answers "why are these things
 connected, how does a belief drive execution, how does execution change a belief
 via distillation, and where does a node come from and what it affects".
 
+`GraphTaskState` is a GUI rendering projection, not the shared business model.
+The target Session/Task/TaskFrame ownership and event contract is defined in
+[`packages/pie/docs/domain-model.md`](../../packages/pie/docs/domain-model.md).
+
 The authoritative spec is the user-provided Node Graph View spec (§1-§32). This
-roadmap phase records implementation status, dependencies, and the core runtime
-contract to implement; it does not restate the spec as a new requirement.
+roadmap phase records implementation status, dependencies, and the core GUI
+projection contract; it does not restate the spec as a new requirement.
 
 ## Spec sections
 
@@ -60,6 +64,11 @@ sequence. Chronology may influence position, never topology. Scope is one User
 Task (not one LoopFrame), P0 target ~50 LoopFrames / ~500 nodes, all frames
 expanded by default (no frame collapse in P0).
 
+Current limitation: `projectGraphTask` projects every frame held by one
+`NativeGuiModel`; the model has no first-class Task collection/selection. The
+target domain contract makes the one-Task scope enforceable instead of relying
+on one task per viewer session.
+
 ### Highest-level layout
 
 LoopFrames are complete rows stacked top→bottom in cognition order. Each
@@ -97,7 +106,7 @@ belief set is dropped rather than leaving a dangling edge.
 
 ### Edges and cross-frame semantics
 
-All edges are typed, directed, explicit. The UI includes a compact legend but
+All graph edges are typed and directed. The UI includes a compact legend but
 does not put labels on individual edges. Cross-frame cognition passes only
 through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
 `Belief → Plan` uses an orthogonal cross-region route; `Distill → Belief` and
@@ -105,6 +114,13 @@ through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
 belief column as a single straight segment). `Plan → Execution`, `Execution →
 Distill`, and `Distill → Propose` remain local curves. Create write-backs are
 dashed and the rest are solid.
+
+The current live adapter still derives some correlations: it associates tool
+calls with the active plan, attributes otherwise unconsumed executions to a
+distillation, and binds belief changes to the active distillation/frame. These
+are compatibility projections, not authoritative cognition. The target runtime
+events explicitly carry Plan→Execution, Execution→Distillation, and
+Distillation→BeliefDelta ids.
 
 ### LoopFrame boundary (entering propose is the delimiter)
 
@@ -121,6 +137,11 @@ entry closes the prior logical frame and opens the next one. `turn_end` and
 frame. Frames do not own Belief nodes: beliefs are global, with separate
 creation provenance used only to align a newly created belief with the row that
 produced it.
+
+This delimiter documents the current adapter only. Under the target domain
+contract, the runtime emits `FrameOpened`/`FrameClosed` with stable string ids;
+the GUI does not split frames on `PROPOSING`, a second plan, or a second
+distillation.
 
 ### Node visual language (indicator + label)
 
@@ -159,8 +180,9 @@ extra-highlighted, and no animation is used.
 P0 is read-only: pan, zoom, select, tooltip, temp popup, and Focus Current are
 allowed; the M7 stage indicator is drawn by the Graph View; node drag, link create/delete, node create, belief edit,
 reconnect, frame move, and semantic mutation are forbidden. The GUI never
-infers cognition; `GraphNode`/`GraphEdge`/`GraphTaskState` semantic edges are
-runtime-supplied.
+mutates cognition. `GraphNode`/`GraphEdge`/`GraphTaskState` are display
+projections; temporary inference in the current RPC adapter is removed when the
+target explicit domain correlations are available.
 
 ### PIE-specific deterministic layout engine
 
@@ -177,7 +199,10 @@ Graphviz and pkg-config are not build dependencies. Identical
 geometry, no node overlap, top-to-bottom frame separation, and the fixed
 Belief / middle / Execution ordering.
 
-### Runtime contract (to be supplied by the runtime)
+### Current GUI projection contract
+
+This contract feeds layout/rendering. It is intentionally downstream of the
+shared domain model and must not become a second source of business truth.
 
 ```cpp
 struct GraphNode {
@@ -250,7 +275,7 @@ frames"). Do not over-invest in node label detail before M3/M4.
 
 No graph editing, node dragging, manual edge creation, frame collapse, graph
 search, node-type filter, generic auto layout, historical belief snapshots,
-Proposal nodes, Observation nodes, side inspector, animation, layout
+Observation nodes, side inspector, animation, layout
 persistence, or shared Text/Graph selection.
 
 ### P1 candidates (only if real use justifies)

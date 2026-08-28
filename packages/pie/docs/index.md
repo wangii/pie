@@ -82,3 +82,4 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Development
 
 - [Development](development.md) - local setup, project structure, and debugging.
+- [Agent session domain model](domain-model.md) - target shared Session/Task/Frame contract for the runtime and native GUI.

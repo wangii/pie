@@ -139,6 +139,10 @@
         {
           "title": "Development",
           "path": "development.md"
+        },
+        {
+          "title": "Agent Session Domain Model",
+          "path": "domain-model.md"
         }
       ]
     }

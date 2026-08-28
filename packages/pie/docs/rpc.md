@@ -833,6 +833,14 @@ Each command has:
 
 Events are streamed to stdout as JSON lines during agent operation. Events do not generally include an `id` field; `bash_execution_update` includes the `id` of its originating `bash` command when one was provided.
 
+The belief-loop events below document the **current** RPC protocol. In
+particular, their numeric `frameId` is currently the runtime task counter and
+their numeric Belief ids are display-registry indexes; clients such as the
+native GUI adapt them into logical frames. They are not the target durable
+business contract. The planned stable string ids, explicit Task/TaskFrame
+lifecycle, and correlation fields are specified in
+[Agent session domain model](domain-model.md#domain-event-contract).
+
 ### Event Types
 
 | Event | Description |
@@ -1203,7 +1211,9 @@ Emitted when the conversation's thinking level changes.
 
 ### BeliefsSelected
 
-Emitted when the planner selects an open batch of beliefs for an execution frame. `beliefs` are the 1-based `B{n}` numeric ids of the selected beliefs.
+Emitted when the planner selects an open batch of beliefs for an execution
+frame. `beliefs` are the current 1-based `B{n}` display-registry indexes. They
+are not stable domain Belief ids.
 
 ```json
 {
@@ -1244,7 +1254,12 @@ Emitted when an existing belief's observable status changes via `declare_belief`
 
 ### PlanProduced
 
-Emitted when the belief loop produces a plan: a batch summary for a planner-role batch, or a synthesized single-step plan for a fast-path run. `planId` uniquely names the plan so a consumer can correlate it with a batch without relying on the `label`. `intent` describes the frame's goal; `question` carries the batch/step summary.
+Emitted when the belief loop produces a plan: a batch summary for a planner-role
+batch, or a synthesized single-step plan for a fast-path run. `planId` uniquely
+names the plan so a consumer can correlate it with a batch without relying on
+the `label`. `intent` describes the frame's goal; `question` carries the
+batch/step summary. In the current protocol, `frameId` is the numeric task
+counter, not a stable logical Frame id.
 
 ```json
 {
@@ -1280,7 +1295,10 @@ Emitted when the belief loop advances to a new phase. `stage` is the authoritati
 phase signal; clients drive the phase display solely from `CursorChanged.stage`
 and must not infer it from `Execution*`/`Distillation*` events (the runtime never
 emits `ExecutionStarted`/`ExecutionCompleted`/`DistillationStarted` as RPC events;
-those exist only in the demo/headless fixture).
+those exist only in the demo/headless fixture). In the current protocol,
+`frameId` is the numeric task counter. The native GUI currently uses transitions
+back to `PROPOSING` to split logical frames; the target contract replaces this
+adapter rule with explicit `FrameOpened`/`FrameClosed` events.
 
 ```json
 {

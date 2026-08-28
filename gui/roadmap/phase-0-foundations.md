@@ -9,6 +9,11 @@ Establish the boundary between the PIE harness runtime and the native GUI, and
 the event/state interface between them. The GUI is a viewer/interactor; it does
 not do planning, distillation, belief update, or stage inference.
 
+The target shared Session/Task/TaskFrame ownership and event contract is defined
+in [`packages/pie/docs/domain-model.md`](../../packages/pie/docs/domain-model.md).
+The structures in this roadmap describe the currently implemented GUI read
+model until that contract is implemented.
+
 ## Spec sections
 
 4 (GUI Layer Responsibilities), 24 (GUI Architecture), 25 (Technology Stack),
@@ -108,6 +113,12 @@ emit. MessagePack/protobuf are future transport options.
 trajectory, distillation, proposals, and open/close timestamps. `FrameStage`
 covers PLANNING / EXECUTING / DISTILLING / PROPOSING / CLOSED. `FrameStatus`
 additionally includes OPEN and FAILED.
+
+This is currently a GUI-owned projection. Live RPC `frameId` is the runtime task
+id, and `NativeGuiModel` creates logical LoopFrames from phase events. In the
+target contract, the runtime emits stable string `taskId` and `frameId` values
+plus explicit `FrameOpened`/`FrameClosed` events; the GUI no longer allocates or
+infers business Frame identity.
 
 ## Dependency (from Phase 0 to Phase 1)
 
