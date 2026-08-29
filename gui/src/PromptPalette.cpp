@@ -90,7 +90,7 @@ static int promptInputCallback(ImGuiInputTextCallbackData* data) {
 
 void renderPromptPalette(bool& open, PromptPaletteState& state,
                           const pie::gui::NativeGuiModel& m, bool canSend,
-                          PromptSender send) {
+                          bool historyNavigationEnabled, PromptSender send) {
     if (!open) return;
 
     // Close on Escape BEFORE rendering the input widget. The focused
@@ -121,8 +121,30 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
     state.workDir = m.session();
     if (ImGui::Begin("User Prompt", &close, flags)) {
         // Keep the input box focused the entire time the window is visible so the
-        // user can keep typing without clicking.
+        // user can keep typing without clicking. Plain Up/Down browse submitted
+        // prompts; modified arrows remain available for normal editor/message
+        // scrolling behavior.
         ImGui::SetKeyboardFocusHere();
+        if (historyNavigationEnabled && !io.KeyCtrl && !io.KeySuper && !io.KeyAlt && !io.KeyShift) {
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false) && !state.promptHistory.empty()) {
+                if (state.promptHistoryIndex < 0) {
+                    state.promptHistoryDraft = promptBuf;
+                    state.promptHistoryIndex = static_cast<int>(state.promptHistory.size()) - 1;
+                } else if (state.promptHistoryIndex > 0) {
+                    --state.promptHistoryIndex;
+                }
+                promptBuf = state.promptHistory[static_cast<size_t>(state.promptHistoryIndex)];
+            } else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false) && state.promptHistoryIndex >= 0) {
+                if (state.promptHistoryIndex + 1 < static_cast<int>(state.promptHistory.size())) {
+                    ++state.promptHistoryIndex;
+                    promptBuf = state.promptHistory[static_cast<size_t>(state.promptHistoryIndex)];
+                } else {
+                    state.promptHistoryIndex = -1;
+                    promptBuf = state.promptHistoryDraft;
+                    state.promptHistoryDraft.clear();
+                }
+            }
+        }
 
         ImGui::SetNextItemWidth(-1.0f);
 
@@ -145,6 +167,13 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
                                   ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_CallbackEdit |
                                       ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_WordWrap,
                                   promptInputCallback, &state);
+
+        // Any typing/editing after loading a history entry starts a fresh draft.
+        if (state.promptHistoryIndex >= 0 &&
+            promptBuf != state.promptHistory[static_cast<size_t>(state.promptHistoryIndex)]) {
+            state.promptHistoryIndex = -1;
+            state.promptHistoryDraft.clear();
+        }
 
         // `@` mention candidate list. Tab (handled in the completion callback)
         // cycles the active index and inserts the candidate; here we only render
@@ -174,7 +203,10 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
         if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
             std::string prompt = promptBuf;
             promptBuf.clear();
-            if (canSend && send && !prompt.empty()) {
+            state.promptHistoryIndex = -1;
+            state.promptHistoryDraft.clear();
+            if (historyNavigationEnabled && canSend && send && !prompt.empty()) {
+                state.promptHistory.push_back(prompt);
                 send(prompt);  // reverse path: user prompt -> runtime client
             }
         }

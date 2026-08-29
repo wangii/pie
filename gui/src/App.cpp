@@ -210,7 +210,7 @@ int main(int argc, char** argv) {
         // ImGui windows and must render in BOTH the text workspace and the Graph
         // View mode. They are drawn before the Graph View early-return so that
         // GraphView mode never affects them.
-        renderPromptPalette(app.promptOpen, app.promptState, app.model, app.live,
+        renderPromptPalette(app.promptOpen, app.promptState, app.model, app.live, app.graphOpen,
                             [&app](const std::string& msg) {
                                 writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
                             });

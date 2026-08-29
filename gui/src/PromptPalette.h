@@ -24,6 +24,12 @@ struct PromptPaletteState {
     size_t lastInMessageLength = 0; // in-message length since last auto-scroll (was `lastInMsgLen`)
     bool inMessagePinned = true;    // while pinned, new content auto-scrolls to the bottom
 
+    // Submitted prompts, newest first through ArrowUp navigation. The draft is
+    // retained while browsing history so ArrowDown can restore it.
+    std::vector<std::string> promptHistory;
+    int promptHistoryIndex = -1;    // -1 = current draft, otherwise history entry
+    std::string promptHistoryDraft;
+
     // "@" file/folder completion state, populated by the input callback each
     // frame and rendered as a candidate list below the input box. The working
     // directory is the base for enumerating candidates.
@@ -36,6 +42,6 @@ struct PromptPaletteState {
 // ':' and closed via Escape/close; `state` carries the persistent editor state.
 void renderPromptPalette(bool& open, PromptPaletteState& state,
                          const pie::gui::NativeGuiModel& m, bool canSend,
-                         PromptSender send);
+                         bool historyNavigationEnabled, PromptSender send);
 
 } // namespace pie::gui

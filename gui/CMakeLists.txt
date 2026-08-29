@@ -155,6 +155,12 @@ target_link_libraries(pi_gui_graph_m789_test PRIVATE pi_gui_model)
 target_include_directories(pi_gui_graph_m789_test PRIVATE src)
 add_test(NAME pi_gui_graph_m789_test COMMAND pi_gui_graph_m789_test)
 
+# GraphView label clipping geometry regression test (headless; no ImGui).
+add_executable(pi_gui_graph_label_layout_test src/graph/GraphLabelLayout.test.cpp)
+target_link_libraries(pi_gui_graph_label_layout_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_graph_label_layout_test PRIVATE src)
+add_test(NAME pi_gui_graph_label_layout_test COMMAND pi_gui_graph_label_layout_test)
+
 # User prompt command serialization + outbound pipe test (headless).
 add_executable(pi_gui_prompt_test src/PromptCmd.test.cpp)
 target_include_directories(pi_gui_prompt_test PRIVATE src)

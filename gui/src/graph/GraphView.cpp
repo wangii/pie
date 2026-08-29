@@ -25,6 +25,7 @@
 
 #include "Model.h"
 #include "graph/GraphStyle.h"
+#include "graph/GraphLabelLayout.h"
 #include "graph/GraphNavigation.h"
 #include "graph/GraphRouting.h"
 
@@ -387,7 +388,17 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         // a card box).
         const float labelX = cxp + st.indicatorRadius + st.indicatorGap;
         ImVec2 ts = ImGui::CalcTextSize(title.c_str());
-        dl->AddText(ImVec2(labelX, cy - ts.y * 0.5f), textCol, title.c_str());
+        // Keep the free-standing label's visible pixels inside the geometry used
+        // for hit testing and layout.  The layout remains unchanged; long labels
+        // are clipped rather than leaking into the adjacent phase band.
+        const GraphRect clipRect = nodeLabelClipRect(r);
+        const ImVec4 labelClip(toScreen(clipRect.x, clipRect.y).x,
+                               toScreen(clipRect.x, clipRect.y).y,
+                               toScreen(clipRect.x + clipRect.w, clipRect.y + clipRect.h).x,
+                               toScreen(clipRect.x + clipRect.w, clipRect.y + clipRect.h).y);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    ImVec2(labelX, cy - ts.y * 0.5f), textCol, title.c_str(),
+                    nullptr, 0.0f, &labelClip);
 
         // Current stage indicator (small accent bar) for the CURRENT node.
         if (current) {

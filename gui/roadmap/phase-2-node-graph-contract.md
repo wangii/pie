@@ -207,7 +207,7 @@ shared domain model and must not become a second source of business truth.
 ```cpp
 struct GraphNode {
     NodeId id;
-    NodeFamily family;            // Belief | Plan | Execution | Distill
+    NodeFamily family;            // Belief | Plan | Execution | Distill | Propose
     optional<LoopFrameId> frame_id;
     optional<LoopFrameId> created_in_frame;  // Belief provenance only
     string display_type;
