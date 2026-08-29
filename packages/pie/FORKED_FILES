@@ -20,6 +20,7 @@ core/extensions/types.ts
 core/footer-data-provider.ts
 core/index.ts
 core/keybindings.ts
+core/model-resolver.ts
 core/output-guard.ts
 core/provider-attribution.ts
 core/role-specs.ts

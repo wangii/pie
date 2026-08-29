@@ -634,7 +634,6 @@ export async function findInitialModel(options: {
 		cliModel,
 		scopedModels,
 		isContinuing,
-		defaultProvider,
 		defaultModelId,
 		defaultThinkingLevel,
 		modelThinkingLevels,
@@ -672,11 +671,18 @@ export async function findInitialModel(options: {
 	}
 
 	// 3. Try saved default from settings if auth is configured.
-	if (defaultProvider && defaultModelId) {
-		const found = modelRuntime.getModel(defaultProvider, defaultModelId);
-		if (found && modelRuntime.hasConfiguredAuth(found.provider)) {
-			model = found;
-			const perModel = modelThinkingLevels?.[`${defaultProvider}/${defaultModelId}`];
+	// Resolve the default model reference the same way the belief-loop role models
+	// are resolved (via resolveCliModel), so it accepts both a bare model id and a
+	// "provider/model" reference like executionModel. An explicit provider prefix in
+	// the reference wins over the settings' defaultProvider.
+	if (defaultModelId) {
+		const resolved = resolveCliModel({
+			cliModel: defaultModelId,
+			modelRuntime,
+		});
+		if (resolved.model && modelRuntime.hasConfiguredAuth(resolved.model.provider)) {
+			model = resolved.model;
+			const perModel = modelThinkingLevels?.[`${model.provider}/${model.id}`];
 			if (perModel) {
 				thinkingLevel = perModel;
 			} else if (defaultThinkingLevel) {

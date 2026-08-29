@@ -23,6 +23,7 @@ src/**
 !src/core/footer-data-provider.ts
 !src/core/index.ts
 !src/core/keybindings.ts
+!src/core/model-resolver.ts
 !src/core/output-guard.ts
 !src/core/provider-attribution.ts
 !src/core/role-specs.ts
