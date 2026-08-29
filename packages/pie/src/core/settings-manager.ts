@@ -93,6 +93,16 @@ export type PackageSource =
 
 /** Settings scoped to the belief-loop ("pie") subsystem. */
 export interface PieSettings {
+	/** Default model for pie sessions and the initial propose role. */
+	defaultModel?: string;
+	/** Default thinking level for pie sessions and roles without a specific override. */
+	defaultThinkingLevel?: ThinkingLevel;
+	/** Thinking level for the planner role. */
+	plannerThinkingLevel?: ThinkingLevel;
+	/** Thinking level for the execution role. */
+	executionThinkingLevel?: ThinkingLevel;
+	/** Thinking level for fast-path execution. */
+	fastPathThinkingLevel?: ThinkingLevel;
 	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
 	executionModel?: string;
 	/**
@@ -818,7 +828,7 @@ export class SettingsManager {
 	}
 
 	getDefaultModel(): string | undefined {
-		return this.settings.defaultModel;
+		return this.settings.pie?.defaultModel ?? this.settings.defaultModel;
 	}
 
 	getExecutionModel(): string | undefined {
@@ -839,6 +849,18 @@ export class SettingsManager {
 
 	getDistillationThinkingLevel(): ThinkingLevel {
 		return this.settings.pie?.distillationThinkingLevel ?? "low";
+	}
+
+	getPlannerThinkingLevel(): ThinkingLevel | undefined {
+		return this.settings.pie?.plannerThinkingLevel ?? this.getDefaultThinkingLevel();
+	}
+
+	getExecutionThinkingLevel(): ThinkingLevel | undefined {
+		return this.settings.pie?.executionThinkingLevel ?? this.getDefaultThinkingLevel();
+	}
+
+	getFastPathThinkingLevel(): ThinkingLevel | undefined {
+		return this.settings.pie?.fastPathThinkingLevel ?? this.getDefaultThinkingLevel();
 	}
 
 	getBeliefLang(): string {
@@ -903,7 +925,7 @@ export class SettingsManager {
 	}
 
 	getDefaultThinkingLevel(): ThinkingLevel | undefined {
-		return this.settings.defaultThinkingLevel;
+		return this.settings.pie?.defaultThinkingLevel ?? this.settings.defaultThinkingLevel;
 	}
 
 	setDefaultThinkingLevel(level: ThinkingLevel): void {

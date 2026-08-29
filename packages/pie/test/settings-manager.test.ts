@@ -282,6 +282,31 @@ describe("SettingsManager", () => {
 	});
 
 	describe("pie settings in settings-pie.json", () => {
+		it("loads pie defaults and role thinking levels from settings-pie.json", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ defaultModel: "global-model", defaultThinkingLevel: "low" }),
+			);
+			writeFileSync(
+				join(agentDir, "settings-pie.json"),
+				JSON.stringify({
+					defaultModel: "pie-model",
+					defaultThinkingLevel: "medium",
+					plannerThinkingLevel: "high",
+					executionThinkingLevel: "minimal",
+					fastPathThinkingLevel: "max",
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getDefaultModel()).toBe("pie-model");
+			expect(manager.getDefaultThinkingLevel()).toBe("medium");
+			expect(manager.getPlannerThinkingLevel()).toBe("high");
+			expect(manager.getExecutionThinkingLevel()).toBe("minimal");
+			expect(manager.getFastPathThinkingLevel()).toBe("max");
+		});
+
 		it("loads pie settings from settings-pie.json alongside non-pie from settings.json", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),

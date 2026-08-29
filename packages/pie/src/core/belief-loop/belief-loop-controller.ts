@@ -1,4 +1,4 @@
-import type { PrepareNextTurnContext } from "@earendil-works/pi-agent-core";
+import type { PrepareNextTurnContext, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Context, contentText, type JsonValue } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai/compat";
 import type { AgentSession } from "../agent-session.ts";
@@ -65,6 +65,33 @@ export interface RoleStatus {
 
 const FRAME_HORIZON_HEADROOM = 1.3;
 const REFLECTION_MIN_SETTLED_BELIEFS = 3;
+
+export function selectRoleThinkingLevel(
+	role: LoopState["role"],
+	loopState: LoopState,
+	levels: {
+		default?: ThinkingLevel;
+		planner?: ThinkingLevel;
+		execution?: ThinkingLevel;
+		fastPath?: ThinkingLevel;
+		distillation: ThinkingLevel;
+	},
+	sessionLevel: ThinkingLevel,
+): ThinkingLevel {
+	const configured =
+		role === "distill"
+			? levels.distillation
+			: role === "planner"
+				? levels.planner
+				: role === "execution"
+					? loopState.role === "execution" && loopState.fastPath
+						? levels.fastPath
+						: levels.execution
+					: role === "propose"
+						? levels.default
+						: levels.fastPath;
+	return configured ?? sessionLevel;
+}
 
 // ============================================================================
 // BeliefLoopController
@@ -187,6 +214,18 @@ export class BeliefLoopController {
 		this.host.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
+			const configuredThinkingLevel = selectRoleThinkingLevel(
+				this.role,
+				this.loopState,
+				{
+					default: this.host.settingsManager.getDefaultThinkingLevel(),
+					planner: this.host.settingsManager.getPlannerThinkingLevel(),
+					execution: this.host.settingsManager.getExecutionThinkingLevel(),
+					fastPath: this.host.settingsManager.getFastPathThinkingLevel(),
+					distillation: this.host.settingsManager.getDistillationThinkingLevel(),
+				},
+				this.host.agent.state.thinkingLevel,
+			);
 
 			return {
 				...previousSnapshot,
@@ -202,10 +241,7 @@ export class BeliefLoopController {
 					),
 				},
 				model: this.roleModel(),
-				thinkingLevel:
-					this.role === "distill"
-						? this.host.settingsManager.getDistillationThinkingLevel()
-						: this.host.agent.state.thinkingLevel,
+				thinkingLevel: configuredThinkingLevel ?? this.host.agent.state.thinkingLevel,
 			};
 		};
 	}
@@ -783,8 +819,10 @@ export class BeliefLoopController {
 					},
 				],
 			};
+			const fastPathThinkingLevel = this.host.settingsManager.getFastPathThinkingLevel();
 			const result = await this.host.modelRuntime.completeSimple(model, context, {
 				toolChoice: "none",
+				reasoning: fastPathThinkingLevel === "off" ? undefined : fastPathThinkingLevel,
 				cacheRetention: "none",
 				sessionId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 			});

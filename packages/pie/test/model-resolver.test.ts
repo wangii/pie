@@ -748,6 +748,33 @@ describe("default model selection", () => {
 		expect(result.model?.id).toBe("openai/ghost-model");
 	});
 
+	test("findInitialModel prefers the pie default model when no explicit model is provided", async () => {
+		const pieModel: Model<"anthropic-messages"> = {
+			...mockModels[0],
+			id: "pie-default",
+		};
+		const fallbackModel: Model<"anthropic-messages"> = {
+			...mockModels[1],
+			provider: "cerebras",
+		};
+		const registry = {
+			getModel: (provider: string, modelId: string) =>
+				provider === pieModel.provider && modelId === pieModel.id ? pieModel : undefined,
+			hasConfiguredAuth: (provider: string) => provider === pieModel.provider,
+			getAvailableSnapshot: () => [fallbackModel],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: pieModel.provider,
+			defaultModelId: pieModel.id,
+			modelRuntime: registry,
+		});
+
+		expect(result.model).toBe(pieModel);
+	});
+
 	test("findInitialModel selects ai-gateway default when available", async () => {
 		const aiGatewayModel: Model<"anthropic-messages"> = {
 			id: "anthropic/claude-opus-4-6",
