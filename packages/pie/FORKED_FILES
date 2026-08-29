@@ -1,0 +1,42 @@
+# Pie-forked files (hand-maintained). Everything else under src/ is synced
+# verbatim from packages/coding-agent/src by scripts/sync-pie-shared.mjs.
+#
+# Paths are relative to packages/pie/src. A file listed here is never
+# overwritten or deleted by the sync; a file NOT listed here must match
+# coding-agent exactly.
+
+cli/args.ts
+cli/startup-ui.ts
+config.ts
+core/agent-session.ts
+core/agent-session-domain.ts
+core/belief-loop/message-projection.ts
+core/belief-loop/belief-loop-controller.ts
+core/belief-set.ts
+core/extensions/index.ts
+core/extensions/loader.ts
+core/extensions/runner.ts
+core/extensions/types.ts
+core/footer-data-provider.ts
+core/index.ts
+core/keybindings.ts
+core/output-guard.ts
+core/provider-attribution.ts
+core/role-specs.ts
+core/sdk.ts
+core/settings-manager.ts
+core/skills.ts
+core/slash-commands.ts
+core/system-prompt.ts
+core/tools/conclude.ts
+core/tools/declare-belief.ts
+core/tools/view-beliefs.ts
+index.ts
+main.ts
+modes/interactive/components/belief-set-panel.ts
+modes/interactive/components/footer.ts
+modes/interactive/interactive-mode.ts
+modes/interactive/theme/theme.ts
+modes/print-mode.ts
+modes/rpc/rpc-mode.ts
+utils/changelog.ts

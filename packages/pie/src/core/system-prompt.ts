@@ -2,7 +2,7 @@
  * System prompt construction and project context loading
  */
 
-import { getDocsPath, getReadmePath } from "../config.ts";
+import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 /**
@@ -94,6 +94,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// Get absolute paths to documentation and examples
 	const readmePath = getReadmePath();
 	const docsPath = getDocsPath();
+	const examplesPath = getExamplesPath();
 
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
@@ -114,14 +115,21 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	};
 
 	const hasBash = tools.includes("bash");
+	const hasPowerShell = tools.includes("powershell");
 	const hasGrep = tools.includes("grep");
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
 	const hasRead = tools.includes("read");
 
 	// File exploration guidelines
-	if (hasBash && !hasGrep && !hasFind && !hasLs) {
-		addGuideline("Use bash for file operations like ls, rg, find");
+	if ((hasBash || hasPowerShell) && !hasGrep && !hasFind && !hasLs) {
+		if (hasBash && hasPowerShell) {
+			addGuideline("Use bash or PowerShell for file operations like listing, searching, and finding files");
+		} else if (hasPowerShell) {
+			addGuideline("Use PowerShell for file operations like listing, searching, and finding files");
+		} else {
+			addGuideline("Use bash for file operations like ls, rg, find");
+		}
 	}
 
 	for (const guideline of promptGuidelines ?? []) {
@@ -171,9 +179,10 @@ ${guidelines}
 Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${readmePath}
 - Additional docs: ${docsPath}
-- When reading pi docs, resolve docs/... under Additional docs, not the current working directory
-- When asked about: extensions (docs/extensions.md), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
-- When working on pi topics, read the docs and follow .md cross-references before implementing
+- Examples: ${examplesPath} (extensions, custom tools, SDK)
+- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
+- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
+- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
 - Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
 	}
 
