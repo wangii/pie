@@ -294,7 +294,9 @@ public:
     void endInMessage();
     const std::string& inMessage() const { return inMessage_; }
     bool inMessageThinking() const { return inMessageThinking_; }
+    bool inMessageError() const { return inMessageError_; }
     void setInMessageThinking(bool thinking);
+    void setInMessageError(const std::string& message);
 
     // Auto-reopen the user prompt pane when the belief loop reaches the
     // terminal finalReport role and its conclusion message ends. Marked on
@@ -348,6 +350,7 @@ private:
     int nextDistillOrdinal_ = 0; // display-label ordinal (D<n>)
     std::string inMessage_;       // live streaming assistant reply for the ':' pane
     bool inMessageThinking_ = false;
+    bool inMessageError_ = false;
     bool finalReportPending_ = false;
     bool autoOpenPrompt_ = false;
     Footer footer_;

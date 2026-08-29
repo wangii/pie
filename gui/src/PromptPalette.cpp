@@ -13,6 +13,7 @@
 
 #include "PaletteMetrics.h"
 #include "PathComplete.h"
+#include "Theme.h"
 #include "UiMarkdown.h"
 
 namespace pie::gui {
@@ -242,11 +243,11 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
         }
 
         if (!m.inMessage().empty()) {
-            // Render the incoming assistant reply (including the finalReport
-            // conclusion, which reaches this same buffer) as Markdown. During
-            // the thinking phase the model still accumulates reasoning deltas
-            // into inMessage_, so render that content rather than hiding it.
+            // Render RPC failures in red; normal assistant replies retain the
+            // markdown renderer's default text color.
+            if (m.inMessageError()) ImGui::PushStyleColor(ImGuiCol_Text, kRed);
             renderMarkdownMessage(m.inMessage());
+            if (m.inMessageError()) ImGui::PopStyleColor();
         } else if (m.inMessageThinking()) {
             // No content yet but the live message is still thinking.
             ImGui::TextDisabled("thinking");

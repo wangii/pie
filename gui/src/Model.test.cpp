@@ -140,6 +140,11 @@ int main() {
     {
         NativeGuiModel rpc;
         check(pie::gui::applyRpcLine(rpc, R"({"type":"response","id":"p1","command":"prompt","success":true})") == pie::gui::RpcApplyResult::Ignored, "response ack ignored");
+        check(rpc.inMessage().empty() && !rpc.inMessageError(), "successful response leaves prompt message unchanged");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"response","id":"p2","command":"prompt","success":false,"error":"request failed"})") == pie::gui::RpcApplyResult::Ignored, "failed response is ignored as control event");
+        check(rpc.inMessage() == "request failed" && rpc.inMessageError(), "failed response surfaces error message");
+        rpc.beginInMessage("next reply");
+        check(!rpc.inMessageError(), "new message clears error state");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"agent_start"})") == pie::gui::RpcApplyResult::Ignored, "agent_start does not open a frame");
         check(pie::gui::applyRpcLine(rpc, R"({"type":"turn_start"})") == pie::gui::RpcApplyResult::Ignored, "turn_start does not open a frame");
         check(rpc.frames().empty(), "no frame after turn boundaries");

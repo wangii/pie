@@ -1,5 +1,7 @@
 # c++
 build/
+.cache/
 
 # macOS Finder metadata
 .DS_Store
+compile_commands.json

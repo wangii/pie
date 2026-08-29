@@ -45,6 +45,10 @@ const char* edgeSemanticTypeToString(EdgeSemanticType t) {
 
 namespace {
 
+std::string pendingFrameId(const std::string& frameId) {
+    return frameId + "::next";
+}
+
 // A stable id is carried into the graph verbatim (never remapped).
 NodeId makeNodeId(const std::string& id) { return NodeId{id}; }
 
@@ -187,14 +191,15 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         // A propose that a distillation produced (its outputs name the delta)
         // belongs to the NEXT loopframe/episode: the distillation closes out the
         // frame's epistemic work, and the propose it feeds is the following
-        // frame's proposal step. The last frame has no successor, so its
-        // distillation-produced propose stays in the current frame.
+        // frame's proposal step. If the successor is not materialized yet,
+        // use a stable placeholder frame; projection will use the real frame
+        // id once the runtime opens it.
         std::set<std::string> distillOutputs;
         if (f.distillation.valid()) {
             for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
         }
-        const std::string& nextFrameId =
-            (frameIndex + 1 < frames.size()) ? frames[frameIndex + 1].id : f.id;
+        const std::string nextFrameId =
+            (frameIndex + 1 < frames.size()) ? frames[frameIndex + 1].id : pendingFrameId(f.id);
         uint64_t proposeIdx = 0;
         for (const BeliefDelta& d : f.beliefDeltas) {
             if (d.beliefId.empty()) continue;
@@ -203,9 +208,7 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
                 ? ("PR-" + f.id + "-" + std::to_string(proposeIdx))
                 : d.id);
             propose.family = NodeFamily::Propose;
-            propose.frameId = (frameIndex + 1 < frames.size() && distillOutputs.count(d.id))
-                ? nextFrameId
-                : f.id;
+            propose.frameId = distillOutputs.count(d.id) ? nextFrameId : f.id;
             propose.displayType = "propose";
             propose.title = d.operation;
             propose.compactText = d.evidence;
@@ -214,6 +217,29 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
             propose.state = NodeVisualState::Default;
             state.nodes.push_back(std::move(propose));
             ++proposeIdx;
+        }
+    }
+
+    // A pending successor is a layout container, not runtime state. It is
+    // materialized only when the last frame has a distillation-produced delta.
+    if (!frames.empty()) {
+        const LoopFrame& last = frames.back();
+        std::set<std::string> outputs;
+        if (last.distillation.valid()) {
+            for (const BeliefDeltaId& output : last.distillation.outputs) outputs.insert(output);
+        }
+        bool hasPendingProposal = false;
+        for (const BeliefDelta& delta : last.beliefDeltas) {
+            if (!delta.beliefId.empty() && outputs.count(delta.id)) {
+                hasPendingProposal = true;
+                break;
+            }
+        }
+        if (hasPendingProposal) {
+            LoopFrameInfo pending;
+            pending.id = pendingFrameId(last.id);
+            pending.label = "#" + std::to_string(frames.size() + 1);
+            state.frames.push_back(std::move(pending));
         }
     }
 

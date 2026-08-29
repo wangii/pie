@@ -118,7 +118,7 @@ static void testBeliefCreateIsPropose() {
         if (n.family == NodeFamily::Propose) {
             ++proposeCount;
             check(n.displayType == "propose", "create Propose node displayType is 'propose'");
-            check(n.frameId && *n.frameId == "f1", "create Propose node belongs to the frame");
+            check(n.frameId && *n.frameId == "f1::next", "distill Propose node belongs to the pending next frame");
         }
         if (n.family == NodeFamily::Belief) {
             ++beliefCount;
@@ -134,6 +134,8 @@ static void testBeliefCreateIsPropose() {
     check(createEdges == 1, "belief create yields one Propose->Belief create edge");
     check(distillToPropose == 1, "belief create yields one Distill->Propose edge");
     check(beliefCount == 1, "belief create yields exactly one belief node");
+    check(s.frames.size() == 2 && s.frames.back().id == "f1::next",
+          "distill output creates a pending next frame container");
 
     PieGraphLayout layout = computeGraphLayout(s);
     const GraphRect* pr = nullptr;
@@ -204,7 +206,7 @@ int main() {
     GraphTaskState state = projectGraphTask(model);
 
     // --- M1: node families ---
-    int proposeNodes1 = 0, proposeNodes2 = 0;
+    int proposeNodes1 = 0, proposeNodes2 = 0, pendingProposeNodes = 0;
     int beliefCount = 0, planCount = 0, execCount1 = 0, distillCount = 0;
     bool beliefsGlobal = true;
     for (const auto& n : state.nodes) {
@@ -221,6 +223,7 @@ int main() {
             case NodeFamily::Propose:
                 if (n.frameId && *n.frameId == "frame-1") ++proposeNodes1;
                 if (n.frameId && *n.frameId == "frame-2") ++proposeNodes2;
+                if (n.frameId && *n.frameId == "frame-2::next") ++pendingProposeNodes;
                 break;
         }
     }
@@ -231,10 +234,12 @@ int main() {
     check(distillCount == 2, "two distill nodes");
     // A distillation-produced propose belongs to the NEXT episode: frame-1's
     // distill outputs delta-1/delta-2, which now render in frame-2's lane;
-    // frame-2's distill outputs delta-3 but frame-2 is the last frame, so
-    // delta-3 stays in frame-2.
+    // frame-2's distill output delta-3 targets the pending successor row.
     check(proposeNodes1 == 0, "frame 1 owns no Propose node (its distill's proposes move to frame 2)");
-    check(proposeNodes2 == 3, "frame 2 owns three Propose nodes (two moved from frame 1 + its own)");
+    check(proposeNodes2 == 2, "frame 2 owns the prior frame's distill Propose nodes");
+    check(pendingProposeNodes == 1, "frame 2's distill output targets the pending next frame");
+    check(state.frames.size() == 3 && state.frames.back().id == "frame-2::next",
+          "the pending next frame is exposed as a graph container");
 
     // --- M1: typed, directed edges with valid endpoints ---
     bool allTyped = !state.edges.empty();
@@ -254,7 +259,7 @@ int main() {
     check(createEdges == 3, "three Propose->Belief create edges (propose ops)");
 
     // --- M1: frame containers ---
-    check(state.frames.size() == 2, "two frame containers");
+    check(state.frames.size() == 3, "two materialized plus one pending frame container");
 
     // --- M3: layout determinism ---
     PieGraphLayout layout = computeGraphLayout(state);
@@ -302,6 +307,29 @@ int main() {
 
     testBeliefCreateIsPropose();
     testBeliefCreateMissingFrameAndLink();
+
+    // A pending successor uses the same row as the real successor once it is
+    // opened; the proposal changes only its frame id, not its node id.
+    {
+        NativeGuiModel m;
+        m.applyLine(R"({"type":"TaskOpened","taskId":"t-2","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f1","ordinal":1})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"DistillationProduced","taskId":"t-2","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
+        GraphTaskState pending = projectGraphTask(m);
+        const GraphNode* before = nullptr;
+        for (const GraphNode& n : pending.nodes) if (n.family == NodeFamily::Propose) before = &n;
+        check(before && before->frameId && *before->frameId == "f1::next",
+              "proposal initially targets the stable pending successor");
+        m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f2","ordinal":2})");
+        GraphTaskState materialized = projectGraphTask(m);
+        const GraphNode* after = nullptr;
+        for (const GraphNode& n : materialized.nodes) if (n.family == NodeFamily::Propose) after = &n;
+        check(after && after->id.value == "d1" && after->frameId && *after->frameId == "f2",
+              "proposal remaps to the real successor without changing its id");
+        check(materialized.frames.size() == 2 && materialized.frames.back().id == "f2",
+              "real successor replaces the pending container");
+    }
 
     // --- Create is a sub-state of the write-back semantic, not a separate edge ---
     {

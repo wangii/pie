@@ -491,6 +491,7 @@ std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
 // ---------------------------------------------------------------------------
 void NativeGuiModel::beginInMessage(const std::string& text) {
     inMessage_ = text;
+    inMessageError_ = false;
 }
 void NativeGuiModel::appendInMessage(const std::string& delta) {
     inMessage_ += delta;
@@ -500,6 +501,11 @@ void NativeGuiModel::endInMessage() {
 }
 void NativeGuiModel::setInMessageThinking(bool thinking) {
     inMessageThinking_ = thinking;
+}
+void NativeGuiModel::setInMessageError(const std::string& message) {
+    inMessage_ = message;
+    inMessageThinking_ = false;
+    inMessageError_ = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -809,9 +815,17 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
     std::string type = str(line, "type");
     if (type.empty()) return RpcApplyResult::Error;
 
-    // Benign RPC control events: no model state.
-    if (type == "response")
+    // Successful acknowledgements are control events; surface failures in the
+    // prompt pane so the user can see why the request was rejected.
+    if (type == "response") {
+        std::string success;
+        if (findKey(line, "success", success) && trim(success).rfind("false", 0) == 0) {
+            std::string message = str(line, "error");
+            if (message.empty()) message = "RPC request failed";
+            model.setInMessageError(message);
+        }
         return RpcApplyResult::Ignored;
+    }
 
     // Bottom-footer telemetry: per-role model + cache hit rate and session cost.
     if (type == "session_status") {
