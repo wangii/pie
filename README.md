@@ -1,6 +1,18 @@
-# Pie: Pi + Epistemology
+# Context compaction is for losers.
 
-![belief-loop-harness](screenshots/1.jpg)
+Coding agents keep getting longer context windows, smarter summarizers, and better compaction.
+
+PIE takes a different position:
+
+**A competent agent should not need to reread its life story to remember what it believes.**
+
+- PIE continuously converts execution history into a precise, revisable belief state.
+- Kill the session. Change the model. Come back tomorrow.
+
+**The work survives.**
+
+**Your agent should never loses the plot.**
+
 ![pie-agent](screenshots/pie.png)
 
 PIE is an experimental coding-agent harness that makes the epistemic process itself an explicit runtime object. Rather than allowing one model invocation to freely mix hypothesis formation, investigation, interpretation and answer generation, PIE separates these cognitive operations and controls the information allowed to cross between them.
@@ -16,19 +28,14 @@ Pie is a self-extensible coding agent whose core is a default-enabled four-phase
 - **结论门控（Conclusion gating）**：conclude 在开放信念或框架义务未清时被阻止，终局前执行一次性覆盖性反思。`conclude` is blocked while beliefs or framing obligations stay open; a one-time reflection runs before the terminal handoff.
 - **终局快照（Terminal snapshot）**：finalReport 无工具，仅凭注入的 `<final_report_context>` 信念快照作答。The finalReport role has no tools and answers solely from the injected `<final_report_context>` belief snapshot.
 
-Built on top of Pi: https://pi.dev
+![belief-loop-harness](screenshots/1.jpg)
 
+Built on top of Pi: https://pi.dev
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
   </a>
 </p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
-
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 项目思想：四阶段信念循环（The project idea: the four-phase belief loop）
 
