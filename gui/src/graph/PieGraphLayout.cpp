@@ -161,7 +161,7 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     const float middleX = beliefX + st.nodeW + st.regionGap;
     const float middleW = std::max({sequenceWidth(maxPlanCount),
                                     sequenceWidth(maxDistillCount),
-                                    sequenceWidth(maxProposeCount)});
+                                    sequenceWidth(maxProposeCount)})/3.;
     const float executionX = middleX + middleW + st.regionGap;
     const float contentTop = st.canvasPad + st.columnHeaderHeight;
 

@@ -13,4 +13,9 @@ namespace pie::gui {
 
 void renderFooter(const pie::gui::NativeGuiModel& m);
 
+// Single-line telemetry footer for the Graph View, pinned to the screen bottom.
+// Reuses the per-role slot rendering and appends the role context lengths, all
+// on one horizontal row so it reads as a footer rather than an in-canvas overlay.
+void renderGraphFooter(const pie::gui::NativeGuiModel& m);
+
 } // namespace pie::gui

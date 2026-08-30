@@ -151,8 +151,9 @@ struct GraphTaskState {
 // Project the runtime model into a GraphTaskState (Phase 2 M1). Beliefs are
 // global; each frame's plan/execution/distillation become nodes; each
 // ProposalCreated occurrence becomes a Propose node on the chain
-// Distill -> Propose -> Belief. Tool call + result are merged into one
-// Execution node.
+// Distill -> Propose -> Belief. A Propose named by a distillation belongs to
+// the successor frame (a pending successor until that frame opens). Tool call +
+// result are merged into one Execution node.
 GraphTaskState projectGraphTask(const NativeGuiModel& model);
 
 } // namespace pie::gui

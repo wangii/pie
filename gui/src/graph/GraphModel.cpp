@@ -78,7 +78,7 @@ BeliefOperation beliefOperationFromDelta(const std::string& operation) {
 } // namespace
 
 std::string beliefNodeTitle(const GraphNode& n) {
-    const char* cat = "";
+    const char* cat = "Belief";
     if (n.domain == "framing") cat = "Target";
     else if (n.domain == "routing") cat = "Route";
     const std::string num = n.title.empty() ? n.id.value : n.title;
@@ -96,6 +96,27 @@ bool edgeIsCreate(EdgeSemanticType t, const std::optional<BeliefOperation>& op) 
 
 GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     GraphTaskState state;
+    const std::vector<LoopFrame> frames = model.frames();
+
+    // Each created Belief's display anchor frame is the frame of its producing
+    // Propose node. A propose that a distillation names (the distill's outputs
+    // contain the delta) is projected to the SUCCESSOR frame, so the Belief it
+    // creates anchors to the same frame as its Propose. Beliefs stay
+    // session-global (no owning frame); this only sets the row-alignment anchor.
+    std::map<std::string, std::string> beliefAnchorFrame;  // beliefId -> frame
+    for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
+        const LoopFrame& f = frames[frameIndex];
+        std::set<std::string> distillOutputs;
+        if (f.distillation.valid()) {
+            for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
+        }
+        const std::string nextFrameId =
+            (frameIndex + 1 < frames.size()) ? frames[frameIndex + 1].id : pendingFrameId(f.id);
+        for (const BeliefDelta& d : f.beliefDeltas) {
+            if (d.beliefId.empty()) continue;
+            beliefAnchorFrame[d.beliefId] = distillOutputs.count(d.id) ? nextFrameId : f.id;
+        }
+    }
 
     // --- Global Belief nodes (creation-order stable, no owning frame) ---
     std::set<std::string> projectedBeliefIds;
@@ -114,14 +135,17 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         node.fullText = b.statement;
         if (!b.expectation.empty()) node.fullText += std::string("  (expects ") + b.expectation + ")";
         node.creationOrder = beliefOrder++;
-        if (!b.createdInFrame.empty()) node.createdInFrame = b.createdInFrame;
+        // Anchor to the frame of the Belief's producing Propose; fall back to the
+        // runtime's committed createdInFrame when no propose owns it.
+        auto anchorIt = beliefAnchorFrame.find(b.id);
+        if (anchorIt != beliefAnchorFrame.end()) node.createdInFrame = anchorIt->second;
+        else if (!b.createdInFrame.empty()) node.createdInFrame = b.createdInFrame;
         node.state = NodeVisualState::Default;
         state.nodes.push_back(std::move(node));
     }
 
     // --- Frames as containers; one frame's plan/execution/distillation/deltas
     // become nodes. A frame carries at most one plan and one distillation. ---
-    const std::vector<LoopFrame> frames = model.frames();
     for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
         const LoopFrame& f = frames[frameIndex];
         const uint64_t frameBase = static_cast<uint64_t>(frameIndex) * 1000;

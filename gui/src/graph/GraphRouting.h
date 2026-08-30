@@ -2,10 +2,11 @@
 //
 // Headless, ImGui-free, unit-testable. It turns a GraphTaskState + a
 // PieGraphLayout into a polyline route per edge. Belief -> Plan and Distill ->
-// Belief use a direct single-segment line; local Plan -> Execution and
-// Execution -> Distill edges keep a short curve. The
-// GUI never infers cognition: the routing only uses the runtime-supplied edge
-// semantic type and the geometry produced by the layout engine.
+// Belief use a direct single-segment line; Plan -> Execution, Execution ->
+// Distill, and Distill -> Propose edges keep a short curve. A Distill -> Propose
+// curve may connect adjacent frame rows; "short" describes its routing style,
+// not shared frame ownership. The GUI never infers cognition: routing only uses
+// the runtime-supplied edge semantic type and layout geometry.
 //
 // Determinism: an identical GraphTaskState + PieGraphLayout yields identical
 // routes (pure function of the two inputs).

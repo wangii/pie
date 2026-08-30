@@ -1,6 +1,7 @@
 // Headless tests for the Phase 2 M1 graph projection and M3 layout engine.
 // No window, no ImGui, no SDK. Run: ./pi_gui_graph_test  (non-zero on failure).
 
+#include "graph/GraphLive.h"
 #include "graph/GraphModel.h"
 #include "graph/PieGraphLayout.h"
 #include "Model.h"
@@ -11,6 +12,7 @@
 
 using pie::gui::BeliefOperation;
 using pie::gui::EdgeSemanticType;
+using pie::gui::GraphLiveState;
 using pie::gui::GraphTaskState;
 using pie::gui::LoopFrameInfo;
 using pie::gui::NativeGuiModel;
@@ -18,6 +20,7 @@ using pie::gui::NodeFamily;
 using pie::gui::PieGraphLayout;
 using pie::gui::projectGraphTask;
 using pie::gui::computeGraphLayout;
+using pie::gui::stabilizeLiveLayout;
 using pie::gui::beliefNodeTitle;
 using pie::gui::edgeIsCreate;
 using pie::gui::GraphNode;
@@ -315,12 +318,51 @@ int main() {
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-2","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f1","ordinal":1})");
         m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+
+        // Before DistillationProduced supplies provenance, the proposal is
+        // provisionally in f1 and receives an initial live-layout position.
+        GraphLiveState live;
+        GraphTaskState provisional = projectGraphTask(m);
+        PieGraphLayout provisionalLayout = stabilizeLiveLayout(
+            provisional, computeGraphLayout(provisional), live);
+        const GraphNode* provisionalNode = nullptr;
+        for (const GraphNode& n : provisional.nodes)
+            if (n.family == NodeFamily::Propose) provisionalNode = &n;
+        check(provisionalNode && provisionalNode->frameId && *provisionalNode->frameId == "f1",
+              "proposal is provisional in the producing frame before distillation provenance");
+        // The Belief its Propose produces is anchored to the producing frame too,
+        // and holds a stable position in that row.
+        const GraphNode* provisionalBelief = nullptr;
+        for (const GraphNode& n : provisional.nodes)
+            if (n.family == NodeFamily::Belief && n.id.value == "B1") provisionalBelief = &n;
+        check(provisionalBelief && provisionalBelief->createdInFrame &&
+                  *provisionalBelief->createdInFrame == "f1",
+              "belief is provisionally anchored to the producing frame");
+
         m.applyLine(R"({"type":"DistillationProduced","taskId":"t-2","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
         GraphTaskState pending = projectGraphTask(m);
+        PieGraphLayout pendingFresh = computeGraphLayout(pending);
+        PieGraphLayout pendingStable = stabilizeLiveLayout(pending, pendingFresh, live);
         const GraphNode* before = nullptr;
         for (const GraphNode& n : pending.nodes) if (n.family == NodeFamily::Propose) before = &n;
         check(before && before->frameId && *before->frameId == "f1::next",
               "proposal initially targets the stable pending successor");
+        check(pendingFresh.nodeRects.at("d1").y == pendingStable.nodeRects.at("d1").y &&
+                  pendingStable.nodeRects.at("d1").y != provisionalLayout.nodeRects.at("d1").y,
+              "live layout moves a reparented proposal into the pending successor");
+
+        // The Belief its Propose produces must follow the same reparenting: its
+        // display anchor re-aims at the pending successor, and the already-warmed
+        // stableBeliefRects cache must not pin it to its old producing row.
+        const GraphNode* pendingBelief = nullptr;
+        for (const GraphNode& n : pending.nodes)
+            if (n.family == NodeFamily::Belief && n.id.value == "B1") pendingBelief = &n;
+        check(pendingBelief && pendingBelief->createdInFrame &&
+                  *pendingBelief->createdInFrame == "f1::next",
+              "belief re-anchors to the pending successor to match its Propose");
+        check(pendingFresh.nodeRects.at("B1").y == pendingStable.nodeRects.at("B1").y &&
+                  pendingStable.nodeRects.at("B1").y != provisionalLayout.nodeRects.at("B1").y,
+              "live layout moves a reparented belief out of its old row (stableBeliefRects invalidated)");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f2","ordinal":2})");
         GraphTaskState materialized = projectGraphTask(m);
         const GraphNode* after = nullptr;

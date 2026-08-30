@@ -29,14 +29,6 @@ namespace pie::gui {
 // supplies.
 enum class FrameStage;
 
-// Runtime session telemetry (defined in Model.h); forward-declared here so the
-// render signature can accept the footer (per-role model + cache hit rate) and
-// the per-role context length without pulling the runtime model into this
-// header. The GUI renders only what the runtime supplies; it never derives
-// cache hit rate or ctx from a generic log.
-struct Footer;
-struct RoleContextUsagePair;
-
 // Persistent view state for a Graph View session (pan/zoom + selection). Kept
 // across Text<->Graph toggles within a session but not persisted to disk.
 struct GraphViewState {
@@ -62,6 +54,6 @@ struct GraphViewState {
 // the runtime's explicit frame stage (used for the Stage indicator). Returns true
 // when a node selection changed this frame (the caller may want to run a
 // dependency-path query / re-emphasize).
-bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx, const std::string& cwd);
+bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const std::string& cwd);
 
 } // namespace pie::gui

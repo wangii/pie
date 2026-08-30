@@ -186,11 +186,12 @@ static void testLive(const GraphTaskState& s) {
     PieGraphLayout fresh1 = computeGraphLayout(s);
     check(fresh1.nodeRects.size() == s.nodes.size(), "M6: fresh layout places every node");
     PieGraphLayout stable1 = stabilizeLiveLayout(s, fresh1, live);
-    check(live.havePrev, "M6: live state persists after first stabilization");
+    check(live.completedFrames.count("10") == 1 && !live.completedFrames.count("20"),
+          "M6: only the completed frame is cached");
 
-    // Emulate a later live round with an extra open-frame node appended: the
-    // settled (closed-frame + belief) nodes must keep their rects; the new node
-    // takes a fresh position (active relayout).
+    // Emulate a later live round with an extra execution and a Propose node in
+    // the open frame. The completed frame must stay frozen as one geometry
+    // group, while the open frame takes the fresh relayout.
     GraphTaskState s2 = s;
     // Add a second open-frame node so the layout engine produces different
     // coordinates for the open frame; settled nodes must not move.
@@ -200,6 +201,12 @@ static void testLive(const GraphTaskState& s) {
     n.frameId = "20";
     n.title = "E21";
     s2.nodes.push_back(n);
+    GraphNode proposal;
+    proposal.id.value = "PR20";
+    proposal.family = NodeFamily::Propose;
+    proposal.frameId = "20";
+    proposal.title = "PR20";
+    s2.nodes.push_back(proposal);
     s2.currentNode = NodeId{"E21"};
     LoopFrameInfo g20;
     g20.id = "20"; g20.label = "LoopFrame #20"; g20.closed = false;
@@ -222,11 +229,22 @@ static void testLive(const GraphTaskState& s) {
     }
     check(settledFrozen, "M6: closed-frame + belief nodes are frozen across a live update");
 
-    bool openRelayout = true;
-    // The new open-frame node must be placed (active relayout produced a rect).
+    auto sameRect = [](const GraphRect& a, const GraphRect& b) {
+        return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+    };
+    check(sameRect(stable1.frameRects.at("10"), stable2.frameRects.at("10")) &&
+              sameRect(stable1.planRegionRects.at("10"), stable2.planRegionRects.at("10")) &&
+              sameRect(stable1.executionRegionRects.at("10"), stable2.executionRegionRects.at("10")),
+          "M6: completed frame boundary and region surfaces are cached together");
+
+    // Adding the Propose band moves the existing open-frame Plan down. It must
+    // use the fresh position instead of an old node-level frozen rectangle.
+    check(stable1.nodeRects.at("P20").y != fresh2.nodeRects.at("P20").y &&
+              sameRect(stable2.nodeRects.at("P20"), fresh2.nodeRects.at("P20")),
+          "M6: existing open-frame nodes take the fresh relayout");
+
     auto e21 = stable2.nodeRects.find("E21");
-    check(e21 != stable2.nodeRects.end(), "M6: active open-frame node is placed after relayout");
-    (void)openRelayout;
+    check(e21 != stable2.nodeRects.end(), "M6: new open-frame node is placed after relayout");
 
     // Belief stability: belief nodes appear in the same rects across rounds.
     auto b1a = stable1.nodeRects.find("B1");

@@ -107,12 +107,15 @@ belief set is dropped rather than leaving a dangling edge.
 ### Edges and cross-frame semantics
 
 All graph edges are typed and directed. The UI includes a compact legend but
-does not put labels on individual edges. Cross-frame cognition passes only
-through Belief; direct `Frame#3 Distill → Frame#8 Plan` is not allowed.
-`Belief → Plan` uses a direct single-segment line; `Distill → Belief` and
-`Propose → Belief` are direct two-point lines (the write-back returns to the
-belief column as a single straight segment). `Plan → Execution`, `Execution →
-Distill`, and `Distill → Propose` remain local curves. Create write-backs are
+does not put labels on individual edges. Cross-frame semantic edges are limited
+to the immediate `Frame A Distill → Frame B Propose` transition and dependencies
+through the global Belief set; arbitrary direct edges such as
+`Frame#3 Distill → Frame#8 Plan` are not allowed. `Belief → Plan` uses a direct
+single-segment line; `Distill → Belief` and `Propose → Belief` are direct
+two-point lines (the write-back returns to the belief column as a single straight
+segment). `Plan → Execution`, `Execution → Distill`, and `Distill → Propose` use
+short curved routes. For `Distill → Propose`, "short curve" describes the route
+shape; its endpoints may belong to adjacent frames. Create write-backs are
 dashed and the rest are solid.
 
 The current live adapter still derives some correlations: it associates tool
@@ -142,6 +145,19 @@ This delimiter documents the current adapter only. Under the target domain
 contract, the runtime emits `FrameOpened`/`FrameClosed` with stable string ids;
 the GUI does not split frames on `PROPOSING`, a second plan, or a second
 distillation.
+
+The event stream can deliver `BeliefDeltaApplied` before
+`DistillationProduced` supplies its output provenance. During that interval the
+projection places the Propose node provisionally in the current frame. Once the
+distillation names the delta, the same stable node id is reassigned to the
+pending or materialized successor frame.
+
+Live-layout stabilization caches geometry at completed-Frame granularity. A
+closed Frame's nodes, boundary, and semantic region surfaces are restored as one
+group; open and pending Frames always take fresh layout. Therefore the
+provisional Propose is free to move into the successor before either row becomes
+a completed cached unit. Global Beliefs are cached separately because they have
+no owning Frame; an actively proposed framing Target remains fresh.
 
 ### Node visual language (indicator + label)
 
@@ -252,8 +268,9 @@ M4 Edge Routing  local curves + direct Belief->Plan line; direct
 M5 Selection     click node -> ancestor + descendant dependency path (cycle-safe
                  visited set, cached adjacency), emphasize related, dim rest  [implemented]
 M6 Live          runtime events (node/edge added, belief created/updated, current
-                 changed, frame opened/closed); active relayout, closed freeze,
-                 belief stable, no auto-follow  [implemented]
+                 changed, frame opened/closed); completed-Frame geometry cache,
+                 fresh open/pending Frames, stable global Beliefs, framing-target
+                 relayout, no auto-follow  [implemented]
 M7 Navigation    first-entry Focus Current, explicit Focus Current, Graph session
                  state preserved across Text<->Graph, Stage indicator
                  (GraphView draws it from the runtime stage; Focus Current pan in

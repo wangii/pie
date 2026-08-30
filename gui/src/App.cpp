@@ -225,8 +225,18 @@ int main(int argc, char** argv) {
             // updates; active frame takes fresh positions.
             PieGraphLayout layout = stabilizeLiveLayout(graphState, freshLayout, app.graphLive);
             ImGui::Text("Node Graph View — (Cmd/Ctrl+G to return to Text View)");
+            // Reserve a single-row footer at the very bottom of the screen; the
+            // canvas child takes the remaining height so its content never
+            // overlaps the footer row. Only the role context is passed to the
+            // graph view; the per-phase model/CH telemetry lives in the footer.
+            float graphFooterH = ImGui::GetFrameHeightWithSpacing() * 1.2f;
+            ImGui::BeginChild("graph-canvas", ImVec2(0, -graphFooterH), false);
             renderGraphView(app.graphView, graphState, layout, app.model.cursor().stage,
-                            app.model.footer(), app.model.roleContext(), app.model.session());
+                            app.model.session());
+            ImGui::EndChild();
+            ImGui::BeginChild("graph-footer", ImVec2(0, graphFooterH), true);
+            renderGraphFooter(app.model);
+            ImGui::EndChild();
             ImGui::End();
             return;
         }

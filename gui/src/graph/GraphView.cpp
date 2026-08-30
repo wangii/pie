@@ -152,7 +152,7 @@ void drawDashedLine(ImDrawList* dl, const ImVec2& a, const ImVec2& b,
 }
 } // namespace
 
-bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const Footer& footer, const RoleContextUsagePair& roleCtx, const std::string& cwd) {
+bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const PieGraphLayout& layout, FrameStage stage, const std::string& cwd) {
     bool selectionChanged = false;
 
     ImGuiIO& io = ImGui::GetIO();
@@ -507,71 +507,6 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         dl->AddText(ImVec2(bg0.x + pad, bg0.y + pad),
                     IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255), title);
         dl->AddText(ImVec2(bg0.x + pad, bg0.y + pad + ts.y + 2.0f), col, label);
-    }
-
-    // --- Session telemetry overlay (bottom-right): current context length for
-    // the two belief-loop roles plus the per-role cache hit rate for the four
-    // belief-loop phases. Reads only explicit runtime telemetry (footer + role
-    // context); undefined values render as an em-dash placeholder. Mirrors the
-    // Stage badge (top-right) and legend (bottom-left) style convention. ---
-    {
-        auto fmtTokens = [](long tokens) -> std::string {
-            if (tokens < 0) return "\xe2\x80\x94";  // em-dash
-            if (tokens >= 1000000) return std::to_string(tokens / 1000000) + "M";
-            if (tokens >= 1000) {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "%.1fk", tokens / 1000.0);
-                return buf;
-            }
-            return std::to_string(tokens);
-        };
-        auto fmtCH = [](const char* label, const RoleFooterSlot& s) -> std::string {
-            char buf[128];
-            // Per-role current model (provider/id) from the existing footer
-            // telemetry, mirroring the text view footer's per-role model config.
-            std::string model = s.model.empty() ? "\xe2\x80\x94" : s.model;
-            if (s.cacheHitRate < 0.0f) {
-                std::snprintf(buf, sizeof(buf), "%s %s CH \xe2\x80\x94", label, model.c_str());
-            } else {
-                std::snprintf(buf, sizeof(buf), "%s %s CH %.1f%%", label, model.c_str(), s.cacheHitRate);
-            }
-            return buf;
-        };
-
-        std::vector<std::string> lines;
-        std::vector<ImU32> lineCols;
-        if (roleCtx.hasData) {
-            lines.push_back("ctx [Epi] " + fmtTokens(roleCtx.epistemic.tokens));
-            lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
-            lines.push_back("ctx [Exec] " + fmtTokens(roleCtx.execution.tokens));
-            lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
-        }
-        lines.push_back(fmtCH("Epi", footer.epistemic));
-        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
-        lines.push_back(fmtCH("Plan", footer.planner));
-        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
-        lines.push_back(fmtCH("Distill", footer.distillation));
-        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
-        lines.push_back(fmtCH("Exec", footer.execution));
-        lineCols.push_back(IM_COL32(st.textBody.r, st.textBody.g, st.textBody.b, 255));
-
-        const float pad = 10.0f;
-        const float lineH = ImGui::GetTextLineHeight();
-        float maxW = 0.0f;
-        for (const auto& l : lines) maxW = std::max(maxW, ImGui::CalcTextSize(l.c_str()).x);
-        float w = maxW + pad * 2.0f;
-        float h = lines.size() * lineH + pad * 2.0f;
-        ImVec2 bg0(origin.x + gridSize.x - w - 12.0f,
-                   origin.y + gridSize.y - h - 12.0f);
-        dl->AddRectFilled(bg0, ImVec2(bg0.x + w, bg0.y + h), IM_COL32(22, 24, 28, 230));
-        dl->AddRect(bg0, ImVec2(bg0.x + w, bg0.y + h),
-                    IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, 120),
-                    st.frameRadius, 0, 1.0f);
-        float ly = bg0.y + pad;
-        for (std::size_t i = 0; i < lines.size(); ++i) {
-            dl->AddText(ImVec2(bg0.x + pad, ly), lineCols[i], lines[i].c_str());
-            ly += lineH;
-        }
     }
 
     // --- Focus Current: first-entry (once) and explicit (F / focusCurrentOnce)
