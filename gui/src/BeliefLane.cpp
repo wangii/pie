@@ -26,7 +26,6 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, const std::string& view
     ImGui::TextUnformatted("BELIEF SET");
     ImGui::Separator();
 
-    ImGui::BeginChild("belief_scroll", ImVec2(0, 0), false);
     const auto& beliefs = m.beliefs();
     for (const auto& b : beliefs) {
         bool isSel = m.isSelectedInCurrentFrame(b.id);
@@ -72,7 +71,6 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, const std::string& view
         }
         ImGui::Spacing();
     }
-    ImGui::EndChild();
 }
 
 } // namespace pie::gui

@@ -32,9 +32,7 @@
 #include "PromptCmd.h"
 #include "LayoutMetrics.h"
 #include "StatusBar.h"
-#include "BeliefLane.h"
-#include "CognitiveLane.h"
-#include "ExecutionLane.h"
+#include "LogListBox.h"
 #include "Summary.h"
 #include "Footer.h"
 #include "PromptPalette.h"
@@ -250,8 +248,6 @@ int main(int argc, char** argv) {
         float headerH = lm.headerH;
         float summaryH = lm.summaryH;
         float footerH = lm.footerH;
-        const float minLaneH = lm.minLaneH;
-        const float minLaneW = lm.minLaneW;
         float laneH = lm.laneH;
 
         ImGui::BeginChild("top", ImVec2(0, headerH), false);
@@ -259,45 +255,7 @@ int main(int argc, char** argv) {
         ImGui::EndChild();
 
         ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
-        float availW = std::max(0.0f, winW - pad * 2);
-        float leftW = availW * 0.27f;
-        float midW = availW * 0.36f;
-        float rightW = std::max(0.0f, availW - leftW - midW);
-        const bool execActive = app.model.cursor().valid() && app.model.cursor().stage == FrameStage::EXECUTING;
-        const bool beliefActive = app.model.cursor().valid() && app.model.cursor().stage == FrameStage::PROPOSING;
-        if (availW < minLaneW * 3) {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(beliefActive));
-            ImGui::BeginChild("left", ImVec2(0, 0), true);
-            renderBeliefLane(app.model, app.viewId);
-            ImGui::EndChild();
-            ImGui::PopStyleColor(1);
-            ImGui::Spacing();
-            ImGui::BeginChild("mid", ImVec2(0, 0), true);
-            renderCognitiveLane(app.model, app.viewId, !app.promptOpen);
-            ImGui::EndChild();
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(execActive));
-            ImGui::BeginChild("right", ImVec2(0, 0), true);
-            renderExecutionLane(app.model, app.viewId);
-            ImGui::EndChild();
-            ImGui::PopStyleColor(1);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(beliefActive));
-            ImGui::BeginChild("left", ImVec2(leftW, 0), true);
-            renderBeliefLane(app.model, app.viewId);
-            ImGui::EndChild();
-            ImGui::PopStyleColor(1);
-            ImGui::SameLine();
-            ImGui::BeginChild("mid", ImVec2(midW, 0), true);
-            renderCognitiveLane(app.model, app.viewId, !app.promptOpen);
-            ImGui::EndChild();
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(execActive));
-            ImGui::BeginChild("right", ImVec2(rightW, 0), true);
-            renderExecutionLane(app.model, app.viewId);
-            ImGui::EndChild();
-            ImGui::PopStyleColor(1);
-        }
+        renderLogListBox(app.model, app.viewId);
         ImGui::EndChild();
 
         ImGui::BeginChild("summary", ImVec2(0, summaryH), false);

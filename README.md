@@ -1,6 +1,7 @@
 # Pie: Pi + Epistemology
 
 ![belief-loop-harness](screenshots/1.jpg)
+![pie-agent](screenshots/pie.png)
 
 PIE is an experimental coding-agent harness that makes the epistemic process itself an explicit runtime object. Rather than allowing one model invocation to freely mix hypothesis formation, investigation, interpretation and answer generation, PIE separates these cognitive operations and controls the information allowed to cross between them.
 

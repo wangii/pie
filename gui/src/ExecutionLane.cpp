@@ -16,9 +16,8 @@ void renderExecutionLane(const pie::gui::NativeGuiModel& m, const std::string& v
     ImGui::TextUnformatted("EXECUTION");
     if (f && f->closed) { ImGui::SameLine(); ImGui::TextDisabled("(closed)"); }
     ImGui::Separator();
-    ImGui::BeginChild("exec_scroll", ImVec2(0, 0), false);
-    if (!f) { ImGui::TextDisabled("(no frame)"); ImGui::EndChild(); return; }
-    if (f->trajectory.empty()) { ImGui::TextDisabled("(no execution steps)"); ImGui::EndChild(); return; }
+    if (!f) { ImGui::TextDisabled("(no frame)"); return; }
+    if (f->trajectory.empty()) { ImGui::TextDisabled("(no execution steps)"); return; }
 
     for (auto& t : f->trajectory) {
         // A tool is "current" when it is in flight (status == running) during
@@ -56,11 +55,6 @@ void renderExecutionLane(const pie::gui::NativeGuiModel& m, const std::string& v
         if (isCurrent) ImGui::PopStyleColor();
         ImGui::PopID();
     }
-
-    // Always keep the execution log scrolled to the bottom so the newest step
-    // stays visible as content is appended.
-    ImGui::SetScrollHereY(1.0f);
-    ImGui::EndChild();
 }
 
 } // namespace pie::gui

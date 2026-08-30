@@ -11,7 +11,6 @@
 using pie::gui::LayoutMetrics;
 using pie::gui::Rect;
 using pie::gui::computeLayout;
-using pie::gui::laneRects;
 
 static int failures = 0;
 static void check(bool cond, const char* what) {
@@ -56,16 +55,6 @@ int main() {
                 check(disjoint(lanes, summary), "lanes vs summary disjoint");
                 check(disjoint(summary, footer), "summary vs footer disjoint");
 
-                // Lane widths: non-negative.
-                float left = 0, mid = 0, right = 0;
-                bool stacked = false;
-                laneRects(m, winW, left, mid, right, stacked);
-                if (stacked) {
-                    check(true, "stacked fallback for narrow window");
-                } else {
-                    check(left > 0.0f && mid > 0.0f && right >= 0.0f, "lane widths non-negative");
-                    check(left + mid + right <= winW, "lanes fit within window width");
-                }
             }
         }
     }

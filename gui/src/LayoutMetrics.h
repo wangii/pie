@@ -16,7 +16,7 @@ struct Rect {
 };
 
 // Single source of truth for the minimum window size. `kMinWindowWidth` is
-// derived from the minimum lane width (three side-by-side lanes + padding).
+// derived from the minimum lane width and padding.
 // `kMinWindowHeight` is derived from a reference row height and the band
 // multipliers used in computeLayout (header 1.2, footer 1.6, summary 2.0) plus
 // the minimum lane height and padding margins.
@@ -40,9 +40,6 @@ struct LayoutMetrics {
     float laneH = 0.0f;     // lanes (main content)
 
     float minLaneH = kMinLaneHeight;
-    float minLaneW = kMinLaneWidth;
-    float laneFracLeft = 0.27f;
-    float laneFracMid = 0.36f;
 };
 
 // Compute region heights for a window of height `winH` and a font-row height
@@ -59,17 +56,6 @@ inline LayoutMetrics computeLayout(float winW, float winH, float rowH) {
     float availH = std::max(0.0f, winH - (m.headerH + m.summaryH + m.footerH + m.pad * 4));
     m.laneH = std::max(m.minLaneH, availH);
     return m;
-}
-
-// Return the stacked (one-column) lane rects when the window is too narrow.
-// Returns true if the lanes fit side-by-side (3 columns), false if stacked.
-inline bool laneRects(const LayoutMetrics& m, float winW, float& left, float& mid, float& right, bool& stacked) {
-    float availW = std::max(0.0f, winW - m.pad * 2);
-    left = availW * m.laneFracLeft;
-    mid = availW * m.laneFracMid;
-    right = std::max(0.0f, availW - left - mid);
-    stacked = availW < m.minLaneW * 3;
-    return !stacked;
 }
 
 } // namespace pie::gui

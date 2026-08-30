@@ -190,6 +190,7 @@ add_executable(pie_gui
     src/BeliefLane.cpp
     src/CognitiveLane.cpp
     src/ExecutionLane.cpp
+    src/LogListBox.cpp
     src/Summary.cpp
     src/Footer.cpp
     src/PromptPalette.cpp
