@@ -31,11 +31,6 @@ Pie is a self-extensible coding agent whose core is a default-enabled four-phase
 ![belief-loop-harness](screenshots/1.jpg)
 
 Built on top of Pi: https://pi.dev
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
 
 ## 项目思想：四阶段信念循环（The project idea: the four-phase belief loop）
 
@@ -106,12 +101,11 @@ Fallbacks: if `pie.executionModel` is unset or fails to resolve, execution falls
 ## 开发命令（Development commands）
 
 ```bash
-npm install --ignore-scripts  # 安装全部依赖，不运行生命周期脚本
-npm run build         # 刷新模型数据后构建所有包
-npm run build:offline # 用既有模型数据离线重建
-npm run check         # 检查：lint、格式、类型、固定依赖、shrinkwrap 等
-./test.sh             # 运行测试（无 API 密钥时跳过依赖 LLM 的测试）
-./pie.sh          # 从源码运行 pi（可在任意目录执行）
+npm install --ignore-scripts
+npm run build
+npm run build:offline
+npm run check
+./pie.sh
 ```
 ## License
 MIT
