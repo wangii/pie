@@ -93,6 +93,46 @@ export function selectRoleThinkingLevel(
 	return configured ?? sessionLevel;
 }
 
+/**
+ * Select the model spec for a role, mirroring {@link selectRoleThinkingLevel}.
+ * A pure function of the role, loop state, and configured model settings so the
+ * routing can be unit-tested without constructing an `AgentSession`.
+ *
+ * It consults `ROLE_SPECS[role].modelPolicy` as the single source of truth for
+ * which setting a role uses, so the role → model mapping never drifts from the
+ * role spec (propose/`default`, planner/`planner`, distill/`distillation`,
+ * execution/`execution`, finalReport/`fastPath`).
+ *
+ * - `propose` always follows the `default` model so every proposal turn sticks to
+ *   the cost/quality strategy (it used to only match the first proposal after a
+ *   task reset, then fall back to the session model).
+ * - `execution` uses `fastPath` when the loop is in the execution fast-path, else
+ *   `execution`.
+ *
+ * Returns `undefined` when the setting for the role is absent, so callers can
+ * fall back to the session model.
+ */
+export function selectRoleModelSpec(
+	role: LoopState["role"],
+	loopState: LoopState,
+	models: {
+		default?: string;
+		planner?: string;
+		execution?: string;
+		fastPath?: string;
+		distillation?: string;
+	},
+): string | undefined {
+	const policy = ROLE_SPECS[role].modelPolicy;
+	if (policy === "default") return models.default;
+	if (policy === "planner") return models.planner;
+	if (policy === "distillation") return models.distillation;
+	if (policy === "execution") {
+		return loopState.role === "execution" && loopState.fastPath ? models.fastPath : models.execution;
+	}
+	return models.fastPath;
+}
+
 // ============================================================================
 // BeliefLoopController
 // ============================================================================
@@ -893,22 +933,13 @@ export class BeliefLoopController {
 
 	roleModelFor(role: "propose" | "planner" | "distill" | "execution" | "finalReport"): Model<any> | undefined {
 		if (this.beliefSetUsable) {
-			const policy = ROLE_SPECS[role].modelPolicy;
-			let spec: string | undefined;
-			if (policy === "execution") {
-				spec =
-					this.loopState.role === "execution" && this.loopState.fastPath
-						? this.host.settingsManager.getFastPathModel()
-						: this.host.settingsManager.getExecutionModel();
-			} else if (policy === "distillation") {
-				spec = this.host.settingsManager.getDistillationModel();
-			} else if (policy === "planner") {
-				spec = this.host.settingsManager.getPlannerModel();
-			} else if (policy === "fastPath") {
-				spec = this.host.settingsManager.getFastPathModel();
-			} else if (role === "propose" && this.beliefSet.beliefs.length === this.beliefsAtTaskReset) {
-				spec = this.host.settingsManager.getDefaultModel();
-			}
+			const spec = selectRoleModelSpec(role, this.loopState, {
+				default: this.host.settingsManager.getDefaultModel(),
+				planner: this.host.settingsManager.getPlannerModel(),
+				execution: this.host.settingsManager.getExecutionModel(),
+				fastPath: this.host.settingsManager.getFastPathModel(),
+				distillation: this.host.settingsManager.getDistillationModel(),
+			});
 			if (spec) {
 				const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this.host.modelRuntime });
 				if (resolved.model) {
