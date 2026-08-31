@@ -19,7 +19,7 @@
  * languages.
  */
 
-export type BeliefDomain = "product" | "code" | "framing";
+export type BeliefDomain = "product" | "code";
 
 /** Routing decision for a request: whether it is suitable for fast-path execution. */
 export type RoutingDecision = "fast-path" | "belief-loop";
@@ -31,7 +31,7 @@ export type RoutingDifficulty = "low" | "medium" | "high";
  * Lifecycle of a belief. Monotone in one direction:
  * `proposed → supported | refuted → superseded`. `status` is derived, not stored.
  */
-export type BeliefStatus = "proposed" | "supported" | "refuted" | "superseded";
+export type BeliefStatus = "proposed" | "supported" | "refuted" | "inconclusive" | "superseded";
 
 export interface Belief {
 	/** Stable within a session; assigned by the BeliefSet, never persisted separately. */
@@ -46,11 +46,12 @@ export interface Belief {
 	readonly evidenceRounds: number;
 	/** Optional skill ids this belief references (e.g. skills the execution role should load). */
 	readonly skillRefs?: readonly string[];
-	/** Append-only evidence that settled the belief as supported. A framing belief's entries
-	 *  also carry the ids of the product/code beliefs whose support discharged the obligation. */
-	readonly supportedBy: readonly { evidence: string; beliefIds?: readonly string[] }[];
+	/** Append-only evidence that settled the belief as supported. */
+	readonly supportedBy: readonly { evidence: string }[];
 	/** Append-only evidence that settled the belief as refuted. */
 	readonly refutedBy: readonly { evidence: string }[];
+	/** Evidence from an experiment that could not settle this belief. */
+	readonly inconclusiveBy: readonly { evidence: string }[];
 	/** The id of the belief that superseded this one (`refine`), or the `WITHDRAWN` sentinel (`retract`). */
 	readonly supersededBy?: string;
 }
@@ -63,7 +64,6 @@ export interface Routing {
 	readonly successProbability: number;
 	readonly estimatedSteps: number;
 	readonly difficulty: RoutingDifficulty;
-	readonly handoffFromBeliefIds?: readonly string[];
 	readonly reason?: string;
 }
 
@@ -84,13 +84,15 @@ export type BeliefDelta =
 			evidenceRounds: number;
 			skillRefs?: readonly string[];
 	  }
-	| { op: "support"; beliefId: string; evidence: string; evidenceBeliefIds?: readonly string[] }
+	| { op: "support"; beliefId: string; evidence: string }
 	| { op: "refute"; beliefId: string; evidence: string }
+	| { op: "inconclusive"; beliefId: string; evidence: string }
 	| {
 			op: "refine";
 			beliefId: string;
 			statement: string;
 			expectation: string;
+			evidence: string;
 			evidenceRounds: number;
 			skillRefs?: readonly string[];
 	  }
@@ -104,7 +106,6 @@ export interface RoutingDelta {
 	readonly successProbability: number;
 	readonly estimatedSteps: number;
 	readonly difficulty: RoutingDifficulty;
-	readonly handoffFromBeliefIds?: readonly string[];
 	readonly reason?: string;
 }
 
@@ -128,6 +129,9 @@ export function statusOf(belief: Belief): BeliefStatus {
 	if (belief.supportedBy.length > 0) {
 		return "supported";
 	}
+	if (belief.inconclusiveBy.length > 0) {
+		return "inconclusive";
+	}
 	return "proposed";
 }
 
@@ -136,8 +140,8 @@ export function validateBelief(statement: string, domain: BeliefDomain): void {
 	if (!statement.trim()) {
 		throw new BeliefValidationError("Belief statement must not be empty.");
 	}
-	if (domain !== "product" && domain !== "code" && domain !== "framing") {
-		throw new BeliefValidationError("Belief domain must be 'product', 'code', or 'framing'.");
+	if (domain !== "product" && domain !== "code") {
+		throw new BeliefValidationError("Belief domain must be 'product' or 'code'.");
 	}
 }
 
@@ -199,18 +203,9 @@ export class BeliefSet {
 		return this._beliefs;
 	}
 
-	/**
-	 * The unadjudicated *world* beliefs driving action — the open frame (may be empty or hold
-	 * several). Framing beliefs are excluded: they are obligations, never
-	 * dispatch targets.
-	 */
+	/** The unadjudicated world beliefs driving the next experiment. */
 	proposed(): Belief[] {
-		return this._beliefs.filter((b) => statusOf(b) === "proposed" && b.domain !== "framing");
-	}
-
-	/** The unadjudicated framing beliefs — open obligations for what the final answer must establish. */
-	framings(): Belief[] {
-		return this._beliefs.filter((b) => statusOf(b) === "proposed" && b.domain === "framing");
+		return this._beliefs.filter((b) => statusOf(b) === "proposed");
 	}
 
 	/** Beliefs still actionable: proposed or supported, not superseded. */
@@ -242,33 +237,36 @@ export class BeliefSet {
 					skillRefs: delta.skillRefs,
 					supportedBy: [],
 					refutedBy: [],
+					inconclusiveBy: [],
 				};
 				this._beliefs.push(belief);
 				return belief;
 			}
 			case "support":
-				return this._adjudicate(delta.beliefId, delta.evidence, "supported", delta.evidenceBeliefIds);
+				return this._adjudicate(delta.beliefId, delta.evidence, "supported");
 			case "refute":
 				return this._adjudicate(delta.beliefId, delta.evidence, "refuted");
+			case "inconclusive":
+				return this._adjudicate(delta.beliefId, delta.evidence, "inconclusive");
 			case "refine": {
 				this._ensureCapacity();
 				const prior = this._require(delta.beliefId, ["proposed", "supported"]);
 				validateBelief(delta.statement, prior.domain);
 				validateExpectation(delta.expectation);
 				validateEvidenceRounds(delta.evidenceRounds);
+				const evidence = delta.evidence.trim();
+				if (!evidence) {
+					throw new BeliefValidationError("Cannot refine without evidence.");
+				}
 				const refined: Belief = {
 					id: this._allocateId(),
 					statement: delta.statement.trim(),
 					domain: prior.domain,
 					expectation: delta.expectation.trim(),
 					evidenceRounds: delta.evidenceRounds,
-					// A refinement is a corrected hypothesis that still needs probing, not a
-					// settled result — its new expectation has no evidence yet. Provenance is
-					// carried by the prior record's `supersededBy` pointer, never as a fabricated
-					// `supportedBy` entry (which would falsely mark it supported and drop it out
-					// of the dispatch frame).
-					supportedBy: [],
+					supportedBy: [{ evidence }],
 					refutedBy: [],
+					inconclusiveBy: [],
 					skillRefs: delta.skillRefs ?? prior.skillRefs,
 				};
 				this._replace(prior.id, { ...prior, supersededBy: refined.id });
@@ -276,26 +274,23 @@ export class BeliefSet {
 				return refined;
 			}
 			case "retract": {
-				const prior = this._require(delta.beliefId, ["proposed", "supported", "refuted"]);
+				const prior = this._require(delta.beliefId, ["proposed", "supported", "refuted", "inconclusive"]);
 				return this._replace(prior.id, { ...prior, supersededBy: WITHDRAWN });
 			}
 		}
 	}
 
 	/**
-	 * Task-end cleanup: keep only settled product/code knowledge that still means something
-	 * to the next task. Everything else — framing obligations, refuted
-	 * and superseded records, and any abnormally leftover proposed entries — is dropped.
+	 * Task-end cleanup: keep only supported world knowledge that still means something
+	 * to the next task. Refuted, inconclusive, superseded, and leftover proposed entries are dropped.
 	 * Returns the removed records.
 	 *
-	 * Safe against dangling references: the only records that reference others by id are
-	 * framing supports (`beliefIds`), and framing records are exactly the ones removed, so
-	 * no surviving belief references a removed one. Removed ids are never reused.
+	 * Removed ids are never reused.
 	 */
 	pruneForNewTask(): Belief[] {
 		const removed: Belief[] = [];
 		this._beliefs = this._beliefs.filter((b) => {
-			const keep = statusOf(b) === "supported" && (b.domain === "product" || b.domain === "code");
+			const keep = statusOf(b) === "supported";
 			if (!keep) {
 				removed.push(b);
 			}
@@ -317,15 +312,10 @@ export class BeliefSet {
 	 * only with evidence — the observed result and how it met or diverged from the
 	 * expectation. This is the R → B′ arrow: an action's result is what moves the belief.
 	 */
-	private _adjudicate(
-		id: string,
-		evidence: string,
-		sign: "supported" | "refuted",
-		evidenceBeliefIds?: readonly string[],
-	): Belief {
+	private _adjudicate(id: string, evidence: string, sign: "supported" | "refuted" | "inconclusive"): Belief {
 		const trimmed = evidence.trim();
 		if (!trimmed) {
-			throw new BeliefValidationError(`Cannot ${sign === "supported" ? "support" : "refute"} without evidence.`);
+			throw new BeliefValidationError(`Cannot mark ${sign} without evidence.`);
 		}
 		const belief = this.get(id);
 		if (!belief) {
@@ -333,52 +323,17 @@ export class BeliefSet {
 		}
 		if (statusOf(belief) !== "proposed") {
 			throw new BeliefValidationError(
-				`Only an open belief can be ${sign === "supported" ? "supported" : "refuted"}; belief ${id} is already ${statusOf(belief)}.`,
+				`Only an open belief can be adjudicated; belief ${id} is already ${statusOf(belief)}.`,
 			);
 		}
-		// A framing belief is discharged only by supported product/code beliefs that establish
-		// the obligation — the structural conclude gate cannot see whether the obligation was
-		// actually satisfied, so the discharge link is enforced here instead of trusting a
-		// bare evidence string. Refuting, refining, or retracting a framing keeps its original
-		// semantics; only `support` requires the reference list.
-		const beliefIds =
-			sign === "supported" && belief.domain === "framing"
-				? this._validateFramingDischarge(id, evidenceBeliefIds)
-				: undefined;
-		const entry = beliefIds !== undefined ? { evidence: trimmed, beliefIds } : { evidence: trimmed };
+		const entry = { evidence: trimmed };
 		const updated =
 			sign === "supported"
 				? { ...belief, supportedBy: [...belief.supportedBy, entry] }
-				: { ...belief, refutedBy: [...belief.refutedBy, { evidence: trimmed }] };
+				: sign === "refuted"
+					? { ...belief, refutedBy: [...belief.refutedBy, entry] }
+					: { ...belief, inconclusiveBy: [...belief.inconclusiveBy, entry] };
 		return this._replace(id, updated);
-	}
-
-	/** Validate a framing belief's discharge references: at least one id, all existing, all
-	 *  product/code (never framing), all already supported. Returns the ids to persist. */
-	private _validateFramingDischarge(id: string, evidenceBeliefIds?: readonly string[]): readonly string[] {
-		const ids = evidenceBeliefIds ?? [];
-		if (ids.length === 0) {
-			throw new BeliefValidationError(
-				`Supporting framing belief ${id} requires \`evidenceBeliefIds\`: reference the product/code beliefs that establish this obligation.`,
-			);
-		}
-		const missing = ids.filter((refId) => !this.get(refId));
-		if (missing.length > 0) {
-			throw new BeliefValidationError(`Unknown belief id in evidenceBeliefIds: ${missing.join(", ")}.`);
-		}
-		const framingRefs = ids.filter((refId) => this.get(refId)!.domain === "framing");
-		if (framingRefs.length > 0) {
-			throw new BeliefValidationError(
-				`evidenceBeliefIds must reference product/code beliefs, not framing beliefs: ${framingRefs.join(", ")}.`,
-			);
-		}
-		const unsupported = ids.filter((refId) => statusOf(this.get(refId)!) !== "supported");
-		if (unsupported.length > 0) {
-			throw new BeliefValidationError(
-				`evidenceBeliefIds must reference supported beliefs; these are not supported yet: ${unsupported.join(", ")}.`,
-			);
-		}
-		return ids;
 	}
 
 	private _replace(id: string, next: Belief): Belief {
@@ -432,7 +387,6 @@ export class RoutingSet {
 			successProbability: delta.successProbability,
 			estimatedSteps: delta.estimatedSteps,
 			difficulty: delta.difficulty,
-			handoffFromBeliefIds: delta.handoffFromBeliefIds,
 			reason: delta.reason,
 		};
 		this._routings.push(routing);
@@ -450,18 +404,13 @@ export class RoutingSet {
  * is called out with its expectation and evidence-round estimate.
  *
  * Two scopes:
- * - `"all"` (the epistemic role): the full set — the frame, the framing obligations, and the
- *   settled beliefs.
- * - `"frame"` (the execution role): only the open frame it is probing (statement + expectation
- *   + evidence-round estimate). Settled history and framing obligations are the epistemic
- *   role's object, not the probe target, and dumping them here only invites the probe role to
- *   step out of its lane.
+ * - `"all"`: the open frame and settled beliefs.
+ * - `"frame"`: only the open frame being probed (statement, expectation, and evidence estimate).
  */
 export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | "frame" = "all"): string {
 	const proposed = beliefs.filter((b) => statusOf(b) === "proposed");
-	const frames = proposed.filter((b) => b.domain !== "framing");
 	const lines: string[] = [];
-	for (const frame of frames) {
+	for (const frame of proposed) {
 		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
 		lines.push(`  expectation: ${frame.expectation}`);
 		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);
@@ -472,14 +421,9 @@ export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | 
 	if (scope === "frame") {
 		return lines.length > 0 ? lines.join("\n") : "No open beliefs to probe.";
 	}
-	const framings = proposed.filter((b) => b.domain === "framing");
-	for (const framing of framings) {
-		lines.push(`[FRAMING] ${framing.id} ${framing.statement}`);
-		lines.push(`  reframe if: ${framing.expectation}`);
-	}
 	const settled = beliefs.filter((b) => {
 		const status = statusOf(b);
-		return status === "supported" || status === "refuted";
+		return status === "supported" || status === "refuted" || status === "inconclusive";
 	});
 	if (settled.length > 0) {
 		lines.push("[SETTLED]");

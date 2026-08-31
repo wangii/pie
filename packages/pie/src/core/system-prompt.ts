@@ -2,7 +2,7 @@
  * System prompt construction and project context loading
  */
 
-import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { getCodingAgentDocsPath, getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 /**
@@ -14,7 +14,7 @@ import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "
  * tools but must not be distracted by the pi-docs block, which is unrelated to the belief
  * it is probing.
  */
-export type SystemPromptRole = "coding" | "propose" | "planner" | "distill" | "execution" | "finalReport";
+export type SystemPromptRole = "coding" | "propose" | "distill" | "execution" | "finalReport";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -93,7 +93,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Get absolute paths to documentation and examples
 	const readmePath = getReadmePath();
-	const docsPath = getDocsPath();
+	const pieDocsPath = getDocsPath();
+	const codingAgentDocsPath = getCodingAgentDocsPath();
 	const examplesPath = getExamplesPath();
 
 	// Build tools list based on selected tools.
@@ -149,14 +150,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const preamble =
 		role === "propose" || role === "distill"
-			? "You are a scientific mind investigating a task by forming and testing beliefs about the product and code."
-			: role === "planner"
-				? "You are the batching planner of a belief-loop investigation: you group the open beliefs into the next execution batch."
-				: role === "execution"
-					? "You are a scientific mind running an experiment: you probe the code or product for evidence about a belief and report what you observe."
-					: role === "finalReport"
-						? "You are a scientific mind concluding an investigation and answering the user's task."
-						: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
+			? "You are a scientific mind investigating a task through provisional, task-local beliefs about the relevant world."
+			: role === "execution"
+				? "You run an experiment against the code or product and preserve the raw observations for distillation."
+				: role === "finalReport"
+					? "You synthesize an evidence-grounded answer to the user's task."
+					: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 
 	let prompt = `${preamble}
 
@@ -177,10 +176,11 @@ ${guidelines}
 	if (role === "coding") {
 		prompt += `
 Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
-- Main documentation: ${readmePath}
-- Additional docs: ${docsPath}
+- Pie documentation: ${readmePath}
+- Pie-specific belief-loop docs: ${pieDocsPath}
+- Shared coding-agent docs: ${codingAgentDocsPath}
 - Examples: ${examplesPath} (extensions, custom tools, SDK)
-- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
+- Resolve general docs/... under Shared coding-agent docs, Pie belief-loop documents under Pie-specific belief-loop docs, and examples/... under Examples, not the current working directory
 - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
 - When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
 - Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;

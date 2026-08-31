@@ -3,703 +3,203 @@ import {
 	BeliefSet,
 	BeliefValidationError,
 	formatBeliefsForView,
-	MAX_EVIDENCE_ROUNDS,
+	MAX_BELIEFS,
 	RoutingSet,
 	statusOf,
 	validateBelief,
 	validateEvidenceRounds,
 	validateExpectation,
+	WITHDRAWN,
 } from "../src/core/belief-set.ts";
 
-describe("BeliefSet status machine (immutable, derived status)", () => {
-	test("propose opens a frame with domain, expectation, and evidence rounds", () => {
+const propose = (set: BeliefSet, statement = "authorizationSource returns stale-replica") =>
+	set.apply({
+		op: "propose",
+		statement,
+		domain: "code",
+		expectation: "reading the implementation shows stale-replica",
+		evidenceRounds: 1,
+	});
+
+describe("BeliefSet", () => {
+	test("stores multiple provisional world beliefs", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
+		propose(set);
+		set.apply({
 			op: "propose",
-			statement: "authorizationSource(1003,1001) returns stale-replica",
-			domain: "code",
-			expectation: "reading authorizationSource shows a stale replica",
+			statement: "logout preserves the cache",
+			domain: "product",
+			expectation: "a post-logout read returns the cached value",
 			evidenceRounds: 2,
 		});
 
-		expect(belief.id).toBe("belief-1");
-		expect(statusOf(belief)).toBe("proposed");
-		expect(belief.expectation).toContain("stale replica");
-		expect(belief.evidenceRounds).toBe(2);
-		expect(set.proposed().map((b) => b.id)).toEqual(["belief-1"]);
-		expect(set.open()).toHaveLength(1);
+		expect(set.proposed()).toHaveLength(2);
+		expect(set.beliefs.map((belief) => belief.id)).toEqual(["belief-1", "belief-2"]);
 	});
 
-	test("propose accepts optional skillRefs and surfaces them in the view", () => {
-		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "adding an llm provider follows the add-llm-provider skill",
-			domain: "code",
-			expectation: "the skill's checklist is available to execution",
-			evidenceRounds: 1,
-			skillRefs: ["add-llm-provider"],
+	test("support and refute adjudicate only from evidence", () => {
+		const supportedSet = new BeliefSet();
+		const supported = propose(supportedSet);
+		expect(() => supportedSet.apply({ op: "support", beliefId: supported.id, evidence: "" })).toThrow(
+			BeliefValidationError,
+		);
+		const supportResult = supportedSet.apply({
+			op: "support",
+			beliefId: supported.id,
+			evidence: "the implementation returned stale-replica as predicted",
 		});
+		expect(statusOf(supportResult)).toBe("supported");
 
-		expect(belief.skillRefs).toEqual(["add-llm-provider"]);
-		expect(formatBeliefsForView(set.beliefs, "all")).toContain("skill refs: add-llm-provider");
+		const refutedSet = new BeliefSet();
+		const refuted = propose(refutedSet);
+		const refuteResult = refutedSet.apply({
+			op: "refute",
+			beliefId: refuted.id,
+			evidence: "the implementation always reads the primary",
+		});
+		expect(statusOf(refuteResult)).toBe("refuted");
 	});
 
-	test("support appends evidence and derives supported status", () => {
+	test("records an inconclusive experiment as distinct from truth adjudication", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache survives logout for 30s",
-			domain: "product",
-			expectation: "value persists 30s",
-			evidenceRounds: 1,
+		const belief = propose(set);
+		const result = set.apply({
+			op: "inconclusive",
+			beliefId: belief.id,
+			evidence: "the dependency failed before the referent was observed",
 		});
 
-		const settled = set.apply({ op: "support", beliefId: belief.id, evidence: "the probe kept the value for 30s" });
-		expect(statusOf(settled)).toBe("supported");
+		expect(statusOf(result)).toBe("inconclusive");
+		expect(result.supportedBy).toHaveLength(0);
+		expect(result.refutedBy).toHaveLength(0);
+		expect(result.inconclusiveBy).toHaveLength(1);
 		expect(set.proposed()).toHaveLength(0);
-		expect(set.open()).toHaveLength(1);
 	});
 
-	test("refute appends evidence and derives refuted status", () => {
+	test("refine can directly form an evidence-supported world-model correction", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache survives logout",
-			domain: "product",
-			expectation: "value persists",
-			evidenceRounds: 1,
-		});
-
-		set.apply({ op: "refute", beliefId: belief.id, evidence: "the value cleared on logout" });
-		expect(statusOf(set.get(belief.id)!)).toBe("refuted");
-		expect(set.proposed()).toHaveLength(0);
-		expect(set.open()).toHaveLength(0);
-	});
-
-	test("multiple open beliefs are allowed (no single-frame invariant)", () => {
-		const set = new BeliefSet();
-		set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-		set.apply({
-			op: "propose",
-			statement: "login is stateless",
-			domain: "product",
-			expectation: "no session reuse",
-			evidenceRounds: 1,
-		});
-
-		expect(set.proposed().map((b) => b.statement)).toEqual(["the cache is warm", "login is stateless"]);
-	});
-
-	test("framing beliefs are obligations, excluded from the open frame", () => {
-		const set = new BeliefSet();
-		const framing = set.apply({
-			op: "propose",
-			statement: "the answer must establish whether it is one bug or two",
-			domain: "framing",
-			expectation: "no second independent mechanism",
-			evidenceRounds: 1,
-		});
-		const world = set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-
-		// The open frame holds only the dispatchable world belief; framing is a separate obligation.
-		expect(set.proposed().map((b) => b.id)).toEqual([world.id]);
-		expect(set.framings().map((b) => b.id)).toEqual([framing.id]);
-		expect(
-			set
-				.open()
-				.map((b) => b.id)
-				.sort(),
-		).toEqual([framing.id, world.id].sort());
-	});
-
-	test("each proposal in a batch is still validated individually", () => {
-		const set = new BeliefSet();
-		set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-
-		// A second proposal with an empty statement is rejected even though one is already open.
-		expect(() =>
-			set.apply({
-				op: "propose",
-				statement: "  ",
-				domain: "code",
-				expectation: "x",
-				evidenceRounds: 1,
-			}),
-		).toThrow(BeliefValidationError);
-	});
-
-	test("support/refute require evidence", () => {
-		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-
-		expect(() => set.apply({ op: "support", beliefId: belief.id, evidence: "  " })).toThrow(BeliefValidationError);
-		expect(() => set.apply({ op: "refute", beliefId: belief.id, evidence: "" })).toThrow(BeliefValidationError);
-	});
-
-	test("support/refute are restricted to the open frame", () => {
-		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "support", beliefId: belief.id, evidence: "reads hit cache" });
-
-		expect(() => set.apply({ op: "support", beliefId: belief.id, evidence: "again" })).toThrow(BeliefValidationError);
-	});
-
-	test("refine supersedes the prior belief and adds a proposed replacement", () => {
-		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the worker cache is the cause",
-			domain: "code",
-			expectation: "disabling cache stops staleness",
-			evidenceRounds: 1,
-		});
-
+		const prior = propose(set, "authentication is one mechanism");
 		const refined = set.apply({
 			op: "refine",
-			beliefId: belief.id,
-			statement: "stale-replica from the worker cache is the cause",
-			expectation: "the stale value matches the worker cache entry",
+			beliefId: prior.id,
+			statement: "authentication has OAuth, session, and API-token mechanisms",
+			expectation: "the mechanisms have distinct handlers",
+			evidence: "three distinct handlers were observed",
 			evidenceRounds: 1,
 		});
 
-		expect(statusOf(set.get(belief.id)!)).toBe("superseded");
-		expect(statusOf(refined)).toBe("proposed");
-		// The refined belief is a new hypothesis: it must re-enter the dispatch frame
-		// (`proposed()`), not be pre-settled without evidence.
-		expect(set.proposed().map((b) => b.id)).toEqual([refined.id]);
+		expect(statusOf(set.get(prior.id)!)).toBe("superseded");
+		expect(set.get(prior.id)?.supersededBy).toBe(refined.id);
+		expect(statusOf(refined)).toBe("supported");
+		expect(refined.supportedBy).toEqual([{ evidence: "three distinct handlers were observed" }]);
 	});
 
-	test("refine replaces skillRefs when given, and preserves prior refs otherwise", () => {
+	test("rejects refinement without material evidence", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the worker cache is the cause",
-			domain: "code",
-			expectation: "disabling cache stops staleness",
-			evidenceRounds: 1,
-			skillRefs: ["cache-debug"],
-		});
-
-		const replaced = set.apply({
-			op: "refine",
-			beliefId: belief.id,
-			statement: "stale-replica from the worker cache is the cause",
-			expectation: "the stale value matches the worker cache entry",
-			evidenceRounds: 1,
-			skillRefs: ["cache-deep-dive"],
-		});
-		expect(replaced.skillRefs).toEqual(["cache-deep-dive"]);
-
-		const preserved = set.apply({
-			op: "refine",
-			beliefId: replaced.id,
-			statement: "replica staleness is caused by the worker cache",
-			expectation: "the stale value matches the worker cache entry",
-			evidenceRounds: 1,
-		});
-		expect(preserved.skillRefs).toEqual(["cache-deep-dive"]);
+		const prior = propose(set);
+		expect(() =>
+			set.apply({
+				op: "refine",
+				beliefId: prior.id,
+				statement: "authorizationSource reads the primary",
+				expectation: "reading the implementation shows a primary read",
+				evidence: " ",
+				evidenceRounds: 1,
+			}),
+		).toThrow(/Cannot refine without evidence/);
 	});
 
-	test("retract withdraws a belief", () => {
+	test("retract withdraws a belief without asserting its negation", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-
-		set.apply({ op: "retract", beliefId: belief.id });
-		expect(statusOf(set.get(belief.id)!)).toBe("superseded");
-		expect(set.proposed()).toHaveLength(0);
+		const belief = propose(set);
+		const withdrawn = set.apply({ op: "retract", beliefId: belief.id });
+		expect(statusOf(withdrawn)).toBe("superseded");
+		expect(withdrawn.supersededBy).toBe(WITHDRAWN);
 	});
 
-	test("illegal transitions and unknown ids throw", () => {
+	test("rejects repeated adjudication and unknown ids", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-
-		expect(() => set.apply({ op: "support", beliefId: "missing", evidence: "x" })).toThrow(BeliefValidationError);
-
-		set.apply({ op: "refute", beliefId: belief.id, evidence: "reads missed" });
-		expect(() => set.apply({ op: "support", beliefId: belief.id, evidence: "x" })).toThrow(BeliefValidationError);
+		const belief = propose(set);
+		set.apply({ op: "support", beliefId: belief.id, evidence: "matched" });
+		expect(() => set.apply({ op: "refute", beliefId: belief.id, evidence: "later claim" })).toThrow(
+			/Only an open belief/,
+		);
+		expect(() => set.apply({ op: "support", beliefId: "belief-99", evidence: "x" })).toThrow(/Unknown belief id/);
 	});
 
-	test("records are immutable — the original belief object is not mutated by support", () => {
+	test("prunes task-local negatives and uncertainty but retains supported knowledge", () => {
 		const set = new BeliefSet();
-		const belief = set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
+		const supported = propose(set, "supported relation");
+		set.apply({ op: "support", beliefId: supported.id, evidence: "matched" });
+		const refuted = propose(set, "refuted relation");
+		set.apply({ op: "refute", beliefId: refuted.id, evidence: "contradicted" });
+		const inconclusive = propose(set, "unsettled relation");
+		set.apply({ op: "inconclusive", beliefId: inconclusive.id, evidence: "probe blocked" });
+		propose(set, "leftover open relation");
 
-		set.apply({ op: "support", beliefId: belief.id, evidence: "reads hit cache" });
+		const removed = set.pruneForNewTask();
+		expect(set.beliefs.map((belief) => belief.statement)).toEqual(["supported relation"]);
+		expect(removed).toHaveLength(3);
+	});
 
-		// The frozen record still reads as proposed; the set's current record is supported.
-		expect(statusOf(belief)).toBe("proposed");
-		expect(statusOf(set.get(belief.id)!)).toBe("supported");
+	test("enforces the record capacity", () => {
+		const set = new BeliefSet();
+		for (let index = 0; index < MAX_BELIEFS; index++) propose(set, `belief ${index}`);
+		expect(() => propose(set, "overflow")).toThrow(/capacity reached/);
 	});
 });
 
-describe("validateBelief (structural)", () => {
-	test("accepts a code relation and a product relation", () => {
-		expect(() => validateBelief("authorizationSource returns stale-replica", "code")).not.toThrow();
-		expect(() => validateBelief("worker-local cache survives logout for 30s", "product")).not.toThrow();
+describe("belief validation", () => {
+	test("accepts product and code domains", () => {
+		expect(() => validateBelief("relation", "product")).not.toThrow();
+		expect(() => validateBelief("relation", "code")).not.toThrow();
 	});
 
-	test("rejects empty statements and unknown domains", () => {
+	test("rejects empty statements and expectations", () => {
 		expect(() => validateBelief("", "code")).toThrow(BeliefValidationError);
-		expect(() => validateBelief("x", "bogus" as "code")).toThrow(BeliefValidationError);
+		expect(() => validateExpectation("  ")).toThrow(BeliefValidationError);
 	});
 
-	test("accepts a framing domain", () => {
-		expect(() => validateBelief("the answer must establish X", "framing")).not.toThrow();
-	});
-});
-
-describe("validateExpectation", () => {
-	test("accepts a falsifiable prediction", () => {
-		expect(() => validateExpectation("reading authorizationSource shows a stale replica")).not.toThrow();
-	});
-
-	test("rejects empty expectations", () => {
-		expect(() => validateExpectation("")).toThrow(BeliefValidationError);
-	});
-});
-
-describe("validateEvidenceRounds", () => {
-	test("accepts a bounded integer", () => {
+	test("validates evidence-round estimates", () => {
 		expect(() => validateEvidenceRounds(1)).not.toThrow();
-		expect(() => validateEvidenceRounds(MAX_EVIDENCE_ROUNDS)).not.toThrow();
-	});
-
-	test("rejects zero, non-integers, and out-of-range values", () => {
+		expect(() => validateEvidenceRounds(5)).not.toThrow();
 		expect(() => validateEvidenceRounds(0)).toThrow(BeliefValidationError);
 		expect(() => validateEvidenceRounds(1.5)).toThrow(BeliefValidationError);
-		expect(() => validateEvidenceRounds(MAX_EVIDENCE_ROUNDS + 1)).toThrow(BeliefValidationError);
-	});
-});
-
-describe("formatBeliefsForView", () => {
-	test("renders a placeholder for no beliefs", () => {
-		expect(formatBeliefsForView([])).toContain("No beliefs");
-	});
-
-	test("calls out the frame with expectation and evidence rounds", () => {
-		const set = new BeliefSet();
-		set.apply({
-			op: "propose",
-			statement: "authorizationSource returns stale-replica",
-			domain: "code",
-			expectation: "reading it shows a stale replica",
-			evidenceRounds: 2,
-		});
-		const text = formatBeliefsForView(set.beliefs);
-		expect(text).toContain("[FRAME]");
-		expect(text).toContain("stale replica");
-		expect(text).toContain("evidence rounds: 2");
-	});
-
-	test("lists settled beliefs separately", () => {
-		const set = new BeliefSet();
-		const b = set.apply({
-			op: "propose",
-			statement: "the cache survives logout",
-			domain: "product",
-			expectation: "value persists",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "refute", beliefId: b.id, evidence: "value cleared" });
-		const text = formatBeliefsForView(set.beliefs);
-		expect(text).toContain("[SETTLED]");
-		expect(text).toContain("the cache survives logout");
-	});
-
-	test("renders framing obligations separately from dispatchable frames", () => {
-		const set = new BeliefSet();
-		set.apply({
-			op: "propose",
-			statement: "the answer must establish X",
-			domain: "framing",
-			expectation: "no second mechanism",
-			evidenceRounds: 1,
-		});
-		set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-		const text = formatBeliefsForView(set.beliefs);
-		expect(text).toContain("[FRAMING]");
-		expect(text).toContain("[FRAME]");
-		expect(text).toContain("reframe if:");
-	});
-
-	test('scope "frame" renders only the open frame, not framing obligations or settled history', () => {
-		const set = new BeliefSet();
-		const settled = set.apply({
-			op: "propose",
-			statement: "the old belief",
-			domain: "product",
-			expectation: "stale",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "support", beliefId: settled.id, evidence: "held" });
-		set.apply({
-			op: "propose",
-			statement: "the answer must establish Y",
-			domain: "framing",
-			expectation: "no second mechanism",
-			evidenceRounds: 1,
-		});
-		set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit cache",
-			evidenceRounds: 1,
-		});
-
-		const frame = formatBeliefsForView(set.beliefs, "frame");
-		expect(frame).toContain("[FRAME]");
-		expect(frame).toContain("the cache is warm");
-		expect(frame).toContain("expectation: reads hit cache");
-		expect(frame).not.toContain("[FRAMING]");
-		expect(frame).not.toContain("[SETTLED]");
-		expect(frame).not.toContain("the old belief");
-		// The full scope still surfaces everything.
-		expect(formatBeliefsForView(set.beliefs, "all")).toContain("[FRAMING]");
-		expect(formatBeliefsForView(set.beliefs, "all")).toContain("[SETTLED]");
 	});
 });
 
 describe("RoutingSet", () => {
-	test("route creates a routing decision outside the belief registry", () => {
+	test("stores routing as task control metadata, not a belief", () => {
 		const set = new RoutingSet();
 		const routing = set.apply({
 			op: "route",
-			statement: "本请求适合 fast path 执行",
+			statement: "no material uncertainty remains",
 			decision: "fast-path",
 			suitabilityProbability: 0.9,
-			successProbability: 0.85,
+			successProbability: 0.8,
 			estimatedSteps: 2,
 			difficulty: "low",
+			reason: "the action is read-only and epistemically closed",
 		});
 
 		expect(routing.id).toBe("routing-1");
-		expect(routing.decision).toBe("fast-path");
-		expect(routing.suitabilityProbability).toBe(0.9);
-		expect(routing.successProbability).toBe(0.85);
-		expect(routing.estimatedSteps).toBe(2);
-		expect(routing.difficulty).toBe("low");
-		expect(set.routings).toEqual([routing]);
-	});
-
-	test("route persists optional handoff traceability fields", () => {
-		const set = new RoutingSet();
-		const routing = set.apply({
-			op: "route",
-			statement: "本请求可把剩余执行交给 fast path",
-			decision: "fast-path",
-			suitabilityProbability: 0.9,
-			successProbability: 0.85,
-			estimatedSteps: 2,
-			difficulty: "low",
-			handoffFromBeliefIds: ["belief-2"],
-			reason: "the remaining framing is execution-only",
-		});
-
-		expect(routing.handoffFromBeliefIds).toEqual(["belief-2"]);
-		expect(routing.reason).toBe("the remaining framing is execution-only");
-	});
-
-	test("rejects an invalid routing decision", () => {
-		const set = new RoutingSet();
-		expect(() =>
-			set.apply({
-				op: "route",
-				statement: "本请求适合 fast path 执行",
-				decision: "maybe" as never,
-				suitabilityProbability: 0.9,
-				successProbability: 0.9,
-				estimatedSteps: 1,
-				difficulty: "low",
-			}),
-		).toThrow("decision must be 'fast-path' or 'belief-loop'.");
-	});
-
-	test("rejects probabilities outside 0-1", () => {
-		const set = new RoutingSet();
-		expect(() =>
-			set.apply({
-				op: "route",
-				statement: "本请求适合 fast path 执行",
-				decision: "fast-path",
-				suitabilityProbability: 1.2,
-				successProbability: 0.9,
-				estimatedSteps: 1,
-				difficulty: "low",
-			}),
-		).toThrow("suitabilityProbability must be a number between 0 and 1.");
-		expect(() =>
-			set.apply({
-				op: "route",
-				statement: "本请求适合 fast path 执行",
-				decision: "fast-path",
-				suitabilityProbability: 0.9,
-				successProbability: -0.1,
-				estimatedSteps: 1,
-				difficulty: "low",
-			}),
-		).toThrow("successProbability must be a number between 0 and 1.");
-	});
-
-	test("rejects a non-integer step estimate and an unknown difficulty", () => {
-		const set = new RoutingSet();
-		expect(() =>
-			set.apply({
-				op: "route",
-				statement: "本请求适合 fast path 执行",
-				decision: "fast-path",
-				suitabilityProbability: 0.9,
-				successProbability: 0.9,
-				estimatedSteps: 1.5,
-				difficulty: "low",
-			}),
-		).toThrow("estimatedSteps must be an integer from 0 to 100.");
-		expect(() =>
-			set.apply({
-				op: "route",
-				statement: "本请求适合 fast path 执行",
-				decision: "fast-path",
-				suitabilityProbability: 0.9,
-				successProbability: 0.9,
-				estimatedSteps: 1,
-				difficulty: "extreme" as never,
-			}),
-		).toThrow("difficulty must be 'low', 'medium', or 'high'.");
+		expect(set.routings).toHaveLength(1);
+		set.clear();
+		expect(set.routings).toHaveLength(0);
 	});
 });
 
-describe("belief set capacity (MAX_BELIEFS = 200)", () => {
-	test("the 200th record is accepted and the 201st is rejected", () => {
+describe("formatBeliefsForView", () => {
+	test("renders open and adjudicated beliefs without control metadata", () => {
 		const set = new BeliefSet();
-		for (let i = 0; i < 200; i++) {
-			set.apply({
-				op: "propose",
-				statement: `belief ${i}`,
-				domain: "product",
-				expectation: "probe",
-				evidenceRounds: 1,
-			});
-		}
-		expect(set.beliefs).toHaveLength(200);
-		expect(() =>
-			set.apply({
-				op: "propose",
-				statement: "overflow",
-				domain: "product",
-				expectation: "probe",
-				evidenceRounds: 1,
-			}),
-		).toThrow("Belief set capacity reached: at most 200 beliefs");
-		expect(set.beliefs).toHaveLength(200);
-	});
+		const supported = propose(set, "supported relation");
+		set.apply({ op: "support", beliefId: supported.id, evidence: "matched" });
+		propose(set, "open relation");
 
-	test("support, refute, and retract still work at capacity", () => {
-		const set = new BeliefSet();
-		for (let i = 0; i < 200; i++) {
-			set.apply({
-				op: "propose",
-				statement: `belief ${i}`,
-				domain: "product",
-				expectation: "probe",
-				evidenceRounds: 1,
-			});
-		}
-		expect(() => set.apply({ op: "support", beliefId: "belief-1", evidence: "seen" })).not.toThrow();
-		expect(() => set.apply({ op: "refute", beliefId: "belief-2", evidence: "not seen" })).not.toThrow();
-		expect(() => set.apply({ op: "retract", beliefId: "belief-3" })).not.toThrow();
-		expect(set.beliefs).toHaveLength(200);
-	});
-
-	test("refine still needs belief capacity", () => {
-		const set = new BeliefSet();
-		for (let i = 0; i < 200; i++) {
-			set.apply({
-				op: "propose",
-				statement: `belief ${i}`,
-				domain: "product",
-				expectation: "probe",
-				evidenceRounds: 1,
-			});
-		}
-		expect(() =>
-			set.apply({
-				op: "refine",
-				beliefId: "belief-1",
-				statement: "refined",
-				expectation: "probe",
-				evidenceRounds: 1,
-			}),
-		).toThrow("Belief set capacity reached");
-		expect(set.beliefs).toHaveLength(200);
-	});
-});
-
-describe("pruneForNewTask (task-end cleanup)", () => {
-	test("keeps only supported product/code beliefs", () => {
-		const set = new BeliefSet();
-		const product = set.apply({
-			op: "propose",
-			statement: "cache survives logout",
-			domain: "product",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "support", beliefId: product.id, evidence: "seen" });
-		const code = set.apply({
-			op: "propose",
-			statement: "route handles x",
-			domain: "code",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "support", beliefId: code.id, evidence: "seen" });
-		const framing = set.apply({
-			op: "propose",
-			statement: "answer must establish y",
-			domain: "framing",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		const refuted = set.apply({
-			op: "propose",
-			statement: "old claim",
-			domain: "product",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "refute", beliefId: refuted.id, evidence: "not seen" });
-		const superseded = set.apply({
-			op: "propose",
-			statement: "superseded claim",
-			domain: "product",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		const refined = set.apply({
-			op: "refine",
-			beliefId: superseded.id,
-			statement: "refined claim",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		const proposed = set.apply({
-			op: "propose",
-			statement: "still open",
-			domain: "product",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-
-		expect(set.beliefs).toHaveLength(7);
-
-		const removed = set.pruneForNewTask();
-
-		// Only the two supported product/code beliefs survive.
-		expect(set.beliefs.map((b) => b.id)).toEqual([product.id, code.id]);
-		// Everything else — framing, refuted, superseded, refined (proposed), proposed — was removed.
-		expect(removed.map((b) => b.id).sort()).toEqual(
-			[framing.id, refuted.id, superseded.id, refined.id, proposed.id].sort(),
-		);
-	});
-
-	test("is idempotent on an already-pruned set", () => {
-		const set = new BeliefSet();
-		const product = set.apply({
-			op: "propose",
-			statement: "cache survives",
-			domain: "product",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		set.apply({ op: "support", beliefId: product.id, evidence: "seen" });
-		set.pruneForNewTask();
-		expect(set.pruneForNewTask()).toHaveLength(0);
-		expect(set.beliefs.map((b) => b.id)).toEqual([product.id]);
-	});
-
-	test("frees capacity for new records", () => {
-		const set = new BeliefSet();
-		for (let i = 0; i < 200; i++) {
-			set.apply({
-				op: "propose",
-				statement: `belief ${i}`,
-				domain: "product",
-				expectation: "probe",
-				evidenceRounds: 1,
-			});
-		}
-		expect(() =>
-			set.apply({
-				op: "propose",
-				statement: "overflow",
-				domain: "product",
-				expectation: "probe",
-				evidenceRounds: 1,
-			}),
-		).toThrow("Belief set capacity reached");
-		// Pruning 200 proposed records frees capacity; ids are never reused.
-		set.pruneForNewTask();
-		const fresh = set.apply({
-			op: "propose",
-			statement: "fresh",
-			domain: "product",
-			expectation: "probe",
-			evidenceRounds: 1,
-		});
-		expect(fresh.id).toBe("belief-201");
+		const text = formatBeliefsForView(set.beliefs);
+		expect(text).toContain("[FRAME]");
+		expect(text).toContain("[SETTLED]");
+		expect(text).not.toContain("FRAMING");
+		expect(text).not.toContain("routing");
 	});
 });

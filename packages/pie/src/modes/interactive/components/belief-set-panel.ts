@@ -36,6 +36,7 @@ export class BeliefSetPanel implements Component {
 				proposed: theme.fg("muted", "proposed"),
 				supported: theme.fg("success", "supported"),
 				refuted: theme.fg("error", "refuted"),
+				inconclusive: theme.fg("warning", "inconclusive"),
 				superseded: theme.fg("dim", "superseded"),
 			}[status];
 			const frameMarker = status === "proposed" ? ` ${theme.fg("accent", "[frame]")}` : "";

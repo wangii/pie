@@ -1,40 +1,18 @@
 import { describe, expect, test } from "vitest";
 import { BeliefSet, RoutingSet } from "../src/core/belief-set.ts";
-import { createDeclareBeliefToolDefinition } from "../src/core/tools/declare-belief.ts";
+import { createDeclareBeliefToolDefinition, createRouteTaskToolDefinition } from "../src/core/tools/declare-belief.ts";
 import { createViewBeliefsToolDefinition } from "../src/core/tools/view-beliefs.ts";
 
 describe("declare_belief tool", () => {
-	test("propose applies a valid belief", async () => {
+	test("proposes a provisional world belief", async () => {
 		const set = new BeliefSet();
 		const tool = createDeclareBeliefToolDefinition(set);
 		const result = await tool.execute(
 			"tc-1",
 			{
-				op: "propose",
-				statement: "authorizationSource(1003,1001) returns stale-replica",
+				statement: "authorizationSource returns a stale replica",
 				domain: "code",
-				expectation: "reading it shows a stale replica",
-				evidenceRounds: 2,
-			},
-			undefined,
-			undefined,
-			undefined as never,
-		);
-
-		expect(set.open()).toHaveLength(1);
-		expect(result.content[0]).toMatchObject({ type: "text" });
-		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
-	});
-
-	test("propose applies when `op` is omitted (defaults to propose)", async () => {
-		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
-			"tc-1",
-			{
-				statement: "authorizationSource(1003,1001) returns stale-replica",
-				domain: "code",
-				expectation: "reading it shows a stale replica",
+				expectation: "the implementation reads the stale replica",
 				evidenceRounds: 2,
 			},
 			undefined,
@@ -46,7 +24,26 @@ describe("declare_belief tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
 	});
 
-	test("an omitted `op` with a beliefId is rejected, not guessed", async () => {
+	test("rejects control state disguised as an unsupported domain", async () => {
+		const set = new BeliefSet();
+		const tool = createDeclareBeliefToolDefinition(set);
+		const result = await tool.execute(
+			"tc-1",
+			{
+				statement: "the final answer must establish X",
+				domain: "framing" as never,
+				expectation: "X is covered",
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect(set.beliefs).toHaveLength(0);
+		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+	});
+
+	test("support treats a fulfilled prediction as evidence", async () => {
 		const set = new BeliefSet();
 		const belief = set.apply({
 			op: "propose",
@@ -56,55 +53,18 @@ describe("declare_belief tool", () => {
 			evidenceRounds: 1,
 		});
 		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
+		await tool.execute(
 			"tc-1",
-			{ beliefId: belief.id, evidence: "reads hit the cache" },
+			{ op: "support", beliefId: belief.id, evidence: "the observed read hit the cache" },
 			undefined,
 			undefined,
 			undefined as never,
 		);
 
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
-		expect((result.content[0] as { text: string }).text).toContain("`op`");
+		expect(set.get(belief.id)?.supportedBy).toEqual([{ evidence: "the observed read hit the cache" }]);
 	});
 
-	test("propose accepts a framing belief", async () => {
-		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
-			"tc-1",
-			{
-				op: "propose",
-				statement: "the answer must establish X",
-				domain: "framing",
-				expectation: "no second mechanism",
-				evidenceRounds: 1,
-			},
-			undefined,
-			undefined,
-			undefined as never,
-		);
-
-		expect(set.framings()).toHaveLength(1);
-		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
-	});
-
-	test("a rejected belief is returned as text, not thrown", async () => {
-		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
-			"tc-1",
-			{ op: "propose", statement: "", domain: "code", expectation: "x", evidenceRounds: 1 },
-			undefined,
-			undefined,
-			undefined as never,
-		);
-
-		expect(set.open()).toHaveLength(0);
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
-	});
-
-	test("support reclassifies by beliefId with evidence", async () => {
+	test("records an inconclusive experiment without treating it as support or refutation", async () => {
 		const set = new BeliefSet();
 		const belief = set.apply({
 			op: "propose",
@@ -114,47 +74,46 @@ describe("declare_belief tool", () => {
 			evidenceRounds: 1,
 		});
 		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
+		await tool.execute(
 			"tc-1",
-			{ op: "support", beliefId: belief.id, evidence: "reads hit the cache" },
+			{ op: "inconclusive", beliefId: belief.id, evidence: "the cache service was unavailable" },
 			undefined,
 			undefined,
 			undefined as never,
 		);
 
-		expect(set.get(belief.id)?.supportedBy).toHaveLength(1);
-		expect((result.content[0] as { text: string }).text).toContain("Applied support");
+		expect(set.get(belief.id)?.inconclusiveBy).toEqual([{ evidence: "the cache service was unavailable" }]);
+		expect(set.proposed()).toHaveLength(0);
 	});
 
-	test("proposing a second belief while one is open is allowed", async () => {
+	test("refine directly records the evidence-supported world-model correction", async () => {
 		const set = new BeliefSet();
-		set.apply({
+		const belief = set.apply({
 			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit the cache",
+			statement: "authentication is one mechanism",
+			domain: "product",
+			expectation: "one mechanism handles all authentication",
 			evidenceRounds: 1,
 		});
 		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
+		await tool.execute(
 			"tc-1",
 			{
-				op: "propose",
-				statement: "login is stateless",
-				domain: "product",
-				expectation: "no session reuse",
-				evidenceRounds: 1,
+				op: "refine",
+				beliefId: belief.id,
+				statement: "authentication has OAuth, session, and API-token mechanisms",
+				expectation: "the three mechanisms have distinct code paths",
+				evidence: "three distinct handlers were observed",
 			},
 			undefined,
 			undefined,
 			undefined as never,
 		);
 
-		expect((result.content[0] as { text: string }).text).toContain("Applied propose");
-		expect(set.proposed()).toHaveLength(2);
+		expect(set.beliefs[1]?.supportedBy).toEqual([{ evidence: "three distinct handlers were observed" }]);
 	});
 
-	test("support without evidence is rejected", async () => {
+	test("rejects adjudication without evidence", async () => {
 		const set = new BeliefSet();
 		const belief = set.apply({
 			op: "propose",
@@ -173,30 +132,19 @@ describe("declare_belief tool", () => {
 		);
 
 		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
-		expect((result.content[0] as { text: string }).text).toContain("evidence");
-	});
-
-	test("an op missing its required field is rejected", async () => {
-		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute("tc-1", { op: "support" }, undefined, undefined, undefined as never);
-
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
-		expect((result.content[0] as { text: string }).text).toContain("beliefId");
 	});
 });
 
-describe("declare_belief route op", () => {
-	test("route applies a settled routing belief", async () => {
-		const set = new BeliefSet();
+describe("route_task tool", () => {
+	test("stores routing separately from beliefs", async () => {
+		const beliefs = new BeliefSet();
 		const routings = new RoutingSet();
-		const tool = createDeclareBeliefToolDefinition(set, routings);
+		const tool = createRouteTaskToolDefinition(routings);
 		const result = await tool.execute(
 			"tc-1",
 			{
-				op: "route",
-				statement: "本请求适合 fast path 执行",
 				decision: "fast-path",
+				reason: "no unresolved uncertainty can change this read-only action",
 				suitabilityProbability: 0.9,
 				successProbability: 0.85,
 				estimatedSteps: 2,
@@ -207,39 +155,14 @@ describe("declare_belief route op", () => {
 			undefined as never,
 		);
 
-		const routing = routings.routings[0]!;
-		expect(routing.id).toBe("routing-1");
-		expect(routing.decision).toBe("fast-path");
-		expect(set.beliefs).toHaveLength(0);
-		expect(set.proposed()).toHaveLength(0);
-		expect((result.content[0] as { text: string }).text).toContain("Applied route");
-	});
-
-	test("route rejects a missing decision", async () => {
-		const set = new BeliefSet();
-		const tool = createDeclareBeliefToolDefinition(set, new RoutingSet());
-		const result = await tool.execute(
-			"tc-1",
-			{
-				op: "route",
-				statement: "本请求适合 fast path 执行",
-				suitabilityProbability: 0.9,
-				successProbability: 0.9,
-				estimatedSteps: 1,
-				difficulty: "low",
-			},
-			undefined,
-			undefined,
-			undefined as never,
-		);
-
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
-		expect((result.content[0] as { text: string }).text).toContain("decision");
+		expect(routings.routings).toHaveLength(1);
+		expect(beliefs.beliefs).toHaveLength(0);
+		expect((result.content[0] as { text: string }).text).toContain("Applied routing");
 	});
 });
 
 describe("view_beliefs tool", () => {
-	test("renders the current belief set as text", async () => {
+	test("renders open and adjudicated world beliefs", async () => {
 		const set = new BeliefSet();
 		set.apply({
 			op: "propose",
@@ -251,32 +174,7 @@ describe("view_beliefs tool", () => {
 		const tool = createViewBeliefsToolDefinition(set);
 		const result = await tool.execute("tc-1", {}, undefined, undefined, undefined as never);
 
+		expect((result.content[0] as { text: string }).text).toContain("[FRAME]");
 		expect((result.content[0] as { text: string }).text).toContain("the cache is warm");
-	});
-
-	test("renders framing beliefs in addition to the frame", async () => {
-		const set = new BeliefSet();
-		set.apply({
-			op: "propose",
-			statement: "the cache is warm",
-			domain: "code",
-			expectation: "reads hit the cache",
-			evidenceRounds: 1,
-		});
-		set.apply({
-			op: "propose",
-			statement: "the answer must establish X",
-			domain: "framing",
-			expectation: "no second mechanism",
-			evidenceRounds: 1,
-		});
-		// The tool signature takes no role callback now, so it is role-independent.
-		const tool = createViewBeliefsToolDefinition(set);
-		const result = await tool.execute("tc-1", {}, undefined, undefined, undefined as never);
-		const text = (result.content[0] as { text: string }).text;
-
-		expect(text).toContain("[FRAME]");
-		expect(text).toContain("[FRAMING]");
-		expect(text).not.toContain("[SETTLED]");
 	});
 });

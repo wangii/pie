@@ -6,17 +6,10 @@ import {
 	type BeliefStatus,
 	type Routing,
 	type RoutingDelta,
-	RoutingSet,
+	type RoutingSet,
 	statusOf,
 } from "../belief-set.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-
-/**
- * The `declare_belief` tool — the epistemic role's mutation surface. It records and
- * reclassifies beliefs; the harness validates the delta and applies it to the immutable
- * `BeliefSet`. `read`/`bash` are not part of this role's surface (they live in the
- * execution role), so the epistemic layer stays cleanly separated from execution.
- */
 
 const declareBeliefSchema = Type.Object({
 	op: Type.Optional(
@@ -26,138 +19,101 @@ const declareBeliefSchema = Type.Object({
 				Type.Literal("support"),
 				Type.Literal("refute"),
 				Type.Literal("refine"),
+				Type.Literal("inconclusive"),
 				Type.Literal("retract"),
-				Type.Literal("route"),
 			],
 			{
 				description:
-					"What to do. Omit it to propose (the default). propose: add a belief (needs statement + domain + expectation). support/refute: settle an open belief (needs beliefId + evidence; supporting a framing belief also needs evidenceBeliefIds). refine: correct a belief (needs beliefId + statement + expectation). retract: withdraw (needs beliefId). route: declare the fast-path routing decision for the current request (needs statement + decision + probabilities + estimatedSteps + difficulty).",
+					"Belief-state operation. Omit to propose. support/refute/inconclusive adjudicate an open belief with evidence. refine replaces it with an evidence-supported correction. retract withdraws an immaterial or abandoned belief.",
 			},
 		),
 	),
 	statement: Type.Optional(
 		Type.String({
 			description:
-				"The belief as a named relation about the product or code, with each referent tagged by kind: [code] (implementation), [prod] (product behavior or documented claim), [user] (user intent/requirement), [convention] (repo idiom/naming/pattern). Tag referents, not every noun. Required for propose and refine.",
+				"A provisional, task-local relational judgment about code, product behavior, a user requirement, or a relevant convention. Required for propose and refine.",
 		}),
 	),
 	domain: Type.Optional(
-		Type.Union([Type.Literal("product"), Type.Literal("code"), Type.Literal("framing")], {
-			description:
-				"product/code: a relation about the world. framing: what the final answer must establish (an obligation). Required for propose.",
+		Type.Union([Type.Literal("product"), Type.Literal("code")], {
+			description: "What part of the world the belief concerns. Required for propose.",
 		}),
 	),
 	expectation: Type.Optional(
 		Type.String({
-			description:
-				"The falsifiable prediction: what observable result would confirm or refute this belief. Required for propose and refine.",
+			description: "The observable prediction that would bear on this belief. Required for propose and refine.",
 		}),
 	),
 	evidenceRounds: Type.Optional(
-		Type.Number({
-			description: "How many tool results this test needs (1-5). Defaults to 1. Required for propose and refine.",
-		}),
+		Type.Number({ description: "Estimated tool results needed by one coherent experiment (1-5). Defaults to 1." }),
 	),
 	skillRefs: Type.Optional(
 		Type.Array(Type.String(), {
-			description:
-				"Optional skill ids this belief references (e.g. skills the execution role should load). Accepted for propose; for refine it replaces the prior refs (omit to keep them).",
+			description: "Optional skill ids relevant to executing this belief's experiment.",
 		}),
 	),
-	beliefId: Type.Optional(
-		Type.String({
-			description: "The id of the belief to support/refute/refine/retract. Required for those ops.",
-		}),
-	),
+	beliefId: Type.Optional(Type.String({ description: "The belief to adjudicate, refine, or retract." })),
 	evidence: Type.Optional(
 		Type.String({
 			description:
-				"The observed result and how it met or diverged from the belief's expectation. Required for support and refute.",
-		}),
-	),
-	evidenceBeliefIds: Type.Optional(
-		Type.Array(Type.String(), {
-			description:
-				"Belief ids that discharge this support. Required when supporting a framing belief: reference the product/code beliefs (each must already be supported) that establish the obligation. Ignored for non-framing support.",
-		}),
-	),
-	decision: Type.Optional(
-		Type.Union([Type.Literal("fast-path"), Type.Literal("belief-loop")], {
-			description: "The routing decision. Required for op `route`.",
-		}),
-	),
-	suitabilityProbability: Type.Optional(
-		Type.Number({
-			description: "How suitable this request is for fast-path execution (0-1). Required for op `route`.",
-		}),
-	),
-	successProbability: Type.Optional(
-		Type.Number({
-			description: "Estimated probability the fast path completes the request (0-1). Required for op `route`.",
-		}),
-	),
-	estimatedSteps: Type.Optional(
-		Type.Number({
-			description: "Estimated number of tool steps the fast path needs. Required for op `route`.",
-		}),
-	),
-	difficulty: Type.Optional(
-		Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
-			description: "Estimated difficulty of the request. Required for op `route`.",
-		}),
-	),
-	handoffFromBeliefIds: Type.Optional(
-		Type.Array(Type.String(), {
-			description:
-				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): the open framing obligations this route authorizes the fast path to take over. Optional.",
-		}),
-	),
-	reason: Type.Optional(
-		Type.String({
-			description:
-				"For a mid-task fast-path handoff (op `route`, decision `fast-path`): why the route authorizes a handoff (e.g. the remaining framing is execution-only). Optional.",
+				"The material observations supporting this adjudication or refinement. Required for support, refute, inconclusive, and refine.",
 		}),
 	),
 });
 
+const routeTaskSchema = Type.Object({
+	decision: Type.Union([Type.Literal("fast-path"), Type.Literal("belief-loop")], {
+		description: "Whether direct execution is epistemically closed or needs the belief loop.",
+	}),
+	reason: Type.String({
+		description: "Why unresolved uncertainty can or cannot materially change the action or its safety.",
+	}),
+	suitabilityProbability: Type.Number({
+		description: "Estimated probability that direct execution is epistemically appropriate (0-1).",
+	}),
+	successProbability: Type.Number({
+		description: "Estimated probability that direct execution completes the request (0-1).",
+	}),
+	estimatedSteps: Type.Number({ description: "Estimated number of direct-execution tool steps." }),
+	difficulty: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")]),
+});
+
 export type DeclareBeliefInput = Static<typeof declareBeliefSchema>;
+export type RouteTaskInput = Static<typeof routeTaskSchema>;
 
 export const declareBeliefSystemPromptContribution = {
-	snippet:
-		"Record or update what you currently believe about the product, the code, or what the answer must establish",
+	snippet: "Record or adjudicate a provisional task-local belief about the relevant world",
 	guidelines: [
-		"A belief names a relation and its falsifiable expectation; support or refute it with the evidence you observed",
-		"Write every belief in {beliefLang}, and tag each referent in the statement with one of [code] / [prod] / [user] / [convention]",
-		"When a skill matches the belief's target, pass its name in skillRefs so the execution role loads it",
+		"Beliefs contain evidence-revisable world judgments, not routing, workflow, exploration, or coverage state",
+		"Treat names as provisional pointers; refine a referent only when evidence makes the distinction task-relevant",
+		"When a skill matches the belief's target, pass its name in skillRefs so execution can load it",
 	],
 };
 
-function toDelta(input: DeclareBeliefInput): BeliefDelta | RoutingDelta {
+function requireBeliefId(input: DeclareBeliefInput, op: string): string {
+	if (!input.beliefId?.trim()) throw new Error(`${op} requires a \`beliefId\`.`);
+	return input.beliefId;
+}
+
+function requireEvidence(input: DeclareBeliefInput, op: string): string {
+	if (!input.evidence?.trim()) throw new Error(`${op} requires material observed \`evidence\`.`);
+	return input.evidence;
+}
+
+function toDelta(input: DeclareBeliefInput): BeliefDelta {
 	const op = input.op ?? "propose";
-	// `op` is optional so the model can batch several proposes without restating the
-	// discriminator on each. But support/refute/refine/retract each carry a `beliefId`
-	// and must be explicit — reject an omitted `op` there rather than guess.
 	if (input.op === undefined && input.beliefId?.trim()) {
-		throw new Error(
-			"`op` is required when `beliefId` is supplied (support/refute/refine/retract each need an explicit `op`). " +
-				"To propose a new belief, omit `beliefId`.",
-		);
+		throw new Error("`op` is required when `beliefId` is supplied. To propose, omit `beliefId`.");
 	}
 	switch (op) {
 		case "propose":
-			if (!input.statement?.trim()) {
-				throw new Error("propose requires a non-empty `statement`.");
+			if (!input.statement?.trim()) throw new Error("propose requires a non-empty `statement`.");
+			if (input.domain !== "product" && input.domain !== "code") {
+				throw new Error("propose requires `domain` of 'product' or 'code'.");
 			}
-			if (input.domain !== "product" && input.domain !== "code" && input.domain !== "framing") {
-				throw new Error("propose requires `domain` of 'product', 'code', or 'framing'.");
-			}
-			if (!input.expectation?.trim()) {
-				throw new Error(
-					"propose requires a non-empty `expectation` (the observable result that would confirm or refute it).",
-				);
-			}
+			if (!input.expectation?.trim()) throw new Error("propose requires a non-empty `expectation`.");
 			return {
-				op: "propose",
+				op,
 				statement: input.statement,
 				domain: input.domain,
 				expectation: input.expectation,
@@ -165,138 +121,92 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta | RoutingDelta {
 				skillRefs: input.skillRefs,
 			};
 		case "support":
-			if (!input.beliefId) throw new Error("support requires a `beliefId`.");
-			if (!input.evidence?.trim()) {
-				throw new Error("support requires `evidence` (the observed result and how it met the expectation).");
-			}
-			return {
-				op: "support",
-				beliefId: input.beliefId,
-				evidence: input.evidence,
-				...(input.evidenceBeliefIds ? { evidenceBeliefIds: input.evidenceBeliefIds } : {}),
-			};
 		case "refute":
-			if (!input.beliefId) throw new Error("refute requires a `beliefId`.");
-			if (!input.evidence?.trim()) {
-				throw new Error(
-					"refute requires `evidence` (the observed result and how it diverged from the expectation).",
-				);
-			}
-			return { op: "refute", beliefId: input.beliefId, evidence: input.evidence };
+		case "inconclusive":
+			return { op, beliefId: requireBeliefId(input, op), evidence: requireEvidence(input, op) };
 		case "retract":
-			if (!input.beliefId) throw new Error("retract requires a `beliefId`.");
-			return { op: "retract", beliefId: input.beliefId };
-		case "route": {
-			if (!input.statement?.trim()) {
-				throw new Error("route requires a non-empty `statement`.");
-			}
-			if (input.decision !== "fast-path" && input.decision !== "belief-loop") {
-				throw new Error("route requires `decision` of 'fast-path' or 'belief-loop'.");
-			}
-			const { suitabilityProbability, successProbability, estimatedSteps, difficulty } = input;
-			if (
-				typeof suitabilityProbability !== "number" ||
-				!Number.isFinite(suitabilityProbability) ||
-				suitabilityProbability < 0 ||
-				suitabilityProbability > 1
-			) {
-				throw new Error("route requires `suitabilityProbability` between 0 and 1.");
-			}
-			if (
-				typeof successProbability !== "number" ||
-				!Number.isFinite(successProbability) ||
-				successProbability < 0 ||
-				successProbability > 1
-			) {
-				throw new Error("route requires `successProbability` between 0 and 1.");
-			}
-			if (typeof estimatedSteps !== "number" || !Number.isSafeInteger(estimatedSteps) || estimatedSteps < 0) {
-				throw new Error("route requires a non-negative integer `estimatedSteps`.");
-			}
-			if (difficulty !== "low" && difficulty !== "medium" && difficulty !== "high") {
-				throw new Error("route requires `difficulty` of 'low', 'medium', or 'high'.");
-			}
-			return {
-				op: "route",
-				statement: input.statement,
-				decision: input.decision,
-				suitabilityProbability,
-				successProbability,
-				estimatedSteps,
-				difficulty,
-				...(input.handoffFromBeliefIds ? { handoffFromBeliefIds: input.handoffFromBeliefIds } : {}),
-				...(input.reason ? { reason: input.reason } : {}),
-			};
-		}
+			return { op, beliefId: requireBeliefId(input, op) };
 		case "refine":
-			if (!input.beliefId) {
-				throw new Error("refine requires a `beliefId`.");
-			}
-			if (!input.statement?.trim()) {
-				throw new Error("refine requires a non-empty `statement`.");
-			}
-			if (!input.expectation?.trim()) {
-				throw new Error("refine requires a non-empty `expectation` (the corrected prediction).");
-			}
+			if (!input.statement?.trim()) throw new Error("refine requires a non-empty `statement`.");
+			if (!input.expectation?.trim()) throw new Error("refine requires a non-empty `expectation`.");
 			return {
-				op: "refine",
-				beliefId: input.beliefId,
+				op,
+				beliefId: requireBeliefId(input, op),
 				statement: input.statement,
 				expectation: input.expectation,
+				evidence: requireEvidence(input, op),
 				evidenceRounds: input.evidenceRounds ?? 1,
 				skillRefs: input.skillRefs,
 			};
 	}
 }
 
+export function createRouteTaskToolDefinition(
+	routingSet: RoutingSet,
+	onRouting?: (delta: RoutingDelta, routing: Routing) => void,
+): ToolDefinition<typeof routeTaskSchema, undefined> {
+	return {
+		name: "route_task",
+		label: "route task",
+		description:
+			"Record task-control routing metadata, not a belief. Fast path requires epistemic closure, not merely operational simplicity.",
+		promptSnippet: "Route epistemically closed work to direct execution",
+		promptGuidelines: [
+			"Choose fast-path only when no unresolved uncertainty could materially change the action or its safety",
+		],
+		parameters: routeTaskSchema,
+		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
+			try {
+				const delta: RoutingDelta = {
+					op: "route",
+					statement: input.reason,
+					decision: input.decision,
+					suitabilityProbability: input.suitabilityProbability,
+					successProbability: input.successProbability,
+					estimatedSteps: input.estimatedSteps,
+					difficulty: input.difficulty,
+					reason: input.reason,
+				};
+				const routing = routingSet.apply(delta);
+				onRouting?.(delta, routing);
+				return {
+					content: [{ type: "text", text: `Applied routing: ${routing.id} (${routing.decision}).` }],
+					details: undefined,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [{ type: "text", text: `Routing rejected: ${message}` }],
+					details: undefined,
+				};
+			}
+		},
+	};
+}
+
 export function createDeclareBeliefToolDefinition(
 	beliefSet: BeliefSet,
-	routingSet: RoutingSet = new RoutingSet(),
 	onBeliefDelta?: (
 		delta: BeliefDelta,
 		belief: Belief,
 		previousStatus: BeliefStatus | undefined,
 		priorBelief?: Belief,
 	) => void,
-	onRouting?: (delta: RoutingDelta, routing: Routing) => void,
 ): ToolDefinition<typeof declareBeliefSchema, undefined> {
 	return {
 		name: "declare_belief",
 		label: "declare belief",
 		description:
-			"Record or update your current beliefs about the product, the code, or what the answer must establish. A belief names a relation between two referents " +
-			"plus a falsifiable expectation. Ops: propose (add a belief — several may be open at once), support/refute " +
-			"(settle a proposed belief with the observed evidence), refine (replace a belief: supply a corrected " +
-			"statement AND expectation, not evidence), retract (withdraw), route (declare the fast-path routing " +
-			"decision for the current request).",
+			"Record or adjudicate provisional world beliefs. A fulfilled prediction is support evidence. Residual observations may directly refine a belief or motivate new candidate beliefs.",
 		promptSnippet: declareBeliefSystemPromptContribution.snippet,
 		promptGuidelines: declareBeliefSystemPromptContribution.guidelines,
 		parameters: declareBeliefSchema,
 		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
 			try {
 				const delta = toDelta(input);
-				if (delta.op === "route") {
-					const routing = routingSet.apply(delta);
-					onRouting?.(delta, routing);
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Applied route: ${routing.id} ${routing.statement} (${routing.decision}).`,
-							},
-						],
-						details: undefined,
-					};
-				}
-				// Capture the target belief's status *before* the mutation so the session can
-				// emit a `BeliefUpdated` with a strictly accurate `previousStatus`.
 				const priorBelief = "beliefId" in delta ? beliefSet.get(delta.beliefId) : undefined;
 				const previousStatus = priorBelief ? statusOf(priorBelief) : undefined;
 				const belief = beliefSet.apply(delta);
-				// Notify the session of the mutation so it can emit the right belief-loop
-				// event at the actual mutation point (creation vs a real status change),
-				// rather than conflating it with batch selection. For `refine`/`retract` the
-				// prior record is carried so the session can surface its supersede transition.
 				onBeliefDelta?.(delta, belief, previousStatus, priorBelief);
 				return {
 					content: [
@@ -307,15 +217,10 @@ export function createDeclareBeliefToolDefinition(
 					],
 					details: undefined,
 				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
 				return {
-					content: [
-						{
-							type: "text",
-							text: `Belief rejected: ${message} Re-read your belief and retry with a corrected form.`,
-						},
-					],
+					content: [{ type: "text", text: `Belief rejected: ${message}` }],
 					details: undefined,
 				};
 			}

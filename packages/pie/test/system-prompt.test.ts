@@ -101,7 +101,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("You are a scientific mind investigating a task by forming and testing beliefs");
+			expect(prompt).toContain("provisional, task-local beliefs about the relevant world");
 			expect(prompt).not.toContain("reading files");
 			expect(prompt).not.toContain("executing commands");
 			expect(prompt).not.toContain("expert coding assistant");
@@ -127,8 +127,8 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			// A probe identity, not the file/command-agent identity.
-			expect(prompt).toContain("You are a scientific mind running an experiment");
+			// An evidence-gathering identity, not the file/command-agent identity.
+			expect(prompt).toContain("You run an experiment against the code or product");
 			expect(prompt).not.toContain("expert coding assistant");
 			// No pi-docs block or coding-only guideline to distract the probe.
 			expect(prompt).not.toContain("Pi documentation");
@@ -167,8 +167,10 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
+			expect(prompt).toContain("- Pie-specific belief-loop docs:");
+			expect(prompt).toContain("- Shared coding-agent docs:");
 			expect(prompt).toContain(
-				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
+				"- Resolve general docs/... under Shared coding-agent docs, Pie belief-loop documents under Pie-specific belief-loop docs, and examples/... under Examples, not the current working directory",
 			);
 			expect(prompt).toContain("environment variables (docs/environment-variables.md)");
 		});

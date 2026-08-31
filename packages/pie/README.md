@@ -1,86 +1,95 @@
 # Pie: Pi + Epistemology
 
-PIE is an experimental coding-agent harness that makes the epistemic process itself an explicit runtime object. Rather than allowing one model invocation to freely mix hypothesis formation, investigation, interpretation and answer generation, PIE separates these cognitive operations and controls the information allowed to cross between them.
+PIE is an experimental coding-agent harness that makes task-local epistemic state explicit.
+It separates choosing uncertainty, contacting the world, adjudicating evidence, and writing the
+answer so evidence can change the agent's working model without turning the investigation into a
+workflow ceremony.
 
-Pie 是一个以四阶段信念循环为核心、默认启用的可自我扩展编码智能体；其余 workspace 只提供通用支撑能力。
-Pie is a self-extensible coding agent whose core is a default-enabled four-phase belief loop; the other workspaces only provide generic support.
-
-
-- **四阶段信念循环（Four-phase belief loop）**：propose → planner → execution → distill → finalReport，由 ROLE_SPECS/TRANSITION_STEERS 单一权威源驱动，默认启用。The phases are driven by the single source of truth ROLE_SPECS/TRANSITION_STEERS and are enabled by default.
-- **批次规划器（Batch planner）**：open beliefs 由 planner 角色按相关性（共享探测目标、工具/skill、依赖、副作用、相近 evidence rounds）合并为一次一个 execution batch，批次选择运行在 `pie.plannerModel`（默认 `defaultModel`）；planner 无工具，open beliefs 直接注入、以一行 `Batch:` 输出选择；单 belief 或无有效选择时回退整帧直通。The planner role groups the open beliefs into one execution batch per turn on `pie.plannerModel` (default `defaultModel`); it has no tools — the open beliefs are injected directly and it replies with one `Batch:` line; a single open belief or a failed selection falls back to the whole-frame dispatch.
-- **角色级隔离（Role-level isolation）**：每阶段的指令、工具面、模型选择与消息投影互相隔离，越权工具调用会被纠正。Each phase keeps its instruction, tool surface, model choice, and message projection isolated; out-of-surface tool calls are steered back.
-- **证据水位线（Evidence watermark）**：原始证据只向蒸馏角色展示一次，随后被掩码，抑制上下文污染。Raw evidence is shown to the distill role exactly once, then masked, curbing context pollution.
-- **执行租约（Execution lease）**：探测帧有工具轮次上限（ceil(Σ证据轮数×1.3)），先提醒后强制返回。Each probe frame has a tool-call budget (ceil(Σ evidence rounds × 1.3)); it nudges once, then forces the return.
-- **结论门控（Conclusion gating）**：conclude 在开放信念或框架义务未清时被阻止，终局前执行一次性覆盖性反思。`conclude` is blocked while beliefs or framing obligations stay open; a one-time reflection runs before the terminal handoff.
-- **终局快照（Terminal snapshot）**：finalReport 无工具，仅凭注入的 `<final_report_context>` 信念快照作答。The finalReport role has no tools and answers solely from the injected `<final_report_context>` belief snapshot.
+Pie 是一个显式维护任务内暂时认识的编码智能体。它分离“选择值得减少的不确定性、接触 world、依据证据更新认识、生成最终回答”，但不把 routing、workflow、coverage 或 ontology bookkeeping 伪装成 belief。
 
 Built on top of Pi: https://pi.dev
 
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+## Belief loop
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## 项目思想：四阶段信念循环（The project idea: the four-phase belief loop）
-
-Pie 在本次迭代中的核心思想，是把"智能体如何回答问题"显式建模为一个四阶段信念循环（belief loop）。该状态机由 pie 包（`packages/pie`）实现并默认启用（`declare_belief` 默认加入工具面）；其余工作区为它提供支撑能力（统一 LLM API、智能体运行时、终端 UI 等），而非各自运行同一状态机。五个阶段由 `packages/pie/src/core/role-specs.ts` 中的 `ROLE_SPECS` 与 `TRANSITION_STEERS` 集中声明，提示词、工具面、模型选择与消息投影共享同一权威来源，不会各自漂移：
-
-| 阶段 | 职责 |
-|------|------|
-| `propose`（提议） | 决定测试什么；提出信念（statement/expectation/evidence）与框架义务（framing obligation） |
-| `planner`（规划） | 把 open beliefs 合并为下一个 execution batch（一次一个 batch；无有效选择时整帧回退） |
-| `execution`（执行） | 先观察探测；当用户意图要求实际修改时，以最小编辑作为检验信念的干预实验并验证，再报告一句原始观察 |
-| `distill`（蒸馏） | 做预测误差蒸馏（prediction-error distillation）：先用既有信念解释观察，再只对残差更新信念 |
-| `finalReport`（终答） | 依据注入的信念快照写出结论，无工具 |
-
-信念按指称类型打标签：`[code]`（实现）、`[prod]`（产品行为或文档声明）、`[user]`（用户意图/需求）、`[convention]`（仓库惯例）。信念本身用 `pie.beliefLang` 指定的语言书写（默认 `English`）。`/bs` 命令可查看当前信念集，`/thinking` 可设置思考级别。详见 [belief-loop-roles.md](packages/pie/docs/belief-loop-roles.md)。
-
-The core idea of Pie in this iteration is to model "how the agent answers a question" explicitly as a four-phase belief loop. The state machine is implemented and enabled by default in the pie package (`packages/pie`) — `declare_belief` is added to the default tool surface; the other workspaces provide supporting capabilities (unified LLM API, agent runtime, terminal UI, …) rather than each running the same state machine. The four belief phases plus the batching planner step are declared centrally by `ROLE_SPECS` and `TRANSITION_STEERS` in `packages/pie/src/core/role-specs.ts`, so prompts, tool surfaces, model selection, and message projections share one authoritative source:
-
-| Phase | Job |
-|-------|-----|
-| `propose` | Decides what to test; proposes beliefs (statement/expectation/evidence) and framing obligations |
-| `planner` | Groups the open beliefs into the next execution batch (one batch per turn; whole-frame fallback on no valid selection) |
-| `execution` | Probes by observation first; when the intended outcome requires an actual change, makes the smallest edit as an intervention experiment, verifies it, then reports one raw observation sentence |
-| `distill` | Performs prediction-error distillation: explains the observation with current beliefs first, then updates only on the residual |
-| `finalReport` | Writes the conclusion from the injected belief snapshot; no tools |
-
-Beliefs tag their referents by kind — `[code]` (implementation), `[prod]` (product behavior or documented claim), `[user]` (user intent/requirement), `[convention]` (repo idiom/naming/pattern) — and are written in the language set by `pie.beliefLang` (default `English`). Use `/bs` to view the current belief set and `/thinking` to set the thinking level. See [belief-loop-roles.md](packages/pie/docs/belief-loop-roles.md).
-
-
-### 角色模型配置（Role model configuration）
-
-信念循环允许为两个角色单独配置模型（仅在信念集启用时生效）：
-
-- `pie.executionModel`：execution（探测）角色使用的模型，仅对该角色覆盖会话模型，适合用便宜模型跑工具探测。
-- `pie.distillationModel`：distill（蒸馏/残差归纳）角色使用的模型，默认回退到 `defaultModel`，保证探测用便宜模型时蒸馏仍跑在强默认模型上。
-- `pie.distillationThinkingLevel`：distill 角色的思考级别，默认 `low`；仅在该角色的请求边界生效，不影响其他角色与会话主模型的思考级别。
-- `pie.beliefLang`：信念循环提示词要求的书写语言，默认 `English`，可改为任意语言名称（如 `Chinese`）。
-- `pie.fastPathModel`：fast path（快速路径）执行的模型。propose 角色第一回合先用配置的 `defaultModel` 对请求做路由判断（`declare_belief` 的 `route` 操作，记为 `RoutingSet` 中的 `Routing`）：判定为 `fast-path` 时，execution 角色直接执行请求并在 `fastPathModel` 上作答，随后用 `distillationModel` 把执行上下文蒸馏成摘要写回 epistemic context，再复位到下一任务的 propose；判定为 `belief-loop` 时走完整信念循环。每个 `route` 记录在首次评估时即按 routing id 消费，后续 propose 回合只处理最新未消费的路由；fast path 仅在信念集静止时派发（无待验证的开放世界信念、无未闭合 framing 义务），因此 distill 批次落定后的后续 propose 回合可以声明一次性的 `fast-path` handoff 把剩余工作交给快速路径；失败的 fast-path 运行使该 route 不再重放，任务带着失败摘要回到 propose 继续信念循环。未配置时 fast path 沿用会话主模型。
-
-propose 始终使用会话主模型（`defaultModel`），finalReport 使用 `pie.fastPathModel`（未配置时回退会话主模型）。模型字符串使用 `provider/modelId` 格式；Pie 专属设置配置在全局 `~/.pi/agent/settings-pie.json` 或项目 `.pi/settings-pie.json`（见下方示例）；项目文件覆盖全局同名项。Pie 设置都放在该文件的顶层，`settings.json` 里的 `pie` 键会被忽略（Pie 设置只从 `settings-pie.json` 读取）；其余非 Pie 设置（如 `theme`）继续取自 `settings.json`：
-
-```json
-// ~/.pi/agent/settings.json
-{
-  "defaultModel": "provider/defaultModel"
-}
+```text
+BELIEF STATE
+    |
+    v
+PROPOSE / NEXT
+选择当前最值得减少的 uncertainty
+    |
+    v
+EXECUTION
+与 world 接触，返回 raw evidence
+    |
+    v
+DISTILL
+adjudicate existing beliefs, identify residual, refine epistemic state
+    |
+    +---- unresolved material uncertainty ---> PROPOSE
+    |
+    +---- epistemically sufficient ----------> FINAL REPORT
 ```
 
+The cognitive roles are:
+
+| role | responsibility |
+|---|---|
+| `propose` | choose the coherent experiment with the highest expected task-relevant information gain relative to cost, risk, side effects, and dependencies |
+| `execution` | observe or minimally intervene, then report every materially distinct raw observation with sources or command results |
+| `distill` | first adjudicate tested beliefs from all relevant evidence, then inspect residual for missing beliefs or reframing |
+| `finalReport` | synthesize settled evidence, preserve uncertainty, and answer the user |
+
+Routing, leases, and domain plans are implementation helpers, not cognitive phases. The former
+planner role was removed because selecting `Batch: ids` added no evidence; beliefs proposed together
+now define one coherent execution episode.
+
+核心规则：
+
+1. Beliefs are provisional and task-local.
+2. Beliefs describe evidence-revisable relations about code, product behavior, user requirements,
+   or relevant conventions.
+3. Names are provisional pointers, not ontological commitments. Internal structure is refined only
+   when evidence makes it task-relevant.
+4. Execution observes or intervenes; distill owns epistemic interpretation.
+5. Evidence settles existing beliefs. Residual exposes missing beliefs or reframing.
+6. Do not investigate uncertainty that cannot materially change the task outcome.
+
+Mandatory scope discovery, atomicity proofs, referent type tags, framing beliefs, coverage
+reflection, and conjunction-completeness checks have been removed. Review consistency checks remain
+heuristics used when evidence suggests drift or hidden scope.
+
+`/bs` displays the current belief set. `pie.beliefLang` controls the language used for belief
+content.
+
+See [PIE-specific documentation](docs/README.md). General CLI, SDK, extension, provider, RPC, and
+TUI documentation is shared with [`packages/coding-agent/docs`](../coding-agent/docs/).
+
+## Fast path
+
+`route_task` records routing in a separate `RoutingSet`; routing is not a belief. Fast path requires
+epistemic closure: no unresolved belief may remain that could materially change the action or its
+safety. Operational simplicity alone is insufficient.
+
+Fast-path terminal ownership is unique:
+
+```text
+fast-path execution -> user
+```
+
+Execution writes the user answer. A hidden distillation summary preserves completed actions and
+blockers for continuity, but distill and finalReport do not write duplicate terminal answers. A
+failed fast path returns to propose.
+
+## Role model configuration
+
+Pie-specific settings live in global `~/.pi/agent/settings-pie.json` or project
+`.pi/settings-pie.json`; project fields override global fields.
+
 ```json
-// ~/.pi/agent/settings-pie.json
 {
-  "defaultModel": "provider/defaultModel",
+  "defaultModel": "provider/strongModel",
   "defaultThinkingLevel": "medium",
-  "plannerModel": "provider/plannerModel",
-  "plannerThinkingLevel": "high",
   "executionModel": "provider/probeModel",
   "executionThinkingLevel": "minimal",
   "distillationModel": "provider/strongModel",
@@ -91,34 +100,30 @@ propose 始终使用会话主模型（`defaultModel`），finalReport 使用 `pi
 }
 ```
 
-回退链（项目 `.pi/settings-pie.json` 与全局同名项深合并，项目优先）：`defaultModel` 未配置时回退到 `settings.json` 的 `defaultModel`；`plannerModel`/`distillationModel` 未配置时回退 `defaultModel`；`executionModel` 未配置时用会话主模型；`fastPathModel` 未配置时 fast path 与 finalReport 沿用会话主模型；fast-path 蒸馏始终使用 `distillationModel`（未配置则 `defaultModel`，再否则会话主模型）。思考级别：`distillationThinkingLevel` 默认 `low`；`planner`/`execution`/`fastPath`/`default` 思考级别未配置时回退 `defaultThinkingLevel`，再回退 `settings.json` 的 `defaultThinkingLevel`。模型名解析失败时，execution/distillation/fastPath 最终都使用会话主模型。
+- `defaultModel`: propose and finalReport. Final synthesis deliberately does not use the cheap
+  fast-path model.
+- `executionModel`: normal evidence gathering.
+- `distillationModel`: evidence adjudication and world-model refinement; defaults to
+  `defaultModel`.
+- `fastPathModel`: epistemically closed direct execution only.
+- `distillationThinkingLevel`: defaults to `low`.
 
-The belief loop lets two roles run on separately configured models (only while the belief set is enabled):
+Unset role models fall back to the session model. Fast-path summaries use `distillationModel` when
+configured; otherwise they use the global default model setting or the session model.
 
-- `pie.executionModel`: the model for the execution (probe) role; overrides the session model for that role only — use a cheaper model for probing.
-- `pie.distillationModel`: the model for the distill (prediction-error) role; defaults to `defaultModel` so distillation stays on the strong default model even when probing runs on a cheaper one.
-- `pie.distillationThinkingLevel`: the thinking level for the distill role; defaults to `low`. It applies only at that role's request boundary and does not affect other roles or the session's main-model thinking level.
-- `pie.beliefLang`: the language the belief-loop prompts must write in; defaults to `English` — set it to another language name (e.g. `Chinese`) to change it.
-- `pie.fastPathModel`: the model for fast-path execution. On the first propose turn of a request, the loop routes on the configured `defaultModel` (a `route` decision recorded as a `Routing` in `RoutingSet`). A `fast-path` decision dispatches the execution role to execute the request directly on `fastPathModel`; the run is then distilled into a summary with `distillationModel` (written back to the epistemic context) and the loop resets to the next task's propose. A `belief-loop` decision keeps the full belief protocol. Each `route` is consumed by id on first evaluation and only the latest unconsumed route decides; the fast path dispatches only when the belief set is quiescent (no proposed world belief pending verification, no open framing obligation) — so a subsequent propose turn may declare a one-shot `fast-path` handoff for the remaining work once a distill batch settles. A failed fast-path run is not re-dispatched: the task returns to propose with the failure summary and the consumed route stays consumed. Unset means the fast path uses the session's main model.
-
-The propose role always uses the session's main model (`defaultModel`); the finalReport role runs on `pie.fastPathModel` (falling back to the session's main model when unset). Model strings use the `provider/modelId` format; pie-specific settings live in the global `~/.pi/agent/settings-pie.json` or the project `.pi/settings-pie.json` (see the example above). Project `.pi/settings-pie.json` deep-merges over global fields and wins. Pie settings sit at the top level of that file, and any `pie` key inside `settings.json` is ignored (pie is read only from `settings-pie.json`); other non-pie settings like `theme` stay in `settings.json`.
-
-Fallbacks (project `.pi/settings-pie.json` deep-merges over global, project wins): `defaultModel` falls back to `settings.json`'s `defaultModel`; `plannerModel`/`distillationModel` fall back to `defaultModel`; `executionModel` uses the session's main model when unset; `fastPathModel` makes the fast path and finalReport use the session's main model when unset; fast-path distillation always uses `distillationModel` (then `defaultModel`, then the session's main model). Thinking levels: `distillationThinkingLevel` defaults to `low`; `planner`/`execution`/`fastPath`/`default` thinking levels fall back to `defaultThinkingLevel`, then to `settings.json`'s `defaultThinkingLevel`. An unresolvable model name ends up on the session's main model for execution/distillation/fast-path.
-
-## 开发命令（Development commands）
+## Development commands
 
 ```bash
-npm install --ignore-scripts  # 安装全部依赖，不运行生命周期脚本
-npm run build         # 刷新模型数据后构建所有包
-npm run build:offline # 用既有模型数据离线重建
-npm run check         # 检查：lint、格式、类型、固定依赖、shrinkwrap 等
-./test.sh             # 运行测试（无 API 密钥时跳过依赖 LLM 的测试）
-./pie.sh          # 从源码运行 Pie（可在任意目录执行）
+npm install --ignore-scripts
+npm run check
+./test.sh
+./pie.sh
 ```
 
-### 与 pi 的关系（Relationship to pi）
-
-Pie 是 pi 的源码级衍生（Built on top of Pi: https://pi.dev）。Pie 有意沿用 pi 的运行时状态命名空间：两个 CLI 读取同一份 `~/.pi/agent`（及项目 `.pi/`）设置、session、凭据与 `PI_*` 环境变量，在两者间切换前请了解共享影响。Pie 未发布到 npm（private），本文档中的 `pi ...` 命令均以 `./pie.sh ...` 运行。
+Pie is a source fork of Pi and intentionally shares `~/.pi/agent`, project `.pi/` state, sessions,
+credentials, and `PI_*` environment variables. Pie is private and is run from source with
+`./pie.sh`.
 
 ## License
+
 MIT

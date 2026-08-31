@@ -1,31 +1,18 @@
 # Agent session domain model
 
-> **Status: target contract; not yet implemented.** This document defines the
-> shared business vocabulary and ownership rules for `packages/pie` and `gui`.
-> Current runtime and GUI gaps are called out explicitly below. It does not
-> describe the existing session JSONL format as if the migration had happened.
+> **Status: current runtime contract.** `agent-session-domain.ts` defines this model,
+> `BeliefLoopController` emits and replays its events, and RPC forwards those events unchanged.
+> GUI projections remain consumers rather than sources of truth.
 
-## Problem
+## Problem and solution
 
-The current implementation has three related but different models:
+Operational messages alone do not provide durable task, frame, routing, belief, execution, and
+distillation identity. Inferring those objects from adjacent model turns makes phase transitions
+ambiguous and couples consumers to controller implementation details.
 
-- `AgentSession` in `packages/pie` is an operational controller. It owns the
-  agent, queues, the current role, a session-wide `BeliefSet`, and a numeric task
-  counter, but it does not retain `Task` or runtime `LoopFrame` records.
-- the live RPC stream calls its numeric task id `frameId` and emits phase events,
-  but it does not emit a complete task/frame lifecycle;
-- `NativeGuiModel` reconstructs logical LoopFrames from those phase events and
-  then projects them again into `GraphTaskState`.
-
-For example, a runtime event with `frameId = 7` means task 7. If execution later
-returns to `PROPOSING`, the GUI closes its current logical frame and creates a
-new synthetic frame that still belongs to runtime task 7. The same field
-therefore names a task on one side and a frame on the other.
-
-The solution is one language-neutral domain contract with stable ids and
-explicit lifecycle events. The runtime remains authoritative. The GUI replays
-the events into a read model; it does not discover task/frame boundaries or
-epistemic relationships from event adjacency.
+PIE therefore emits one language-neutral domain contract with stable opaque ids and explicit
+lifecycle events. The runtime is authoritative. Consumers replay the events into a read model;
+they do not discover task/frame boundaries or epistemic relationships from message adjacency.
 
 ## Three layers, not one object
 
@@ -63,14 +50,13 @@ Ownership rules:
   Belief pointers;
 - Execution and Distillation occurrences belong to exactly one TaskFrame;
 - Routing belongs to the TaskFrame/Episode whose path it selected;
-- Target is the immutable user outcome captured at task start; revisable
-  completion obligations remain framing beliefs.
+- Target is the immutable user outcome captured at task start; it remains control context and is not copied into the Belief registry.
 
 Cross-language and persisted records use ids, never `shared_ptr`/`unique_ptr`.
 An implementation may use references internally, but pointer ownership is not
 part of the domain or wire contract.
 
-## Target read model
+## Read model
 
 The following C++-like pseudocode describes relationships, not a required C++
 header. TypeScript uses tagged unions with the same discriminants.
@@ -117,6 +103,7 @@ struct TaskFrame {
   TaskId taskId;
   uint64_t ordinal;
   FrameStatus status;
+  FrameStage stage;
 
   std::vector<Intervention> steering;
   std::optional<Routing> routing;
@@ -153,13 +140,14 @@ is never an independently writable field.
 struct Belief {
   BeliefId id;
   std::string statement;
-  BeliefDomain domain; // Product | Code | Framing
+  BeliefDomain domain; // Product | Code
   std::string expectation;
   uint32_t evidenceRounds;
   std::vector<SkillId> skillRefs;
 
   std::vector<SupportEvidence> supportedBy;
   std::vector<RefutationEvidence> refutedBy;
+  std::vector<RefutationEvidence> inconclusiveBy;
   std::optional<BeliefId> supersededBy;
   bool withdrawn;
 };
@@ -168,6 +156,7 @@ enum class BeliefStatus {
   Proposed,
   Supported,
   Refuted,
+  Inconclusive,
   Superseded,
 };
 ```
@@ -175,8 +164,8 @@ enum class BeliefStatus {
 The status transition remains monotone:
 
 ```text
-Proposed -> Supported | Refuted
-Proposed | Supported | Refuted -> Superseded
+Proposed -> Supported | Refuted | Inconclusive
+Proposed | Supported | Refuted | Inconclusive -> Superseded
 ```
 
 Task-boundary pruning removes ids from `activeBeliefs`; it does not delete
@@ -184,9 +173,8 @@ historical Belief records or reuse their ids. This preserves Task/Frame
 provenance while keeping the next task's working set small.
 
 Routing is not encoded as a Belief domain in the target model. A routing
-decision is an action by the harness/model, not a world assertion whose evidence
-is the decision itself. If an epistemic justification is needed, `Routing` may
-reference supporting Belief ids.
+decision is control metadata, not a world assertion. Its reason explains the
+control decision but does not become belief evidence.
 
 ### Routing
 
@@ -200,16 +188,13 @@ struct Routing {
   double successProbability;
   uint32_t estimatedSteps;
   RoutingDifficulty difficulty;
-
-  std::vector<BeliefId> supportingBeliefs;
-  std::vector<BeliefId> handoffFromFramingBeliefs;
   std::string reason;
 };
 ```
 
 There is one Routing record on the outer `TaskFrame`. `FastPathFrame` does not
-repeat it. Initial routing and a later mid-task fast-path handoff use the same
-shape; the latter fills `handoffFromFramingBeliefs`.
+repeat it. Routing is written through the control-only `route_task` tool. Fast-path dispatch is
+blocked while any proposed belief remains; an immaterial proposal must be explicitly retracted.
 
 ### Plan
 
@@ -221,8 +206,9 @@ struct Plan {
 };
 ```
 
-The current planner emits only a `Batch:` list. `selectedToExplore` is therefore
-authoritative; `intent` is optional and must not be synthesized by the GUI.
+`selectedToExplore` records the coherent beliefs chosen by propose for one execution episode.
+`intent` is optional and must not be synthesized by the GUI. Plan is harness bookkeeping, not a
+separate cognitive role.
 
 ### Execution
 
@@ -249,9 +235,8 @@ information. `filePath` is retained only as an optional normalized index for
 file-related tools.
 
 `planId` is required for a `BeliefLoopFrame` execution and absent for a direct
-`FastPathFrame` execution. A singleton belief may skip the planner model, but
-the runtime still emits a minimal Plan occurrence selecting that belief; this is
-harness bookkeeping, not fabricated planner prose.
+`FastPathFrame` execution. The runtime emits a minimal Plan occurrence selecting the coherent
+belief set proposed for execution; this is harness bookkeeping, not model-generated planner prose.
 
 ### Distillation and belief deltas
 
@@ -267,12 +252,12 @@ struct BeliefDelta {
   BeliefDeltaId id;
   FrameId frameId;
   std::optional<DistillationId> distillationId;
-  BeliefOperation operation; // Propose | Support | Refute | Refine | Retract
+  BeliefOperation operation; // Propose | Support | Refute | Refine | Inconclusive | Retract
 
   std::optional<BeliefId> beliefId;
   std::optional<Belief> proposedRecord;
   std::optional<std::string> evidence;
-  std::vector<BeliefId> evidenceBeliefIds;
+  std::vector<Belief> resultingBeliefs;
 };
 ```
 
@@ -296,25 +281,18 @@ struct Intervention {
 Steering is a sequence, not `optional<string>`: several messages can arrive in
 one frame, and their location in the execution/cognitive flow matters.
 
-## Target versus framing beliefs
-
-`Target` and a framing Belief answer different questions:
+## Target versus beliefs
 
 | Object | Meaning | Mutable? |
 |---|---|---|
 | `InitialPrompt` | what the user sent and what the runtime executed after expansion | no |
-| `Target` | the initial user outcome the Task is trying to achieve | no |
-| framing Belief | the current revisable judgment of what the answer must establish | superseded through Belief refinement |
+| `Target` | the user outcome the Task is trying to achieve | no |
+| Belief | a provisional, evidence-revisable judgment about the relevant world | superseded through refinement |
 
-Target must not become the conclude gate. The existing framing-belief rule stays:
-open framing obligations block conclusion, and supporting one requires links to
-supported product/code beliefs.
-
-The default Target statement is the effective initial prompt unless an input
-hook supplies a more precise explicit outcome; creating it does not require an
-extra LLM inference. A steering message that changes tactics remains an
-Intervention under the same Target. A message that replaces the desired outcome
-closes the current Task and opens a new one instead of mutating Target.
+Target is control context, not a belief and not a recursive completeness checklist. The default
+Target statement is the effective initial prompt unless an input hook supplies a more precise
+explicit outcome. A steering message that changes tactics remains an Intervention under the same
+Target. A message that replaces the desired outcome closes the current Task and opens a new one.
 
 ## Task and session branching
 
@@ -416,39 +394,20 @@ model and must not become a second source of truth.
 7. Every Execution belongs to one Frame and, when applicable, one Plan.
 8. Every Distillation names its Execution inputs and BeliefDelta outputs.
 9. Routing exists once per routed Frame and is not duplicated in FastPathFrame.
-10. Target is immutable; revisable completion semantics live in framing beliefs.
+10. Target is immutable and remains distinct from evidence-revisable world beliefs.
 11. A GUI Task view contains exactly one Task's Frames.
 12. Session branching is preserved by the event tree; a Task vector is only a
     selected-branch projection.
 
-## Current implementation gaps
+## Current implementation notes
 
-- runtime `AgentSession` retains only the current task counter/request and a
-  session-wide in-memory BeliefSet;
-- belief/task/frame state is not reconstructed as a durable domain snapshot on
-  session resume;
-- RPC `frameId` is a numeric task id;
-- the GUI allocates logical Frame ids and derives Frame boundaries;
-- runtime Belief ids are remapped to numeric registry indexes for the GUI;
-- GUI Belief records omit expectation, evidence, and supersession provenance;
-- live Distillation input ids and belief-delta output ids are inferred or
-  absent;
-- fast-path planning is synthesized and fast-path distillation is a custom
-  message rather than the same structured Distillation occurrence;
-- `GraphTaskState` currently projects every Frame in `NativeGuiModel`, not an
-  explicitly selected Task.
-
-These gaps describe migration work. They are not permission for the GUI to
-become authoritative.
-
-## Migration order
-
-1. Add stable id types and versioned domain-event TypeScript definitions.
-2. Emit Task/Frame lifecycle and stable Belief ids without changing the GUI.
-3. Persist/replay domain events into `AgentSessionSnapshot`.
-4. Adapt `NativeGuiModel` to consume explicit ids and correlations; keep legacy
-   demo fixtures behind an adapter during the transition.
-5. Make Text/Graph views select one Task and remove synthetic Frame splitting.
-6. Remove numeric Belief remapping and adjacency-based provenance inference.
-
-Each step must keep the runtime authoritative and closed history immutable.
+- Domain events are stored as `pie.agent-session-domain-event` custom session entries and replayed
+  into `AgentSessionSnapshot` for the selected branch.
+- The live controller still owns the operational `BeliefSet`; the replayed snapshot is a durable
+  read model, not a replacement mutable store.
+- `Distillation.outputs` provides the current distillation-to-delta correlation. The optional
+  reverse `BeliefDelta.distillationId` is not required for replay.
+- Fast-path summaries appear both as a structured domain distillation and as the hidden
+  `fast_path_distillation` custom message used for conversational continuity.
+- Any GUI or external client must consume stable ids and explicit lifecycle events. It must not
+  recreate frame boundaries from role or message adjacency.

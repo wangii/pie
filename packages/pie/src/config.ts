@@ -436,9 +436,14 @@ export function getReadmePath(): string {
 	return resolve(join(getPackageDir(), "README.md"));
 }
 
-/** Get path to docs directory */
+/** Get path to Pie-specific docs directory. */
 export function getDocsPath(): string {
 	return resolve(join(getPackageDir(), "docs"));
+}
+
+/** Get path to the shared coding-agent documentation in this source checkout. */
+export function getCodingAgentDocsPath(): string {
+	return resolve(join(getPackageDir(), "..", "coding-agent", "docs"));
 }
 
 /** Get path to examples directory */

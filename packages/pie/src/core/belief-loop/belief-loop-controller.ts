@@ -28,7 +28,6 @@ import {
 	WITHDRAWN,
 } from "../belief-set.ts";
 import type { ContextUsage } from "../extensions/index.ts";
-import type { CustomMessage } from "../messages.ts";
 import { resolveCliModel } from "../model-resolver.ts";
 import { ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
 import { buildSystemPrompt } from "../system-prompt.ts";
@@ -38,12 +37,9 @@ import { projectContextMessages, projectMessagesFor } from "./message-projection
 // Types and constants (moved from agent-session.ts)
 // ============================================================================
 
-/** One phase of the belief loop. The execution role carries its frame-scoped fields
- *  (`frameHorizon`, `leaseReportNudged`), so those fields cannot be read while propose,
- *  distill, or finalReport. */
+/** One cognitive phase of the belief loop. Execution carries its frame-scoped lease fields. */
 export type LoopState =
 	| { role: "propose" }
-	| { role: "planner" }
 	| { role: "distill" }
 	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
 	| { role: "finalReport" };
@@ -58,20 +54,17 @@ export interface RoleStatusSlot {
 /** The belief-loop status slots. `epistemic` covers the propose role only. */
 export interface RoleStatus {
 	epistemic: RoleStatusSlot;
-	planner: RoleStatusSlot;
 	distillation: RoleStatusSlot;
 	execution: RoleStatusSlot;
 }
 
 const FRAME_HORIZON_HEADROOM = 1.3;
-const REFLECTION_MIN_SETTLED_BELIEFS = 3;
 
 export function selectRoleThinkingLevel(
 	role: LoopState["role"],
 	loopState: LoopState,
 	levels: {
 		default?: ThinkingLevel;
-		planner?: ThinkingLevel;
 		execution?: ThinkingLevel;
 		fastPath?: ThinkingLevel;
 		distillation: ThinkingLevel;
@@ -81,15 +74,11 @@ export function selectRoleThinkingLevel(
 	const configured =
 		role === "distill"
 			? levels.distillation
-			: role === "planner"
-				? levels.planner
-				: role === "execution"
-					? loopState.role === "execution" && loopState.fastPath
-						? levels.fastPath
-						: levels.execution
-					: role === "propose"
-						? levels.default
-						: levels.fastPath;
+			: role === "execution"
+				? loopState.role === "execution" && loopState.fastPath
+					? levels.fastPath
+					: levels.execution
+				: levels.default;
 	return configured ?? sessionLevel;
 }
 
@@ -100,8 +89,7 @@ export function selectRoleThinkingLevel(
  *
  * It consults `ROLE_SPECS[role].modelPolicy` as the single source of truth for
  * which setting a role uses, so the role → model mapping never drifts from the
- * role spec (propose/`default`, planner/`planner`, distill/`distillation`,
- * execution/`execution`, finalReport/`fastPath`).
+ * role spec (propose and finalReport/`default`, distill/`distillation`, execution/`execution`).
  *
  * - `propose` always follows the `default` model so every proposal turn sticks to
  *   the cost/quality strategy (it used to only match the first proposal after a
@@ -117,7 +105,6 @@ export function selectRoleModelSpec(
 	loopState: LoopState,
 	models: {
 		default?: string;
-		planner?: string;
 		execution?: string;
 		fastPath?: string;
 		distillation?: string;
@@ -125,12 +112,11 @@ export function selectRoleModelSpec(
 ): string | undefined {
 	const policy = ROLE_SPECS[role].modelPolicy;
 	if (policy === "default") return models.default;
-	if (policy === "planner") return models.planner;
 	if (policy === "distillation") return models.distillation;
 	if (policy === "execution") {
 		return loopState.role === "execution" && loopState.fastPath ? models.fastPath : models.execution;
 	}
-	return models.fastPath;
+	return policy === "fastPath" ? models.fastPath : models.default;
 }
 
 // ============================================================================
@@ -138,9 +124,8 @@ export function selectRoleModelSpec(
 // ============================================================================
 
 /**
- * The four-phase belief loop (propose → planner → execution → distill → finalReport),
- * extracted from AgentSession. Owns the loop and domain state; reaches into `host` for the
- * session concerns it cannot own (agent, session manager, settings, tool registry, event emit).
+ * The belief loop (propose → execution → distill → finalReport), extracted from AgentSession.
+ * Routing, leases, and domain events are implementation helpers rather than cognitive phases.
  */
 export class BeliefLoopController {
 	readonly beliefSet = new BeliefSet();
@@ -149,12 +134,12 @@ export class BeliefLoopController {
 	loopState: LoopState = { role: "propose" };
 	/** The belief ids already dispatched to execution. */
 	dispatchedFrameIds: Set<string> = new Set();
-	/** Routing beliefs already evaluated for the current task. */
+	/** Routing decisions already evaluated for the current task. */
 	consumedRouteIds: Set<string> = new Set();
-	/** True once the pre-conclusion reflection steer has fired for the current task. */
+	/** True once the cheap pre-conclusion adversarial check has fired for the current task. */
 	reflected = false;
 	/** Latest cache hit rate per belief-loop role, captured at message_end. */
-	roleCacheHitRate: Partial<Record<"propose" | "planner" | "distill" | "execution", number>> = {};
+	roleCacheHitRate: Partial<Record<"propose" | "distill" | "execution", number>> = {};
 	/** Full active tool names (independent of the current role's subset), owned by the host. */
 	private get fullActiveToolNames(): string[] {
 		return this.host._fullActiveToolNames;
@@ -167,21 +152,6 @@ export class BeliefLoopController {
 	beliefsAtTaskReset = 0;
 	/** Set when a fast-path run reported a tool error. */
 	fastPathFailure = false;
-	/** For a frame-open fast-path handoff. */
-	frameOpenHandoff: {
-		route: Routing;
-		framingIds: readonly string[];
-		outcomeBeliefId?: string;
-		openWorldBeliefs: ReadonlyArray<{
-			id: string;
-			domain: string;
-			statement: string;
-			expectation: string;
-			evidenceRounds: number;
-		}>;
-	} | null = null;
-	/** Open world belief ids snapshotted during a frame-open handoff (deferred). */
-	deferredWorldBeliefIds: Set<string> = new Set();
 	/** The current task's request text. */
 	currentTaskRequestText = "";
 
@@ -259,7 +229,6 @@ export class BeliefLoopController {
 				this.loopState,
 				{
 					default: this.host.settingsManager.getDefaultThinkingLevel(),
-					planner: this.host.settingsManager.getPlannerThinkingLevel(),
 					execution: this.host.settingsManager.getExecutionThinkingLevel(),
 					fastPath: this.host.settingsManager.getFastPathThinkingLevel(),
 					distillation: this.host.settingsManager.getDistillationThinkingLevel(),
@@ -295,8 +264,6 @@ export class BeliefLoopController {
 		this.routingSet.clear();
 		this.reflected = false;
 		this.fastPathFailure = false;
-		this.frameOpenHandoff = null;
-		this.deferredWorldBeliefIds = new Set();
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		this.beliefSet.pruneForNewTask();
 		this.beliefsAtTaskReset = this.beliefSet.beliefs.length;
@@ -349,15 +316,13 @@ export class BeliefLoopController {
 
 	private emitCursorChanged(role: LoopState["role"]): void {
 		const stage =
-			role === "planner"
-				? "planning"
-				: role === "execution"
-					? "executing"
-					: role === "distill"
-						? "distilling"
-						: role === "finalReport"
-							? "closed"
-							: "proposing";
+			role === "execution"
+				? "executing"
+				: role === "distill"
+					? "distilling"
+					: role === "finalReport"
+						? "closed"
+						: "proposing";
 		if (stage === "closed") {
 			this.closeDomainFrame();
 		} else {
@@ -376,10 +341,9 @@ export class BeliefLoopController {
 		const ranTools = turn.toolResults.length > 0;
 		switch (state.role) {
 			case "propose": {
-				const proposed = this.beliefSet.proposed().filter((b) => !this.deferredWorldBeliefIds.has(b.id));
-				const undispatched = proposed.filter((b) => !this.dispatchedFrameIds.has(b.id));
-				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
-				if (concluded) {
+				const proposed = this.beliefSet.proposed();
+				const undispatched = proposed.filter((belief) => !this.dispatchedFrameIds.has(belief.id));
+				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
 					return this.concludeTransition(state, proposed);
 				}
 				const routes = this.routingSet.routings.filter((routing) => !this.consumedRouteIds.has(routing.id));
@@ -387,106 +351,59 @@ export class BeliefLoopController {
 				if (route) {
 					this.consumedRouteIds.add(route.id);
 					if (route.decision === "fast-path") {
+						if (proposed.length > 0) {
+							return {
+								state,
+								steer: TRANSITION_STEERS.fastPathBlocked(
+									proposed.map((belief) => `"${belief.statement}"`).join(", "),
+								),
+							};
+						}
 						return this.dispatchToFastExecution(route);
 					}
 					this.selectDomainFrameBody("belief-loop", route);
 				}
-				if (undispatched.length > 1) {
-					return this.dispatchToPlanner();
-				}
-				if (undispatched.length === 1) {
+				if (undispatched.length > 0) {
 					return this.dispatchToExecution(undispatched);
 				}
 				if (proposed.length > 0) {
-					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 					return {
 						state: { role: "distill" },
-						steer: TRANSITION_STEERS.openBeliefs(statements),
+						steer: TRANSITION_STEERS.openBeliefs(proposed.map((belief) => `"${belief.statement}"`).join(", ")),
 					};
 				}
 				if (this.beliefSet.beliefs.length > this.beliefsAtTaskReset) {
-					return {
-						state,
-						steer: TRANSITION_STEERS.deepenOrConclude,
-					};
+					return { state, steer: TRANSITION_STEERS.deepenOrConclude };
 				}
-				if (!ranTools) {
-					return { state: { role: "finalReport" } };
-				}
-				return { state };
+				return !ranTools ? { state: { role: "finalReport" } } : { state };
 			}
 			case "distill": {
 				await this.emitDistillationBlock(turn);
-				const proposed = this.beliefSet.proposed().filter((b) => !this.deferredWorldBeliefIds.has(b.id));
-				const undispatched = proposed.filter((b) => !this.dispatchedFrameIds.has(b.id));
-				const concluded = turn.toolResults.some((r) => r.toolName === "conclude");
-				if (concluded) {
+				const proposed = this.beliefSet.proposed();
+				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
 					return this.concludeTransition(state, proposed);
 				}
-				if (undispatched.length > 1) {
-					this.openNextDomainFrame();
-					return this.dispatchToPlanner();
-				}
-				if (undispatched.length === 1) {
-					this.openNextDomainFrame();
-					return this.dispatchToExecution(undispatched);
-				}
-				if (proposed.length > 0 && !ranTools) {
-					const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
+				const unadjudicated = proposed.filter((belief) => this.dispatchedFrameIds.has(belief.id));
+				if (unadjudicated.length > 0) {
 					return {
 						state,
-						steer: TRANSITION_STEERS.openBeliefs(statements),
+						steer: TRANSITION_STEERS.openBeliefs(
+							unadjudicated.map((belief) => `"${belief.statement}"`).join(", "),
+						),
 					};
 				}
-				if (proposed.length > 0) {
-					return { state };
-				}
-				return {
-					state: { role: "propose" },
-					steer: TRANSITION_STEERS.deepenOrConclude,
-				};
-			}
-			case "planner": {
-				const proposed = this.beliefSet.proposed().filter((b) => !this.deferredWorldBeliefIds.has(b.id));
-				const undispatched = proposed.filter((b) => !this.dispatchedFrameIds.has(b.id));
-				const selected = this.readBatchSelection(turn);
-				if (selected) {
-					const selectedSet = new Set(selected);
-					const batch = undispatched.filter((b) => selectedSet.has(b.id));
-					if (batch.length > 0) {
-						this.emitBatchSelectionBlock(batch);
-						return this.dispatchToExecution(batch);
-					}
-				}
-				return this.dispatchToExecution(proposed);
+				return { state: { role: "propose" }, steer: TRANSITION_STEERS.deepenOrConclude };
 			}
 			case "execution": {
 				const frameHorizon = state.frameHorizon - turn.toolResults.length;
 				if (state.fastPath) {
-					if (turn.toolResults.some((r) => r.isError)) {
-						this.fastPathFailure = true;
-					}
-					if (!ranTools) {
-						if (this.frameOpenHandoff) {
-							return await this.settleFrameOpenHandoff(turn);
-						}
-						await this.settleFastPath(turn);
-						if (this.fastPathFailure) {
-							this.openNextDomainFrame();
-							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-						}
-						this.resetLoopForNewTask();
-						return { state: { role: "propose" } };
-					}
-					if (frameHorizon <= 0 && !state.leaseReportNudged) {
-						return {
-							state: { role: "execution", frameHorizon, leaseReportNudged: true, fastPath: true },
-							steer: TRANSITION_STEERS.leaseNudge,
-						};
-					}
-					if (frameHorizon <= 0) {
-						if (this.frameOpenHandoff) {
-							return await this.settleFrameOpenHandoff(turn);
+					if (turn.toolResults.some((result) => result.isError)) this.fastPathFailure = true;
+					if (!ranTools || frameHorizon <= 0) {
+						if (ranTools && frameHorizon <= 0 && !state.leaseReportNudged) {
+							return {
+								state: { role: "execution", frameHorizon, leaseReportNudged: true, fastPath: true },
+								steer: TRANSITION_STEERS.leaseNudge,
+							};
 						}
 						await this.settleFastPath(turn);
 						if (this.fastPathFailure) {
@@ -505,9 +422,7 @@ export class BeliefLoopController {
 						},
 					};
 				}
-				if (!ranTools) {
-					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
-				}
+				if (!ranTools) return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicate };
 				if (frameHorizon <= 0 && !state.leaseReportNudged) {
 					return {
 						state: { role: "execution", frameHorizon, leaseReportNudged: true },
@@ -515,7 +430,7 @@ export class BeliefLoopController {
 					};
 				}
 				if (frameHorizon <= 0) {
-					return { state: { role: "distill" }, steer: TRANSITION_STEERS.residual };
+					return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicate };
 				}
 				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
 			}
@@ -525,26 +440,15 @@ export class BeliefLoopController {
 	}
 
 	private concludeTransition(state: LoopState, proposed: Belief[]): { state: LoopState; steer?: string } {
-		const openFramings = this.beliefSet.framings();
-		if (openFramings.length > 0 || proposed.length > 0) {
-			const reasons: string[] = [];
-			if (openFramings.length > 0) {
-				reasons.push(
-					`these obligations for what the answer must establish are still open (${openFramings.map((b) => `"${b.statement}"`).join(", ")})`,
-				);
-			}
-			if (proposed.length > 0) {
-				reasons.push(`these beliefs are still unresolved (${proposed.map((b) => `"${b.statement}"`).join(", ")})`);
-			}
+		if (proposed.length > 0) {
 			return {
 				state,
-				steer: TRANSITION_STEERS.concludePremature(reasons.join(" and ")),
+				steer: TRANSITION_STEERS.concludePremature(
+					`these beliefs remain unresolved (${proposed.map((belief) => `"${belief.statement}"`).join(", ")})`,
+				),
 			};
 		}
-		const settledThisTask = this.beliefSet.beliefs
-			.slice(this.beliefsAtTaskReset)
-			.filter((b) => statusOf(b) === "supported").length;
-		if (settledThisTask >= REFLECTION_MIN_SETTLED_BELIEFS && !this.reflected) {
+		if (!this.reflected) {
 			this.reflected = true;
 			return { state, steer: TRANSITION_STEERS.reflection };
 		}
@@ -556,79 +460,34 @@ export class BeliefLoopController {
 
 	private formatFinalReportContext(): string {
 		const beliefs = this.beliefSet.beliefs;
-		const settledWorld = beliefs.filter((b) => statusOf(b) === "supported" && b.domain !== "framing");
-		const framingOutcomes = beliefs.filter((b) => b.domain === "framing" && statusOf(b) !== "proposed");
-		const refuted = beliefs.filter((b) => statusOf(b) === "refuted");
+		const supported = beliefs.filter((belief) => statusOf(belief) === "supported");
+		const refuted = beliefs.filter((belief) => statusOf(belief) === "refuted");
+		const inconclusive = beliefs.filter((belief) => statusOf(belief) === "inconclusive");
 		const lines: string[] = ["<final_report_context>"];
-		if (settledWorld.length > 0) {
-			lines.push("Settled world beliefs:");
-			for (const b of settledWorld) {
-				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
-				lines.push(`  expectation: ${b.expectation}`);
-				if (b.skillRefs && b.skillRefs.length > 0) {
-					lines.push(`  skill refs: ${b.skillRefs.join(", ")}`);
-				}
-				for (const e of b.supportedBy) {
-					lines.push(`  evidence: ${e.evidence}`);
-				}
-			}
-		}
-		if (framingOutcomes.length > 0) {
-			lines.push("Framing outcomes:");
-			for (const b of framingOutcomes) {
-				lines.push(`- ${b.id} [${b.domain}] ${b.statement} (${statusOf(b)})`);
-				for (const e of b.supportedBy) {
-					lines.push(`  evidence: ${e.evidence}`);
-				}
+		if (supported.length > 0) {
+			lines.push("Supported beliefs:");
+			for (const belief of supported) {
+				lines.push(`- ${belief.id} [${belief.domain}] ${belief.statement}`);
+				lines.push(`  expectation: ${belief.expectation}`);
+				for (const entry of belief.supportedBy) lines.push(`  evidence: ${entry.evidence}`);
 			}
 		}
 		if (refuted.length > 0) {
-			lines.push("Refuted beliefs (not part of the answer):");
-			for (const b of refuted) {
-				lines.push(`- ${b.id} [${b.domain}] ${b.statement}`);
+			lines.push("Refuted beliefs (not facts):");
+			for (const belief of refuted) {
+				lines.push(`- ${belief.id} [${belief.domain}] ${belief.statement}`);
+				for (const entry of belief.refutedBy) lines.push(`  evidence: ${entry.evidence}`);
+			}
+		}
+		if (inconclusive.length > 0) {
+			lines.push("Inconclusive beliefs (preserve uncertainty):");
+			for (const belief of inconclusive) {
+				lines.push(`- ${belief.id} [${belief.domain}] ${belief.statement}`);
+				for (const entry of belief.inconclusiveBy) lines.push(`  evidence: ${entry.evidence}`);
 			}
 		}
 		lines.push("</final_report_context>");
 		return lines.join("\n");
-	}
-
-	private dispatchToPlanner(): { state: LoopState; steer: string } {
-		return {
-			state: { role: "planner" },
-			steer: TRANSITION_STEERS.planBatch(),
-		};
-	}
-
-	private readBatchSelection(turn: PrepareNextTurnContext): string[] | undefined {
-		const text = (turn.message.content ?? []).map((block) => (block.type === "text" ? block.text : "")).join(" ");
-		const match = text.match(/Batch:\s*([^\n]+)/);
-		if (!match) return undefined;
-		const ids = match[1]
-			.split(",")
-			.map((s) => s.trim())
-			.filter(Boolean);
-		return ids.length > 0 ? ids : undefined;
-	}
-
-	private emitBatchSelectionBlock(batch: Belief[]): void {
-		const ids = batch.map((b) => b.id);
-		const message: CustomMessage<{ beliefIds: string[] }> = {
-			role: "custom",
-			customType: "batchSelection",
-			content: `Selected batch: ${ids.join(", ")}`,
-			display: true,
-			details: { beliefIds: ids },
-			timestamp: Date.now(),
-		};
-		this.host.sessionManager.appendCustomMessageEntry(
-			message.customType,
-			message.content,
-			message.display,
-			message.details,
-		);
-		this.host._emit({ type: "message_start", message });
-		this.host._emit({ type: "message_end", message });
-		this.ensureDomainPlan(ids, `Probe batch: ${ids.join(", ")}`);
 	}
 
 	onBeliefDelta(
@@ -649,7 +508,6 @@ export class BeliefLoopController {
 			beliefId: "beliefId" in delta ? delta.beliefId : undefined,
 			proposedRecord: delta.op === "propose" || delta.op === "refine" ? this.domainBelief(belief) : undefined,
 			evidence: "evidence" in delta ? delta.evidence : undefined,
-			evidenceBeliefIds: "evidenceBeliefIds" in delta ? [...(delta.evidenceBeliefIds ?? [])] : [],
 			resultingBeliefs: resultingBeliefs.map((record) => this.domainBelief(record)),
 		};
 		this.pendingDomainBeliefDeltas.push({ delta: domainDelta, activeBeliefs: this.activeDomainBeliefIds() });
@@ -680,18 +538,6 @@ export class BeliefLoopController {
 		};
 	}
 
-	private frameOpenHandoffAuthorized(route: Routing): boolean {
-		const openFramings = this.beliefSet.framings();
-		if (openFramings.length === 0) {
-			return false;
-		}
-		const authorized = new Set(route.handoffFromBeliefIds ?? []);
-		if (authorized.size !== openFramings.length) {
-			return false;
-		}
-		return openFramings.every((f) => authorized.has(f.id));
-	}
-
 	private dispatchToFastExecution(route: Routing): { state: LoopState; steer: string } {
 		this.dispatchedFrameIds = new Set();
 		this.fastPathFailure = false;
@@ -709,19 +555,6 @@ export class BeliefLoopController {
 			this.openNextDomainFrame();
 		}
 		this.selectDomainFrameBody("fast-path", route);
-		this.frameOpenHandoff = this.frameOpenHandoffAuthorized(route)
-			? {
-					route,
-					framingIds: this.beliefSet.framings().map((f) => f.id),
-					openWorldBeliefs: this.beliefSet.proposed().map((b) => ({
-						id: b.id,
-						domain: b.domain,
-						statement: b.statement,
-						expectation: b.expectation,
-						evidenceRounds: b.evidenceRounds,
-					})),
-				}
-			: null;
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		return {
 			state: {
@@ -732,34 +565,6 @@ export class BeliefLoopController {
 			},
 			steer: TRANSITION_STEERS.fastPathDispatch,
 		};
-	}
-
-	private async settleFrameOpenHandoff(turn: PrepareNextTurnContext): Promise<{ state: LoopState; steer: string }> {
-		const handoff = this.frameOpenHandoff;
-		if (!handoff) {
-			throw new Error("_settleFrameOpenHandoff called without a frame-open handoff.");
-		}
-		const outcomeDelta = {
-			op: "propose" as const,
-			statement: `fast path executed the authorized handoff for framing(s) ${handoff.framingIds.join(", ")} without error`,
-			domain: "product" as const,
-			expectation: "the tool results for the authorized handoff contain no error",
-			evidenceRounds: this.beliefSet.framings().length || 1,
-		};
-		const outcome = this.beliefSet.apply(outcomeDelta);
-		handoff.outcomeBeliefId = outcome.id;
-		this.dispatchedFrameIds = new Set([...this.dispatchedFrameIds, outcome.id]);
-		this.fastPathFailure = false;
-		await this.settleFastPath(turn, outcome.id);
-		this.openNextDomainFrame();
-		this.selectDomainFrameBody("belief-loop");
-		this.onBeliefDelta(outcomeDelta, outcome, undefined);
-		this.deferredWorldBeliefIds = new Set(handoff.openWorldBeliefs.map((b) => b.id));
-		this.frameOpenHandoff = null;
-		if (this.fastPathFailure) {
-			return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
-		}
-		return { state: { role: "distill" }, steer: TRANSITION_STEERS.fastPathDischarge };
 	}
 
 	private async emitDistillationBlock(turn: PrepareNextTurnContext): Promise<void> {
@@ -785,13 +590,12 @@ export class BeliefLoopController {
 		this.recordDomainDistillation(lines.join("\n"));
 	}
 
-	private async settleFastPath(turn: PrepareNextTurnContext, outcomeBeliefId?: string): Promise<void> {
+	private async settleFastPath(turn: PrepareNextTurnContext): Promise<void> {
 		if (turn.toolResults.some((r) => r.isError)) {
 			this.fastPathFailure = true;
 		}
 		const summary = await this.distillFastPath(turn);
 		this.recordDomainDistillation(summary);
-		const handoff = this.frameOpenHandoff;
 		try {
 			await this.host.sendCustomMessage(
 				{
@@ -802,7 +606,6 @@ export class BeliefLoopController {
 						runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 						outcome: this.fastPathFailure ? "failure" : "success",
 						request: this.currentTaskRequestText,
-						...this.fastPathTraceability(handoff, outcomeBeliefId),
 					},
 				},
 				{ triggerTurn: false },
@@ -810,21 +613,6 @@ export class BeliefLoopController {
 		} catch {
 			// Persisting the summary must not block the state transition.
 		}
-	}
-
-	private fastPathTraceability(
-		handoff: { route: Routing; framingIds: readonly string[]; outcomeBeliefId?: string } | null,
-		outcomeBeliefId?: string,
-	): Record<string, unknown> {
-		if (!handoff) {
-			return {};
-		}
-		return {
-			parentTaskId: this.host.taskId,
-			handoffFromBeliefIds: [...handoff.framingIds],
-			reason: handoff.route.reason,
-			outcomeBeliefId: outcomeBeliefId ?? handoff.outcomeBeliefId,
-		};
 	}
 
 	private resolveDistillationModel(): Model<any> | undefined {
@@ -848,13 +636,11 @@ export class BeliefLoopController {
 				systemPrompt:
 					"Summarize the completed fast-path execution for the epistemic context. List: " +
 					"completed actions, side effects, key observations, the final result, any remaining " +
-					"goal, and actions that must not be repeated. Also report for each open world " +
-					"hypothesis handed off at the start whether the execution resolved it, left it " +
-					"open, or rendered it moot.",
+					"goal, and actions that must not be repeated.",
 				messages: [
 					{
 						role: "user",
-						content: `Request: ${this.currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this.fastPathTranscript(turn)}\n\nOpen world hypotheses at handoff:\n${this.fastPathOpenBeliefs()}`,
+						content: `Request: ${this.currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this.fastPathTranscript(turn)}`,
 						timestamp: Date.now(),
 					},
 				],
@@ -890,14 +676,6 @@ export class BeliefLoopController {
 		return parts.join("\n");
 	}
 
-	private fastPathOpenBeliefs(): string {
-		const open = this.frameOpenHandoff?.openWorldBeliefs ?? [];
-		if (open.length === 0) {
-			return "(none)";
-		}
-		return open.map((b) => `${b.id} [${b.domain}]: ${b.statement}`).join("\n");
-	}
-
 	// =========================================================================
 	// Role surface
 	// =========================================================================
@@ -931,11 +709,10 @@ export class BeliefLoopController {
 		return [...tools];
 	}
 
-	roleModelFor(role: "propose" | "planner" | "distill" | "execution" | "finalReport"): Model<any> | undefined {
+	roleModelFor(role: "propose" | "distill" | "execution" | "finalReport"): Model<any> | undefined {
 		if (this.beliefSetUsable) {
 			const spec = selectRoleModelSpec(role, this.loopState, {
 				default: this.host.settingsManager.getDefaultModel(),
-				planner: this.host.settingsManager.getPlannerModel(),
 				execution: this.host.settingsManager.getExecutionModel(),
 				fastPath: this.host.settingsManager.getFastPathModel(),
 				distillation: this.host.settingsManager.getDistillationModel(),
@@ -977,24 +754,7 @@ export class BeliefLoopController {
 				toolSnippets: snippets,
 				promptGuidelines: guidelines,
 			});
-		let prompt = base + this.roleInstruction();
-		if (this.role === "planner") {
-			const open = this.beliefSet.proposed().filter((b) => !this.dispatchedFrameIds.has(b.id));
-			if (open.length > 0) {
-				prompt += `\n\nOpen beliefs:\n${open.map((b) => `${b.id}: ${b.statement}`).join("\n")}`;
-			}
-		}
-		if (this.role === "execution" && this.frameOpenHandoff && this.frameOpenHandoff.openWorldBeliefs.length > 0) {
-			prompt +=
-				"\n\nOpen world hypotheses (UNVERIFIED — not settled facts; execute the request without assuming them true):\n" +
-				this.frameOpenHandoff.openWorldBeliefs
-					.map(
-						(b) =>
-							`${b.id} [${b.domain}]: ${b.statement} (expectation: ${b.expectation}, evidenceRounds: ${b.evidenceRounds})`,
-					)
-					.join("\n");
-		}
-		return prompt;
+		return base + this.roleInstruction();
 	}
 
 	beliefLangPrompt(text: string): string {
@@ -1110,11 +870,9 @@ export class BeliefLoopController {
 			expectation: belief.expectation,
 			evidenceRounds: belief.evidenceRounds,
 			skillRefs: [...(belief.skillRefs ?? [])],
-			supportedBy: belief.supportedBy.map((evidence) => ({
-				evidence: evidence.evidence,
-				beliefIds: evidence.beliefIds ? [...evidence.beliefIds] : undefined,
-			})),
+			supportedBy: belief.supportedBy.map((evidence) => ({ evidence: evidence.evidence })),
 			refutedBy: belief.refutedBy.map((evidence) => ({ evidence: evidence.evidence })),
+			inconclusiveBy: belief.inconclusiveBy.map((evidence) => ({ evidence: evidence.evidence })),
 			supersededBy:
 				belief.supersededBy !== undefined && belief.supersededBy !== WITHDRAWN ? belief.supersededBy : undefined,
 			withdrawn: belief.supersededBy === WITHDRAWN,
@@ -1130,8 +888,6 @@ export class BeliefLoopController {
 			successProbability: route.successProbability,
 			estimatedSteps: route.estimatedSteps,
 			difficulty: route.difficulty,
-			supportingBeliefs: [],
-			handoffFromFramingBeliefs: [...(route.handoffFromBeliefIds ?? [])],
 			reason: route.reason ?? route.statement,
 		};
 	}
@@ -1330,10 +1086,6 @@ export class BeliefLoopController {
 			epistemic: {
 				model: this.roleModelFor("propose"),
 				latestCacheHitRate: this.roleCacheHitRate.propose,
-			},
-			planner: {
-				model: this.roleModelFor("planner"),
-				latestCacheHitRate: this.roleCacheHitRate.planner,
 			},
 			distillation: {
 				model: this.roleModelFor("distill"),

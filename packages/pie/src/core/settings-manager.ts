@@ -97,8 +97,6 @@ export interface PieSettings {
 	defaultModel?: string;
 	/** Default thinking level for pie sessions and roles without a specific override. */
 	defaultThinkingLevel?: ThinkingLevel;
-	/** Thinking level for the planner role. */
-	plannerThinkingLevel?: ThinkingLevel;
 	/** Thinking level for the execution role. */
 	executionThinkingLevel?: ThinkingLevel;
 	/** Thinking level for fast-path execution. */
@@ -106,20 +104,13 @@ export interface PieSettings {
 	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
 	executionModel?: string;
 	/**
-	 * Model for the belief loop's distillation (prediction-error) step — the epistemic role's
-	 * residual accounting that turns the probe's raw observations into what the belief set must
-	 * update on. Defaults to `defaultModel` so the distillation stays on the strong default model
-	 * even when the probe role is on a cheaper `executionModel`. */
+	 * Model for adjudicating execution evidence and refining the belief state. Defaults to
+	 * `defaultModel` so synthesis stays on the strong model when execution uses a cheaper one. */
 	distillationModel?: string;
-	/** Thinking level for the belief loop's distillation (prediction-error) role. Defaults to "low". */
+	/** Thinking level for the belief loop's distillation role. Defaults to "low". */
 	distillationThinkingLevel?: ThinkingLevel;
 	/** The language belief-set prompts must write in. Defaults to "English". */
 	beliefLang?: string;
-	/**
-	 * Model for the belief loop's planner step (batch selection). Defaults to `defaultModel`.
-	 * The planner groups the open beliefs into the next execution batch; this setting picks the
-	 * model that call runs on. */
-	plannerModel?: string;
 	/**
 	 * Model for fast-path execution: a request routed to the fast path runs its execution on this
 	 * model instead of `executionModel`/the session model. Unset means "use the session model". */
@@ -843,16 +834,8 @@ export class SettingsManager {
 		return this.settings.pie?.distillationModel ?? this.settings.defaultModel;
 	}
 
-	getPlannerModel(): string | undefined {
-		return this.settings.pie?.plannerModel ?? this.settings.defaultModel;
-	}
-
 	getDistillationThinkingLevel(): ThinkingLevel {
 		return this.settings.pie?.distillationThinkingLevel ?? "low";
-	}
-
-	getPlannerThinkingLevel(): ThinkingLevel | undefined {
-		return this.settings.pie?.plannerThinkingLevel ?? this.getDefaultThinkingLevel();
 	}
 
 	getExecutionThinkingLevel(): ThinkingLevel | undefined {

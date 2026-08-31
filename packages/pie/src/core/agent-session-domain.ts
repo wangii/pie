@@ -40,11 +40,11 @@ export function createDomainId(kind: DomainIdKind): string {
 export type DomainContent = string | readonly JsonValue[];
 export type TaskStatus = "active" | "completed" | "cancelled" | "failed";
 export type FrameStatus = "active" | "closed";
-export type FrameStage = "routing" | "planning" | "executing" | "distilling" | "proposing" | "closed";
+export type FrameStage = "routing" | "proposing" | "executing" | "distilling" | "closed";
 export type FrameBodyKind = "belief-loop" | "fast-path";
-export type BeliefDomain = "product" | "code" | "framing";
-export type BeliefStatus = "proposed" | "supported" | "refuted" | "superseded";
-export type BeliefOperation = "propose" | "support" | "refute" | "refine" | "retract";
+export type BeliefDomain = "product" | "code";
+export type BeliefStatus = "proposed" | "supported" | "refuted" | "inconclusive" | "superseded";
+export type BeliefOperation = "propose" | "support" | "refute" | "refine" | "inconclusive" | "retract";
 export type RoutingDecision = "belief-loop" | "fast-path";
 export type RoutingDifficulty = "low" | "medium" | "high";
 export type ExecutionStatus = "running" | "succeeded" | "failed" | "cancelled";
@@ -62,7 +62,6 @@ export interface Target {
 
 export interface SupportEvidence {
 	readonly evidence: string;
-	readonly beliefIds?: readonly BeliefId[];
 }
 
 export interface RefutationEvidence {
@@ -78,6 +77,7 @@ export interface Belief {
 	readonly skillRefs: readonly string[];
 	readonly supportedBy: readonly SupportEvidence[];
 	readonly refutedBy: readonly RefutationEvidence[];
+	readonly inconclusiveBy?: readonly RefutationEvidence[];
 	readonly supersededBy?: BeliefId;
 	readonly withdrawn: boolean;
 }
@@ -86,6 +86,7 @@ export function statusOfDomainBelief(belief: Belief): BeliefStatus {
 	if (belief.supersededBy !== undefined || belief.withdrawn) return "superseded";
 	if (belief.refutedBy.length > 0) return "refuted";
 	if (belief.supportedBy.length > 0) return "supported";
+	if ((belief.inconclusiveBy?.length ?? 0) > 0) return "inconclusive";
 	return "proposed";
 }
 
@@ -97,8 +98,6 @@ export interface Routing {
 	readonly successProbability: number;
 	readonly estimatedSteps: number;
 	readonly difficulty: RoutingDifficulty;
-	readonly supportingBeliefs: readonly BeliefId[];
-	readonly handoffFromFramingBeliefs: readonly BeliefId[];
 	readonly reason: string;
 }
 
@@ -135,7 +134,6 @@ export interface BeliefDelta {
 	readonly beliefId?: BeliefId;
 	readonly proposedRecord?: Belief;
 	readonly evidence?: string;
-	readonly evidenceBeliefIds: readonly BeliefId[];
 	/** Complete immutable records changed by this operation, including both sides of a refinement. */
 	readonly resultingBeliefs: readonly Belief[];
 }

@@ -63,8 +63,28 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "conclude", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["grep", "find", "declare_belief", "view_beliefs", "conclude"]);
+		).toEqual([
+			"bash",
+			"conclude",
+			"declare_belief",
+			"edit",
+			"find",
+			"grep",
+			"ls",
+			"powershell",
+			"read",
+			"route_task",
+			"view_beliefs",
+			"write",
+		]);
+		expect(session.getActiveToolNames()).toEqual([
+			"grep",
+			"find",
+			"route_task",
+			"declare_belief",
+			"view_beliefs",
+			"conclude",
+		]);
 		expect(session.systemPrompt).toContain("- grep:");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
@@ -112,6 +132,7 @@ describe("defaultTools setting", () => {
 			"declare_belief",
 			"dynamic_tool",
 			"grep",
+			"route_task",
 			"sdk_tool",
 			"static_tool",
 			"view_beliefs",
@@ -128,7 +149,13 @@ describe("defaultTools setting", () => {
 		allowlistedSession.dispose();
 
 		const excludedSession = await createSession(["read", "grep"], { excludeTools: ["read"] });
-		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "declare_belief", "view_beliefs", "conclude"]);
+		expect(excludedSession.getActiveToolNames()).toEqual([
+			"grep",
+			"route_task",
+			"declare_belief",
+			"view_beliefs",
+			"conclude",
+		]);
 		excludedSession.dispose();
 
 		const toolLessSession = await createSession(["read"], { noTools: "all" });
@@ -151,8 +178,21 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "conclude", "declare_belief", "edit", "find", "grep", "ls", "read", "view_beliefs", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["ls", "declare_belief", "view_beliefs", "conclude"]);
+		).toEqual([
+			"bash",
+			"conclude",
+			"declare_belief",
+			"edit",
+			"find",
+			"grep",
+			"ls",
+			"powershell",
+			"read",
+			"route_task",
+			"view_beliefs",
+			"write",
+		]);
+		expect(session.getActiveToolNames()).toEqual(["ls", "route_task", "declare_belief", "view_beliefs", "conclude"]);
 		session.dispose();
 	});
 });

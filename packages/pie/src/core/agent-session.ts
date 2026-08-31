@@ -116,7 +116,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createConcludeToolDefinition } from "./tools/conclude.ts";
-import { createDeclareBeliefToolDefinition } from "./tools/declare-belief.ts";
+import { createDeclareBeliefToolDefinition, createRouteTaskToolDefinition } from "./tools/declare-belief.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { createViewBeliefsToolDefinition } from "./tools/view-beliefs.ts";
@@ -707,25 +707,8 @@ export class AgentSession {
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
-	/** The event as surfaced to the UI and extensions: the planner role's raw selection text is
-	 *  withheld because the accepted batch is displayed as a dedicated `batchSelection` block
-	 *  (`_emitBatchSelectionBlock`); showing both would duplicate the selection in the chat. The
-	 *  transcript itself keeps the full text (the next `_advanceRole` parses the `Batch:` line from
-	 *  it), so only the forwarded copies are filtered. */
+	/** The event as surfaced to the UI and extensions. */
 	private _displayEvent(event: AgentEvent): AgentEvent {
-		if (
-			this._beliefLoop.role === "planner" &&
-			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
-			event.message.role === "assistant"
-		) {
-			return {
-				...event,
-				message: {
-					...event.message,
-					content: event.message.content.filter((block) => block.type === "toolCall"),
-				},
-			};
-		}
 		return event;
 	}
 
@@ -2932,12 +2915,13 @@ export class AgentSession {
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 		this._baseToolDefinitions.set(
+			"route_task",
+			createRouteTaskToolDefinition(this._beliefLoop.routingSet) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
 			"declare_belief",
-			createDeclareBeliefToolDefinition(
-				this._beliefLoop.beliefSet,
-				this._beliefLoop.routingSet,
-				(delta, belief, previousStatus, priorBelief) =>
-					this._beliefLoop.onBeliefDelta(delta, belief, previousStatus, priorBelief),
+			createDeclareBeliefToolDefinition(this._beliefLoop.beliefSet, (delta, belief, previousStatus, priorBelief) =>
+				this._beliefLoop.onBeliefDelta(delta, belief, previousStatus, priorBelief),
 			) as ToolDefinition,
 		);
 		this._baseToolDefinitions.set(
@@ -2968,14 +2952,14 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "declare_belief", "view_beliefs", "conclude"];
+			: ["read", "bash", "edit", "write", "route_task", "declare_belief", "view_beliefs", "conclude"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		// The belief set is on by default, so its tools must be active even when the
 		// caller supplied its own `activeToolNames` (the CLI passes a settings default
 		// of `["read", "bash", "edit", "write"]` that would otherwise drop them). An
 		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
 		// back out via `allowedToolNames`.
-		const beliefToolNames = ["declare_belief", "view_beliefs", "conclude"];
+		const beliefToolNames = ["route_task", "declare_belief", "view_beliefs", "conclude"];
 		const activeToolNames =
 			baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
 				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]

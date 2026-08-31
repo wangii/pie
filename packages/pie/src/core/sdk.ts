@@ -221,7 +221,6 @@ export function getNativeGuiSnapshot(session: AgentSession): NativeGuiSnapshot {
 			if (!roleStatus) return undefined;
 			return {
 				epistemic: { ...roleStatus.epistemic },
-				planner: { ...roleStatus.planner },
 				distillation: { ...roleStatus.distillation },
 				execution: { ...roleStatus.execution },
 			};

@@ -241,24 +241,6 @@ describe("SettingsManager", () => {
 		});
 	});
 
-	describe("plannerModel", () => {
-		it("returns the configured planner model", () => {
-			expect(SettingsManager.inMemory({ pie: { plannerModel: "claude-haiku-4-5" } }).getPlannerModel()).toBe(
-				"claude-haiku-4-5",
-			);
-		});
-
-		it("defaults to defaultModel when not configured", () => {
-			expect(SettingsManager.inMemory({ defaultModel: "deepseek-v4-pro" }).getPlannerModel()).toBe(
-				"deepseek-v4-pro",
-			);
-		});
-
-		it("is undefined when neither plannerModel nor defaultModel is configured", () => {
-			expect(SettingsManager.inMemory().getPlannerModel()).toBeUndefined();
-		});
-	});
-
 	describe("distillationThinkingLevel", () => {
 		it("defaults to low when not configured", () => {
 			expect(SettingsManager.inMemory().getDistillationThinkingLevel()).toBe("low");
@@ -292,7 +274,6 @@ describe("SettingsManager", () => {
 				JSON.stringify({
 					defaultModel: "pie-model",
 					defaultThinkingLevel: "medium",
-					plannerThinkingLevel: "high",
 					executionThinkingLevel: "minimal",
 					fastPathThinkingLevel: "max",
 				}),
@@ -302,7 +283,6 @@ describe("SettingsManager", () => {
 
 			expect(manager.getDefaultModel()).toBe("pie-model");
 			expect(manager.getDefaultThinkingLevel()).toBe("medium");
-			expect(manager.getPlannerThinkingLevel()).toBe("high");
 			expect(manager.getExecutionThinkingLevel()).toBe("minimal");
 			expect(manager.getFastPathThinkingLevel()).toBe("max");
 		});
