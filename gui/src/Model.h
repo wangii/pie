@@ -38,10 +38,9 @@ using BeliefDeltaId = std::string;
 enum class FrameStage {
     NONE,
     ROUTING,
-    PLANNING,
+    PROPOSING,
     EXECUTING,
     DISTILLING,
-    PROPOSING,
     CLOSED,
 };
 const char* frameStageToString(FrameStage s);
@@ -52,15 +51,16 @@ const char* frameStageToString(FrameStage s);
 struct Belief {
     BeliefId id;
     std::string statement;   // the prose assertion
-    std::string domain;      // "product" | "code" | "framing"
+    std::string domain;      // "product" | "code"
     std::string expectation; // the falsifiable prediction
     int evidenceRounds = 0;
     std::vector<std::string> skillRefs;
     std::vector<std::string> supportedBy; // evidence strings
     std::vector<std::string> refutedBy;   // evidence strings
+    std::vector<std::string> inconclusiveBy; // evidence strings that left the belief unsettled
     std::string supersededBy;             // empty when not superseded
     bool withdrawn = false;
-    std::string status; // derived: proposed | supported | refuted | superseded
+    std::string status; // derived: proposed | supported | refuted | inconclusive | superseded
     // Explicit provenance: the frame whose BeliefDeltaApplied introduced this
     // belief. Empty when unknown. Set from the event's frameId, never inferred
     // from event adjacency.
@@ -104,10 +104,9 @@ struct BeliefDelta {
     BeliefDeltaId id;
     FrameId frameId;
     DistillationId distillationId; // empty when not produced by a distillation
-    std::string operation;         // propose | support | refute | refine | retract
+    std::string operation;         // propose | support | refute | inconclusive | refine | retract
     BeliefId beliefId;             // target belief
     std::string evidence;
-    std::vector<BeliefId> evidenceBeliefIds;
 };
 
 struct Intervention {
@@ -147,7 +146,6 @@ struct RoleContextUsagePair {
 // belief-loop phases, and the accumulated session cost.
 struct Footer {
     RoleFooterSlot epistemic;     // propose
-    RoleFooterSlot planner;       // plan
     RoleFooterSlot distillation;  // distill
     RoleFooterSlot execution;     // execution
     double sessionCost = 0.0;

@@ -65,7 +65,7 @@ static void delta(NativeGuiModel& m, const char* frameId, const char* deltaId,
     line += op;
     line += "\",\"beliefId\":\"";
     line += beliefId;
-    line += "\",\"evidenceBeliefIds\":[],\"resultingBeliefs\":[";
+    line += "\",\"resultingBeliefs\":[";
     line += rec;
     line += "]},\"activeBeliefs\":[\"";
     line += beliefId;
@@ -112,7 +112,7 @@ static void testBeliefCreateIsPropose() {
     NativeGuiModel m;
     m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
     m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
     m.applyLine(R"({"type":"DistillationProduced","taskId":"t-1","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
 
     GraphTaskState s = projectGraphTask(m);
@@ -155,7 +155,7 @@ static void testBeliefCreateMissingFrameAndLink() {
     {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
         GraphTaskState s = projectGraphTask(m);
         int propose = 0;
@@ -167,7 +167,7 @@ static void testBeliefCreateMissingFrameAndLink() {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
         GraphTaskState s = projectGraphTask(m);
         int propose = 0, createEdges = 0;
         for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
@@ -182,7 +182,7 @@ static void testBeliefCreateMissingFrameAndLink() {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        const char* deltaLine = R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})";
+        const char* deltaLine = R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})";
         m.applyLine(deltaLine);
         m.applyLine(deltaLine);  // replay
         GraphTaskState s = projectGraphTask(m);
@@ -194,7 +194,7 @@ static void testBeliefCreateMissingFrameAndLink() {
     {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");  // duplicate
         GraphTaskState s = projectGraphTask(m);
@@ -317,7 +317,7 @@ int main() {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-2","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","evidenceBeliefIds":[],"resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
 
         // Before DistillationProduced supplies provenance, the proposal is
         // provisionally in f1 and receives an initial live-layout position.
@@ -407,12 +407,10 @@ int main() {
         b.displayType = "superseded";
         check(beliefNodeTitle(b) == "Belief B1 (superseded)", "authoritative 'superseded' spelling");
         check(beliefNodeTitle(b) != "Belief B1 (superceded)", "misspelling 'superceded' is not emitted");
-        b.domain = "framing";
-        check(beliefNodeTitle(b) == "Target B1 (superseded)", "framing domain -> Target prefix");
-        b.domain = "routing";
-        check(beliefNodeTitle(b) == "Route B1 (superseded)", "routing domain -> Route prefix");
+        b.domain = "code";
+        check(beliefNodeTitle(b) == "Belief B1 (superseded)", "code domain keeps Belief prefix (no Target/Route)");
         b.title = "";
-        check(beliefNodeTitle(b) == "Route B1 (superseded)", "empty title falls back to id");
+        check(beliefNodeTitle(b) == "Belief B1 (superseded)", "empty title falls back to id");
     }
 
     if (failures == 0) std::printf("PASS\n");

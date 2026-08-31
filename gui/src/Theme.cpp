@@ -43,6 +43,7 @@ ImVec4 beliefStatusColor(const std::string& status) {
     if (status == "proposed") return kAccent;
     if (status == "supported") return kGreen;
     if (status == "refuted") return kRed;
+    if (status == "inconclusive") return kGray;
     if (status == "superseded") return kAmber;
     // Legacy demo statuses retained for back-compat with older fixtures.
     if (status == "open") return kAccent;

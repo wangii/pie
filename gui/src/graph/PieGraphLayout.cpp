@@ -106,8 +106,7 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     for (const GraphNode& node : state.nodes) {
         if (node.family == NodeFamily::Belief || !node.frameId) {
             beliefs.push_back(&node);
-            if (node.family == NodeFamily::Belief &&
-                node.domain != "framing" && node.domain != "routing") {
+            if (node.family == NodeFamily::Belief) {
                 columnBeliefs.push_back(&node);
             }
             continue;
@@ -161,22 +160,10 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
     const float middleX = beliefX + st.nodeW + st.regionGap;
     const float middleW = std::max({sequenceWidth(maxPlanCount),
                                     sequenceWidth(maxDistillCount),
-                                    sequenceWidth(maxProposeCount)})/3.;
+                                    sequenceWidth(maxProposeCount)});
     const float executionX = middleX + middleW + st.regionGap;
     const float contentTop = st.canvasPad + st.columnHeaderHeight;
 
-    // Framing (Target) beliefs anchor below the latest episode as a whole.
-    std::vector<const GraphNode*> globalFraming;
-    for (const LoopFrameInfo& frame : state.frames) {
-        for (const GraphNode* b : beliefsByFrame[frame.id]) {
-            if (b->domain == "framing") globalFraming.push_back(b);
-        }
-    }
-    sortByOrder(globalFraming, [](const GraphNode& node) { return node.creationOrder; });
-
-    const float framingH = globalFraming.empty()
-        ? 0.0f
-        : stackHeight(globalFraming.size()) + st.framePad;
     const float loopAreaTop = contentTop;
     float rowTop = loopAreaTop;
 
@@ -187,25 +174,14 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         const auto& proposeNodes = proposeByFrame[frame.id];
         const auto& beliefNodes = beliefsByFrame[frame.id];
 
-        // Routing beliefs are re-anchored directly ABOVE their owning frame's
-        // box (centered on it), so they are pulled out of the belief column; the
-        // world (non-routing, non-framing) beliefs stay in the left column.
-        std::vector<const GraphNode*> routingNodes;
+        // All product/code beliefs stay in the left belief column. Routing is
+        // no longer a belief domain; the frame's routing decision is rendered
+        // as a non-node text slot (routingTextSlotH) above the frame box.
         std::vector<const GraphNode*> column;
-        for (const GraphNode* b : beliefNodes) {
-            if (b->domain == "routing") routingNodes.push_back(b);
-            else if (b->domain != "framing") column.push_back(b);
-        }
-        // Reserve a routing slot above the owning frame box: it holds either a
-        // legacy routing belief card stack (domain == "routing") or the frame's
-        // own routing-decision text (the real Routing step), whichever is present.
+        for (const GraphNode* b : beliefNodes) column.push_back(b);
         const bool hasRoutingText =
             !frame.routingDecision.empty() || !frame.routingReason.empty();
-        const float routingSlotH =
-            (routingNodes.empty()
-                 ? 0.0f
-                 : stackHeight(routingNodes.size()) + st.phaseBandGap) +
-            (hasRoutingText ? st.routingTextSlotH : 0.0f);
+        const float routingSlotH = hasRoutingText ? st.routingTextSlotH : 0.0f;
 
         const float planH = planNodes.empty() ? 0.0f : st.nodeH;
         const float distillH = distillNodes.empty() ? 0.0f : st.nodeH;
@@ -235,24 +211,11 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         if (proposeH > 0.0f) { proposeY = bandCursor; bandCursor += proposeH + st.phaseBandGap; }
         if (planH > 0.0f) { planY = bandCursor; bandCursor += planH + st.phaseBandGap; }
         if (distillH > 0.0f) { distillY = bandCursor; }
-        const bool isLastFrame = &frame == &state.frames.back();
-        const float framingSlotH = (isLastFrame && !globalFraming.empty()) ? framingH : 0.0f;
 
         for (std::size_t i = 0; i < column.size(); ++i) {
             out.nodeRects[column[i]->id.value] = GraphRect{
                 beliefX,
                 nodeTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
-                st.nodeW,
-                st.nodeH,
-            };
-        }
-        // Routing nodes sit directly above the owning frame box, horizontally
-        // centered on the box (frameCenterX = box center x).
-        const float frameCenterX = (middleX + executionX + st.nodeW) * 0.5f;
-        for (std::size_t i = 0; i < routingNodes.size(); ++i) {
-            out.nodeRects[routingNodes[i]->id.value] = GraphRect{
-                frameCenterX - st.nodeW * 0.5f,
-                rowTop + static_cast<float>(i) * (st.nodeH + st.nodeGapV),
                 st.nodeW,
                 st.nodeH,
             };
@@ -312,30 +275,7 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         GraphRect createdBounds = paddedBounds(column, out.nodeRects, st.framePad * 0.5f);
         if (createdBounds.w > 0.0f) out.beliefRegionRects[frame.id] = createdBounds;
 
-        rowTop = frameBottom + framingSlotH + st.rowGap;
-    }
-
-    // Global framing slot: the framing (Target) beliefs anchor below the LATEST
-    // episode/loop-frame, so their position follows the newest frame dynamically
-    // instead of being fixed to a frame boundary.
-    if (!state.frames.empty() && !globalFraming.empty()) {
-        auto lastIt = out.frameRects.find(state.frames.back().id);
-        float lastBottom = (lastIt != out.frameRects.end())
-            ? lastIt->second.y + lastIt->second.h
-            : loopAreaTop;
-        // Framing (Target) cards anchor directly below the latest episode box,
-        // horizontally centered on it.
-        float framingCenterX = beliefX;
-        if (lastIt != out.frameRects.end()) {
-            const GraphRect& fr = lastIt->second;
-            framingCenterX = fr.x + fr.w * 0.5f;
-        }
-        float fy = lastBottom;
-        for (const GraphNode* b : globalFraming) {
-            out.nodeRects[b->id.value] = GraphRect{
-                framingCenterX - st.nodeW * 0.5f, fy, st.nodeW, st.nodeH};
-            fy += st.nodeH + st.nodeGapV;
-        }
+        rowTop = frameBottom + st.rowGap;
     }
 
     if (state.frames.empty()) {

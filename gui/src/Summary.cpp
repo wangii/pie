@@ -21,7 +21,7 @@ void renderSummary(const pie::gui::NativeGuiModel& m, const std::string& viewId)
     }
     if (sel.empty()) sel = "(none)";
     std::string line = sel + "  →  ";
-    line += f->plan.valid() ? (f->plan.intent.empty() ? "planned" : f->plan.intent) : "(planning)";
+    line += f->plan.valid() ? (f->plan.intent.empty() ? "planned" : f->plan.intent) : "(no plan yet)";
     line += "  →  ";
     line += std::to_string(f->trajectory.size()) + " execution step(s)";
     line += "  →  ";

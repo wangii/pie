@@ -24,9 +24,9 @@ void renderCognitiveLane(const pie::gui::NativeGuiModel& m, const std::string& v
     // background; the others keep the default child background.
     const pie::gui::FrameStage stage = m.cursor().valid() ? m.cursor().stage : pie::gui::FrameStage::NONE;
 
-    // PLAN
+    // PLAN (the proposal/plan step, active during the runtime's PROPOSING stage)
     {
-        bool active = (stage == pie::gui::FrameStage::PLANNING);
+        bool active = (stage == pie::gui::FrameStage::PROPOSING);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, paneBg(active));
         ImGui::BeginChild("plan_section", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiChildFlags_AlwaysUseWindowPadding);
         ImGui::PushStyleColor(ImGuiCol_Text, kAccent);

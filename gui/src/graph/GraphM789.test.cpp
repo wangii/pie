@@ -135,28 +135,13 @@ static void testStyle() {
     // RGB triples are typed uint8_t by construction; assert a few known defaults.
     check(g.cardBelief.r == 58 && g.cardBelief.g == 88 && g.cardBelief.b == 96, "M9: belief card color default matches");
     check(g.edgeDistillToBelief.r == 220 && g.edgeDistillToBelief.g == 140 && g.edgeDistillToBelief.b == 220, "M9: distill edge color default matches");
-    // Routing / framing domain colors are distinct from the plain belief card and
-    // from each other, so the belief element itself carries the domain role.
-    bool rfDistinct = (g.cardBeliefRouting.r != g.cardBelief.r ||
-                       g.cardBeliefRouting.g != g.cardBelief.g ||
-                       g.cardBeliefRouting.b != g.cardBelief.b) &&
-                      (g.cardBeliefFraming.r != g.cardBelief.r ||
-                       g.cardBeliefFraming.g != g.cardBelief.g ||
-                       g.cardBeliefFraming.b != g.cardBelief.b) &&
-                      (g.cardBeliefRouting.r != g.cardBeliefFraming.r ||
-                       g.cardBeliefRouting.g != g.cardBeliefFraming.g ||
-                       g.cardBeliefRouting.b != g.cardBeliefFraming.b);
-    check(rfDistinct, "M9: routing/framing domain colors are distinct from plain belief");
     (void)g;
 }
 
-// --- Routing / Framing card placement (PieGraphLayout domain reparenting) ---
+// --- Belief column placement (PieGraphLayout domain reparenting is removed:
+// product/code beliefs all stay in the left belief column) ---
 static void testRoutingFramingPlacement() {
-    GraphTaskState s = buildSmallState();  // frames 10, 20; beliefs B1, B2 (no domain)
-    for (GraphNode& n : s.nodes) {
-        if (n.id.value == "B1") { n.domain = "routing"; n.createdInFrame = "10"; }
-        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = "10"; }
-    }
+    GraphTaskState s = buildSmallState();  // frames 10, 20; beliefs B1, B2 (product/code)
     PieGraphLayout layout = computeGraphLayout(s);
     auto fr10 = layout.frameRects.find("10");
     auto fr20 = layout.frameRects.find("20");
@@ -166,26 +151,16 @@ static void testRoutingFramingPlacement() {
           "RF: frames 10/20 have containers");
     if (fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end() &&
         r1 != layout.nodeRects.end() && r2 != layout.nodeRects.end()) {
-        const GraphRect& f10 = fr10->second;
-        const GraphRect& f20 = fr20->second;
         const GraphRect& rb = r1->second;
         const GraphRect& rf = r2->second;
-        // Routing cards anchor directly ABOVE their owning frame box, centered.
-        check(rb.y + rb.h <= f10.y + 1e-3f,
-              "RF: routing card sits above its frame (frame 10)");
-        check(std::fabs((rb.x + rb.w * 0.5f) - (f10.x + f10.w * 0.5f)) <= 1e-3f,
-              "RF: routing card is horizontally centered on its frame");
-        // Framing (target) cards anchor directly BELOW the LATEST episode box,
-        // centered on it.
-        check(rf.y >= f20.y + f20.h - 1e-3f,
-              "RF: framing card is below the latest episode (frame 20)");
-        check(std::fabs((rf.x + rf.w * 0.5f) - (f20.x + f20.w * 0.5f)) <= 1e-3f,
-              "RF: framing card is horizontally centered on the latest episode");
+        // All product/code beliefs sit in the left belief column (same x, stacked).
+        check(std::fabs(rb.x - rf.x) <= 1e-3f, "RF: product/code beliefs share the column x");
+        check(true, "RF: product/code beliefs are placed");
     } else {
-        check(false, "RF: routing/framing cards were placed");
+        check(false, "RF: product/code beliefs were placed");
     }
 
-    // No two node rects overlap after domain reparenting.
+    // No two node rects overlap after reparenting.
     bool noOverlap = true;
     for (const auto& [k, r] : layout.nodeRects) {
         for (const auto& [k2, r2] : layout.nodeRects) {
@@ -194,37 +169,31 @@ static void testRoutingFramingPlacement() {
                 r.y < r2.y + r2.h && r2.y < r.y + r.h) noOverlap = false;
         }
     }
-    check(noOverlap, "RF: no node overlap after routing/framing placement");
+    check(noOverlap, "RF: no node overlap after belief placement");
 
-    // A plain belief (no domain) still lays out in the global belief column.
+    // A plain belief still lays out in the global belief column.
     GraphTaskState s2 = buildSmallState();
     PieGraphLayout l2 = computeGraphLayout(s2);
     check(l2.nodeRects.count("B1") == 1, "RF: plain belief remains laid out");
 }
 
-// --- Framing/target anchor: always below the LAST (latest) episode ---
-// Fix 4: the framing (target) beliefs are anchored below the latest episode/
-// loop-frame, so their y position must sit below the last frame's bottom edge,
-// independent of which frame is "current".
+// --- Belief column stability across current-frame selection ---
+// Fix 4 analog: a product/code belief's position in the belief column must be
+// independent of which frame is "current" (no per-frame anchoring).
 static void testCurrentFrameSelection() {
     auto make = [](bool f10closed, bool f20closed, bool f20exec) {
         GraphTaskState s = buildSmallState();
-        for (GraphNode& n : s.nodes) {
-            if (n.id.value == "B1") {
-                n.domain = "routing";
-            } else if (n.id.value == "B2") {
-                n.domain = "framing";
-                n.createdInFrame = "10";
-            }
-        }
         s.frames[0].closed = f10closed;
         s.frames[1].closed = f20closed;
         s.frames[1].executing = f20exec;
         return s;
     };
-    auto bottom = [](const GraphRect& r) { return r.y + r.h; };
 
-    // Every current-frame path must place the framing card below the LAST frame.
+    // Every current-frame path must place the product/code beliefs at the same
+    // belief-column positions (they are not anchored to the latest frame).
+    float b1x = 0.0f, b1y = 0.0f, b2x = 0.0f, b2y = 0.0f;
+    bool haveFirst = false;
+    bool sameAcrossPaths = true;
     for (int path = 0; path < 3; ++path) {
         bool f10closed, f20closed, f20exec;
         switch (path) {
@@ -233,18 +202,20 @@ static void testCurrentFrameSelection() {
             default: f10closed = true; f20closed = true;  f20exec = false; break;  // all closed -> last frame
         }
         PieGraphLayout layout = computeGraphLayout(make(f10closed, f20closed, f20exec));
-        auto f20 = layout.frameRects.find("20");
-        auto rf = layout.nodeRects.find("B2");
-        check(f20 != layout.frameRects.end() && rf != layout.nodeRects.end(),
-              "CUR: path places the framing card");
-        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
-            check(rf->second.y >= bottom(f20->second) - 1e-3f,
-                  "CUR: framing card is below the last (latest) episode");
-        if (f20 != layout.frameRects.end() && rf != layout.nodeRects.end())
-            check(std::fabs((rf->second.x + rf->second.w * 0.5f) -
-                            (f20->second.x + f20->second.w * 0.5f)) <= 1e-3f,
-                  "CUR: framing card is horizontally centered on the latest episode");
+        auto b1 = layout.nodeRects.find("B1");
+        auto b2 = layout.nodeRects.find("B2");
+        check(b1 != layout.nodeRects.end() && b2 != layout.nodeRects.end(),
+              "CUR: path places the product/code beliefs");
+        if (b1 == layout.nodeRects.end() || b2 == layout.nodeRects.end()) continue;
+        if (!haveFirst) {
+            b1x = b1->second.x; b1y = b1->second.y; b2x = b2->second.x; b2y = b2->second.y;
+            haveFirst = true;
+        } else if (b1->second.x != b1x || b1->second.y != b1y ||
+                   b2->second.x != b2x || b2->second.y != b2y) {
+            sameAcrossPaths = false;
+        }
     }
+    check(sameAcrossPaths, "CUR: product/code beliefs keep column positions across current-frame paths");
 }
 
 // --- M7: Focus Current pan (the surviving navigation geometry; the minimap
@@ -378,14 +349,8 @@ static void testFramingNextLoopframe() {
     LoopFrameInfo f30; f30.id = "30"; f30.label = "LoopFrame #30"; f30.closed = true;
     s.frames.push_back(f10); s.frames.push_back(f20); s.frames.push_back(f30);
 
-    // B2 is the framing card, created in frame 10; B3 created in frame 20. With
-    // Fix 1, the routing belief B1 sits inside the frame that created it.
-    for (GraphNode& n : s.nodes) {
-        if (n.id.value == "B1") n.domain = "routing";
-        else if (n.id.value == "B2") { n.domain = "framing"; n.createdInFrame = "10"; }
-        else if (n.id.value == "B3") { n.domain = "framing"; n.createdInFrame = "20"; }
-    }
-
+    // B1/B2/B3 are product/code beliefs (no routing/framing domain); they all
+    // stay in the left belief column anchored to their inferred creation frame.
     PieGraphLayout layout = computeGraphLayout(s);
     auto fr10 = layout.frameRects.find("10");
     auto fr20 = layout.frameRects.find("20");
@@ -396,43 +361,20 @@ static void testFramingNextLoopframe() {
     check(fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end() &&
           fr30 != layout.frameRects.end() && rb != layout.nodeRects.end() &&
           rf != layout.nodeRects.end() && rf2 != layout.nodeRects.end(),
-          "NLF: three-frame layout plus routing/two framing cards produced");
+          "NLF: three-frame layout plus product/code beliefs produced");
     if (fr10 != layout.frameRects.end() && fr20 != layout.frameRects.end() &&
         fr30 != layout.frameRects.end() && rf != layout.nodeRects.end() &&
         rf2 != layout.nodeRects.end()) {
-        const GraphRect& f10 = fr10->second;
-        const GraphRect& f20 = fr20->second;
-        const GraphRect& f30 = fr30->second;
         const GraphRect& rfrect = rf->second;
         const GraphRect& rf2rect = rf2->second;
-        // Routing cards anchor directly ABOVE their inferred frame box, centered.
-        check(rb != layout.nodeRects.end() && rb->second.y + rb->second.h <= f20.y + 1e-3f,
-              "NLF: routing card is above its inferred frame");
-        check(rb != layout.nodeRects.end() &&
-              std::fabs((rb->second.x + rb->second.w * 0.5f) -
-                        (f20.x + f20.w * 0.5f)) <= 1e-3f,
-              "NLF: routing card is horizontally centered on its inferred frame");
-        // Fix 4: the framing (target) cards anchor below the LAST episode (frame 30),
-        // so the stack's TOP card sits at frame 30's bottom edge.
-        check(rfrect.y >= f30.y + f30.h - 1e-3f,
-              "NLF: framing card is not above the latest episode bottom");
-
-        // Two framing cards must stack as a whole: one is the top-of-stack card,
-        // the other below it (distinct y, creation order), neither overlapping.
-        check(rf2rect.y != rfrect.y,
-              "NLF: multiple framing cards occupy distinct stack slots");
-        const float topOfStack = std::min(rf2rect.y, rfrect.y);
-        const float bottomOfStack = std::max(rf2rect.y + rf2rect.h, rfrect.y + rfrect.h);
-        // The whole stack hangs below the latest episode (frame 30) bottom: the
-        // top-of-stack card starts at (or just after) frame 30's bottom edge.
-        check(std::fabs(topOfStack - (f30.y + f30.h)) <= 1e-3f,
-              "NLF: framing stack top aligns below the latest episode");
-        // Each framing card is horizontally centered on the latest episode box.
-        check(std::fabs((rfrect.x + rfrect.w * 0.5f) - (f30.x + f30.w * 0.5f)) <= 1e-3f,
-              "NLF: framing cards are horizontally centered on the latest episode");
+        // All product/code beliefs share the left belief column x.
+        check(std::fabs(rfrect.x - rf2rect.x) <= 1e-3f,
+              "NLF: product/code beliefs share the column x");
+        // They occupy distinct stack slots (creation order).
+        check(rf2rect.y != rfrect.y, "NLF: product/code beliefs occupy distinct rows");
         check(rf2rect.y + rf2rect.h <= rfrect.y + 1e-3f ||
               rfrect.y + rfrect.h <= rf2rect.y + 1e-3f,
-              "NLF: two framing cards do not overlap each other");
+              "NLF: product/code beliefs do not overlap each other");
     }
 
     // The no-overlap invariant must still hold.

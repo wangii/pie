@@ -49,11 +49,6 @@ struct GraphStyle {
     Rgb cardBeliefClosed{70, 70, 76};
     Rgb cardBeliefSupported{72, 108, 60};   // validated belief (supported)
     Rgb cardBeliefSuperseded{110, 80, 60};  // replaced belief (superseded/supercede)
-    // Routing / framing belief cards get distinct domain colors (the label
-    // colors above are for the (now removed) side tags; these color the cards
-    // themselves so the element, not a legend, carries the domain).
-    Rgb cardBeliefRouting{96, 70, 26};    // dark amber
-    Rgb cardBeliefFraming{86, 62, 118};   // dark violet
     Rgb cardPlan{52, 78, 108};
     Rgb cardExecOk{104, 204, 120};  // success (green), per user status-color spec
     Rgb cardExecFailed{120, 48, 48};
@@ -139,16 +134,11 @@ struct GraphStyle {
     Rgb proposeRegionFill{64, 104, 112};   // matches cardPropose
     Rgb proposeRegionLabel{150, 190, 210}; // matches edgeDistillToPropose
 
-    // --- Routing / Framing belief placement (reserved slots in the layout) ---
-    // Routing beliefs guide the decision process; framing beliefs (the current
-    // "target") state the obligations the final answer must discharge. Both get
-    // distinct card colors (cardBeliefRouting / cardBeliefFraming above) and are
-    // re-anchored by PieGraphLayout rather than kept with their creating frame:
-    // routing directly above the whole loop-frame area, framing directly below
-    // the current (active) frame. These two label colors are legacy remnants of
-    // the removed side-tag legend and are not used by the card renderer.
-    Rgb beliefRoutingLabel{240, 176, 52};   // amber (legacy, unused)
-    Rgb beliefFramingLabel{156, 120, 240};  // violet (legacy, unused)
+    // --- Frame-level Routing decision text slot (the retained Route step) ---
+    // A frame's routingDecision/routingReason is rendered as a text slot above
+    // the frame box; belief cards are all product/code and use the plain belief
+    // colors. beliefFramingLabel was removed with the framing domain.
+    Rgb beliefRoutingLabel{240, 176, 52};   // amber (Route text slot)
 };
 
 // The single default style instance. Shared by the headless layout / routing

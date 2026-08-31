@@ -195,7 +195,6 @@ std::vector<std::string> strArrayField(const std::string& s, const std::string& 
 
 FrameStage parseStage(const std::string& s) {
     if (s == "routing" || s == "ROUTING") return FrameStage::ROUTING;
-    if (s == "planning" || s == "PLANNING") return FrameStage::PLANNING;
     if (s == "executing" || s == "EXECUTING") return FrameStage::EXECUTING;
     if (s == "distilling" || s == "DISTILLING") return FrameStage::DISTILLING;
     if (s == "proposing" || s == "PROPOSING") return FrameStage::PROPOSING;
@@ -298,6 +297,7 @@ std::string deriveBeliefStatus(const Belief& b) {
     if (b.withdrawn || !b.supersededBy.empty()) return "superseded";
     if (!b.refutedBy.empty()) return "refuted";
     if (!b.supportedBy.empty()) return "supported";
+    if (!b.inconclusiveBy.empty()) return "inconclusive";
     return "proposed";
 }
 
@@ -329,6 +329,14 @@ void parseBeliefRecord(const std::string& raw, Belief& b) {
             if (!ev.empty()) b.refutedBy.push_back(ev);
         }
     }
+    b.inconclusiveBy.clear();
+    std::string incRaw;
+    if (rawValue(raw, "inconclusiveBy", incRaw)) {
+        for (auto& e : arrayElements(incRaw)) {
+            std::string ev = str(e, "evidence");
+            if (!ev.empty()) b.inconclusiveBy.push_back(ev);
+        }
+    }
     b.status = deriveBeliefStatus(b);
 }
 
@@ -351,7 +359,6 @@ LoopFrame::History deriveHistory(const LoopFrame& f) {
 const char* frameStageToString(FrameStage s) {
     switch (s) {
         case FrameStage::ROUTING: return "ROUTING";
-        case FrameStage::PLANNING: return "PLANNING";
         case FrameStage::EXECUTING: return "EXECUTING";
         case FrameStage::DISTILLING: return "DISTILLING";
         case FrameStage::PROPOSING: return "PROPOSING";
@@ -674,7 +681,6 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
         d.operation = str(deltaRaw, "operation");
         d.beliefId = str(deltaRaw, "beliefId");
         d.evidence = str(deltaRaw, "evidence");
-        d.evidenceBeliefIds = strArrayField(deltaRaw, "evidenceBeliefIds");
 
         std::string resultingRaw;
         std::string createdId;
@@ -693,6 +699,7 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
                 stored.skillRefs = std::move(parsed.skillRefs);
                 stored.supportedBy = std::move(parsed.supportedBy);
                 stored.refutedBy = std::move(parsed.refutedBy);
+                stored.inconclusiveBy = std::move(parsed.inconclusiveBy);
                 stored.supersededBy = std::move(parsed.supersededBy);
                 stored.withdrawn = parsed.withdrawn;
                 stored.status = parsed.status;
@@ -846,13 +853,11 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         std::string rawRoleStatus;
         if (rawValue(line, "roleStatus", rawRoleStatus)) {
             f.epistemic = parseRole("epistemic");
-            f.planner = parseRole("planner");
             f.distillation = parseRole("distillation");
             f.execution = parseRole("execution");
         }
         if (rawRoleStatus.empty()) {
             f.epistemic = parseRole("epistemic");
-            f.planner = parseRole("planner");
             f.distillation = parseRole("distillation");
             f.execution = parseRole("execution");
         }

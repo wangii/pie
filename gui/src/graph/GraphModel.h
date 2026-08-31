@@ -91,8 +91,9 @@ struct GraphNode {
     // corresponding LoopFrame row without making the frame its owner.
     std::optional<std::string> createdInFrame;
     std::string displayType;
-    // Belief domain (world / routing / framing) for a Belief node; empty for
-    // non-Belief families. Lets the renderer color routing and framing beliefs
+    // Belief domain (product | code) for a Belief node; empty for
+    // non-Belief families. Belief cards are all product/code; the frame's own
+    // routing decision is rendered as the frame-level Route text, not a belief.
     // distinctly.
     std::string domain;
     std::string title;        // short node label (exec: simplified "<tool> <command>" summary)

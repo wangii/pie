@@ -16,7 +16,7 @@ namespace {
 
 bool stableBelief(const GraphNode& node) {
     if (node.family != NodeFamily::Belief) return false;
-    return node.domain != "framing" || node.displayType != "proposed";
+    return true;
 }
 
 bool frameStructureMatches(const CompletedFrameLayout& cached,
@@ -91,8 +91,8 @@ PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state,
                                    GraphLiveState& live) {
     PieGraphLayout result = fresh;
 
-    // Beliefs are global rather than frame-owned. Keep stable Beliefs at their
-    // first position, but let a proposed framing Target follow the latest frame.
+    // Beliefs are global rather than frame-owned. Keep beliefs at their first
+    // position (stable across live updates; there is no framing Target case).
     std::set<std::string> currentBeliefIds;
     for (const GraphNode& node : state.nodes) {
         if (node.family != NodeFamily::Belief) continue;

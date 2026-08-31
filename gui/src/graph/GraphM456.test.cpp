@@ -254,9 +254,9 @@ static void testLive(const GraphTaskState& s) {
           "M6: belief nodes are position-stable across live updates");
 }
 
-// --- M6+ regression: a framing ("Target") card must follow the LATEST episode
-// box when it grows (it is anchored below it), rather than being frozen like a
-// plain belief node. A non-framing world belief must stay frozen.
+// --- Belief lifecycle across live updates: a product/code belief is position-
+// stable (frozen) when the latest episode grows, whether it is still proposed or
+// already adjudicated. There is no longer a framing "Target" freshness case.
 static void testFramingFollowsLatest() {
     auto mkNode = [](const std::string& id, NodeFamily f, const std::string& frame,
                      const std::string& domain, const std::string& createdIn,
@@ -278,28 +278,27 @@ static void testFramingFollowsLatest() {
     GraphTaskState s;
     LoopFrameInfo f20; f20.id = "20"; f20.label = "LoopFrame #20"; f20.closed = false;
     s.frames.push_back(f20);
-    s.nodes.push_back(mkNode("T1", NodeFamily::Belief, "", "framing", "20", "proposed", 1));
-    s.nodes.push_back(mkNode("W1", NodeFamily::Belief, "", "", "", "", 2));
+    s.nodes.push_back(mkNode("B1", NodeFamily::Belief, "", "code", "20", "proposed", 1));
+    s.nodes.push_back(mkNode("B2", NodeFamily::Belief, "", "code", "20", "supported", 2));
     s.nodes.push_back(mkNode("P20", NodeFamily::Plan, "20", "", "", "", 3));
     s.nodes.push_back(mkNode("E20", NodeFamily::Execution, "20", "", "", "", 4));
 
     GraphLiveState live;
     PieGraphLayout stable1 = stabilizeLiveLayout(s, computeGraphLayout(s), live);
-    float t1y1 = stable1.nodeRects["T1"].y;
-    check(stable1.nodeRects.count("T1") == 1, "M6+: framing card placed by fresh layout");
+    float b1y1 = stable1.nodeRects["B1"].y;
+    float b2y1 = stable1.nodeRects["B2"].y;
+    check(stable1.nodeRects.count("B1") == 1, "M6+: product/code belief placed by fresh layout");
 
-    // Grow the latest (open) episode with a second execution node; the frame box
-    // gets taller, so its bottom (and thus the anchored framing card) moves down.
+    // Grow the latest (open) episode with a second execution node; the frame gets
+    // taller, but the beliefs stay position-stable.
     GraphTaskState s2 = s;
     s2.nodes.push_back(mkNode("E21", NodeFamily::Execution, "20", "", "", "", 5));
     PieGraphLayout stable2 = stabilizeLiveLayout(s2, computeGraphLayout(s2), live);
 
-    float t1y2 = stable2.nodeRects["T1"].y;
-    check(t1y2 > t1y1, "M6+: framing card follows a growing latest episode (moves down)");
-
-    float w1y1 = stable1.nodeRects["W1"].y;
-    float w1y2 = stable2.nodeRects["W1"].y;
-    check(w1y1 == w1y2, "M6+: non-framing world belief stays frozen across the update");
+    float b1y2 = stable2.nodeRects["B1"].y;
+    float b2y2 = stable2.nodeRects["B2"].y;
+    check(b1y2 == b1y1, "M6+: proposed product/code belief stays frozen across the update");
+    check(b2y2 == b2y1, "M6+: adjudicated product/code belief stays frozen across the update");
 }
 
 int main() {

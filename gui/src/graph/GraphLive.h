@@ -7,8 +7,7 @@
 // region surfaces are cached together. Open and pending frames always use the
 // fresh layout, so a Propose node can move from its provisional current-frame
 // position into the successor frame when DistillationProduced supplies its
-// provenance. Global Beliefs have no owning frame and keep a separate stable
-// position; an actively proposed framing ("Target") Belief remains fresh.
+// provenance. Global Beliefs have no owning frame and keep a stable position.
 
 #pragma once
 

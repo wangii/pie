@@ -79,8 +79,6 @@ BeliefOperation beliefOperationFromDelta(const std::string& operation) {
 
 std::string beliefNodeTitle(const GraphNode& n) {
     const char* cat = "Belief";
-    if (n.domain == "framing") cat = "Target";
-    else if (n.domain == "routing") cat = "Route";
     const std::string num = n.title.empty() ? n.id.value : n.title;
     std::string label = std::string(cat) + " " + num;
     if (!n.displayType.empty() && n.displayType != "belief")

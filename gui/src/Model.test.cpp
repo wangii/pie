@@ -46,12 +46,12 @@ static void feedDemoTask(NativeGuiModel& m) {
     m.applyLine(R"({"type":"TaskOpened","taskId":"task-1","initialPrompt":{"id":"p-1","original":"x","effective":"x"},"inheritedBeliefs":[]})");
     m.applyLine(R"({"type":"TargetDefined","taskId":"task-1","target":{"id":"t-1","statement":"Is pytest available?"}})");
     m.applyLine(R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-1","ordinal":1})");
-    m.applyLine(R"({"type":"RoutingDecided","taskId":"task-1","frameId":"frame-1","routing":{"id":"r-1","statement":"s","decision":"belief-loop","suitabilityProbability":0.3,"successProbability":0.9,"estimatedSteps":2,"difficulty":"medium","supportingBeliefs":[],"handoffFromFramingBeliefs":[],"reason":"needs evidence"}})");
+    m.applyLine(R"({"type":"RoutingDecided","taskId":"task-1","frameId":"frame-1","routing":{"id":"r-1","statement":"s","decision":"belief-loop","suitabilityProbability":0.3,"successProbability":0.9,"estimatedSteps":2,"difficulty":"medium","reason":"needs evidence"}})");
     m.applyLine(R"({"type":"FrameBodySelected","taskId":"task-1","frameId":"frame-1","body":"belief-loop","openBeliefsAtStart":[]})");
 
-    std::string d1 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-1\",\"frameId\":\"frame-1\",\"operation\":\"propose\",\"beliefId\":\"belief-1\",\"evidenceBeliefIds\":[],\"resultingBeliefs\":[" + beliefRecord("belief-1", "project uses pytest", "code", "pytest is importable") + "]},\"activeBeliefs\":[\"belief-1\"]}";
+    std::string d1 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-1\",\"frameId\":\"frame-1\",\"operation\":\"propose\",\"beliefId\":\"belief-1\",\"resultingBeliefs\":[" + beliefRecord("belief-1", "project uses pytest", "code", "pytest is importable") + "]},\"activeBeliefs\":[\"belief-1\"]}";
     m.applyLine(d1);
-    std::string d2 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-2\",\"frameId\":\"frame-1\",\"operation\":\"propose\",\"beliefId\":\"belief-2\",\"evidenceBeliefIds\":[],\"resultingBeliefs\":[" + beliefRecord("belief-2", "runtime lacks pytest", "product", "pip show pytest fails") + "]},\"activeBeliefs\":[\"belief-1\",\"belief-2\"]}";
+    std::string d2 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-2\",\"frameId\":\"frame-1\",\"operation\":\"propose\",\"beliefId\":\"belief-2\",\"resultingBeliefs\":[" + beliefRecord("belief-2", "runtime lacks pytest", "product", "pip show pytest fails") + "]},\"activeBeliefs\":[\"belief-1\",\"belief-2\"]}";
     m.applyLine(d2);
 
     m.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-1","plan":{"id":"plan-1","selectedToExplore":["belief-1","belief-2"],"intent":"verify dependency"}})");
@@ -66,6 +66,8 @@ static void feedDemoTask(NativeGuiModel& m) {
 }
 
 int main() {
+    // ---------------------------------------------------------------------
+    // Domain-event ingestion (applyLine / demo path)
     // ---------------------------------------------------------------------
     // Domain-event ingestion (applyLine / demo path)
     // ---------------------------------------------------------------------
@@ -106,6 +108,22 @@ int main() {
         // Task closed clears the active task and cursor.
         check(model.activeTask() == nullptr, "no active task after close");
         check(!model.cursor().valid(), "cursor invalid after close");
+    }
+
+    // ---------------------------------------------------------------------
+    // inconclusive: an adjudication with only inconclusiveBy evidence derives
+    // the 'inconclusive' status rather than falling back to 'proposed'.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-i","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        model.applyLine(R"({"type":"FrameOpened","taskId":"task-i","frameId":"frame-i","ordinal":1})");
+        std::string d = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-i\",\"frameId\":\"frame-i\",\"delta\":{\"id\":\"delta-i\",\"frameId\":\"frame-i\",\"operation\":\"inconclusive\",\"beliefId\":\"belief-i\",\"resultingBeliefs\":[{\"id\":\"belief-i\",\"statement\":\"project uses pytest\",\"domain\":\"code\",\"expectation\":\"pytest is importable\",\"evidenceRounds\":1,\"skillRefs\":[],\"supportedBy\":[],\"refutedBy\":[],\"inconclusiveBy\":[{\"evidence\":\"output was ambiguous\"}],\"withdrawn\":false}]},\"activeBeliefs\":[\"belief-i\"]}";
+        model.applyLine(d);
+        const auto* belief = model.belief("belief-i");
+        check(belief != nullptr, "inconclusive: belief registered");
+        check(belief && belief->status == "inconclusive", "inconclusive: status derived from inconclusiveBy");
+        check(belief && belief->inconclusiveBy.size() == 1, "inconclusive: evidence captured");
     }
 
     // ---------------------------------------------------------------------
@@ -164,8 +182,8 @@ int main() {
         check(rpc.cursor().frameId == "frame-9", "cursor bound to frame id");
         check(rpc.cursor().stage == pie::gui::FrameStage::ROUTING, "cursor starts at routing");
 
-        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","taskId":"task-9","frameId":"frame-9","stage":"planning"})") == pie::gui::RpcApplyResult::Applied, "CursorChanged applied");
-        check(rpc.cursor().stage == pie::gui::FrameStage::PLANNING, "cursor stage planning");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"CursorChanged","taskId":"task-9","frameId":"frame-9","stage":"proposing"})") == pie::gui::RpcApplyResult::Applied, "CursorChanged applied");
+        check(rpc.cursor().stage == pie::gui::FrameStage::PROPOSING, "cursor stage proposing");
     }
 
     // ---------------------------------------------------------------------

@@ -41,7 +41,6 @@ const char* stageLabel(FrameStage s) {
     switch (s) {
         case FrameStage::ROUTING: return "Route";
         case FrameStage::PROPOSING: return "Propose";
-        case FrameStage::PLANNING: return "Plan";
         case FrameStage::EXECUTING: return "Execution";
         case FrameStage::DISTILLING: return "Distillation";
         case FrameStage::CLOSED: return "Close";
@@ -55,7 +54,6 @@ ImU32 stageColor(FrameStage s) {
     switch (s) {
         case FrameStage::ROUTING: return rgb(st.beliefRegionLabel);
         case FrameStage::PROPOSING: return rgb(st.beliefRegionLabel);
-        case FrameStage::PLANNING: return rgb(st.planRegionLabel);
         case FrameStage::EXECUTING: return rgb(st.executionRegionLabel);
         case FrameStage::DISTILLING: return rgb(st.distillRegionLabel);
         case FrameStage::CLOSED: return rgb(st.frameBorder);
@@ -70,9 +68,6 @@ ImU32 cardColor(NodeFamily f, const GraphNode& n, bool selected, bool current) {
     if (current) return IM_COL32(st.cardCurrent.r, st.cardCurrent.g, st.cardCurrent.b, 255);
     switch (f) {
         case NodeFamily::Belief:
-            // Framing beliefs (the revisable "target" obligations) carry a
-            // distinct domain color; routing is no longer a belief domain.
-            if (n.domain == "framing") return IM_COL32(st.cardBeliefFraming.r, st.cardBeliefFraming.g, st.cardBeliefFraming.b, 255);
             if (n.displayType == "refuted" || n.displayType == "falsified") return IM_COL32(st.cardBeliefFalsified.r, st.cardBeliefFalsified.g, st.cardBeliefFalsified.b, 255);
             if (n.displayType == "revised") return IM_COL32(st.cardBeliefRevised.r, st.cardBeliefRevised.g, st.cardBeliefRevised.b, 255);
             if (n.displayType == "closed") return IM_COL32(st.cardBeliefClosed.r, st.cardBeliefClosed.g, st.cardBeliefClosed.b, 255);
@@ -329,11 +324,10 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
     // node is no longer a card that wraps its text; it is a small family/status
     // indicator (colored dot, or the execution status mark) followed by the
     // label. The node rect still anchors edges, the hit-test and the tooltip. ---
-    // The framing / "Target" belief nodes render LAST (they are drawn after every
-    // other node) so the target kind is always the final node on the canvas. Node
-    // positions come from computeGraphLayout, so this draw order does not change
-    // the geometric alignment to the next loopframe's top border -- it only makes
-    // the target the last-drawn element.
+    // All belief nodes draw in model order; product/code Beliefs are rendered
+    // like every other node (there is no framing/Target last-draw pass). Node
+    // positions come from computeGraphLayout, so draw order does not change the
+    // geometric alignment to the next loopframe's top border.
     auto drawNode = [&](const GraphNode& n) {
         auto it = layout.nodeRects.find(n.id.value);
         if (it == layout.nodeRects.end()) return;
@@ -424,16 +418,8 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         }
     };
 
-    // Pass 1: every non-framing node, in model order.
-    for (const auto& n : state.nodes) {
-        if (n.family == NodeFamily::Belief && n.domain == "framing") continue;
-        drawNode(n);
-    }
-    // Pass 2: the framing / "Target" belief nodes, drawn LAST.
-    for (const auto& n : state.nodes) {
-        if (n.family != NodeFamily::Belief || n.domain != "framing") continue;
-        drawNode(n);
-    }
+    // All belief nodes draw in a single pass (there is no framing/Target pass).
+    for (const auto& n : state.nodes) drawNode(n);
 
     // --- Legend: the five edge-semantic encodings (top-left overlay). ---
     {
