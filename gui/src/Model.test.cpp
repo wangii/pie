@@ -49,9 +49,9 @@ static void feedDemoTask(NativeGuiModel& m) {
     m.applyLine(R"({"type":"RoutingDecided","taskId":"task-1","frameId":"frame-1","routing":{"id":"r-1","statement":"s","decision":"belief-loop","suitabilityProbability":0.3,"successProbability":0.9,"estimatedSteps":2,"difficulty":"medium","reason":"needs evidence"}})");
     m.applyLine(R"({"type":"FrameBodySelected","taskId":"task-1","frameId":"frame-1","body":"belief-loop","openBeliefsAtStart":[]})");
 
-    std::string d1 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-1\",\"frameId\":\"frame-1\",\"operation\":\"propose\",\"beliefId\":\"belief-1\",\"resultingBeliefs\":[" + beliefRecord("belief-1", "project uses pytest", "code", "pytest is importable") + "]},\"activeBeliefs\":[\"belief-1\"]}";
+    std::string d1 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-1\",\"frameId\":\"frame-1\",\"producerPhase\":\"propose\",\"operation\":\"propose\",\"resultBeliefId\":\"belief-1\",\"resultingBeliefs\":[" + beliefRecord("belief-1", "project uses pytest", "code", "pytest is importable") + "]},\"activeBeliefs\":[\"belief-1\"]}";
     m.applyLine(d1);
-    std::string d2 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-2\",\"frameId\":\"frame-1\",\"operation\":\"propose\",\"beliefId\":\"belief-2\",\"resultingBeliefs\":[" + beliefRecord("belief-2", "runtime lacks pytest", "product", "pip show pytest fails") + "]},\"activeBeliefs\":[\"belief-1\",\"belief-2\"]}";
+    std::string d2 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-2\",\"frameId\":\"frame-1\",\"producerPhase\":\"propose\",\"operation\":\"propose\",\"resultBeliefId\":\"belief-2\",\"resultingBeliefs\":[" + beliefRecord("belief-2", "runtime lacks pytest", "product", "pip show pytest fails") + "]},\"activeBeliefs\":[\"belief-1\",\"belief-2\"]}";
     m.applyLine(d2);
 
     m.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-1","plan":{"id":"plan-1","selectedToExplore":["belief-1","belief-2"],"intent":"verify dependency"}})");
@@ -60,7 +60,11 @@ static void feedDemoTask(NativeGuiModel& m) {
     m.applyLine(R"({"type":"ExecutionStarted","taskId":"task-1","frameId":"frame-1","execution":{"id":"exec-2","planId":"plan-1","intention":"Run bash","tool":"bash","input":{"command":"pip show pytest"}}})");
     m.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-1","executionId":"exec-2","output":"exit 1","status":"failed","error":"not found"})");
     m.applyLine(R"({"type":"CursorChanged","taskId":"task-1","frameId":"frame-1","stage":"executing"})");
-    m.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-1","distillation":{"id":"distill-1","inputs":["exec-1","exec-2"],"contents":"declared vs runtime differ","outputs":["delta-1","delta-2"]}})");
+    std::string d3 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-3\",\"frameId\":\"frame-1\",\"producerPhase\":\"distill\",\"operation\":\"support\",\"sourceBeliefId\":\"belief-1\",\"resultBeliefId\":\"belief-1\",\"resultingBeliefs\":[" + beliefRecord("belief-1", "project uses pytest", "code", "pytest is importable") + "]},\"activeBeliefs\":[\"belief-1\",\"belief-2\"]}";
+    m.applyLine(d3);
+    std::string d4 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-4\",\"frameId\":\"frame-1\",\"producerPhase\":\"distill\",\"operation\":\"refute\",\"sourceBeliefId\":\"belief-2\",\"resultBeliefId\":\"belief-2\",\"resultingBeliefs\":[" + beliefRecord("belief-2", "runtime lacks pytest", "product", "pip show pytest fails") + "]},\"activeBeliefs\":[\"belief-1\"]}";
+    m.applyLine(d4);
+    m.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-1","distillation":{"id":"distill-1","inputs":["exec-1","exec-2"],"contents":"declared vs runtime differ","outputs":["delta-3","delta-4"]}})");
     m.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-1"})");
     m.applyLine(R"({"type":"TaskClosed","taskId":"task-1","status":"completed"})");
 }
@@ -95,7 +99,7 @@ int main() {
         check(f && f->distillation.valid(), "distillation valid");
         check(f && f->distillation.inputs.size() == 2, "distillation inputs");
         check(f && f->distillation.outputs.size() == 2, "distillation outputs");
-        check(f && f->beliefDeltas.size() == 2, "two belief deltas");
+        check(f && f->beliefDeltas.size() == 4, "four belief deltas across propose and distill");
 
         // Belief registry: two beliefs, correct statement/status/provenance.
         check(model.beliefs().size() == 2, "two beliefs registered");
@@ -118,7 +122,7 @@ int main() {
         NativeGuiModel model;
         model.applyLine(R"({"type":"TaskOpened","taskId":"task-i","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         model.applyLine(R"({"type":"FrameOpened","taskId":"task-i","frameId":"frame-i","ordinal":1})");
-        std::string d = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-i\",\"frameId\":\"frame-i\",\"delta\":{\"id\":\"delta-i\",\"frameId\":\"frame-i\",\"operation\":\"inconclusive\",\"beliefId\":\"belief-i\",\"resultingBeliefs\":[{\"id\":\"belief-i\",\"statement\":\"project uses pytest\",\"domain\":\"code\",\"expectation\":\"pytest is importable\",\"evidenceRounds\":1,\"skillRefs\":[],\"supportedBy\":[],\"refutedBy\":[],\"inconclusiveBy\":[{\"evidence\":\"output was ambiguous\"}],\"withdrawn\":false}]},\"activeBeliefs\":[\"belief-i\"]}";
+        std::string d = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-i\",\"frameId\":\"frame-i\",\"delta\":{\"id\":\"delta-i\",\"frameId\":\"frame-i\",\"producerPhase\":\"distill\",\"operation\":\"inconclusive\",\"sourceBeliefId\":\"belief-i\",\"resultBeliefId\":\"belief-i\",\"resultingBeliefs\":[{\"id\":\"belief-i\",\"statement\":\"project uses pytest\",\"domain\":\"code\",\"expectation\":\"pytest is importable\",\"evidenceRounds\":1,\"skillRefs\":[],\"supportedBy\":[],\"refutedBy\":[],\"inconclusiveBy\":[{\"evidence\":\"output was ambiguous\"}],\"withdrawn\":false}]},\"activeBeliefs\":[\"belief-i\"]}";
         model.applyLine(d);
         const auto* belief = model.belief("belief-i");
         check(belief != nullptr, "inconclusive: belief registered");
@@ -245,7 +249,7 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
-    // Graph projection: two belief deltas -> two Propose nodes; typed edges.
+    // Graph projection: propose plus distill deltas -> four Propose nodes.
     // ---------------------------------------------------------------------
     {
         NativeGuiModel model;
@@ -264,7 +268,7 @@ int main() {
         check(plans == 1, "one plan node");
         check(execs == 2, "two execution nodes");
         check(dists == 1, "one distill node");
-        check(proposes == 2, "two propose nodes (one per belief delta)");
+        check(proposes == 4, "four propose nodes (one per belief delta)");
 
         bool allTyped = !st.edges.empty();
         for (const auto& e : st.edges) {

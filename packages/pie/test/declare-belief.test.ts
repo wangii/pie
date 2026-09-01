@@ -27,7 +27,7 @@ describe("declare_belief tool", () => {
 	test("rejects control state disguised as an unsupported domain", async () => {
 		const set = new BeliefSet();
 		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
+		const execution = tool.execute(
 			"tc-1",
 			{
 				statement: "the final answer must establish X",
@@ -40,7 +40,8 @@ describe("declare_belief tool", () => {
 		);
 
 		expect(set.beliefs).toHaveLength(0);
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+		await expect(execution).rejects.toThrow("Belief rejected");
+		expect(tool.executionMode).toBe("sequential");
 	});
 
 	test("support treats a fulfilled prediction as evidence", async () => {
@@ -123,7 +124,7 @@ describe("declare_belief tool", () => {
 			evidenceRounds: 1,
 		});
 		const tool = createDeclareBeliefToolDefinition(set);
-		const result = await tool.execute(
+		const execution = tool.execute(
 			"tc-1",
 			{ op: "support", beliefId: belief.id },
 			undefined,
@@ -131,7 +132,7 @@ describe("declare_belief tool", () => {
 			undefined as never,
 		);
 
-		expect((result.content[0] as { text: string }).text).toContain("Belief rejected");
+		await expect(execution).rejects.toThrow("Belief rejected");
 	});
 });
 
@@ -158,6 +159,27 @@ describe("route_task tool", () => {
 		expect(routings.routings).toHaveLength(1);
 		expect(beliefs.beliefs).toHaveLength(0);
 		expect((result.content[0] as { text: string }).text).toContain("Applied routing");
+		expect(tool.executionMode).toBe("sequential");
+	});
+
+	test("throws rejected routing so the agent records an error result", async () => {
+		const tool = createRouteTaskToolDefinition(new RoutingSet());
+		await expect(
+			tool.execute(
+				"tc-1",
+				{
+					decision: "fast-path",
+					reason: "invalid estimate",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 101,
+					difficulty: "low",
+				},
+				undefined,
+				undefined,
+				undefined as never,
+			),
+		).rejects.toThrow("Routing rejected");
 	});
 });
 

@@ -43,6 +43,7 @@ describe("belief-loop event family", () => {
 					evidence: "memory pressure was not applied",
 				}),
 			]),
+			fauxAssistantMessage([fauxToolCall("declare_belief", { op: "retract", beliefId: "belief-2" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
 			fauxAssistantMessage("the cache survives logout"),
@@ -60,13 +61,20 @@ describe("belief-loop event family", () => {
 		for (const event of deltas) {
 			expect(event.delta.frameId).toBe(event.frameId);
 			expect(event.delta.resultingBeliefs.length).toBeGreaterThan(0);
+			expect(event.delta.resultingBeliefs.some((belief) => belief.id === event.delta.resultBeliefId)).toBe(true);
 		}
 
 		const plans = harness.eventsOfType("PlanProduced");
 		expect(plans.some((event) => event.plan.selectedToExplore.length > 0)).toBe(true);
 		const distillations = harness.eventsOfType("DistillationProduced");
 		expect(distillations.length).toBeGreaterThan(0);
-		expect(distillations[0].distillation.outputs.length).toBeGreaterThan(0);
+		const firstFrameDeltas = deltas.filter((event) => event.frameId === distillations[0].frameId);
+		expect(distillations[0].distillation.outputs).toEqual(
+			firstFrameDeltas.filter((event) => event.delta.producerPhase === "distill").map((event) => event.delta.id),
+		);
+		expect(distillations[0].distillation.outputs).not.toContain(
+			firstFrameDeltas.find((event) => event.delta.producerPhase === "propose")?.delta.id,
+		);
 	});
 
 	it("records both immutable belief records changed by evidence-supported refine", async () => {
@@ -103,6 +111,9 @@ describe("belief-loop event family", () => {
 		const refine = harness.eventsOfType("BeliefDeltaApplied").find((event) => event.delta.operation === "refine");
 		expect(refine?.delta.resultingBeliefs).toHaveLength(2);
 		expect(refine?.delta.resultingBeliefs.map(statusOfDomainBelief)).toEqual(["superseded", "supported"]);
+		expect(refine?.delta.producerPhase).toBe("distill");
+		expect(refine?.delta.sourceBeliefId).toBe("belief-1");
+		expect(refine?.delta.resultBeliefId).toBe("belief-2");
 	});
 
 	it("records routing as a frame decision rather than a belief", async () => {

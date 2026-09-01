@@ -30,8 +30,9 @@ std::vector<EdgeRoute> computeEdgeRoutes(const GraphTaskState& state,
         route.type = edge.type;
         route.beliefOperation = edge.beliefOperation;
 
-        if (edge.type == EdgeSemanticType::BeliefToPlan) {
-            // Belief -> Plan is a direct straight line, not a two-elbow
+        if (edge.type == EdgeSemanticType::BeliefToPlan ||
+            edge.type == EdgeSemanticType::BeliefToPropose) {
+            // Belief -> Plan/Propose is a direct straight line, not a two-elbow
             // orthogonal polyline: the plan directly reads the beliefs it
             // selected, so the connection is a single segment.
             const auto source = right(*sourceRect);

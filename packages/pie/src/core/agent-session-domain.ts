@@ -45,6 +45,7 @@ export type FrameBodyKind = "belief-loop" | "fast-path";
 export type BeliefDomain = "product" | "code";
 export type BeliefStatus = "proposed" | "supported" | "refuted" | "inconclusive" | "superseded";
 export type BeliefOperation = "propose" | "support" | "refute" | "refine" | "inconclusive" | "retract";
+export type BeliefDeltaProducerPhase = "propose" | "distill";
 export type RoutingDecision = "belief-loop" | "fast-path";
 export type RoutingDifficulty = "low" | "medium" | "high";
 export type ExecutionStatus = "running" | "succeeded" | "failed" | "cancelled";
@@ -130,7 +131,13 @@ export interface BeliefDelta {
 	readonly id: BeliefDeltaId;
 	readonly frameId: FrameId;
 	readonly distillationId?: DistillationId;
+	/** Cognitive phase that produced this mutation; never inferred from event order. */
+	readonly producerPhase: BeliefDeltaProducerPhase;
 	readonly operation: BeliefOperation;
+	/** Existing belief read or replaced by this mutation. */
+	readonly sourceBeliefId?: BeliefId;
+	/** Canonical belief written by this mutation. For refine, this is the new record. */
+	readonly resultBeliefId: BeliefId;
 	readonly beliefId?: BeliefId;
 	readonly proposedRecord?: Belief;
 	readonly evidence?: string;
@@ -453,6 +460,15 @@ export function applyAgentSessionDomainEvent(
 			if (frame.body.beliefDeltas.some((delta) => delta.id === event.delta.id)) {
 				fail(event, `belief delta ${event.delta.id} already exists`);
 			}
+			if (event.delta.producerPhase !== "propose" && event.delta.producerPhase !== "distill") {
+				fail(event, `belief delta ${event.delta.id} has invalid producer phase`);
+			}
+			if (!event.delta.resultingBeliefs.some((belief) => belief.id === event.delta.resultBeliefId)) {
+				fail(event, `belief delta ${event.delta.id} does not contain result ${event.delta.resultBeliefId}`);
+			}
+			if (event.delta.sourceBeliefId !== undefined && !snapshot.beliefs.has(event.delta.sourceBeliefId)) {
+				fail(event, `belief delta ${event.delta.id} names unknown source ${event.delta.sourceBeliefId}`);
+			}
 			const beliefs = new Map(snapshot.beliefs);
 			const introduced = [...task.introducedBeliefs];
 			for (const belief of event.delta.resultingBeliefs) {
@@ -519,6 +535,19 @@ export function applyAgentSessionDomainEvent(
 			const executionIds = new Set(frame.body.trajectory.map((execution) => execution.id));
 			for (const input of event.distillation.inputs) {
 				if (!executionIds.has(input)) fail(event, `distillation input ${input} is not in frame ${frame.id}`);
+			}
+			if (frame.body.kind === "belief-loop") {
+				const expectedOutputs = frame.body.beliefDeltas
+					.filter((delta) => delta.producerPhase === "distill")
+					.map((delta) => delta.id);
+				if (
+					expectedOutputs.length !== event.distillation.outputs.length ||
+					expectedOutputs.some((output, index) => event.distillation.outputs[index] !== output)
+				) {
+					fail(event, `distillation outputs must exactly match distill-produced belief deltas`);
+				}
+			} else if (event.distillation.outputs.length > 0) {
+				fail(event, `fast-path distillation cannot produce belief deltas`);
 			}
 			const body = { ...frame.body, distillation: event.distillation };
 			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };

@@ -678,18 +678,19 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
         if (!d.id.empty() && !seenDeltaIds_.insert(d.id).second) return true;
         d.frameId = str(deltaRaw, "frameId", frameId);
         d.distillationId = str(deltaRaw, "distillationId");
+        d.producerPhase = str(deltaRaw, "producerPhase");
         d.operation = str(deltaRaw, "operation");
         d.beliefId = str(deltaRaw, "beliefId");
+        d.sourceBeliefId = str(deltaRaw, "sourceBeliefId");
+        d.resultBeliefId = str(deltaRaw, "resultBeliefId");
         d.evidence = str(deltaRaw, "evidence");
 
         std::string resultingRaw;
-        std::string createdId;
         if (rawValue(deltaRaw, "resultingBeliefs", resultingRaw)) {
             for (auto& e : arrayElements(resultingRaw)) {
                 Belief parsed;
                 parseBeliefRecord(e, parsed);
                 if (parsed.id.empty()) continue;
-                if (createdId.empty()) createdId = parsed.id;
                 const bool isNew = beliefById_.find(parsed.id) == beliefById_.end();
                 Belief& stored = upsertBelief(parsed.id);
                 stored.statement = parsed.statement;
@@ -706,10 +707,6 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
                 if (isNew || stored.createdInFrame.empty()) stored.createdInFrame = frameId;
             }
         }
-        // A creation delta names its belief via beliefId; when the runtime omits
-        // it but does project a resulting belief, fall back to that id so the
-        // Propose node is still emitted and linked.
-        if (d.beliefId.empty() && !createdId.empty()) d.beliefId = createdId;
         if (f) f->beliefDeltas.push_back(std::move(d));
         else pendingDeltas_.push_back(std::move(d));
         activeBeliefs_ = strArrayField(line, "activeBeliefs");

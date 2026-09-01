@@ -38,6 +38,7 @@ const char* edgeSemanticTypeToString(EdgeSemanticType t) {
         case EdgeSemanticType::ExecutionToDistill: return "Execution->Distill";
         case EdgeSemanticType::DistillToBelief: return "Distill->Belief";
         case EdgeSemanticType::DistillToPropose: return "Distill->Propose";
+        case EdgeSemanticType::BeliefToPropose: return "Belief->Propose";
         case EdgeSemanticType::ProposeToBelief: return "Propose->Belief";
     }
     return "?";
@@ -96,23 +97,19 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     GraphTaskState state;
     const std::vector<LoopFrame> frames = model.frames();
 
-    // Each created Belief's display anchor frame is the frame of its producing
-    // Propose node. A propose that a distillation names (the distill's outputs
-    // contain the delta) is projected to the SUCCESSOR frame, so the Belief it
-    // creates anchors to the same frame as its Propose. Beliefs stay
+    // Each result Belief's display anchor frame is the frame of its producing
+    // Propose node. A distill-produced delta is projected to the successor
+    // frame from its explicit producerPhase, so the Belief it creates anchors
+    // to the same frame as its Propose. Beliefs stay
     // session-global (no owning frame); this only sets the row-alignment anchor.
     std::map<std::string, std::string> beliefAnchorFrame;  // beliefId -> frame
     for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
         const LoopFrame& f = frames[frameIndex];
-        std::set<std::string> distillOutputs;
-        if (f.distillation.valid()) {
-            for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
-        }
         const std::string nextFrameId =
             (frameIndex + 1 < frames.size()) ? frames[frameIndex + 1].id : pendingFrameId(f.id);
         for (const BeliefDelta& d : f.beliefDeltas) {
-            if (d.beliefId.empty()) continue;
-            beliefAnchorFrame[d.beliefId] = distillOutputs.count(d.id) ? nextFrameId : f.id;
+            if (d.resultBeliefId.empty()) continue;
+            beliefAnchorFrame[d.resultBeliefId] = d.producerPhase == "distill" ? nextFrameId : f.id;
         }
     }
 
@@ -210,27 +207,23 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
 
         // --- Propose nodes (one per belief delta: the hypothesis-formation
         // step between distillation and the belief it writes back). ---
-        // A propose that a distillation produced (its outputs name the delta)
+        // A propose that a distillation produced (producerPhase="distill")
         // belongs to the NEXT loopframe/episode: the distillation closes out the
         // frame's epistemic work, and the propose it feeds is the following
         // frame's proposal step. If the successor is not materialized yet,
         // use a stable placeholder frame; projection will use the real frame
         // id once the runtime opens it.
-        std::set<std::string> distillOutputs;
-        if (f.distillation.valid()) {
-            for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
-        }
         const std::string nextFrameId =
             (frameIndex + 1 < frames.size()) ? frames[frameIndex + 1].id : pendingFrameId(f.id);
         uint64_t proposeIdx = 0;
         for (const BeliefDelta& d : f.beliefDeltas) {
-            if (d.beliefId.empty()) continue;
+            if (d.resultBeliefId.empty()) continue;
             GraphNode propose;
             propose.id = makeNodeId(d.id.empty()
                 ? ("PR-" + f.id + "-" + std::to_string(proposeIdx))
                 : d.id);
             propose.family = NodeFamily::Propose;
-            propose.frameId = distillOutputs.count(d.id) ? nextFrameId : f.id;
+            propose.frameId = d.producerPhase == "distill" ? nextFrameId : f.id;
             propose.displayType = "propose";
             propose.title = d.operation;
             propose.compactText = d.evidence;
@@ -246,13 +239,9 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     // materialized only when the last frame has a distillation-produced delta.
     if (!frames.empty()) {
         const LoopFrame& last = frames.back();
-        std::set<std::string> outputs;
-        if (last.distillation.valid()) {
-            for (const BeliefDeltaId& output : last.distillation.outputs) outputs.insert(output);
-        }
         bool hasPendingProposal = false;
         for (const BeliefDelta& delta : last.beliefDeltas) {
-            if (!delta.beliefId.empty() && outputs.count(delta.id)) {
+            if (!delta.resultBeliefId.empty() && delta.producerPhase == "distill") {
                 hasPendingProposal = true;
                 break;
             }
@@ -278,29 +267,36 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
             }
         }
 
-        // Distill -> Propose -> Belief: explicit provenance. Distillation names
-        // the belief-delta ids it produced (outputs); each delta names the belief
-        // it wrote back (beliefId) and its operation. Only deltas whose belief is
-        // projected are linked (a dangling target is dropped).
+        // Distill -> Propose and source Belief -> Propose -> result Belief are
+        // explicit provenance. Distillation names only distill-produced delta
+        // ids; refine names both the replaced and replacement belief ids.
         std::set<std::string> distillOutputs;
         if (f.distillation.valid()) {
             for (const BeliefDeltaId& o : f.distillation.outputs) distillOutputs.insert(o);
         }
         for (const BeliefDelta& d : f.beliefDeltas) {
-            if (d.beliefId.empty() || !projectedBeliefIds.count(d.beliefId)) continue;
+            if (d.resultBeliefId.empty() || !projectedBeliefIds.count(d.resultBeliefId)) continue;
             const std::string proposeId = d.id;
             // Distill -> Propose when the distillation names this delta.
-            if (f.distillation.valid() && distillOutputs.count(d.id)) {
+            if (f.distillation.valid() && d.producerPhase == "distill" && distillOutputs.count(d.id)) {
                 GraphEdge distillToPropose;
                 distillToPropose.source = makeNodeId(f.distillation.id);
                 distillToPropose.target = makeNodeId(proposeId);
                 distillToPropose.type = EdgeSemanticType::DistillToPropose;
                 state.edges.push_back(std::move(distillToPropose));
             }
+            if (!d.sourceBeliefId.empty() && d.sourceBeliefId != d.resultBeliefId &&
+                projectedBeliefIds.count(d.sourceBeliefId)) {
+                GraphEdge beliefToPropose;
+                beliefToPropose.source = makeNodeId(d.sourceBeliefId);
+                beliefToPropose.target = makeNodeId(proposeId);
+                beliefToPropose.type = EdgeSemanticType::BeliefToPropose;
+                state.edges.push_back(std::move(beliefToPropose));
+            }
             // Propose -> Belief with the operation encoding.
             GraphEdge proposeToBelief;
             proposeToBelief.source = makeNodeId(proposeId);
-            proposeToBelief.target = makeNodeId(d.beliefId);
+            proposeToBelief.target = makeNodeId(d.resultBeliefId);
             proposeToBelief.type = EdgeSemanticType::ProposeToBelief;
             proposeToBelief.beliefOperation = beliefOperationFromDelta(d.operation);
             state.edges.push_back(std::move(proposeToBelief));

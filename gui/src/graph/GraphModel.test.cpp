@@ -53,7 +53,8 @@ static std::string beliefRecord(const char* id, const char* statement, const cha
 }
 
 static void delta(NativeGuiModel& m, const char* frameId, const char* deltaId,
-                  const char* op, const char* beliefId) {
+                  const char* op, const char* beliefId,
+                  const char* producerPhase = "propose") {
     std::string rec = beliefRecord(beliefId, "statement of ", "code", "expectation");
     std::string line = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"";
     line += frameId;
@@ -61,9 +62,13 @@ static void delta(NativeGuiModel& m, const char* frameId, const char* deltaId,
     line += deltaId;
     line += "\",\"frameId\":\"";
     line += frameId;
+    line += "\",\"producerPhase\":\"";
+    line += producerPhase;
     line += "\",\"operation\":\"";
     line += op;
     line += "\",\"beliefId\":\"";
+    line += beliefId;
+    line += "\",\"resultBeliefId\":\"";
     line += beliefId;
     line += "\",\"resultingBeliefs\":[";
     line += rec;
@@ -89,7 +94,9 @@ static NativeGuiModel buildModel() {
     model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-1","executionId":"exec-1","output":"pytest==8.0","status":"succeeded"})");
     model.applyLine(R"({"type":"ExecutionStarted","taskId":"task-1","frameId":"frame-1","execution":{"id":"exec-2","planId":"plan-1","intention":"bash","tool":"bash","input":{"command":"pip show pytest"}}})");
     model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-1","executionId":"exec-2","output":"exit 1","status":"failed","error":"not found"})");
-    model.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-1","distillation":{"id":"distill-1","inputs":["exec-1","exec-2"],"contents":"declared vs runtime differ","outputs":["delta-1","delta-2"]}})");
+    delta(model, "frame-1", "delta-1-support", "support", "belief-1", "distill");
+    delta(model, "frame-1", "delta-2-inconclusive", "inconclusive", "belief-2", "distill");
+    model.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-1","distillation":{"id":"distill-1","inputs":["exec-1","exec-2"],"contents":"declared vs runtime differ","outputs":["delta-1-support","delta-2-inconclusive"]}})");
     model.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-1"})");
 
     // Frame 2: propose belief-3; plan; one execution; distill; close.
@@ -99,7 +106,8 @@ static NativeGuiModel buildModel() {
     model.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-2","plan":{"id":"plan-2","selectedToExplore":["belief-3"],"intent":"check env"}})");
     model.applyLine(R"({"type":"ExecutionStarted","taskId":"task-1","frameId":"frame-2","execution":{"id":"exec-3","planId":"plan-2","intention":"bash","tool":"bash","input":{"command":"ls"}}})");
     model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-2","executionId":"exec-3","output":"a b c","status":"succeeded"})");
-    model.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-2","distillation":{"id":"distill-2","inputs":["exec-3"],"contents":"ok","outputs":["delta-3"]}})");
+    delta(model, "frame-2", "delta-3-support", "support", "belief-3", "distill");
+    model.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-2","distillation":{"id":"distill-2","inputs":["exec-3"],"contents":"ok","outputs":["delta-3-support"]}})");
     model.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-2"})");
 
     return model;
@@ -112,7 +120,7 @@ static void testBeliefCreateIsPropose() {
     NativeGuiModel m;
     m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
     m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"distill","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
     m.applyLine(R"({"type":"DistillationProduced","taskId":"t-1","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
 
     GraphTaskState s = projectGraphTask(m);
@@ -155,7 +163,7 @@ static void testBeliefCreateMissingFrameAndLink() {
     {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
         GraphTaskState s = projectGraphTask(m);
         int propose = 0;
@@ -167,7 +175,7 @@ static void testBeliefCreateMissingFrameAndLink() {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
         GraphTaskState s = projectGraphTask(m);
         int propose = 0, createEdges = 0;
         for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
@@ -182,7 +190,7 @@ static void testBeliefCreateMissingFrameAndLink() {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        const char* deltaLine = R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})";
+        const char* deltaLine = R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})";
         m.applyLine(deltaLine);
         m.applyLine(deltaLine);  // replay
         GraphTaskState s = projectGraphTask(m);
@@ -194,7 +202,7 @@ static void testBeliefCreateMissingFrameAndLink() {
     {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");  // duplicate
         GraphTaskState s = projectGraphTask(m);
@@ -202,6 +210,31 @@ static void testBeliefCreateMissingFrameAndLink() {
         for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
         check(propose == 1, "repeated FrameOpened preserves the backfilled Propose node");
     }
+}
+
+static void testRefineLinksSourceAndResultBeliefs() {
+    NativeGuiModel m;
+    m.applyLine(R"({"type":"TaskOpened","taskId":"t-r","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+    m.applyLine(R"({"type":"FrameOpened","taskId":"t-r","frameId":"f1","ordinal":1})");
+    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-r","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"one mechanism","domain":"code","expectation":"one handler","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-r","frameId":"f1","delta":{"id":"d2","frameId":"f1","producerPhase":"distill","operation":"refine","beliefId":"B1","sourceBeliefId":"B1","resultBeliefId":"B2","resultingBeliefs":[{"id":"B1","statement":"one mechanism","domain":"code","expectation":"one handler","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"supersededBy":"B2","withdrawn":false},{"id":"B2","statement":"multiple mechanisms","domain":"code","expectation":"multiple handlers","evidenceRounds":1,"skillRefs":[],"supportedBy":[{"evidence":"three handlers"}],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B2"]})");
+    m.applyLine(R"({"type":"DistillationProduced","taskId":"t-r","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"refined","outputs":["d2"]}})");
+
+    GraphTaskState s = projectGraphTask(m);
+    bool sourceToRefine = false;
+    bool refineToResult = false;
+    bool refineToSource = false;
+    for (const GraphEdge& edge : s.edges) {
+        if (edge.type == EdgeSemanticType::BeliefToPropose &&
+            edge.source.value == "B1" && edge.target.value == "d2") sourceToRefine = true;
+        if (edge.type == EdgeSemanticType::ProposeToBelief &&
+            edge.source.value == "d2" && edge.target.value == "B2") refineToResult = true;
+        if (edge.type == EdgeSemanticType::ProposeToBelief &&
+            edge.source.value == "d2" && edge.target.value == "B1") refineToSource = true;
+    }
+    check(sourceToRefine, "refine links source Belief -> Propose");
+    check(refineToResult, "refine links Propose -> replacement Belief");
+    check(!refineToSource, "refine does not write back to the superseded source");
 }
 
 int main() {
@@ -235,11 +268,10 @@ int main() {
     check(planCount == 2, "two plan nodes");
     check(execCount1 == 2, "two execution nodes for frame 1");
     check(distillCount == 2, "two distill nodes");
-    // A distillation-produced propose belongs to the NEXT episode: frame-1's
-    // distill outputs delta-1/delta-2, which now render in frame-2's lane;
-    // frame-2's distill output delta-3 targets the pending successor row.
-    check(proposeNodes1 == 0, "frame 1 owns no Propose node (its distill's proposes move to frame 2)");
-    check(proposeNodes2 == 2, "frame 2 owns the prior frame's distill Propose nodes");
+    // Initial proposals stay in their producing frame. Distill-produced
+    // write-backs move to the successor from explicit producerPhase metadata.
+    check(proposeNodes1 == 2, "frame 1 owns its two initial Propose nodes");
+    check(proposeNodes2 == 3, "frame 2 owns two prior distill write-backs and its initial proposal");
     check(pendingProposeNodes == 1, "frame 2's distill output targets the pending next frame");
     check(state.frames.size() == 3 && state.frames.back().id == "frame-2::next",
           "the pending next frame is exposed as a graph container");
@@ -252,6 +284,7 @@ int main() {
                            e.type == EdgeSemanticType::PlanToExecution ||
                            e.type == EdgeSemanticType::ExecutionToDistill ||
                            e.type == EdgeSemanticType::DistillToPropose ||
+                           e.type == EdgeSemanticType::BeliefToPropose ||
                            e.type == EdgeSemanticType::ProposeToBelief;
         if (!known) allTyped = false;
         if (!e.source.valid() || !e.target.valid()) allTyped = false;
@@ -310,6 +343,7 @@ int main() {
 
     testBeliefCreateIsPropose();
     testBeliefCreateMissingFrameAndLink();
+    testRefineLinksSourceAndResultBeliefs();
 
     // A pending successor uses the same row as the real successor once it is
     // opened; the proposal changes only its frame id, not its node id.
@@ -317,10 +351,10 @@ int main() {
         NativeGuiModel m;
         m.applyLine(R"({"type":"TaskOpened","taskId":"t-2","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","operation":"propose","beliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
+        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"distill","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
 
-        // Before DistillationProduced supplies provenance, the proposal is
-        // provisionally in f1 and receives an initial live-layout position.
+        // producerPhase supplies provenance immediately; no event-order guess
+        // is needed before DistillationProduced arrives.
         GraphLiveState live;
         GraphTaskState provisional = projectGraphTask(m);
         PieGraphLayout provisionalLayout = stabilizeLiveLayout(
@@ -328,16 +362,14 @@ int main() {
         const GraphNode* provisionalNode = nullptr;
         for (const GraphNode& n : provisional.nodes)
             if (n.family == NodeFamily::Propose) provisionalNode = &n;
-        check(provisionalNode && provisionalNode->frameId && *provisionalNode->frameId == "f1",
-              "proposal is provisional in the producing frame before distillation provenance");
-        // The Belief its Propose produces is anchored to the producing frame too,
-        // and holds a stable position in that row.
+        check(provisionalNode && provisionalNode->frameId && *provisionalNode->frameId == "f1::next",
+              "distill proposal immediately targets the pending successor");
         const GraphNode* provisionalBelief = nullptr;
         for (const GraphNode& n : provisional.nodes)
             if (n.family == NodeFamily::Belief && n.id.value == "B1") provisionalBelief = &n;
         check(provisionalBelief && provisionalBelief->createdInFrame &&
-                  *provisionalBelief->createdInFrame == "f1",
-              "belief is provisionally anchored to the producing frame");
+                  *provisionalBelief->createdInFrame == "f1::next",
+              "distill result belief immediately anchors to the pending successor");
 
         m.applyLine(R"({"type":"DistillationProduced","taskId":"t-2","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
         GraphTaskState pending = projectGraphTask(m);
@@ -348,8 +380,8 @@ int main() {
         check(before && before->frameId && *before->frameId == "f1::next",
               "proposal initially targets the stable pending successor");
         check(pendingFresh.nodeRects.at("d1").y == pendingStable.nodeRects.at("d1").y &&
-                  pendingStable.nodeRects.at("d1").y != provisionalLayout.nodeRects.at("d1").y,
-              "live layout moves a reparented proposal into the pending successor");
+                  pendingStable.nodeRects.at("d1").y == provisionalLayout.nodeRects.at("d1").y,
+              "distillation correlation does not reparent an explicit proposal");
 
         // The Belief its Propose produces must follow the same reparenting: its
         // display anchor re-aims at the pending successor, and the already-warmed
@@ -361,8 +393,8 @@ int main() {
                   *pendingBelief->createdInFrame == "f1::next",
               "belief re-anchors to the pending successor to match its Propose");
         check(pendingFresh.nodeRects.at("B1").y == pendingStable.nodeRects.at("B1").y &&
-                  pendingStable.nodeRects.at("B1").y != provisionalLayout.nodeRects.at("B1").y,
-              "live layout moves a reparented belief out of its old row (stableBeliefRects invalidated)");
+                  pendingStable.nodeRects.at("B1").y == provisionalLayout.nodeRects.at("B1").y,
+              "distillation correlation does not reparent an explicit result belief");
         m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f2","ordinal":2})");
         GraphTaskState materialized = projectGraphTask(m);
         const GraphNode* after = nullptr;

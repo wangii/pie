@@ -161,10 +161,12 @@ enum class BeliefStatus {
 };
 ```
 
-The status transition remains monotone:
+An inconclusive experiment does not settle the belief. Its evidence is retained
+as attempt history and the same belief remains eligible for another experiment:
 
 ```text
 Proposed -> Supported | Refuted | Inconclusive
+Inconclusive -> Inconclusive | Supported | Refuted
 Proposed | Supported | Refuted | Inconclusive -> Superseded
 ```
 
@@ -252,8 +254,11 @@ struct BeliefDelta {
   BeliefDeltaId id;
   FrameId frameId;
   std::optional<DistillationId> distillationId;
+  BeliefDeltaProducerPhase producerPhase; // Propose | Distill
   BeliefOperation operation; // Propose | Support | Refute | Refine | Inconclusive | Retract
 
+  std::optional<BeliefId> sourceBeliefId;
+  BeliefId resultBeliefId;
   std::optional<BeliefId> beliefId;
   std::optional<Belief> proposedRecord;
   std::optional<std::string> evidence;
@@ -261,7 +266,10 @@ struct BeliefDelta {
 };
 ```
 
-A frame can contain zero or more belief deltas. `proposal: string` is
+A frame can contain zero or more belief deltas. `producerPhase` records whether
+propose or distill emitted the mutation without relying on event order.
+`sourceBeliefId` and `resultBeliefId` make refinement lineage explicit: the old
+belief is the source and the replacement is the result. `proposal: string` is
 insufficient because one propose/distill phase may create, settle, refine, or
 retract several beliefs. Distillation output ids provide an explicit
 `Execution -> Distillation -> BeliefDelta -> Belief` provenance chain.
@@ -337,10 +345,10 @@ Required correlation fields:
 - Plan, Execution, Distillation, Intervention, Routing, and BeliefDelta carry
   their own stable string id plus their owning/correlation ids;
 - `ExecutionCompleted` carries structured output and terminal status;
-- `DistillationProduced` carries explicit execution input ids and belief-delta
-  output ids;
-- `BeliefDeltaApplied` carries the stable Belief id and resulting immutable
-  record/provenance;
+- `DistillationProduced` carries explicit execution input ids and only the ids
+  of deltas whose `producerPhase` is `Distill`;
+- `BeliefDeltaApplied` carries the producer phase, source/result Belief ids, and
+  resulting immutable record/provenance;
 - `FrameOpened`/`FrameClosed` are emitted by the runtime. `PROPOSING`, a second
   plan, or a second distillation is never used by the GUI as a frame delimiter.
 
@@ -392,7 +400,7 @@ model and must not become a second source of truth.
 5. Belief status is derived from provenance.
 6. A Plan selects Belief ids; it does not own Beliefs.
 7. Every Execution belongs to one Frame and, when applicable, one Plan.
-8. Every Distillation names its Execution inputs and BeliefDelta outputs.
+8. Every Distillation names its Execution inputs and only its own BeliefDelta outputs.
 9. Routing exists once per routed Frame and is not duplicated in FastPathFrame.
 10. Target is immutable and remains distinct from evidence-revisable world beliefs.
 11. A GUI Task view contains exactly one Task's Frames.
@@ -405,8 +413,9 @@ model and must not become a second source of truth.
   into `AgentSessionSnapshot` for the selected branch.
 - The live controller still owns the operational `BeliefSet`; the replayed snapshot is a durable
   read model, not a replacement mutable store.
-- `Distillation.outputs` provides the current distillation-to-delta correlation. The optional
-  reverse `BeliefDelta.distillationId` is not required for replay.
+- `BeliefDelta.producerPhase` provides phase ownership; `Distillation.outputs`
+  contains exactly the distill-produced delta ids. The optional reverse
+  `BeliefDelta.distillationId` is not required for replay.
 - Fast-path summaries appear both as a structured domain distillation and as the hidden
   `fast_path_distillation` custom message used for conversational continuity.
 - Any GUI or external client must consume stable ids and explicit lifecycle events. It must not

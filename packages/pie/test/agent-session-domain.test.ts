@@ -89,7 +89,9 @@ function beliefLoopEvents(): AgentSessionDomainEvent[] {
 			delta: {
 				id: "belief-delta-1",
 				frameId: "frame-1",
+				producerPhase: "propose",
 				operation: "propose",
+				resultBeliefId: "belief-1",
 				proposedRecord: belief,
 				resultingBeliefs: [belief],
 			},
@@ -138,7 +140,7 @@ function beliefLoopEvents(): AgentSessionDomainEvent[] {
 				id: "distillation-1",
 				inputs: ["execution-1"],
 				contents: "cache survives logout",
-				outputs: ["belief-delta-1"],
+				outputs: [],
 			},
 		},
 		{
@@ -219,6 +221,19 @@ describe("agent session domain replay", () => {
 		};
 
 		expect(() => applyAgentSessionDomainEvent(snapshot, close)).toThrow(DomainReplayError);
+	});
+
+	it("rejects propose-phase deltas claimed as distillation outputs", () => {
+		const events = beliefLoopEvents();
+		const index = events.findIndex((event) => event.type === "DistillationProduced");
+		const distillation = events[index];
+		if (distillation?.type !== "DistillationProduced") throw new Error("missing distillation fixture");
+		events[index] = {
+			...distillation,
+			distillation: { ...distillation.distillation, outputs: ["belief-delta-1"] },
+		};
+
+		expect(() => replayAgentSessionDomainEvents("session-1", events)).toThrow(/must exactly match/);
 	});
 
 	it("starts each task with only explicitly inherited active beliefs", () => {

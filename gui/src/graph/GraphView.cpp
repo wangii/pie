@@ -103,6 +103,7 @@ ImU32 edgeColor(EdgeSemanticType t, float alpha) {
         case EdgeSemanticType::ExecutionToDistill: return IM_COL32(st.edgeExecutionToDistill.r, st.edgeExecutionToDistill.g, st.edgeExecutionToDistill.b, 255);
         case EdgeSemanticType::DistillToBelief: return IM_COL32(st.edgeDistillToBelief.r, st.edgeDistillToBelief.g, st.edgeDistillToBelief.b, 255);
         case EdgeSemanticType::DistillToPropose: return IM_COL32(st.edgeDistillToPropose.r, st.edgeDistillToPropose.g, st.edgeDistillToPropose.b, 255);
+        case EdgeSemanticType::BeliefToPropose: return IM_COL32(st.edgeBeliefToPropose.r, st.edgeBeliefToPropose.g, st.edgeBeliefToPropose.b, 255);
         case EdgeSemanticType::ProposeToBelief: return IM_COL32(st.edgeProposeToBelief.r, st.edgeProposeToBelief.g, st.edgeProposeToBelief.b, 255);
     }
     return IM_COL32(st.edgeMuted.r, st.edgeMuted.g, st.edgeMuted.b, 255);
@@ -429,12 +430,14 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         const char* labels[] = {
             "Belief -> Plan   (read)",
             "Distillation -> Propose",
+            "Belief -> Propose   (refine source)",
             "Propose -> Belief   (write back / create)",
             "Distillation -> Belief   (create)",
         };
         const EdgeSemanticType types[] = {
             EdgeSemanticType::BeliefToPlan,
             EdgeSemanticType::DistillToPropose,
+            EdgeSemanticType::BeliefToPropose,
             EdgeSemanticType::ProposeToBelief,
             EdgeSemanticType::DistillToBelief,
         };

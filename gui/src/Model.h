@@ -104,8 +104,11 @@ struct BeliefDelta {
     BeliefDeltaId id;
     FrameId frameId;
     DistillationId distillationId; // empty when not produced by a distillation
+    std::string producerPhase;     // propose | distill (explicit runtime provenance)
     std::string operation;         // propose | support | refute | inconclusive | refine | retract
-    BeliefId beliefId;             // target belief
+    BeliefId beliefId;             // legacy operation target
+    BeliefId sourceBeliefId;       // existing belief read/replaced by the mutation
+    BeliefId resultBeliefId;       // canonical belief written by the mutation
     std::string evidence;
 };
 

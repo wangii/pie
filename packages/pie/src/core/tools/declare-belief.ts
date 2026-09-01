@@ -155,6 +155,7 @@ export function createRouteTaskToolDefinition(
 			"Choose fast-path only when no unresolved uncertainty could materially change the action or its safety",
 		],
 		parameters: routeTaskSchema,
+		executionMode: "sequential",
 		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
 			try {
 				const delta: RoutingDelta = {
@@ -175,10 +176,7 @@ export function createRouteTaskToolDefinition(
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: `Routing rejected: ${message}` }],
-					details: undefined,
-				};
+				throw new Error(`Routing rejected: ${message}`);
 			}
 		},
 	};
@@ -201,6 +199,7 @@ export function createDeclareBeliefToolDefinition(
 		promptSnippet: declareBeliefSystemPromptContribution.snippet,
 		promptGuidelines: declareBeliefSystemPromptContribution.guidelines,
 		parameters: declareBeliefSchema,
+		executionMode: "sequential",
 		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
 			try {
 				const delta = toDelta(input);
@@ -219,10 +218,7 @@ export function createDeclareBeliefToolDefinition(
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: `Belief rejected: ${message}` }],
-					details: undefined,
-				};
+				throw new Error(`Belief rejected: ${message}`);
 			}
 		},
 	};

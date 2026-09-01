@@ -74,6 +74,48 @@ describe("BeliefSet", () => {
 		expect(result.refutedBy).toHaveLength(0);
 		expect(result.inconclusiveBy).toHaveLength(1);
 		expect(set.proposed()).toHaveLength(0);
+		expect(set.unresolved()).toEqual([result]);
+	});
+
+	test("retries an inconclusive belief until later evidence settles it", () => {
+		const set = new BeliefSet();
+		const belief = propose(set);
+		set.apply({ op: "inconclusive", beliefId: belief.id, evidence: "the first probe timed out" });
+		const retried = set.apply({
+			op: "inconclusive",
+			beliefId: belief.id,
+			evidence: "the second probe lacked permission",
+		});
+		expect(retried.inconclusiveBy).toHaveLength(2);
+
+		const settled = set.apply({
+			op: "support",
+			beliefId: belief.id,
+			evidence: "the third probe observed the expected implementation",
+		});
+		expect(statusOf(settled)).toBe("supported");
+		expect(set.unresolved()).toHaveLength(0);
+
+		const refutedSet = new BeliefSet();
+		const refuted = propose(refutedSet, "retry then refute");
+		refutedSet.apply({ op: "inconclusive", beliefId: refuted.id, evidence: "first probe failed" });
+		expect(
+			statusOf(refutedSet.apply({ op: "refute", beliefId: refuted.id, evidence: "retry contradicted it" })),
+		).toBe("refuted");
+
+		const refinedSet = new BeliefSet();
+		const refined = propose(refinedSet, "retry then refine");
+		refinedSet.apply({ op: "inconclusive", beliefId: refined.id, evidence: "first probe failed" });
+		const replacement = refinedSet.apply({
+			op: "refine",
+			beliefId: refined.id,
+			statement: "refined after retry",
+			expectation: "the retry observes the refined relation",
+			evidence: "the retry exposed a more precise relation",
+			evidenceRounds: 1,
+		});
+		expect(statusOf(replacement)).toBe("supported");
+		expect(statusOf(refinedSet.get(refined.id)!)).toBe("superseded");
 	});
 
 	test("refine can directly form an evidence-supported world-model correction", () => {
@@ -122,7 +164,7 @@ describe("BeliefSet", () => {
 		const belief = propose(set);
 		set.apply({ op: "support", beliefId: belief.id, evidence: "matched" });
 		expect(() => set.apply({ op: "refute", beliefId: belief.id, evidence: "later claim" })).toThrow(
-			/Only an open belief/,
+			/Only an unresolved belief/,
 		);
 		expect(() => set.apply({ op: "support", beliefId: "belief-99", evidence: "x" })).toThrow(/Unknown belief id/);
 	});
@@ -201,5 +243,15 @@ describe("formatBeliefsForView", () => {
 		expect(text).toContain("[SETTLED]");
 		expect(text).not.toContain("FRAMING");
 		expect(text).not.toContain("routing");
+	});
+
+	test("renders inconclusive attempts in the open frame", () => {
+		const set = new BeliefSet();
+		const belief = propose(set, "retryable relation");
+		set.apply({ op: "inconclusive", beliefId: belief.id, evidence: "probe timed out" });
+
+		const text = formatBeliefsForView(set.beliefs, "frame");
+		expect(text).toContain("[FRAME]");
+		expect(text).toContain("inconclusive attempt: probe timed out");
 	});
 });

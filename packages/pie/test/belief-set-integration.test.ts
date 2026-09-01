@@ -186,7 +186,7 @@ describe("belief-loop integration", () => {
 		).toHaveLength(2);
 	});
 
-	test("an inconclusive experiment remains explicit in final synthesis", async () => {
+	test("retries an inconclusive experiment before allowing conclusion", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -207,17 +207,94 @@ describe("belief-loop integration", () => {
 					evidence: "the endpoint was unavailable before cache behavior could be observed",
 				}),
 			]),
+			fauxAssistantMessage("Retry with the local cache configuration instead."),
+			fauxAssistantMessage("Observed:\n- the local cache configuration preserves entries across logout."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the local cache configuration preserves entries across logout",
+				}),
+			]),
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
 			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage("Remote cache persistence remains unverified."),
+			fauxAssistantMessage("The configured cache persists across logout."),
 		]);
 
 		await harness.session.prompt("does the remote cache persist?");
 
-		expect(statusOf(harness.session.beliefs[0]!)).toBe("inconclusive");
+		expect(statusOf(harness.session.beliefs[0]!)).toBe("supported");
+		expect(harness.session.beliefs[0]?.inconclusiveBy).toHaveLength(1);
+		expect(
+			harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0),
+		).toHaveLength(2);
 		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toContain(
-			"Remote cache persistence remains unverified.",
+			"The configured cache persists across logout.",
 		);
+	});
+
+	test("records rejected state mutations as error tool results", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", { op: "support", beliefId: "belief-1" }),
+				fauxToolCall("route_task", {
+					decision: "fast-path",
+					reason: "invalid estimate",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 101,
+					difficulty: "low",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("No valid state mutation was applied."),
+		]);
+
+		await harness.session.prompt("exercise invalid mutations");
+
+		const results = harness.session.messages.filter((message) => message.role === "toolResult");
+		expect(results).toHaveLength(4);
+		expect(results.slice(0, 2).every((result) => result.role === "toolResult" && result.isError)).toBe(true);
+		expect(getMessageText(results[0])).toContain("Belief rejected");
+		expect(getMessageText(results[1])).toContain("Routing rejected");
+	});
+
+	test("does not persist rejected adjudication text as distillation", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache is warm",
+					domain: "code",
+					expectation: "a read hits the cache",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage("Observed: the read hit the cache."),
+			fauxAssistantMessage([fauxToolCall("declare_belief", { op: "support", beliefId: "belief-1" })]),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the observed read hit the cache",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("The cache is warm."),
+		]);
+
+		await harness.session.prompt("check the cache");
+
+		const distillations = harness.eventsOfType("DistillationProduced");
+		expect(distillations).toHaveLength(1);
+		expect(distillations[0].distillation.contents).not.toContain("Belief rejected");
+		expect(distillations[0].distillation.outputs).toHaveLength(1);
 	});
 
 	test("finalReport uses the default model rather than the fast-path model", async () => {

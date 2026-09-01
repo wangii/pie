@@ -28,8 +28,9 @@ export type RoutingDecision = "fast-path" | "belief-loop";
 export type RoutingDifficulty = "low" | "medium" | "high";
 
 /**
- * Lifecycle of a belief. Monotone in one direction:
- * `proposed → supported | refuted → superseded`. `status` is derived, not stored.
+ * Lifecycle of a belief. `inconclusive` records a failed experiment and remains
+ * retryable; support, refutation, refinement, or retraction can still settle it.
+ * `status` is derived, not stored.
  */
 export type BeliefStatus = "proposed" | "supported" | "refuted" | "inconclusive" | "superseded";
 
@@ -208,11 +209,19 @@ export class BeliefSet {
 		return this._beliefs.filter((b) => statusOf(b) === "proposed");
 	}
 
-	/** Beliefs still actionable: proposed or supported, not superseded. */
+	/** Unresolved beliefs that still require a successful experiment. */
+	unresolved(): Belief[] {
+		return this._beliefs.filter((b) => {
+			const status = statusOf(b);
+			return status === "proposed" || status === "inconclusive";
+		});
+	}
+
+	/** Beliefs still actionable: unresolved or supported, not superseded. */
 	open(): Belief[] {
 		return this._beliefs.filter((b) => {
 			const status = statusOf(b);
-			return status === "proposed" || status === "supported";
+			return status === "proposed" || status === "inconclusive" || status === "supported";
 		});
 	}
 
@@ -250,7 +259,7 @@ export class BeliefSet {
 				return this._adjudicate(delta.beliefId, delta.evidence, "inconclusive");
 			case "refine": {
 				this._ensureCapacity();
-				const prior = this._require(delta.beliefId, ["proposed", "supported"]);
+				const prior = this._require(delta.beliefId, ["proposed", "inconclusive", "supported"]);
 				validateBelief(delta.statement, prior.domain);
 				validateExpectation(delta.expectation);
 				validateEvidenceRounds(delta.evidenceRounds);
@@ -308,9 +317,9 @@ export class BeliefSet {
 	}
 
 	/**
-	 * Settle the frame. Only an open (`proposed`) belief may be supported/refuted, and
-	 * only with evidence — the observed result and how it met or diverged from the
-	 * expectation. This is the R → B′ arrow: an action's result is what moves the belief.
+	 * Settle one experiment. A proposed or previously inconclusive belief may be
+	 * adjudicated with evidence. Another inconclusive result appends attempt history;
+	 * support or refutation settles the belief. This is the R → B′ arrow.
 	 */
 	private _adjudicate(id: string, evidence: string, sign: "supported" | "refuted" | "inconclusive"): Belief {
 		const trimmed = evidence.trim();
@@ -321,9 +330,10 @@ export class BeliefSet {
 		if (!belief) {
 			throw new BeliefValidationError(`Unknown belief id: ${id}.`);
 		}
-		if (statusOf(belief) !== "proposed") {
+		const status = statusOf(belief);
+		if (status !== "proposed" && status !== "inconclusive") {
 			throw new BeliefValidationError(
-				`Only an open belief can be adjudicated; belief ${id} is already ${statusOf(belief)}.`,
+				`Only an unresolved belief can be adjudicated; belief ${id} is already ${status}.`,
 			);
 		}
 		const entry = { evidence: trimmed };
@@ -408,12 +418,18 @@ export class RoutingSet {
  * - `"frame"`: only the open frame being probed (statement, expectation, and evidence estimate).
  */
 export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | "frame" = "all"): string {
-	const proposed = beliefs.filter((b) => statusOf(b) === "proposed");
+	const unresolved = beliefs.filter((b) => {
+		const status = statusOf(b);
+		return status === "proposed" || status === "inconclusive";
+	});
 	const lines: string[] = [];
-	for (const frame of proposed) {
+	for (const frame of unresolved) {
 		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
 		lines.push(`  expectation: ${frame.expectation}`);
 		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);
+		for (const attempt of frame.inconclusiveBy) {
+			lines.push(`  inconclusive attempt: ${attempt.evidence}`);
+		}
 		if (frame.skillRefs && frame.skillRefs.length > 0) {
 			lines.push(`  skill refs: ${frame.skillRefs.join(", ")}`);
 		}
@@ -423,7 +439,7 @@ export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | 
 	}
 	const settled = beliefs.filter((b) => {
 		const status = statusOf(b);
-		return status === "supported" || status === "refuted" || status === "inconclusive";
+		return status === "supported" || status === "refuted";
 	});
 	if (settled.length > 0) {
 		lines.push("[SETTLED]");

@@ -60,6 +60,7 @@ enum class EdgeSemanticType {
     ExecutionToDistill, // execution results entered cognition
     DistillToBelief,    // distillation updated / created a belief (epistemic result)
     DistillToPropose,   // distillation produced a proposal (hypothesis formation)
+    BeliefToPropose,    // refinement read/replaced an existing belief
     ProposeToBelief,    // proposal added / revised a belief (epistemic result)
 };
 const char* edgeSemanticTypeToString(EdgeSemanticType t);

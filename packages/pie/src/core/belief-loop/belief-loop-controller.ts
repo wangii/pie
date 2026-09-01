@@ -161,7 +161,7 @@ export class BeliefLoopController {
 	currentFrameId: string | undefined;
 	currentPlanId: string | undefined;
 	currentFrameExecutionIds: string[] = [];
-	currentFrameBeliefDeltaIds: string[] = [];
+	currentFrameDistillationDeltaIds: string[] = [];
 	pendingDomainBeliefDeltas: Array<{ delta: DomainBeliefDelta; activeBeliefs: string[] }> = [];
 	pendingDomainTaskPrompt:
 		| {
@@ -341,21 +341,21 @@ export class BeliefLoopController {
 		const ranTools = turn.toolResults.length > 0;
 		switch (state.role) {
 			case "propose": {
-				const proposed = this.beliefSet.proposed();
-				const undispatched = proposed.filter((belief) => !this.dispatchedFrameIds.has(belief.id));
+				const unresolved = this.beliefSet.unresolved();
+				const undispatched = unresolved.filter((belief) => !this.dispatchedFrameIds.has(belief.id));
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					return this.concludeTransition(state, proposed);
+					return this.concludeTransition(state, unresolved);
 				}
 				const routes = this.routingSet.routings.filter((routing) => !this.consumedRouteIds.has(routing.id));
 				const route = routes[routes.length - 1];
 				if (route) {
 					this.consumedRouteIds.add(route.id);
 					if (route.decision === "fast-path") {
-						if (proposed.length > 0) {
+						if (unresolved.length > 0) {
 							return {
 								state,
 								steer: TRANSITION_STEERS.fastPathBlocked(
-									proposed.map((belief) => `"${belief.statement}"`).join(", "),
+									unresolved.map((belief) => `"${belief.statement}"`).join(", "),
 								),
 							};
 						}
@@ -366,10 +366,10 @@ export class BeliefLoopController {
 				if (undispatched.length > 0) {
 					return this.dispatchToExecution(undispatched);
 				}
-				if (proposed.length > 0) {
+				if (unresolved.length > 0) {
 					return {
 						state: { role: "distill" },
-						steer: TRANSITION_STEERS.openBeliefs(proposed.map((belief) => `"${belief.statement}"`).join(", ")),
+						steer: TRANSITION_STEERS.openBeliefs(unresolved.map((belief) => `"${belief.statement}"`).join(", ")),
 					};
 				}
 				if (this.beliefSet.beliefs.length > this.beliefsAtTaskReset) {
@@ -381,7 +381,7 @@ export class BeliefLoopController {
 				await this.emitDistillationBlock(turn);
 				const proposed = this.beliefSet.proposed();
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					return this.concludeTransition(state, proposed);
+					return this.concludeTransition(state, this.beliefSet.unresolved());
 				}
 				const unadjudicated = proposed.filter((belief) => this.dispatchedFrameIds.has(belief.id));
 				if (unadjudicated.length > 0) {
@@ -439,12 +439,12 @@ export class BeliefLoopController {
 		}
 	}
 
-	private concludeTransition(state: LoopState, proposed: Belief[]): { state: LoopState; steer?: string } {
-		if (proposed.length > 0) {
+	private concludeTransition(state: LoopState, unresolved: Belief[]): { state: LoopState; steer?: string } {
+		if (unresolved.length > 0) {
 			return {
 				state,
 				steer: TRANSITION_STEERS.concludePremature(
-					`these beliefs remain unresolved (${proposed.map((belief) => `"${belief.statement}"`).join(", ")})`,
+					`these beliefs remain unresolved (${unresolved.map((belief) => `"${belief.statement}"`).join(", ")})`,
 				),
 			};
 		}
@@ -504,8 +504,11 @@ export class BeliefLoopController {
 		const domainDelta: DomainBeliefDelta = {
 			id: createDomainId("belief-delta"),
 			frameId: this.currentFrameId,
+			producerPhase: this.role === "distill" ? "distill" : "propose",
 			operation: delta.op,
 			beliefId: "beliefId" in delta ? delta.beliefId : undefined,
+			sourceBeliefId: "beliefId" in delta ? delta.beliefId : undefined,
+			resultBeliefId: belief.id,
 			proposedRecord: delta.op === "propose" || delta.op === "refine" ? this.domainBelief(belief) : undefined,
 			evidence: "evidence" in delta ? delta.evidence : undefined,
 			resultingBeliefs: resultingBeliefs.map((record) => this.domainBelief(record)),
@@ -570,7 +573,7 @@ export class BeliefLoopController {
 	private async emitDistillationBlock(turn: PrepareNextTurnContext): Promise<void> {
 		const lines: string[] = [];
 		for (const result of turn.toolResults) {
-			if (result.toolName !== "declare_belief") continue;
+			if (result.toolName !== "declare_belief" || result.isError) continue;
 			for (const block of result.content) {
 				if (block.type === "text" && block.text.trim().length > 0) {
 					lines.push(block.text);
@@ -851,7 +854,7 @@ export class BeliefLoopController {
 		this.currentFrameId = frameId;
 		this.currentPlanId = undefined;
 		this.currentFrameExecutionIds = [];
-		this.currentFrameBeliefDeltaIds = [];
+		this.currentFrameDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
 		this.recordDomainEvent({
 			...this.domainEventBase(),
@@ -896,7 +899,7 @@ export class BeliefLoopController {
 		return this.beliefSet.beliefs
 			.filter((belief) => {
 				const status = statusOf(belief);
-				return status === "proposed" || status === "supported";
+				return status === "proposed" || status === "inconclusive" || status === "supported";
 			})
 			.map((belief) => belief.id);
 	}
@@ -924,7 +927,7 @@ export class BeliefLoopController {
 				frameId: this.currentFrameId,
 				body: kind,
 				openBeliefsAtStart:
-					kind === "belief-loop" ? this.beliefSet.proposed().map((belief) => belief.id) : undefined,
+					kind === "belief-loop" ? this.beliefSet.unresolved().map((belief) => belief.id) : undefined,
 			});
 		}
 		if (kind === "belief-loop") this.flushPendingDomainBeliefDeltas();
@@ -941,7 +944,9 @@ export class BeliefLoopController {
 				delta: pending.delta,
 				activeBeliefs: pending.activeBeliefs,
 			});
-			this.currentFrameBeliefDeltaIds.push(pending.delta.id);
+			if (pending.delta.producerPhase === "distill") {
+				this.currentFrameDistillationDeltaIds.push(pending.delta.id);
+			}
 		}
 		this.pendingDomainBeliefDeltas = [];
 	}
@@ -1032,7 +1037,7 @@ export class BeliefLoopController {
 				id: createDomainId("distillation"),
 				inputs: [...this.currentFrameExecutionIds],
 				contents,
-				outputs: [...this.currentFrameBeliefDeltaIds],
+				outputs: [...this.currentFrameDistillationDeltaIds],
 			},
 		});
 	}
@@ -1053,7 +1058,8 @@ export class BeliefLoopController {
 		this.currentFrameId = frameId;
 		this.currentPlanId = undefined;
 		this.currentFrameExecutionIds = [];
-		this.currentFrameBeliefDeltaIds = [];
+		this.currentFrameDistillationDeltaIds = [];
+		this.dispatchedFrameIds = new Set();
 		this.pendingDomainBeliefDeltas = [];
 	}
 
@@ -1072,7 +1078,7 @@ export class BeliefLoopController {
 		this.currentFrameId = undefined;
 		this.currentPlanId = undefined;
 		this.currentFrameExecutionIds = [];
-		this.currentFrameBeliefDeltaIds = [];
+		this.currentFrameDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
 	}
 

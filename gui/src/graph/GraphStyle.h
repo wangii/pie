@@ -79,6 +79,7 @@ struct GraphStyle {
     Rgb edgeExecutionToDistill{190, 198, 208};
     Rgb edgeDistillToBelief{220, 140, 220};
     Rgb edgeDistillToPropose{150, 190, 210};
+    Rgb edgeBeliefToPropose{104, 204, 120};
     Rgb edgeProposeToBelief{220, 180, 140};
     Rgb edgeMuted{90, 95, 100};
     float arrowheadSize = 8.0f;   // base length along the direction
