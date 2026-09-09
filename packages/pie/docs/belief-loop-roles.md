@@ -100,6 +100,12 @@ Observed:
 The evidence watermark exposes the current execution episode's raw evidence to distill once, then
 masks it from later belief-side turns.
 
+Execution carries a frame-scoped lease (a budget of tool results). When the lease is exhausted the
+runtime says only that the budget was spent; it does not infer whether the experiment finished. The
+report prompt and the distill handoff state this as a resource-limit fact, so distill adjudicates
+only the evidence actually gathered and may support, refute, or mark inconclusive on the evidence,
+never on the budget alone.
+
 ## Distillation
 
 Distill has two ordered steps:
@@ -123,6 +129,11 @@ gets one cheap adversarial check:
 
 > Is there any obvious unresolved uncertainty that could materially change the answer? If yes,
 > investigate it. Otherwise conclude.
+
+This single guard gates every normal final report entry, including the propose path that falls
+through to finalReport when there is no open work — it is not bypassed by omitting an explicit
+`conclude`. Only `proposed` (unadjudicated) beliefs block conclusion; an `inconclusive` belief that
+has been adjudicated does not.
 
 There is no coverage, ontology, conjunction, or recursive completeness protocol. Inconclusive
 beliefs are included in `<final_report_context>` so finalReport can preserve uncertainty rather

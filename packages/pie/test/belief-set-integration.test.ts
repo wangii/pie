@@ -317,4 +317,120 @@ describe("belief-loop integration", () => {
 			"final answer",
 		);
 	});
+
+	test("carries an adjudicated inconclusive belief into finalReport", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the remote cache survives logout",
+					domain: "product",
+					expectation: "a remote probe returns the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage("Observed:\n- the remote cache endpoint was unavailable."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "inconclusive",
+					beliefId: "belief-1",
+					evidence: "the endpoint was unavailable before cache behavior could be observed",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("The cache could not be observed; the outcome is open."),
+		]);
+
+		await harness.session.prompt("does the remote cache persist?");
+
+		// The belief remains inconclusive: it is not retried nor dropped, so the guard did
+		// not block conclusion the way an *unadjudicated* proposal would. It survives to the
+		// terminal context as a preserve-uncertainty entry.
+		expect(statusOf(harness.session.beliefs[0]!)).toBe("inconclusive");
+		const finalContext = harness.session.messages
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+		expect(finalContext).toContain("Inconclusive beliefs (preserve uncertainty):");
+		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toContain(
+			"The cache could not be observed; the outcome is open.",
+		);
+	});
+
+	test("a plain propose turn with no open work still gets one adversarial reflection", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("There is nothing left to investigate."),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("Nothing further to establish."),
+		]);
+
+		await harness.session.prompt("answer from the existing evidence");
+
+		const userText = harness.session.messages
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+		expect(userText).toContain("Before concluding, perform one cheap adversarial check");
+	});
+
+	test("states budget exhaustion without inferring the experiment was cutoff", async () => {
+		const inspectTool: AgentTool = {
+			name: "inspect",
+			label: "Inspect",
+			description: "Return an observation",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "observed something" }],
+				details: undefined,
+			}),
+		};
+		const harness = await createHarness({ tools: [inspectTool] });
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a probe returns the cached value",
+					evidenceRounds: 1,
+				}),
+			]),
+			// Two probe calls exhaust the frame horizon (ceil(1 * 1.3) = 2).
+			fauxAssistantMessage([fauxToolCall("inspect", {})]),
+			fauxAssistantMessage([fauxToolCall("inspect", {})]),
+			// Lease nudge, then a report turn settling to distill.
+			fauxAssistantMessage("Observed:\n- a partial observation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the observed value confirms the cache persists",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("The cache persists."),
+		]);
+
+		await harness.session.prompt("does the cache persist?");
+
+		const userText = harness.session.messages
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+		// The nudge and handoff state the budget was spent without claiming the run was
+		// incomplete, so a distill may still support/refute on the evidence actually gathered.
+		expect(userText).not.toContain("You have gathered enough evidence for this experiment");
+		expect(userText).toContain("execution budget for this experiment");
+		expect(userText).toContain("budget was exhausted");
+		expect(userText).toContain("not a claim that the experiment was complete or incomplete");
+		expect(statusOf(harness.session.beliefs[0]!)).toBe("supported");
+	});
 });

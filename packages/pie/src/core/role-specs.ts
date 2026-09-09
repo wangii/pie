@@ -156,9 +156,16 @@ export const TRANSITION_STEERS = {
 	adjudicate:
 		"Adjudicate the tested beliefs from all relevant evidence first. Then inspect the residual for missing beliefs or a " +
 		"task-relevant reframing. Evidence settles existing beliefs; residual exposes missing beliefs or reframing.",
+	adjudicateBudgetExhausted:
+		"The execution budget was exhausted. This is a resource limit statement, not a claim that the experiment was " +
+		"complete or incomplete. Adjudicate the tested beliefs only from the evidence actually gathered: mark each support, " +
+		"refute, or inconclusive based on whether that evidence settles it, and prefer inconclusive when the evidence is " +
+		"insufficient. Then inspect the residual for missing beliefs or a task-relevant reframing. Do not infer whether the " +
+		"experiment was complete or incomplete from the budget alone.",
 	leaseNudge:
-		"You have gathered enough evidence for this experiment. Report every materially distinct observation with its source, " +
-		"location, or command result; do not add conclusions.",
+		"Your execution budget for this experiment is exhausted. This states the budget was spent, not that the experiment " +
+		"is done or undone. Report every materially distinct observation you did gather with its source, location, or command " +
+		"result; note what was not yet observed, if anything; and do not add conclusions.",
 	concludePremature: (reasons: string) =>
 		`Concluding is premature because ${reasons}. Adjudicate each belief or retract it only if it cannot materially change the answer.`,
 	reflection:

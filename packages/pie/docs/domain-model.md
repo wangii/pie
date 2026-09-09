@@ -417,6 +417,9 @@ model and must not become a second source of truth.
   contains exactly the distill-produced delta ids. The optional reverse
   `BeliefDelta.distillationId` is not required for replay.
 - Fast-path summaries appear both as a structured domain distillation and as the hidden
-  `fast_path_distillation` custom message used for conversational continuity.
+  `fast_path_distillation` custom message used for conversational continuity. That custom
+  message also carries a deterministic tool-operation record (calls and their `ok`/`error`/no-result
+  outcomes) so the epistemic side can cross-check what actually ran, independent of the model
+  summary.
 - Any GUI or external client must consume stable ids and explicit lifecycle events. It must not
   recreate frame boundaries from role or message adjacency.

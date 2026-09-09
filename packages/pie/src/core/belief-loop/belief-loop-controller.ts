@@ -344,7 +344,7 @@ export class BeliefLoopController {
 				const unresolved = this.beliefSet.unresolved();
 				const undispatched = unresolved.filter((belief) => !this.dispatchedFrameIds.has(belief.id));
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					return this.concludeTransition(state, unresolved);
+					return this.concludeTransition(state, this.beliefSet.proposed());
 				}
 				const routes = this.routingSet.routings.filter((routing) => !this.consumedRouteIds.has(routing.id));
 				const route = routes[routes.length - 1];
@@ -375,13 +375,13 @@ export class BeliefLoopController {
 				if (this.beliefSet.beliefs.length > this.beliefsAtTaskReset) {
 					return { state, steer: TRANSITION_STEERS.deepenOrConclude };
 				}
-				return !ranTools ? { state: { role: "finalReport" } } : { state };
+				return !ranTools ? this.concludeTransition(state, this.beliefSet.proposed()) : { state };
 			}
 			case "distill": {
 				await this.emitDistillationBlock(turn);
 				const proposed = this.beliefSet.proposed();
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					return this.concludeTransition(state, this.beliefSet.unresolved());
+					return this.concludeTransition(state, this.beliefSet.proposed());
 				}
 				const unadjudicated = proposed.filter((belief) => this.dispatchedFrameIds.has(belief.id));
 				if (unadjudicated.length > 0) {
@@ -422,29 +422,37 @@ export class BeliefLoopController {
 						},
 					};
 				}
-				if (!ranTools) return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicate };
-				if (frameHorizon <= 0 && !state.leaseReportNudged) {
+				const budgetExhausted = frameHorizon <= 0;
+				if (!ranTools) {
+					return {
+						state: { role: "distill" },
+						steer: budgetExhausted ? TRANSITION_STEERS.adjudicateBudgetExhausted : TRANSITION_STEERS.adjudicate,
+					};
+				}
+				if (budgetExhausted && !state.leaseReportNudged) {
 					return {
 						state: { role: "execution", frameHorizon, leaseReportNudged: true },
 						steer: TRANSITION_STEERS.leaseNudge,
 					};
 				}
-				if (frameHorizon <= 0) {
-					return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicate };
+				if (budgetExhausted) {
+					return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicateBudgetExhausted };
 				}
-				return { state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged } };
+				return {
+					state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged },
+				};
 			}
 			case "finalReport":
 				return { state };
 		}
 	}
 
-	private concludeTransition(state: LoopState, unresolved: Belief[]): { state: LoopState; steer?: string } {
-		if (unresolved.length > 0) {
+	private concludeTransition(state: LoopState, unadjudicated: Belief[]): { state: LoopState; steer?: string } {
+		if (unadjudicated.length > 0) {
 			return {
 				state,
 				steer: TRANSITION_STEERS.concludePremature(
-					`these beliefs remain unresolved (${unresolved.map((belief) => `"${belief.statement}"`).join(", ")})`,
+					`these beliefs remain unadjudicated (${unadjudicated.map((belief) => `"${belief.statement}"`).join(", ")})`,
 				),
 			};
 		}
@@ -597,13 +605,17 @@ export class BeliefLoopController {
 		if (turn.toolResults.some((r) => r.isError)) {
 			this.fastPathFailure = true;
 		}
-		const summary = await this.distillFastPath(turn);
+		const summary = await this.distillFastPath();
+		const operationRecord = this.fastPathOperationRecord();
+		// Attach the deterministic tool-operation record alongside the model summary so the
+		// handoff stays accurate even if the summarizer omits a completed action.
+		const content = operationRecord ? `${summary}\n\nCompleted operations:\n${operationRecord}` : summary;
 		this.recordDomainDistillation(summary);
 		try {
 			await this.host.sendCustomMessage(
 				{
 					customType: "fast_path_distillation",
-					content: summary,
+					content,
 					display: false,
 					details: {
 						runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
@@ -629,10 +641,10 @@ export class BeliefLoopController {
 		return this.host.agent.state.model;
 	}
 
-	private async distillFastPath(turn: PrepareNextTurnContext): Promise<string> {
+	private async distillFastPath(): Promise<string> {
 		const model = this.resolveDistillationModel();
 		if (!model) {
-			return this.fallbackFastPathSummary(turn);
+			return this.fallbackFastPathSummary();
 		}
 		try {
 			const context: Context = {
@@ -643,7 +655,7 @@ export class BeliefLoopController {
 				messages: [
 					{
 						role: "user",
-						content: `Request: ${this.currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this.fastPathTranscript(turn)}`,
+						content: `Request: ${this.currentTaskRequestText || "(unknown)"}\n\nExecution:\n${this.fastPathFragment()}`,
 						timestamp: Date.now(),
 					},
 				],
@@ -656,26 +668,66 @@ export class BeliefLoopController {
 				sessionId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 			});
 			const text = contentText(result.content).trim();
-			return text || this.fallbackFastPathSummary(turn);
+			return text || this.fallbackFastPathSummary();
 		} catch {
-			return this.fallbackFastPathSummary(turn);
+			return this.fallbackFastPathSummary();
 		}
 	}
 
-	private fallbackFastPathSummary(turn: PrepareNextTurnContext): string {
+	private fallbackFastPathSummary(): string {
 		const lines = [
 			this.fastPathFailure ? "Fast-path run failed." : "Fast-path run completed.",
 			`Request: ${this.currentTaskRequestText || "(unknown)"}`,
-			...turn.toolResults.map((r) => `tool ${r.toolName}: ${r.isError ? "error" : "ok"}`),
+			this.fastPathFragment(),
 		];
 		return lines.join("\n");
 	}
 
-	private fastPathTranscript(turn: PrepareNextTurnContext): string {
-		const parts: string[] = [`assistant: ${this.host._messageText(turn.message)}`];
-		for (const r of turn.toolResults) {
-			parts.push(`tool ${r.toolName}: ${this.host._messageText(r)}`);
+	/** Deterministic record of this fast-path run's tool calls and their results, keyed by
+	 *  `toolCallId`. Independent of any model summary, so propose always sees which probes ran
+	 *  and their outcome even when the settling turn (or the distilled summary) omits them.
+	 */
+	private fastPathOperationRecord(): string {
+		const messages = this.host.agent.state.messages.slice(this.evidenceWatermark);
+		const results = new Map<string, { name: string; isError: boolean; text: string }>();
+		for (const message of messages) {
+			if (message.role !== "toolResult") continue;
+			results.set(message.toolCallId, {
+				name: message.toolName,
+				isError: message.isError,
+				text: this.host._messageText(message),
+			});
 		}
+		const lines: string[] = [];
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				const result = results.get(block.id);
+				if (result) {
+					const outcome = result.isError ? "error" : "ok";
+					lines.push(`tool ${result.name}: ${result.text || outcome}`);
+				} else {
+					lines.push(`call ${block.name} (no result)`);
+				}
+			}
+		}
+		return lines.join("\n");
+	}
+
+	private fastPathFragment(): string {
+		// The fragment is bounded by the dispatch watermark, so it includes every turn of this
+		// fast-path run (and the settlement turn's message, already appended by `turn_end`)
+		// while excluding the propose-side transcript that preceded the dispatch.
+		const messages = this.host.agent.state.messages.slice(this.evidenceWatermark);
+		const parts: string[] = [];
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			const text = this.host._messageText(message);
+			if (text) parts.push(`assistant: ${text}`);
+		}
+		const operations = this.fastPathOperationRecord();
+		if (operations) parts.push(operations);
 		return parts.join("\n");
 	}
 

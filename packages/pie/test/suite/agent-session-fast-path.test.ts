@@ -89,6 +89,57 @@ describe("AgentSession fast path", () => {
 		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(1);
 	});
 
+	it("preserves prior-turn successful actions in a failed fast-path handoff", async () => {
+		const inspectTool: AgentTool = {
+			name: "inspect",
+			label: "Inspect",
+			description: "Return a code observation",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "the generated file is derived from the template" }],
+				details: undefined,
+			}),
+		};
+		const boomTool: AgentTool = {
+			name: "boom",
+			label: "Boom",
+			description: "Always fails",
+			parameters: Type.Object({}),
+			execute: async () => {
+				throw new Error("boom");
+			},
+		};
+		const harness = await createHarness({ ...fastHarnessOptions, tools: [inspectTool, boomTool] });
+		harnesses.push(harness);
+		harness.setResponses([
+			routeResponse("fast-path"),
+			// First turn: a successful probe the failing final turn never restates.
+			fauxAssistantMessage([fauxToolCall("inspect", {})]),
+			// Next turn: the tool that fails, in the same fast-path fragment and before the
+			// settlement turn (a plain-text turn would stop the fast path).
+			fauxAssistantMessage([fauxToolCall("boom", {})]),
+			fauxAssistantMessage("I failed."),
+			// The summarizer's prose omits the prior successful probe; the deterministic
+			// operation record appended to the handoff must still surface it.
+			fauxAssistantMessage("Summary: complete the task in the belief loop."),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage("belief loop took over"),
+		]);
+
+		await harness.session.prompt("run a probe then boom");
+
+		const summaries = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "fast_path_distillation",
+		);
+		expect(summaries).toHaveLength(1);
+		expect((summaries[0] as { details?: { outcome?: string } }).details?.outcome).toBe("failure");
+		const summaryText = getMessageText(summaries[0]);
+		expect(summaryText).toContain("Completed operations:");
+		expect(summaryText).toContain("tool inspect");
+		expect(summaryText).toContain("tool boom");
+	});
+
 	it("keeps belief-loop execution for material uncertainty", async () => {
 		const harness = await createHarness(fastHarnessOptions);
 		harnesses.push(harness);
