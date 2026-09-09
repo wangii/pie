@@ -192,7 +192,6 @@ export type AgentSessionEvent =
 			reason: "manual" | "threshold" | "overflow";
 	  }
 	| { type: "summarization_retry_finished" }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "bash_execution_update"; id?: string; delta: string };
 
 /** Listener function for agent session events */
@@ -1223,6 +1222,7 @@ export class AgentSession {
 		} finally {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
+			this._flushPendingCustomMessages();
 			await this._emitAgentSettled();
 		}
 	}
@@ -1346,8 +1346,9 @@ export class AgentSession {
 				return;
 			}
 
-			// Flush any pending bash messages before the new prompt
+			// Flush any pending bash and custom messages before the new prompt
 			this._flushPendingBashMessages();
+			this._flushPendingCustomMessages();
 
 			// Validate model
 			if (!this.model) {

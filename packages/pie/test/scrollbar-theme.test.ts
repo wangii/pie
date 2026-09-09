@@ -28,22 +28,27 @@ afterEach(() => {
 });
 
 describe("optional fullscreen theme colors", () => {
-	it("falls back to selectedBg when scrollbarThumb is omitted", () => {
+	it.each([
+		["scrollbarTrack", "muted"],
+		["scrollbarThumb", "text"],
+	] as const)("falls back to %s when omitted", (token, fallback) => {
 		const themeJson = loadDarkTheme();
-		themeJson.name = "legacy-scrollbar-theme";
-		delete themeJson.colors.scrollbarThumb;
+		themeJson.name = `missing-${token}-theme`;
+		delete themeJson.colors[token];
 
 		const loadedTheme = loadThemeFromPath(writeTheme(themeJson), "truecolor");
-		expect(loadedTheme.getBgAnsi("scrollbarThumb")).toBe(loadedTheme.getBgAnsi("selectedBg"));
+		expect(loadedTheme.getFgAnsi(token)).toBe(loadedTheme.getFgAnsi(fallback));
 	});
 
-	it("uses an explicitly configured scrollbarThumb", () => {
+	it("uses explicitly configured scrollbar colors", () => {
 		const themeJson = loadDarkTheme();
 		themeJson.name = "custom-scrollbar-theme";
+		themeJson.colors.scrollbarTrack = "#654321";
 		themeJson.colors.scrollbarThumb = "#123456";
 
 		const loadedTheme = loadThemeFromPath(writeTheme(themeJson), "truecolor");
-		expect(loadedTheme.getBgAnsi("scrollbarThumb")).toBe("\x1b[48;2;18;52;86m");
+		expect(loadedTheme.getFgAnsi("scrollbarTrack")).toBe("\x1b[38;2;101;67;33m");
+		expect(loadedTheme.getFgAnsi("scrollbarThumb")).toBe("\x1b[38;2;18;52;86m");
 	});
 
 	it("falls back to existing selection and text colors for search highlights", () => {

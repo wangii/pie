@@ -946,7 +946,8 @@ export class InteractiveMode {
 			primary: true,
 			overscroll: "chain",
 			scrollbar: this.settingsManager.getFullscreenScrollbar(),
-			scrollbarStyle: (text) => theme.bg("scrollbarThumb", text),
+			scrollbarTrackStyle: (text) => theme.fg("scrollbarTrack", text),
+			scrollbarThumbStyle: (text) => theme.fg("scrollbarThumb", text),
 		});
 		this.beliefPanel = new BeliefSetPanel(() => this.session.beliefs);
 		this.beliefPanelContainer.addChild(this.beliefPanel);

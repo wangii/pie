@@ -48,6 +48,7 @@ const ThemeJsonSchema = Type.Object({
 		thinkingText: ColorValueSchema,
 		// Backgrounds & Content Text (11 required, 3 optional)
 		selectedBg: ColorValueSchema,
+		scrollbarTrack: Type.Optional(ColorValueSchema),
 		scrollbarThumb: Type.Optional(ColorValueSchema),
 		searchMatchBg: Type.Optional(ColorValueSchema),
 		searchMatchText: Type.Optional(ColorValueSchema),
@@ -122,6 +123,8 @@ export type ThemeColor =
 	| "dim"
 	| "text"
 	| "thinkingText"
+	| "scrollbarTrack"
+	| "scrollbarThumb"
 	| "searchMatchText"
 	| "userMessageText"
 	| "customMessageText"
@@ -161,7 +164,6 @@ export type ThemeColor =
 
 export type ThemeBg =
 	| "selectedBg"
-	| "scrollbarThumb"
 	| "searchMatchBg"
 	| "userMessageBg"
 	| "customMessageBg"
@@ -169,8 +171,8 @@ export type ThemeBg =
 	| "toolSuccessBg"
 	| "toolErrorBg";
 
-type OptionalThemeColor = "thinkingMax" | "searchMatchText";
-type OptionalThemeBg = "scrollbarThumb" | "searchMatchBg";
+type OptionalThemeColor = "scrollbarTrack" | "scrollbarThumb" | "thinkingMax" | "searchMatchText";
+type OptionalThemeBg = "searchMatchBg";
 
 type ColorMode = "truecolor" | "256color";
 
@@ -331,6 +333,7 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 
 function withThemeColorFallbacks(colors: ThemeJson["colors"]): ThemeJson["colors"] & {
 	thinkingMax: ColorValue;
+	scrollbarTrack: ColorValue;
 	scrollbarThumb: ColorValue;
 	searchMatchBg: ColorValue;
 	searchMatchText: ColorValue;
@@ -338,7 +341,8 @@ function withThemeColorFallbacks(colors: ThemeJson["colors"]): ThemeJson["colors
 	return {
 		...colors,
 		thinkingMax: colors.thinkingMax ?? colors.thinkingXhigh,
-		scrollbarThumb: colors.scrollbarThumb ?? colors.selectedBg,
+		scrollbarTrack: colors.scrollbarTrack ?? colors.muted,
+		scrollbarThumb: colors.scrollbarThumb ?? colors.text,
 		searchMatchBg: colors.searchMatchBg ?? colors.selectedBg,
 		searchMatchText: colors.searchMatchText ?? colors.text,
 	};
@@ -371,6 +375,8 @@ export class Theme {
 		this.fgColors = new Map();
 		const colors = {
 			...fgColors,
+			scrollbarTrack: fgColors.scrollbarTrack ?? fgColors.muted,
+			scrollbarThumb: fgColors.scrollbarThumb ?? fgColors.text,
 			thinkingMax: fgColors.thinkingMax ?? fgColors.thinkingXhigh,
 			searchMatchText: fgColors.searchMatchText ?? fgColors.text,
 		};
@@ -380,7 +386,6 @@ export class Theme {
 		this.bgColors = new Map();
 		const backgrounds = {
 			...bgColors,
-			scrollbarThumb: bgColors.scrollbarThumb ?? bgColors.selectedBg,
 			searchMatchBg: bgColors.searchMatchBg ?? bgColors.selectedBg,
 		};
 		for (const [key, value] of Object.entries(backgrounds) as [ThemeBg, string | number][]) {
@@ -633,7 +638,6 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
 	const bgColorKeys: Set<string> = new Set([
 		"selectedBg",
-		"scrollbarThumb",
 		"searchMatchBg",
 		"userMessageBg",
 		"customMessageBg",
