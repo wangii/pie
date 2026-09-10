@@ -45,7 +45,13 @@ const declareBeliefSchema = Type.Object({
 		}),
 	),
 	evidenceRounds: Type.Optional(
-		Type.Number({ description: "Estimated tool results needed by one coherent experiment (1-5). Defaults to 1." }),
+		Type.Number({
+			description:
+				"Estimated tool results this belief's experiment needs, counting locate, read, cross-check, and verify steps " +
+				"(1-15); each parallel tool call counts as one. The execution budget sums this over every belief dispatched " +
+				"in the experiment, so split shared work across the dispatched beliefs instead of repeating it on each and " +
+				"keep at least 1 per belief. Defaults to 1.",
+		}),
 	),
 	skillRefs: Type.Optional(
 		Type.Array(Type.String(), {

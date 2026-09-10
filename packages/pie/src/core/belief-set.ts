@@ -114,7 +114,7 @@ export interface RoutingDelta {
 export class BeliefValidationError extends Error {}
 
 /** Upper bound on a declared evidence-round estimate (a validation cap, not a horizon). */
-export const MAX_EVIDENCE_ROUNDS = 5;
+export const MAX_EVIDENCE_ROUNDS = 15;
 
 /** Upper bound on belief records held at once. The 200th may be added; the 201st is rejected. */
 export const MAX_BELIEFS = 200;

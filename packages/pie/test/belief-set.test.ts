@@ -4,6 +4,7 @@ import {
 	BeliefValidationError,
 	formatBeliefsForView,
 	MAX_BELIEFS,
+	MAX_EVIDENCE_ROUNDS,
 	RoutingSet,
 	statusOf,
 	validateBelief,
@@ -205,6 +206,11 @@ describe("belief validation", () => {
 	test("validates evidence-round estimates", () => {
 		expect(() => validateEvidenceRounds(1)).not.toThrow();
 		expect(() => validateEvidenceRounds(5)).not.toThrow();
+		expect(() => validateEvidenceRounds(MAX_EVIDENCE_ROUNDS)).not.toThrow();
+		expect(MAX_EVIDENCE_ROUNDS).toBe(15);
+		expect(() => validateEvidenceRounds(15)).not.toThrow();
+		expect(() => validateEvidenceRounds(16)).toThrow(BeliefValidationError);
+		expect(() => validateEvidenceRounds(MAX_EVIDENCE_ROUNDS + 1)).toThrow(BeliefValidationError);
 		expect(() => validateEvidenceRounds(0)).toThrow(BeliefValidationError);
 		expect(() => validateEvidenceRounds(1.5)).toThrow(BeliefValidationError);
 	});

@@ -61,7 +61,13 @@ const PROPOSE_PROTOCOL =
 	"belief saying that execution or a final answer is required.\n" +
 	"6. Use declare_belief to propose the current coherent set. After distill, inspect any directly implied candidate " +
 	"beliefs, retract those now immaterial, and choose the next useful uncertainty. Call conclude when no obvious unresolved " +
-	"uncertainty could materially change the answer.";
+	"uncertainty could materially change the answer.\n" +
+	"7. Set `evidenceRounds` per belief as the tool results its experiment needs for locate → read → cross-check → verify; " +
+	"each parallel tool call counts as one tool result, and the declared value is 1-15. The execution budget sums " +
+	"`evidenceRounds` over every belief " +
+	"dispatched in the experiment, including unresolved beliefs carried over from earlier rounds, so estimate the whole " +
+	"experiment once and split that estimate across the dispatched beliefs: keep at least 1 per belief and assign shared " +
+	"work once, so the summed total matches the experiment you intend instead of repeating the shared cost on each belief.";
 
 export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	propose: {
