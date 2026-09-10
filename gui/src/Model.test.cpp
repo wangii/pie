@@ -131,6 +131,29 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
+    // Execution failure surfaces in the ':' in-message pane.
+    // A failed execution with non-empty error text sets inMessageError; a
+    // succeeded or error-less execution never overwrites the current message.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-e","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        model.applyLine(R"({"type":"FrameOpened","taskId":"task-e","frameId":"frame-e","ordinal":1})");
+        model.applyLine(R"({"type":"ExecutionStarted","taskId":"task-e","frameId":"frame-e","execution":{"id":"exec-f","planId":"plan-1","intention":"Run bash","tool":"bash","input":{"command":"pip show pytest"}}})");
+        model.beginInMessage("prior reply");
+        model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-e","frameId":"frame-e","executionId":"exec-f","output":"exit 1","status":"failed","error":"not found"})");
+        check(model.inMessage() == "not found" && model.inMessageError(), "execution failure surfaces palette error");
+
+        NativeGuiModel ok;
+        ok.applyLine(R"({"type":"TaskOpened","taskId":"task-e","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        ok.applyLine(R"({"type":"FrameOpened","taskId":"task-e","frameId":"frame-e","ordinal":1})");
+        ok.applyLine(R"({"type":"ExecutionStarted","taskId":"task-e","frameId":"frame-e","execution":{"id":"exec-ok","planId":"plan-1","intention":"Run read","tool":"read","input":{"path":"requirements.txt"}}})");
+        ok.beginInMessage("prior reply");
+        ok.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-e","frameId":"frame-e","executionId":"exec-ok","output":"pytest==8.0","status":"succeeded"})");
+        check(ok.inMessage() == "prior reply" && !ok.inMessageError(), "succeeded execution leaves palette message unchanged");
+    }
+
+    // ---------------------------------------------------------------------
     // Non-event / garbage lines are ignored; state unchanged.
     // ---------------------------------------------------------------------
     {
@@ -219,6 +242,18 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
+    // ADVERSARIAL: a nested stopReason inside content precedes the top-level
+    // stopReason in the wire string. With a first-occurrence search this could
+    // shadow the real stopReason and misclassify a stop message as an error.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel rpc;
+        pie::gui::applyRpcLine(rpc, R"({"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","input":{"cmd":"x","stopReason":"error"}}],"stopReason":"stop"}})");
+        fprintf(stderr, "ADV result: inMessage=[%s] inMessageError=%d\n", rpc.inMessage().c_str(), (int)rpc.inMessageError());
+        check(rpc.inMessage().empty() && !rpc.inMessageError(), "nested stopReason in content must not shadow stop");
+    }
+
+    // ---------------------------------------------------------------------
     // finalReport auto-reopen: FrameClosed marks pending; the next message_end
     // requests reopen; a following FrameOpened clears the pending signal.
     // ---------------------------------------------------------------------
@@ -246,6 +281,53 @@ int main() {
         check(rpc2.finalReportPending(), "mid-loop close marks pending");
         pie::gui::applyRpcLine(rpc2, R"({"type":"FrameOpened","taskId":"t","frameId":"f2","ordinal":2})");
         check(!rpc2.finalReportPending(), "FrameOpened clears the pending signal");
+    }
+
+    // ---------------------------------------------------------------------
+    // Model-stream failure (stopReason="error") surfaces as a palette error.
+    // message_end carries the failure in errorMessage; only when the message
+    // is an assistant message with stopReason="error" should it be converted.
+    // ---------------------------------------------------------------------
+    {
+        // Empty-content seed mimics a stream that failed before any delta.
+        NativeGuiModel rpc;
+        pie::gui::applyRpcLine(rpc, R"({"type":"message_start","message":{"role":"assistant","content":[]}})");
+        check(rpc.inMessage().empty() && !rpc.inMessageError(), "empty content seed leaves no message");
+        check(pie::gui::applyRpcLine(rpc, R"({"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"connection dropped"}})") == pie::gui::RpcApplyResult::Applied, "message_end applied");
+        check(rpc.inMessage() == "connection dropped" && rpc.inMessageError(), "stream failure surfaces palette error");
+
+        // Empty errorMessage falls back to a non-empty default.
+        NativeGuiModel rpc2;
+        pie::gui::applyRpcLine(rpc2, R"({"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error"}})");
+        check(!rpc2.inMessage().empty() && rpc2.inMessageError(), "empty errorMessage uses fallback text");
+
+        // A normal (stopReason="stop") message_end leaves the buffer unchanged.
+        NativeGuiModel rpc3;
+        pie::gui::applyRpcLine(rpc3, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}})");
+        pie::gui::applyRpcLine(rpc3, R"({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"stopReason":"stop"}})");
+        check(rpc3.inMessage() == "ok" && !rpc3.inMessageError(), "normal stop leaves message unchanged");
+
+        // A non-assistant message_end carrying stopReason/errorMessage is not
+        // misclassified (scoped to role == "assistant").
+        NativeGuiModel rpc4;
+        pie::gui::applyRpcLine(rpc4, R"({"type":"message_end","message":{"role":"user","content":[],"stopReason":"error","errorMessage":"should not surface"}})");
+        check(rpc4.inMessage().empty() && !rpc4.inMessageError(), "non-assistant message_end not treated as error");
+
+        // A same-named key inside ordinary text content is not misread as the
+        // assistant failure field (scoped reads never scan into content).
+        NativeGuiModel rpc5;
+        pie::gui::applyRpcLine(rpc5, R"({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"stopReason error"}],"stopReason":"stop"}})");
+        check(rpc5.inMessage().empty() && !rpc5.inMessageError(), "text mentioning stopReason is not an error");
+
+        // finalReport auto-open must still fire on a normal message_end.
+        NativeGuiModel rpc6;
+        pie::gui::applyRpcLine(rpc6, R"({"type":"TaskOpened","taskId":"task-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        pie::gui::applyRpcLine(rpc6, R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-1","ordinal":1})");
+        pie::gui::applyRpcLine(rpc6, R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-1"})");
+        check(rpc6.finalReportPending(), "pending set by frame close");
+        pie::gui::applyRpcLine(rpc6, R"({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"final"}]}})");
+        pie::gui::applyRpcLine(rpc6, R"({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"final"}],"stopReason":"stop"}})");
+        check(rpc6.inMessage() == "final" && rpc6.consumeAutoOpenPrompt(), "auto-open still requested after normal end");
     }
 
     // ---------------------------------------------------------------------

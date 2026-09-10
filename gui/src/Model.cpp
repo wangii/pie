@@ -126,6 +126,64 @@ std::string stringValue(const std::string& v) {
     return decodeEscapes(v.substr(1, q - 1));
 }
 
+// Extract the value of a top-level member of a JSON object string, scanning
+// only the object's direct members and skipping nested objects/arrays. Unlike
+// findKey (which matches the first occurrence anywhere in the string), a
+// nested member with the same name never shadows the direct member. Returns
+// the raw value substring (starting after the member's colon) and true, or
+// false if the member is absent or `obj` is not an object.
+bool directMember(const std::string& obj, const std::string& key, std::string& out) {
+    size_t i = 0;
+    auto skipWs = [&](size_t& p) {
+        while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t' || obj[p] == '\n' || obj[p] == '\r')) ++p;
+    };
+    skipWs(i);
+    if (i >= obj.size() || obj[i] != '{') return false;
+    ++i;
+    while (i < obj.size()) {
+        size_t j = i;
+        size_t colon = std::string::npos;
+        bool inString = false;
+        int depth = 0;
+        while (j < obj.size()) {
+            char c = obj[j];
+            if (c == '"') {
+                if (inString && j > 0 && obj[j - 1] == '\\') { ++j; continue; }
+                inString = !inString;
+                ++j; continue;
+            }
+            if (!inString) {
+                if (c == '{' || c == '[') { ++depth; ++j; continue; }
+                if (c == '}' || c == ']') { if (depth == 0) break; --depth; ++j; continue; }
+                if (c == ':' && depth == 0 && colon == std::string::npos) { colon = j; ++j; continue; }
+                if (c == ',' && depth == 0) break;
+            }
+            ++j;
+        }
+        // The member key is the first quoted token in obj[i, j).
+        const std::string member = obj.substr(i, j - i);
+        const size_t kp = member.find('"');
+        if (kp != std::string::npos && colon != std::string::npos) {
+            size_t kq = kp + 1;
+            while (kq < member.size() && member[kq] != '"') { if (member[kq] == '\\') ++kq; ++kq; }
+            const std::string mkey = member.substr(kp + 1, kq - kp - 1);
+            if (mkey == key) {
+                size_t vs = colon + 1;
+                while (vs < obj.size() && (obj[vs] == ' ' || obj[vs] == '\t' || obj[vs] == '\n' || obj[vs] == '\r')) ++vs;
+                // String members decode to unquoted text; object/array members
+                // return the raw substring so they can be re-parsed.
+                out = (vs < obj.size() && obj[vs] == '"') ? stringValue(obj.substr(vs)) : trim(obj.substr(vs));
+                return true;
+            }
+        }
+        i = j;
+        if (i < obj.size() && obj[i] == '}') return false;
+        if (i < obj.size() && obj[i] == ',') ++i;
+        else ++i;
+    }
+    return false;
+}
+
 std::string str(const std::string& s, const std::string& key, const std::string& def = {}) {
     std::string raw;
     if (!findKey(s, key, raw)) return def;
@@ -767,6 +825,12 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
                 else if (status == "cancelled") t.status = "cancelled";
                 else t.status = "failed"; // "failed"
                 t.warning = str(line, "error");
+                // Surface execution failures in the ':' prompt palette in-message
+                // area (graphview and text view share it). Only a real failure with
+                // non-empty error text is shown; success/cancelled or error-less
+                // events never overwrite the current message. A subsequent
+                // message_start resets the error state via beginInMessage.
+                if (t.status == "failed" && !t.warning.empty()) setInMessageError(t.warning);
                 break;
             }
         }
@@ -943,6 +1007,23 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
         return RpcApplyResult::Ignored;
     }
     if (type == "message_end") {
+        // A model-stream failure surfaces as an assistant message whose
+        // stopReason is "error" with the failure text in errorMessage. Surface
+        // it in the ':' prompt palette as an error (red) so the failure is
+        // visible; a normal message_end leaves the in-message untouched. Reads
+        // are scoped to the message object and gated on role == "assistant"
+        // so same-named keys in other nested content cannot be misread.
+        // Reads are scoped to direct members of the message object so a same-named
+        // nested key inside content (e.g. a toolCall argument named stopReason)
+        // cannot shadow the message's own stopReason/errorMessage.
+        std::string msgRaw, role, stop;
+        if (directMember(line, "message", msgRaw) &&
+            directMember(msgRaw, "role", role) && role == "assistant" &&
+            directMember(msgRaw, "stopReason", stop) && stop == "error") {
+            std::string em;
+            if (!directMember(msgRaw, "errorMessage", em) || em.empty()) em = "Request failed";
+            model.setInMessageError(em);
+        }
         model.endInMessage();
         if (model.finalReportPending()) model.requestAutoOpenPrompt();
         return RpcApplyResult::Applied;
