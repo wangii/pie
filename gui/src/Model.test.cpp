@@ -154,6 +154,30 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
+    // In-message history archives every replaced non-empty reply, oldest first.
+    // Palette page indices therefore stay stable across appends: index i always
+    // names the same archived reply, and the live reply is a "latest" sentinel.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.beginInMessage("a");       // no archive (buffer was empty)
+        model.beginInMessage("bb");      // archive "a"
+        model.beginInMessage("ccc");     // archive "bb"
+        model.setInMessageError("err");  // archive "ccc"
+        const auto& h = model.inMessageHistory();
+        check(h.size() == 3, "history keeps every replaced non-empty reply");
+        check(h.size() == 3 && h[0].text == "a" && !h[0].error, "history[0] is the oldest reply");
+        check(h.size() == 3 && h[1].text == "bb" && !h[1].error, "history[1] preserves append order");
+        check(h.size() == 3 && h[2].text == "ccc" && !h[2].error, "history[2] archives the pre-error reply");
+        check(model.inMessage() == "err" && model.inMessageError(), "current message is the error");
+
+        // Appending a later reply must not shift earlier history indices.
+        model.beginInMessage("newest"); // archive "err"
+        check(h.size() == 4 && h[0].text == "a" && h[1].text == "bb", "earlier indices stable after append");
+        check(h.size() == 4 && h[3].text == "err" && h[3].error, "archived error flag retained");
+    }
+
+    // ---------------------------------------------------------------------
     // Non-event / garbage lines are ignored; state unchanged.
     // ---------------------------------------------------------------------
     {

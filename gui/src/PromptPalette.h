@@ -30,6 +30,12 @@ struct PromptPaletteState {
     int promptHistoryIndex = -1;    // -1 = current draft, otherwise history entry
     std::string promptHistoryDraft;
 
+    // Archived-reply paging. -1 = live/latest message; otherwise an index into
+    // NativeGuiModel::inMessageHistory(). History indices are append-only (see
+    // Model.h), so browsing an old reply is not disturbed by new messages.
+    int inMessageHistoryIndex = -1;
+    int lastInMessagePage = -1;     // last page rendered, to reset scroll on switch
+
     // "@" file/folder completion state, populated by the input callback each
     // frame and rendered as a candidate list below the input box. The working
     // directory is the base for enumerating candidates.

@@ -121,11 +121,24 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
     state.workDir = m.session();
     if (ImGui::Begin("User Prompt", &close, flags)) {
-        // Keep the input box focused the entire time the window is visible so the
-        // user can keep typing without clicking. Plain Up/Down browse submitted
-        // prompts; modified arrows remain available for normal editor/message
-        // scrolling behavior.
-        ImGui::SetKeyboardFocusHere();
+        // Focus the input when the palette (re)appears so the user can type
+        // immediately. Requesting focus every frame kept re-issuing a nav/active
+        // id request that swallowed the pager arrow buttons' press/release, so
+        // clicks on them never fired. Plain Up/Down browse submitted prompts;
+        // modified arrows remain available for editor/message scrolling.
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+
+        // Cmd/Ctrl+Left/Right page through the archived in-message replies, the
+        // same steps as the arrow buttons. io.KeyCtrl is the platform's primary
+        // shortcut modifier (ImGuiMod_Ctrl means Cmd on macOS and Ctrl on the
+        // other platforms), so this yields Cmd+Left/Right on macOS and
+        // Ctrl+Left/Right elsewhere. Read with the default (Any) key owner: the
+        // focused InputText owns the arrow keys, so an owner-scoped Shortcut()
+        // would never route, while IsKeyPressed() with Any still observes the
+        // chord.
+        const bool pageMod = io.KeyCtrl;
+        const bool shortcutPrev = pageMod && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false);
+        const bool shortcutNext = pageMod && ImGui::IsKeyPressed(ImGuiKey_RightArrow, false);
         if (historyNavigationEnabled && !io.KeyCtrl && !io.KeySuper && !io.KeyAlt && !io.KeyShift) {
             if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false) && !state.promptHistory.empty()) {
                 if (state.promptHistoryIndex < 0) {
@@ -217,10 +230,54 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
         // as it grows. Only live mode feeds message_start/message_update/message_end;
         // in demo mode this stays empty.
         ImGui::Separator();
+
+        // Archived-reply pager: -1 is the live/latest reply; 0..N-1 index into
+        // NativeGuiModel::inMessageHistory() (oldest first). History indices are
+        // append-only, so browsing an old reply is not disturbed by new messages.
+        const auto& inHistory = m.inMessageHistory();
+        if (state.inMessageHistoryIndex >= static_cast<int>(inHistory.size()))
+            state.inMessageHistoryIndex = -1;
+        const int navPage = state.inMessageHistoryIndex;
+        const bool navLive = navPage < 0;
+        const bool canPrev = navLive ? !inHistory.empty() : navPage > 0;
+        const bool canNext = !navLive;
+        ImGui::BeginDisabled(!canPrev);
+        const bool clickPrev = ImGui::ArrowButton("in_msg_prev", ImGuiDir_Left);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!canNext);
+        const bool clickNext = ImGui::ArrowButton("in_msg_next", ImGuiDir_Right);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        // Buttons and keyboard chords share one step so a click plus a held chord
+        // cannot advance two pages in one frame.
+        if ((clickPrev || shortcutPrev) && canPrev)
+            state.inMessageHistoryIndex = navLive ? static_cast<int>(inHistory.size()) - 1 : navPage - 1;
+        else if ((clickNext || shortcutNext) && canNext)
+            state.inMessageHistoryIndex =
+                (navPage + 1 < static_cast<int>(inHistory.size())) ? navPage + 1 : -1;
+        // Read the page AFTER the buttons so a click this frame selects the page
+        // rendered below; using the pre-click index would lag the content/scroll
+        // bookkeeping by one frame.
+        const int page = state.inMessageHistoryIndex;
+        const bool livePage = page < 0;
+        if (livePage) {
+            ImGui::TextDisabled("latest");
+        } else {
+            ImGui::TextDisabled("history %d/%d", page + 1, static_cast<int>(inHistory.size()));
+        }
+
         ImGui::BeginChild("in_message", ImVec2(0, 0), true);
 
-        // Cmd/Ctrl+Up/Down scroll the incoming message area one page at a time.
-        // The chord is read while the in_message child is the active window so
+        // The selected page's text/error flag. Only the live page streams and
+        // auto-scrolls; archived pages render their frozen text.
+        const std::string& shownText =
+            livePage ? m.inMessage() : inHistory[static_cast<size_t>(page)].text;
+        const bool shownError =
+            livePage ? m.inMessageError() : inHistory[static_cast<size_t>(page)].error;
+
+        // Cmd/Ctrl+Up/Down scroll the current page one page at a time. The chord
+        // is read while the in_message child is the active window so
         // GetScrollY/SetScrollY target this child (not the input box).
         {
             const float maxScroll = ImGui::GetScrollMaxY();
@@ -230,7 +287,7 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
                 const float y = paletteScrollByPage(ImGui::GetScrollY(), pageStep, maxScroll, +1);
                 ImGui::SetScrollY(y);
                 // Re-pin to the bottom once the user scrolls down to the end.
-                if (paletteScrollAtBottom(y, maxScroll)) state.inMessagePinned = true;
+                if (livePage && paletteScrollAtBottom(y, maxScroll)) state.inMessagePinned = true;
             }
             if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)) {
                 const float y = paletteScrollByPage(ImGui::GetScrollY(), pageStep, maxScroll, -1);
@@ -242,22 +299,36 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
             }
         }
 
-        if (!m.inMessage().empty()) {
+        if (!shownText.empty()) {
             // Render RPC failures in red; normal assistant replies retain the
             // markdown renderer's default text color.
-            if (m.inMessageError()) ImGui::PushStyleColor(ImGuiCol_Text, kRed);
-            renderMarkdownMessage(m.inMessage());
-            if (m.inMessageError()) ImGui::PopStyleColor();
-        } else if (m.inMessageThinking()) {
+            if (shownError) ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            renderMarkdownMessage(shownText);
+            if (shownError) ImGui::PopStyleColor();
+        } else if (livePage && m.inMessageThinking()) {
             // No content yet but the live message is still thinking.
             ImGui::TextDisabled("thinking");
         } else {
-            ImGui::TextDisabled("(waiting for a live message...)");
+            ImGui::TextDisabled(livePage ? "(waiting for a live message...)"
+                                         : "(empty archived message)");
         }
-        // Auto-scroll to the bottom on new content only while pinned to the
-        // bottom; if the user scrolled up we leave the view where it is. On a
-        // fresh message (or after re-pinning) this snaps back to the tail.
-        if (m.inMessage().size() != state.lastInMessageLength && state.inMessagePinned) {
+        // On a page switch, jump to the start of an archived reply. Returning to
+        // the live page jumps to the tail and re-pins: otherwise the length-based
+        // auto-scroll below would not fire (the live length is unchanged) and the
+        // latest reply would stay stuck at the top and unpinned.
+        if (state.lastInMessagePage != page) {
+            state.lastInMessagePage = page;
+            if (livePage) {
+                state.inMessagePinned = true;
+                ImGui::SetScrollHereY(1.0f);
+            } else {
+                state.inMessagePinned = false;
+                ImGui::SetScrollY(0.0f);
+            }
+        }
+        // Auto-scroll to the bottom on new content only for the live page while
+        // pinned to the bottom; browsing an archived page never moves.
+        if (livePage && m.inMessage().size() != state.lastInMessageLength && state.inMessagePinned) {
             ImGui::SetScrollHereY(1.0f);
         }
         state.lastInMessageLength = m.inMessage().size();

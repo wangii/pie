@@ -555,6 +555,10 @@ std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
 // Live in-message stream (':' pane)
 // ---------------------------------------------------------------------------
 void NativeGuiModel::beginInMessage(const std::string& text) {
+    // Archive the reply being replaced so the palette can page back through it.
+    // This is the replacement point: capturing history at render time would miss
+    // earlier replacements in the same drained event batch.
+    if (!inMessage_.empty()) inMessageHistory_.push_back(ArchivedInMessage{inMessage_, inMessageError_});
     inMessage_ = text;
     inMessageError_ = false;
 }
@@ -568,6 +572,7 @@ void NativeGuiModel::setInMessageThinking(bool thinking) {
     inMessageThinking_ = thinking;
 }
 void NativeGuiModel::setInMessageError(const std::string& message) {
+    if (!inMessage_.empty()) inMessageHistory_.push_back(ArchivedInMessage{inMessage_, inMessageError_});
     inMessage_ = message;
     inMessageThinking_ = false;
     inMessageError_ = true;

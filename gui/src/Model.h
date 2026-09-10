@@ -300,6 +300,17 @@ public:
     void setInMessageThinking(bool thinking);
     void setInMessageError(const std::string& message);
 
+    // Archived prior in-message replies, oldest first. Captured at the moment a
+    // new reply replaces a non-empty current message, so every replacement in a
+    // single drained event batch is retained even though the palette only sees
+    // the final `inMessage()`. `error` records whether the archived text was an
+    // error message at the time it was replaced.
+    struct ArchivedInMessage {
+        std::string text;
+        bool error = false;
+    };
+    const std::vector<ArchivedInMessage>& inMessageHistory() const { return inMessageHistory_; }
+
     // Auto-reopen the user prompt pane when the belief loop reaches the
     // terminal finalReport role and its conclusion message ends. Marked on
     // CursorChanged(stage="closed") (which only the finalReport transition
@@ -353,6 +364,7 @@ private:
     std::string inMessage_;       // live streaming assistant reply for the ':' pane
     bool inMessageThinking_ = false;
     bool inMessageError_ = false;
+    std::vector<ArchivedInMessage> inMessageHistory_; // replaced non-empty replies, oldest first
     bool finalReportPending_ = false;
     bool autoOpenPrompt_ = false;
     Footer footer_;
