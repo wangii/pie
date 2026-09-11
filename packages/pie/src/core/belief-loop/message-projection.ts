@@ -23,7 +23,14 @@ import { type LoopRole, ROLE_SPECS } from "../role-specs.ts";
  *  `view_beliefs` / `conclude` mark the belief-side (epistemic) roles; anything else
  *  (read/bash/grep/…) marks the probe role. */
 export function isProbeTool(name: string): boolean {
-	return name !== "route_task" && name !== "declare_belief" && name !== "view_beliefs" && name !== "conclude";
+	return (
+		name !== "route_task" &&
+		name !== "declare_belief" &&
+		name !== "focus_beliefs" &&
+		name !== "select_experiment" &&
+		name !== "view_beliefs" &&
+		name !== "conclude"
+	);
 }
 
 /** Whether an assistant turn belongs to the probe role, i.e. it invoked a non-belief tool. */
@@ -39,7 +46,11 @@ function isEpistemicMutation(message: AssistantMessage): boolean {
 	return message.content.some(
 		(block) =>
 			block.type === "toolCall" &&
-			(block.name === "route_task" || block.name === "declare_belief" || block.name === "conclude"),
+			(block.name === "route_task" ||
+				block.name === "declare_belief" ||
+				block.name === "focus_beliefs" ||
+				block.name === "select_experiment" ||
+				block.name === "conclude"),
 	);
 }
 
@@ -81,7 +92,12 @@ function maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = tru
 			continue;
 		}
 		if (block.type === "toolCall") {
-			const isMutation = block.name === "route_task" || block.name === "declare_belief" || block.name === "conclude";
+			const isMutation =
+				block.name === "route_task" ||
+				block.name === "declare_belief" ||
+				block.name === "focus_beliefs" ||
+				block.name === "select_experiment" ||
+				block.name === "conclude";
 			const isReadOnly = block.name === "view_beliefs";
 			if (isMutation || (isReadOnly && !keepViewBeliefs)) {
 				continue;
@@ -102,6 +118,8 @@ function maskBeliefEchoes(message: AgentMessage): AgentMessage | undefined {
 		message.role === "toolResult" &&
 		(message.toolName === "route_task" ||
 			message.toolName === "declare_belief" ||
+			message.toolName === "focus_beliefs" ||
+			message.toolName === "select_experiment" ||
 			message.toolName === "view_beliefs" ||
 			message.toolName === "conclude")
 	) {
@@ -169,7 +187,11 @@ function maskOperationalDetail(
 function maskBeliefBookkeeping(message: AgentMessage): AgentMessage | undefined {
 	switch (message.role) {
 		case "toolResult":
-			if (message.toolName === "route_task") {
+			if (
+				message.toolName === "route_task" ||
+				message.toolName === "focus_beliefs" ||
+				message.toolName === "select_experiment"
+			) {
 				return {
 					role: "user",
 					content: [{ type: "text", text: "[routing decision omitted]" }],

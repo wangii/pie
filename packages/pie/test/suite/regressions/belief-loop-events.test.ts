@@ -29,6 +29,11 @@ describe("belief-loop event family", () => {
 					expectation: "a pressure probe observes eviction",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1", "belief-2"] }),
+				fauxToolCall("select_experiment", {
+					intent: "which behavior the final answer must report",
+					beliefIds: ["belief-1", "belief-2"],
+				}),
 			]),
 			fauxAssistantMessage("Observed:\n- logout kept the value.\n- memory pressure was not applied."),
 			fauxAssistantMessage([
@@ -44,8 +49,8 @@ describe("belief-loop event family", () => {
 				}),
 			]),
 			fauxAssistantMessage([fauxToolCall("declare_belief", { op: "retract", beliefId: "belief-2" })]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 
@@ -89,6 +94,11 @@ describe("belief-loop event family", () => {
 					expectation: "the result states the cache behavior",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("select_experiment", {
+					intent: "how long the final answer should say the cache survives",
+					beliefIds: ["belief-1"],
+				}),
 			]),
 			fauxAssistantMessage("Observed:\n- the cache survives logout for 30s."),
 			fauxAssistantMessage([
@@ -101,8 +111,8 @@ describe("belief-loop event family", () => {
 					evidenceRounds: 1,
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout for 30s"),
 		]);
 

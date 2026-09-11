@@ -5,6 +5,11 @@ import { afterEach, describe, expect, test } from "vitest";
 import { statusOf } from "../src/core/belief-set.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
+const select = (beliefIds: string[], intent = "which action to take") => [
+	fauxToolCall("focus_beliefs", { beliefIds }),
+	fauxToolCall("select_experiment", { intent, beliefIds }),
+];
+
 describe("belief-loop integration", () => {
 	const harnesses: Harness[] = [];
 
@@ -19,6 +24,8 @@ describe("belief-loop integration", () => {
 		expect(harness.session.agent.state.tools.map((tool) => tool.name)).toEqual([
 			"route_task",
 			"declare_belief",
+			"focus_beliefs",
+			"select_experiment",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -50,6 +57,7 @@ describe("belief-loop integration", () => {
 					expectation: "the post-logout request has a new session id",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1", "belief-2"]),
 			]),
 			fauxAssistantMessage(
 				"Observed:\n- the post-logout read returned the cached value.\n- the request used a new session id.",
@@ -66,8 +74,8 @@ describe("belief-loop integration", () => {
 					evidence: "the request used a new session id as predicted",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache survives logout while the session is replaced."),
 		]);
 
@@ -107,6 +115,7 @@ describe("belief-loop integration", () => {
 					expectation: "code and README describe the same result",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1"]),
 			]),
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			fauxAssistantMessage("Observed:\n- `foo.ts:42` returns X.\n- README claims Y."),
@@ -117,8 +126,8 @@ describe("belief-loop integration", () => {
 					evidence: "foo.ts:42 returns X while README claims Y",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The implementation and README disagree."),
 		]);
 
@@ -140,6 +149,7 @@ describe("belief-loop integration", () => {
 					expectation: "one handler covers all authentication",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1"]),
 			]),
 			fauxAssistantMessage(
 				"Observed:\n- OAuth uses oauth.ts.\n- sessions use session.ts.\n- API tokens use token.ts.",
@@ -161,6 +171,7 @@ describe("belief-loop integration", () => {
 				}),
 			]),
 			fauxAssistantMessage("This residual uncertainty is material; probe it."),
+			fauxAssistantMessage([...select(["belief-3"])]),
 			fauxAssistantMessage(
 				"Observed:\n- OAuth, session, and API-token handlers all check the shared revocation store.",
 			),
@@ -171,8 +182,8 @@ describe("belief-loop integration", () => {
 					evidence: "all three handlers check the shared revocation store",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("Authentication has three mechanisms with shared revocation."),
 		]);
 
@@ -198,6 +209,7 @@ describe("belief-loop integration", () => {
 					expectation: "a remote probe returns the cached value",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1"]),
 			]),
 			fauxAssistantMessage("Observed:\n- the remote cache endpoint was unavailable."),
 			fauxAssistantMessage([
@@ -207,7 +219,7 @@ describe("belief-loop integration", () => {
 					evidence: "the endpoint was unavailable before cache behavior could be observed",
 				}),
 			]),
-			fauxAssistantMessage("Retry with the local cache configuration instead."),
+			fauxAssistantMessage([...select(["belief-1"])]),
 			fauxAssistantMessage("Observed:\n- the local cache configuration preserves entries across logout."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -216,8 +228,8 @@ describe("belief-loop integration", () => {
 					evidence: "the local cache configuration preserves entries across logout",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The configured cache persists across logout."),
 		]);
 
@@ -230,6 +242,362 @@ describe("belief-loop integration", () => {
 		).toHaveLength(2);
 		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toContain(
 			"The configured cache persists across logout.",
+		);
+	});
+
+	test("an unresolved belief outside the focus neither dispatches nor blocks conclusion", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cancellation signal reaches the request",
+					domain: "code",
+					expectation: "the request observes the cancellation",
+					evidenceRounds: 1,
+				}),
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives across logins",
+					domain: "product",
+					expectation: "a post-login read returns the prior value",
+					evidenceRounds: 1,
+				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("select_experiment", {
+					intent: "whether to change the adapter",
+					beliefIds: ["belief-1"],
+				}),
+			]),
+			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the request observed the cancellation",
+				}),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "changed the adapter", evidence: "the test passed" }),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "changed the adapter", evidence: "the test passed" }),
+			]),
+			fauxAssistantMessage("Cancellation now propagates."),
+		]);
+
+		await harness.session.prompt("fix cancellation");
+
+		const executionPlans = harness
+			.eventsOfType("PlanProduced")
+			.filter((event) => event.plan.selectedToExplore.length > 0);
+		expect(executionPlans).toHaveLength(1);
+		expect(executionPlans[0]?.plan.selectedToExplore).toEqual(["belief-1"]);
+		expect(statusOf(harness.session.beliefs[1]!)).toBe("proposed");
+	});
+
+	test("rejects an experiment selection until the task declares its focus", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cancellation signal reaches the request",
+					domain: "code",
+					expectation: "the request observes the cancellation",
+					evidenceRounds: 1,
+				}),
+				// No focus_beliefs before the selection: the task has not said what it acts on.
+				fauxToolCall("select_experiment", {
+					intent: "whether to change the adapter",
+					beliefIds: ["belief-1"],
+				}),
+			]),
+			fauxAssistantMessage([...select(["belief-1"])]),
+			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the request observed the cancellation",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("Cancellation propagates."),
+		]);
+
+		await harness.session.prompt("fix cancellation");
+
+		const selections = harness.session.messages.filter(
+			(message) => message.role === "toolResult" && message.toolName === "select_experiment",
+		);
+		expect(selections).toHaveLength(2);
+		expect(selections[0]?.role === "toolResult" && selections[0].isError).toBe(true);
+		expect(getMessageText(selections[0]!)).toContain("Declare the task focus with focus_beliefs");
+		expect(selections[1]?.role === "toolResult" && selections[1].isError).toBe(false);
+	});
+
+	test("re-declaring the same focus keeps an already selected experiment", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cancellation signal reaches the request",
+					domain: "code",
+					expectation: "the request observes the cancellation",
+					evidenceRounds: 1,
+				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+			]),
+			// Tools run in call order, so the selection lands before the same focus is restated.
+			// Restating an unchanged scope must not discard the selection.
+			fauxAssistantMessage([
+				fauxToolCall("select_experiment", {
+					intent: "whether to change the adapter",
+					beliefIds: ["belief-1"],
+				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+			]),
+			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the request observed the cancellation",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("Cancellation propagates."),
+		]);
+
+		await harness.session.prompt("fix cancellation");
+
+		const plans = harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0);
+		expect(plans).toHaveLength(1);
+		expect(plans[0]?.plan.selectedToExplore).toEqual(["belief-1"]);
+		expect(plans[0]?.plan.intent).toBe("whether to change the adapter");
+	});
+
+	test("view_beliefs reports the task focus alongside retained belief history", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cancellation signal reaches the request",
+					domain: "code",
+					expectation: "the request observes the cancellation",
+					evidenceRounds: 1,
+				}),
+				...select(["belief-1"]),
+			]),
+			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the request observed the cancellation",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("Cancellation propagates."),
+		]);
+
+		await harness.session.prompt("fix cancellation");
+
+		const viewBeliefs = harness.session.getRegisteredTool("view_beliefs");
+		expect(viewBeliefs).toBeDefined();
+		const result = await viewBeliefs!.execute("view-beliefs", {});
+		const text = result.content
+			.filter((block): block is { type: "text"; text: string } => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(text).toContain("[FOCUS] belief-1");
+		expect(text).toContain("(supported)");
+	});
+
+	test("retained unresolved history from an earlier task neither dispatches nor blocks the next task", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			// Task 1 proposes a belief, never focuses it, and concludes: the belief stays proposed.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives across logins",
+					domain: "product",
+					expectation: "a post-login read returns the prior value",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "answered the first question", evidence: "read the config" }),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "answered the first question", evidence: "read the config" }),
+			]),
+			fauxAssistantMessage("The first task is answered."),
+			// Task 2 declares its own belief. The leftover from task 1 is still proposed, so this
+			// turn is where an unfiltered nudge would drag it back into scope.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cancellation signal reaches the request",
+					domain: "code",
+					expectation: "the request observes the cancellation",
+					evidenceRounds: 1,
+				}),
+			]),
+			fauxAssistantMessage([...select(["belief-2"])]),
+			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-2",
+					evidence: "the request observed the cancellation",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "fixed cancellation", evidence: "test passed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "fixed cancellation", evidence: "test passed" })]),
+			fauxAssistantMessage("Cancellation propagates."),
+		]);
+
+		await harness.session.prompt("answer the first question");
+		await harness.session.prompt("fix cancellation");
+
+		// Only the second task's own belief was ever dispatched.
+		const plans = harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0);
+		expect(plans.at(-1)?.plan.selectedToExplore).toEqual(["belief-2"]);
+		// The second task was nudged about its own belief only; the retained leftover was not put
+		// back in scope by the controller, so it cannot re-enter the task's attention on its own.
+		const secondTaskStart = harness.session.messages.findIndex(
+			(message) => message.role === "user" && getMessageText(message) === "fix cancellation",
+		);
+		const steers = harness.session.messages
+			.slice(secondTaskStart)
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+		expect(steers).toContain("the cancellation signal reaches the request");
+		expect(steers).not.toContain("the cache survives across logins");
+		// The leftover record survived the boundary, unadjudicated and harmless.
+		expect(statusOf(harness.session.beliefs[0]!)).toBe("proposed");
+		expect(statusOf(harness.session.beliefs[1]!)).toBe("supported");
+		// The second task reached its own conclusion; the leftover never blocked it.
+		expect(
+			harness.session.messages
+				.filter((message) => message.role === "assistant")
+				.map(getMessageText)
+				.filter(Boolean)
+				.at(-1),
+		).toBe("Cancellation propagates.");
+	});
+
+	test("a rejected conclude does not complete the task", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			// Blank fields: the call is refused, so no task outcome is recorded and the handoff
+			// must not advance on the strength of the call alone.
+			fauxAssistantMessage([fauxToolCall("conclude", { result: " ", evidence: " " })]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", {
+					result: "changed the adapter to forward the cancellation signal",
+					evidence: "the cancel propagation test passed",
+				}),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", {
+					result: "changed the adapter to forward the cancellation signal",
+					evidence: "the cancel propagation test passed",
+				}),
+			]),
+			fauxAssistantMessage("Cancellation now propagates."),
+		]);
+
+		await harness.session.prompt("fix cancellation");
+
+		const concludes = harness.session.messages.filter(
+			(message) => message.role === "toolResult" && message.toolName === "conclude",
+		);
+		expect(concludes).toHaveLength(3);
+		expect(concludes[0]?.role === "toolResult" && concludes[0].isError).toBe(true);
+		expect(getMessageText(concludes[0]!)).toContain("non-empty `result` is required");
+		expect(concludes[1]?.role === "toolResult" && concludes[1].isError).toBe(false);
+
+		// The handoff happened only after a real delivery was recorded.
+		const userText = harness.session.messages
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+		expect(userText).toContain("Concluding was rejected");
+		expect(userText).toContain("changed the adapter to forward the cancellation signal");
+	});
+
+	test("records the delivered result as a task outcome separate from belief settlement", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cancellation signal reaches the request",
+					domain: "code",
+					expectation: "the request observes the cancellation",
+					evidenceRounds: 1,
+				}),
+				...select(["belief-1"]),
+			]),
+			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the request observed the cancellation",
+				}),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", {
+					result: "changed the adapter to forward the cancellation signal",
+					evidence: "the cancel propagation test passed",
+					blockers: "the upstream timeout path is untested",
+				}),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", {
+					result: "changed the adapter to forward the cancellation signal",
+					evidence: "the cancel propagation test passed",
+					blockers: "the upstream timeout path is untested",
+				}),
+			]),
+			fauxAssistantMessage("Cancellation now propagates."),
+		]);
+
+		await harness.session.prompt("fix cancellation");
+
+		const userText = harness.session.messages
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+		expect(userText).toContain("Task outcome (delivered result, separate from belief settlement):");
+		expect(userText).toContain("changed the adapter to forward the cancellation signal");
+		expect(userText).toContain("the cancel propagation test passed");
+		expect(userText).toContain("the upstream timeout path is untested");
+
+		const persisted = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "task_outcome",
+		);
+		expect(persisted).toBeDefined();
+		expect((persisted as { details?: { delivered?: string } }).details?.delivered).toContain(
+			"changed the adapter to forward the cancellation signal",
 		);
 	});
 
@@ -248,8 +616,8 @@ describe("belief-loop integration", () => {
 					difficulty: "low",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("No valid state mutation was applied."),
 		]);
 
@@ -274,6 +642,7 @@ describe("belief-loop integration", () => {
 					expectation: "a read hits the cache",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1"]),
 			]),
 			fauxAssistantMessage("Observed: the read hit the cache."),
 			fauxAssistantMessage([fauxToolCall("declare_belief", { op: "support", beliefId: "belief-1" })]),
@@ -284,8 +653,8 @@ describe("belief-loop integration", () => {
 					evidence: "the observed read hit the cache",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache is warm."),
 		]);
 
@@ -304,8 +673,8 @@ describe("belief-loop integration", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("final answer"),
 		]);
 
@@ -330,6 +699,7 @@ describe("belief-loop integration", () => {
 					expectation: "a remote probe returns the cached value",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1"]),
 			]),
 			fauxAssistantMessage("Observed:\n- the remote cache endpoint was unavailable."),
 			fauxAssistantMessage([
@@ -339,8 +709,8 @@ describe("belief-loop integration", () => {
 					evidence: "the endpoint was unavailable before cache behavior could be observed",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache could not be observed; the outcome is open."),
 		]);
 
@@ -365,8 +735,8 @@ describe("belief-loop integration", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("There is nothing left to investigate."),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("Nothing further to establish."),
 		]);
 
@@ -401,6 +771,7 @@ describe("belief-loop integration", () => {
 					expectation: "a probe returns the cached value",
 					evidenceRounds: 1,
 				}),
+				...select(["belief-1"]),
 			]),
 			// Two probe calls exhaust the frame horizon (ceil(1 * 1.3) = 2).
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
@@ -414,8 +785,8 @@ describe("belief-loop integration", () => {
 					evidence: "the observed value confirms the cache persists",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache persists."),
 		]);
 

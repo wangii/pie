@@ -115,8 +115,13 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createConcludeToolDefinition } from "./tools/conclude.ts";
-import { createDeclareBeliefToolDefinition, createRouteTaskToolDefinition } from "./tools/declare-belief.ts";
+import { createConcludeToolDefinition, createReportOutcomeToolDefinition } from "./tools/conclude.ts";
+import {
+	createDeclareBeliefToolDefinition,
+	createFocusBeliefsToolDefinition,
+	createRouteTaskToolDefinition,
+	createSelectExperimentToolDefinition,
+} from "./tools/declare-belief.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { createViewBeliefsToolDefinition } from "./tools/view-beliefs.ts";
@@ -1045,6 +1050,15 @@ export class AgentSession {
 	 */
 	getActiveToolNames(): string[] {
 		return this._fullActiveToolNames;
+	}
+
+	/**
+	 * Get a registered tool by name, independent of the belief-loop role surface currently
+	 * projected onto the agent. Callers that need to invoke a tool directly (tests, SDK
+	 * consumers) must not depend on `agent.state.tools`, which is the current role's subset.
+	 */
+	getRegisteredTool(name: string): AgentTool | undefined {
+		return this._toolRegistry.get(name);
 	}
 
 	/**
@@ -2929,9 +2943,32 @@ export class AgentSession {
 		);
 		this._baseToolDefinitions.set(
 			"view_beliefs",
-			createViewBeliefsToolDefinition(this._beliefLoop.beliefSet) as ToolDefinition,
+			createViewBeliefsToolDefinition(
+				this._beliefLoop.beliefSet,
+				this._beliefLoop.focusSet,
+				() => this._beliefLoop.pendingExperiment,
+			) as ToolDefinition,
 		);
-		this._baseToolDefinitions.set("conclude", createConcludeToolDefinition() as ToolDefinition);
+		this._baseToolDefinitions.set(
+			"focus_beliefs",
+			createFocusBeliefsToolDefinition(this._beliefLoop.beliefSet, this._beliefLoop.focusSet, (beliefIds) =>
+				this._beliefLoop.setFocus(beliefIds),
+			) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"select_experiment",
+			createSelectExperimentToolDefinition(this._beliefLoop.beliefSet, this._beliefLoop.focusSet, (selection) =>
+				this._beliefLoop.selectExperiment(selection),
+			) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"conclude",
+			createConcludeToolDefinition((outcome) => this._beliefLoop.recordOutcome(outcome)) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"report_outcome",
+			createReportOutcomeToolDefinition((outcome) => this._beliefLoop.recordOutcome(outcome)) as ToolDefinition,
+		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2955,14 +2992,32 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "route_task", "declare_belief", "view_beliefs", "conclude"];
+			: [
+					"read",
+					"bash",
+					"edit",
+					"write",
+					"route_task",
+					"declare_belief",
+					"focus_beliefs",
+					"select_experiment",
+					"view_beliefs",
+					"conclude",
+				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		// The belief set is on by default, so its tools must be active even when the
 		// caller supplied its own `activeToolNames` (the CLI passes a settings default
 		// of `["read", "bash", "edit", "write"]` that would otherwise drop them). An
 		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
 		// back out via `allowedToolNames`.
-		const beliefToolNames = ["route_task", "declare_belief", "view_beliefs", "conclude"];
+		const beliefToolNames = [
+			"route_task",
+			"declare_belief",
+			"focus_beliefs",
+			"select_experiment",
+			"view_beliefs",
+			"conclude",
+		];
 		const activeToolNames =
 			baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
 				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]

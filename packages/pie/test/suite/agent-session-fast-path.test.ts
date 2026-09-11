@@ -39,6 +39,9 @@ describe("AgentSession fast path", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			routeResponse("fast-path"),
+			fauxAssistantMessage([
+				fauxToolCall("report_outcome", { result: "echoed hello", evidence: "the echo tool returned ok" }),
+			]),
 			fauxAssistantMessage("Done."),
 			fauxAssistantMessage("Summary: completed the request."),
 		]);
@@ -74,8 +77,8 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([fauxToolCall("boom", {})]),
 			fauxAssistantMessage("I failed."),
 			fauxAssistantMessage("Summary: failed at boom."),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("belief loop took over"),
 		]);
 
@@ -122,8 +125,8 @@ describe("AgentSession fast path", () => {
 			// The summarizer's prose omits the prior successful probe; the deterministic
 			// operation record appended to the handoff must still surface it.
 			fauxAssistantMessage("Summary: complete the task in the belief loop."),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("belief loop took over"),
 		]);
 
@@ -153,6 +156,11 @@ describe("AgentSession fast path", () => {
 					expectation: "a post-logout probe keeps the value",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("select_experiment", {
+					intent: "whether the cache is persistent",
+					beliefIds: ["belief-1"],
+				}),
 			]),
 			fauxAssistantMessage("Observed:\n- the post-logout value persisted."),
 			fauxAssistantMessage([
@@ -162,8 +170,8 @@ describe("AgentSession fast path", () => {
 					evidence: "the post-logout value persisted as predicted",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 
@@ -197,6 +205,7 @@ describe("AgentSession fast path", () => {
 					expectation: "the repository marks the file as generated",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 			]),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", { op: "retract", beliefId: "belief-1" }),
@@ -208,6 +217,9 @@ describe("AgentSession fast path", () => {
 					estimatedSteps: 1,
 					difficulty: "low",
 				}),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("report_outcome", { result: "edited the target file", evidence: "the write returned ok" }),
 			]),
 			fauxAssistantMessage("Done."),
 			fauxAssistantMessage("Summary: completed after excluding the irrelevant target."),
@@ -223,5 +235,33 @@ describe("AgentSession fast path", () => {
 				(message) => message.role === "custom" && message.customType === "fast_path_distillation",
 			),
 		).toBeDefined();
+	});
+
+	it("does not mark a fast path successful when the submitted outcome carries a blocker", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+		harness.setResponses([
+			routeResponse("fast-path"),
+			fauxAssistantMessage([
+				fauxToolCall("report_outcome", {
+					result: "changed one of the two call sites",
+					evidence: "the first call site's test passed",
+					blockers: "the second call site is still untested",
+				}),
+			]),
+			fauxAssistantMessage("Partially done."),
+			fauxAssistantMessage("Summary: one call site changed, the other not verified."),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("belief loop took over"),
+		]);
+
+		await harness.session.prompt("change both call sites");
+
+		const summaries = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "fast_path_distillation",
+		);
+		expect(summaries).toHaveLength(1);
+		expect((summaries[0] as { details?: { outcome?: string } }).details?.outcome).toBe("failure");
 	});
 });

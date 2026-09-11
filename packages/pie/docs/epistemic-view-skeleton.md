@@ -23,10 +23,14 @@ interface Belief {
 }
 ```
 
-A belief is a task-local, evidence-revisable relational judgment about code, product behavior, a
+A belief is a provisional, evidence-revisable relational judgment about code, product behavior, a
 user requirement, or a relevant convention. `expectation` states what observation would bear on
 the judgment. It is not the only evidence distill may consider: a prediction being fulfilled is
 itself support evidence.
+
+Records are retained for the session: a task boundary resets the *focus* (see below) but does not
+prune the set. A belief, once created, keeps its provenance — including refutations and
+inconclusive attempts — and can be selected again by a later task.
 
 Names inside statements are provisional pointers. PIE does not require semantic tags or an
 atomicity proof. Distill refines a referent only when evidence reveals ambiguity, materially
@@ -50,6 +54,18 @@ distill records only evidence material to the judgment.
 
 - The task objective is the domain `Target` derived from the user request.
 - Fast-path selection is `RoutingSet` control metadata written by `route_task`.
+- The **task focus** (`FocusSet`) is the control-only slice of belief ids the current task acts on,
+  written by `focus_beliefs`. It is scope, not truth: membership never changes a belief's status, so
+  a belief can leave the focus — an unknown that no longer bears on the fix — while remaining
+  proposed, refuted, or inconclusive, and can be focused again later. The slice starts empty and
+  undeclared for every task and is never inherited.
+- An **experiment selection** is the control-only pair of a belief subset (drawn from the focus) and
+  the task decision its outcome could change, written by `select_experiment`. Dispatch is limited to
+  that subset; beliefs left out keep their status and stay in focus.
+- The **task outcome** is what the task actually delivered, the evidence that it was delivered, and
+  any remaining blocker — written by `conclude` (or `report_outcome` on the fast path). Epistemic
+  sufficiency and task completion are separate judgments: the same settled beliefs can answer an
+  explanation request and fail a change request that also required the change to be verified.
 - Execution leases, domain plans, cursor stages, and terminal handoff are runtime control state.
 - Review coverage and consistency checks are optional heuristics selected by expected information
   gain.
@@ -68,4 +84,9 @@ execution evidence
 
 Evidence settles existing beliefs. Residual exposes missing beliefs or reframing. Propose then
 chooses which unresolved uncertainty matters next relative to task value, cost, risk, side effects,
-and evidence dependencies.
+and evidence dependencies — and which task decision that choice could change.
+
+Focus sits beside this flow rather than in it: `focus_beliefs` decides what the task is acting on,
+and `select_experiment` picks the subset to probe. Neither is an arrow into the belief set, so
+neither can settle a belief, and an unresolved belief outside the focus neither dispatches nor
+blocks conclusion.

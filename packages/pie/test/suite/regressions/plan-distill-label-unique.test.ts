@@ -28,6 +28,11 @@ describe("plan/distillation domain identity", () => {
 					expectation: "the configuration defines a finite TTL",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1", "belief-2"] }),
+				fauxToolCall("select_experiment", {
+					intent: "whether the final answer calls the cache persistent",
+					beliefIds: ["belief-1", "belief-2"],
+				}),
 			]),
 			fauxAssistantMessage("Observed:\n- logout kept the value.\n- the configured TTL is 30s."),
 			fauxAssistantMessage([
@@ -50,6 +55,13 @@ describe("plan/distillation domain identity", () => {
 				}),
 			]),
 			fauxAssistantMessage("The residual eviction uncertainty is material."),
+			fauxAssistantMessage([
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-3"] }),
+				fauxToolCall("select_experiment", {
+					intent: "whether the final answer must qualify persistence under pressure",
+					beliefIds: ["belief-3"],
+				}),
+			]),
 			fauxAssistantMessage("Observed:\n- memory pressure evicted the value after 4s."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -58,8 +70,8 @@ describe("plan/distillation domain identity", () => {
 					evidence: "memory pressure evicted the value after 4s",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
-			fauxAssistantMessage([fauxToolCall("conclude", {})]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache has bounded and pressure-sensitive persistence"),
 		]);
 

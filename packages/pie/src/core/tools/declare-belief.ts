@@ -4,6 +4,8 @@ import {
 	type BeliefDelta,
 	type BeliefSet,
 	type BeliefStatus,
+	type ExperimentSelection,
+	type FocusSet,
 	type Routing,
 	type RoutingDelta,
 	type RoutingSet,
@@ -87,6 +89,28 @@ const routeTaskSchema = Type.Object({
 export type DeclareBeliefInput = Static<typeof declareBeliefSchema>;
 export type RouteTaskInput = Static<typeof routeTaskSchema>;
 
+const selectExperimentSchema = Type.Object({
+	intent: Type.String({
+		description:
+			"The task decision, action, or conclusion this experiment's outcome could change. One sentence, not a restatement of what you want to learn.",
+	}),
+	beliefIds: Type.Array(Type.String(), {
+		minItems: 1,
+		description:
+			"Belief ids forming one coherent experiment. Must be a subset of the declared task focus. Dispatch is limited to this selection; beliefs left out keep their status and stay in focus.",
+	}),
+});
+
+const focusBeliefsSchema = Type.Object({
+	beliefIds: Type.Array(Type.String(), {
+		description:
+			"Belief ids the task currently acts on. Replaces the focus slice; pass an empty array to declare that nothing is in focus. Changing focus never changes a belief's status.",
+	}),
+});
+
+export type SelectExperimentInput = Static<typeof selectExperimentSchema>;
+export type FocusBeliefsInput = Static<typeof focusBeliefsSchema>;
+
 export const declareBeliefSystemPromptContribution = {
 	snippet: "Record or adjudicate a provisional task-local belief about the relevant world",
 	guidelines: [
@@ -145,6 +169,104 @@ function toDelta(input: DeclareBeliefInput): BeliefDelta {
 				skillRefs: input.skillRefs,
 			};
 	}
+}
+
+export function createFocusBeliefsToolDefinition(
+	beliefSet: BeliefSet,
+	focusSet: FocusSet,
+	onFocus?: (beliefIds: readonly string[]) => void,
+): ToolDefinition<typeof focusBeliefsSchema, undefined> {
+	return {
+		name: "focus_beliefs",
+		label: "focus beliefs",
+		description:
+			"Declare which beliefs the task currently acts on. Replaces the focus slice; an empty list means nothing is in focus. Control metadata, not a belief.",
+		promptSnippet: "Declare the beliefs the task currently acts on",
+		promptGuidelines: [
+			"Focus is the task's scope, not an experiment; it never changes a belief's status",
+			"A refuted or inconclusive belief can be put back in focus if it is relevant again",
+		],
+		parameters: focusBeliefsSchema,
+		executionMode: "sequential",
+		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
+			try {
+				const beliefIds = [...new Set(input.beliefIds.map((id) => id.trim()).filter(Boolean))];
+				for (const beliefId of beliefIds) {
+					if (!beliefSet.get(beliefId)) throw new Error(`Unknown belief id: ${beliefId}.`);
+				}
+				focusSet.select(beliefIds);
+				onFocus?.(beliefIds);
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								beliefIds.length > 0 ? `Focused beliefs: ${beliefIds.join(", ")}` : "Focused beliefs: (none)",
+						},
+					],
+					details: undefined,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`Focus rejected: ${message}`);
+			}
+		},
+	};
+}
+
+export function createSelectExperimentToolDefinition(
+	beliefSet: BeliefSet,
+	focusSet: FocusSet,
+	onSelect?: (selection: ExperimentSelection) => void,
+): ToolDefinition<typeof selectExperimentSchema, undefined> {
+	return {
+		name: "select_experiment",
+		label: "select experiment",
+		description:
+			"Choose the belief subset for the next execution experiment and state which task decision its outcome would change. Control metadata, not a belief.",
+		promptSnippet: "Select the next experiment's beliefs and the decision they inform",
+		promptGuidelines: [
+			"The selection must be a subset of the declared focus; unselected focus beliefs keep their status",
+			"State the action or conclusion the experiment could change, not what you hope to learn",
+		],
+		parameters: selectExperimentSchema,
+		executionMode: "sequential",
+		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
+			try {
+				const intent = input.intent.trim();
+				if (!intent) throw new Error("select_experiment requires a non-empty `intent`.");
+				if (!focusSet.declared) {
+					throw new Error("Declare the task focus with focus_beliefs before selecting an experiment.");
+				}
+				const beliefIds = [...new Set(input.beliefIds.map((id) => id.trim()).filter(Boolean))];
+				if (beliefIds.length === 0) throw new Error("select_experiment requires at least one belief id.");
+				for (const beliefId of beliefIds) {
+					const belief = beliefSet.get(beliefId);
+					if (!belief) throw new Error(`Unknown belief id: ${beliefId}.`);
+					if (!focusSet.has(beliefId)) {
+						throw new Error(`Belief ${beliefId} is outside the declared focus; add it with focus_beliefs first.`);
+					}
+					const status = statusOf(belief);
+					if (status !== "proposed" && status !== "inconclusive") {
+						throw new Error(`Belief ${beliefId} is ${status}; only an unresolved belief can be selected.`);
+					}
+				}
+				onSelect?.({ intent, beliefIds });
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Selected experiment: ${beliefIds.join(", ")} -- decision: ${intent}`,
+						},
+					],
+					details: undefined,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`Experiment selection rejected: ${message}`);
+			}
+		},
+	};
 }
 
 export function createRouteTaskToolDefinition(

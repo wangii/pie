@@ -9,13 +9,17 @@ protocols that models could satisfy ceremonially without improving the answer.
 
 The current epistemic boundary is narrower:
 
-> A belief is a provisional, task-local, evidence-revisable relational judgment about code,
-> product behavior, a user requirement, or a relevant convention.
+> A belief is a provisional, evidence-revisable relational judgment about code, product behavior,
+> a user requirement, or a relevant convention. Its record is retained across tasks as history;
+> the task's focus — which beliefs it acts on — is the task-local part.
 
 The original user request is already stored as the task `Target`. It supplies the objective used by
 propose and finalReport; it is not copied into the belief set as an obligation. `conclude` remains
-an explicit control action and is gated only by proposed world beliefs plus one cheap check for an
-obvious material uncertainty.
+an explicit control action, gated by proposed world beliefs *in the task's declared focus* (plus one
+cheap check for an obvious material uncertainty) and required to record what was actually delivered
+and how it was verified. The focus slice carries the task's own scope; it is control metadata, so
+narrowing it drops a question from the task's attention without inventing a belief to represent the
+narrowing.
 
 Routing is likewise separate control metadata in `RoutingSet`, written through `route_task` rather
 than `declare_belief`.

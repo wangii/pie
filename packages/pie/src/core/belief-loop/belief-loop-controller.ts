@@ -22,9 +22,12 @@ import {
 	type BeliefDelta,
 	BeliefSet,
 	type BeliefStatus,
+	type ExperimentSelection,
+	FocusSet,
 	type Routing,
 	RoutingSet,
 	statusOf,
+	type TaskOutcome,
 	WITHDRAWN,
 } from "../belief-set.ts";
 import type { ContextUsage } from "../extensions/index.ts";
@@ -59,6 +62,18 @@ export interface RoleStatus {
 }
 
 const FRAME_HORIZON_HEADROOM = 1.3;
+
+/** Whether two id lists name the same set, ignoring order and duplicates. Used to tell a real
+ *  focus change from a re-declaration of the current slice. */
+function sameBeliefIds(a: readonly string[], b: readonly string[]): boolean {
+	const left = new Set(a);
+	const right = new Set(b);
+	if (left.size !== right.size) return false;
+	for (const id of left) {
+		if (!right.has(id)) return false;
+	}
+	return true;
+}
 
 export function selectRoleThinkingLevel(
 	role: LoopState["role"],
@@ -129,6 +144,8 @@ export function selectRoleModelSpec(
  */
 export class BeliefLoopController {
 	readonly beliefSet = new BeliefSet();
+	/** The current task's focus slice: belief ids in scope, independent of their truth status. */
+	readonly focusSet = new FocusSet();
 	readonly routingSet = new RoutingSet();
 	/** The belief loop's current phase; see `LoopState`. */
 	loopState: LoopState = { role: "propose" };
@@ -154,6 +171,10 @@ export class BeliefLoopController {
 	fastPathFailure = false;
 	/** The current task's request text. */
 	currentTaskRequestText = "";
+	/** Explicit experiment selection from propose, consumed on dispatch. */
+	pendingExperiment: ExperimentSelection | undefined;
+	/** What the task actually delivered and how it was verified. Outside the BeliefSet. */
+	taskOutcome: TaskOutcome | undefined;
 
 	// Domain state
 	domainSnapshot: AgentSessionSnapshot;
@@ -255,6 +276,94 @@ export class BeliefLoopController {
 		};
 	}
 
+	/**
+	 * Record an explicit experiment selection: the beliefs to probe and the task decision the
+	 * experiment informs. Does not touch the focus slice; the selection must lie inside the
+	 * focus declared through `focus_beliefs`.
+	 */
+	selectExperiment(selection: ExperimentSelection): void {
+		this.pendingExperiment = selection;
+	}
+
+	/** Declare the task focus slice. Membership never changes a belief's truth status. A focus
+	 *  that actually changes invalidates any outstanding experiment selection, so a selection
+	 *  made under an earlier scope is never silently re-scoped. Re-declaring the same scope is a
+	 *  no-op for the selection: tools run in call order within a turn, so a model that selects
+	 *  before restating the same focus must not lose the selection. */
+	setFocus(beliefIds: readonly string[]): void {
+		const changed = !sameBeliefIds(this.focusSet.beliefIds, beliefIds);
+		this.focusSet.select(beliefIds);
+		if (changed) {
+			this.pendingExperiment = undefined;
+		}
+	}
+
+	/** Record what the task delivered and how it was verified (distinct from belief settlement). */
+	recordOutcome(outcome: TaskOutcome): void {
+		this.taskOutcome = outcome;
+	}
+
+	/** Unresolved beliefs within the task focus slice. The focus is authoritative and defaults
+	 *  to empty, so an out-of-focus unresolved belief is never in scope without being put back. */
+	private focusUnresolved(): Belief[] {
+		return this.beliefSet.unresolved().filter((belief) => this.focusSet.has(belief.id));
+	}
+
+	/** Whether a belief was created during the current task. `_beliefs` is append-only and
+	 *  `beliefsAtTaskReset` records the length at the boundary, so retained history from earlier
+	 *  tasks sorts before it. */
+	private createdThisTask(belief: Belief): boolean {
+		return this.beliefSet.beliefs.indexOf(belief) >= this.beliefsAtTaskReset;
+	}
+
+	/** Unresolved beliefs the current task still has to place in scope: those it declared, plus
+	 *  whatever it already put in focus. Retained history from earlier tasks is excluded — it
+	 *  neither dispatches nor is nudged about unless the task focuses it again. */
+	private scopedUnresolved(): Belief[] {
+		return this.beliefSet
+			.unresolved()
+			.filter((belief) => this.focusSet.has(belief.id) || this.createdThisTask(belief));
+	}
+
+	/** Proposed (unadjudicated) beliefs within the task focus slice. */
+	private focusProposed(): Belief[] {
+		return this.beliefSet.proposed().filter((belief) => this.focusSet.has(belief.id));
+	}
+
+	/** Proposed beliefs that were dispatched for the current experiment and are still unadjudicated.
+	 *  These must be adjudicated before conclusion regardless of later focus changes. */
+	private dispatchedProposed(): Belief[] {
+		return this.beliefSet.proposed().filter((belief) => this.dispatchedFrameIds.has(belief.id));
+	}
+
+	/** Everything that must be adjudicated before conclusion can pass. */
+	private blockingProposed(): Belief[] {
+		const seen = new Set<string>();
+		const blocking: Belief[] = [];
+		for (const belief of [...this.focusProposed(), ...this.dispatchedProposed()]) {
+			if (seen.has(belief.id)) continue;
+			seen.add(belief.id);
+			blocking.push(belief);
+		}
+		return blocking;
+	}
+
+	/** The rejection message when this turn's `conclude` was refused, else undefined. A refused
+	 *  call recorded no task outcome, so it must not advance the handoff: the loop would otherwise
+	 *  reach finalReport with an empty result — completion inferred from the call, not the delivery. */
+	private rejectedConclude(turn: PrepareNextTurnContext): string | undefined {
+		for (const result of turn.toolResults) {
+			if (result.toolName !== "conclude" || !result.isError) continue;
+			const text = result.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text")
+				.map((block) => block.text.trim())
+				.filter(Boolean)
+				.join(" ");
+			return text || "the conclusion did not record a delivered result";
+		}
+		return undefined;
+	}
+
 	/** Reset the loop's transient bookkeeping for a new task. */
 	resetLoopForNewTask(): void {
 		this.closeDomainTask();
@@ -264,6 +373,9 @@ export class BeliefLoopController {
 		this.routingSet.clear();
 		this.reflected = false;
 		this.fastPathFailure = false;
+		this.pendingExperiment = undefined;
+		this.taskOutcome = undefined;
+		this.focusSet.reset();
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		this.beliefSet.pruneForNewTask();
 		this.beliefsAtTaskReset = this.beliefSet.beliefs.length;
@@ -341,10 +453,13 @@ export class BeliefLoopController {
 		const ranTools = turn.toolResults.length > 0;
 		switch (state.role) {
 			case "propose": {
-				const unresolved = this.beliefSet.unresolved();
-				const undispatched = unresolved.filter((belief) => !this.dispatchedFrameIds.has(belief.id));
+				const unresolved = this.focusUnresolved();
+				const rejected = this.rejectedConclude(turn);
+				if (rejected !== undefined) {
+					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
+				}
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					return this.concludeTransition(state, this.beliefSet.proposed());
+					return this.concludeTransition(state, this.blockingProposed());
 				}
 				const routes = this.routingSet.routings.filter((routing) => !this.consumedRouteIds.has(routing.id));
 				const route = routes[routes.length - 1];
@@ -363,25 +478,44 @@ export class BeliefLoopController {
 					}
 					this.selectDomainFrameBody("belief-loop", route);
 				}
-				if (undispatched.length > 0) {
-					return this.dispatchToExecution(undispatched);
+				if (this.pendingExperiment) {
+					const experiment = this.pendingExperiment;
+					this.pendingExperiment = undefined;
+					const selected = experiment.beliefIds
+						.map((id) => this.beliefSet.get(id))
+						.filter((belief): belief is Belief => {
+							if (!belief) return false;
+							const status = statusOf(belief);
+							return status === "proposed" || status === "inconclusive";
+						});
+					if (selected.length > 0) {
+						return this.dispatchToExecution(selected, experiment.intent);
+					}
 				}
-				if (unresolved.length > 0) {
+				const scoped = this.scopedUnresolved();
+				if (scoped.length > 0) {
+					// Unresolved beliefs this task owns — declared here, or already in focus — but with no
+					// experiment selected. Nudge about those only: retained history from earlier tasks
+					// stays out of scope unless the task puts it back in focus.
 					return {
-						state: { role: "distill" },
-						steer: TRANSITION_STEERS.openBeliefs(unresolved.map((belief) => `"${belief.statement}"`).join(", ")),
+						state,
+						steer: TRANSITION_STEERS.selectExperiment(scoped.map((belief) => `"${belief.statement}"`).join(", ")),
 					};
 				}
 				if (this.beliefSet.beliefs.length > this.beliefsAtTaskReset) {
 					return { state, steer: TRANSITION_STEERS.deepenOrConclude };
 				}
-				return !ranTools ? this.concludeTransition(state, this.beliefSet.proposed()) : { state };
+				return !ranTools ? this.concludeTransition(state, this.blockingProposed()) : { state };
 			}
 			case "distill": {
 				await this.emitDistillationBlock(turn);
 				const proposed = this.beliefSet.proposed();
+				const rejected = this.rejectedConclude(turn);
+				if (rejected !== undefined) {
+					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
+				}
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					return this.concludeTransition(state, this.beliefSet.proposed());
+					return this.concludeTransition(state, this.blockingProposed());
 				}
 				const unadjudicated = proposed.filter((belief) => this.dispatchedFrameIds.has(belief.id));
 				if (unadjudicated.length > 0) {
@@ -447,7 +581,10 @@ export class BeliefLoopController {
 		}
 	}
 
-	private concludeTransition(state: LoopState, unadjudicated: Belief[]): { state: LoopState; steer?: string } {
+	private async concludeTransition(
+		state: LoopState,
+		unadjudicated: Belief[],
+	): Promise<{ state: LoopState; steer?: string }> {
 		if (unadjudicated.length > 0) {
 			return {
 				state,
@@ -460,10 +597,37 @@ export class BeliefLoopController {
 			this.reflected = true;
 			return { state, steer: TRANSITION_STEERS.reflection };
 		}
+		// Persist the structured task outcome as a session message, not just the in-memory field
+		// and the transient final-report context, so it survives the final turn and branch replay.
+		if (this.taskOutcome) {
+			await this.persistTaskOutcome();
+		}
 		return {
 			state: { role: "finalReport" },
 			steer: `${TRANSITION_STEERS.writeConclusion}\n\n${this.formatFinalReportContext()}`,
 		};
+	}
+
+	private async persistTaskOutcome(): Promise<void> {
+		const outcome = this.taskOutcome;
+		if (!outcome) return;
+		try {
+			await this.host.sendCustomMessage(
+				{
+					customType: "task_outcome",
+					content: [{ type: "text", text: `Delivered: ${outcome.result}\nVerified by: ${outcome.evidence}` }],
+					display: false,
+					details: {
+						delivered: outcome.result,
+						verifiedBy: outcome.evidence,
+						blockers: outcome.blockers,
+					},
+				},
+				{ triggerTurn: false },
+			);
+		} catch {
+			// Persisting the outcome must not block the handoff.
+		}
 	}
 
 	private formatFinalReportContext(): string {
@@ -493,6 +657,12 @@ export class BeliefLoopController {
 				lines.push(`- ${belief.id} [${belief.domain}] ${belief.statement}`);
 				for (const entry of belief.inconclusiveBy) lines.push(`  evidence: ${entry.evidence}`);
 			}
+		}
+		if (this.taskOutcome) {
+			lines.push("Task outcome (delivered result, separate from belief settlement):");
+			lines.push(`  delivered: ${this.taskOutcome.result}`);
+			lines.push(`  verified by: ${this.taskOutcome.evidence}`);
+			if (this.taskOutcome.blockers) lines.push(`  remaining blockers: ${this.taskOutcome.blockers}`);
 		}
 		lines.push("</final_report_context>");
 		return lines.join("\n");
@@ -530,10 +700,10 @@ export class BeliefLoopController {
 		if (frame?.body.kind === "belief-loop") this.flushPendingDomainBeliefDeltas();
 	}
 
-	private dispatchToExecution(proposed: Belief[]): { state: LoopState; steer: string } {
+	private dispatchToExecution(proposed: Belief[], intent?: string): { state: LoopState; steer: string } {
 		this.ensureDomainPlan(
 			proposed.map((belief) => belief.id),
-			`Probe ${proposed.map((belief) => belief.id).join(", ")}`,
+			intent ?? `Probe ${proposed.map((belief) => belief.id).join(", ")}`,
 		);
 		this.dispatchedFrameIds = new Set(proposed.map((b) => b.id));
 		this.evidenceWatermark = this.host.agent.state.messages.length;
@@ -545,7 +715,9 @@ export class BeliefLoopController {
 				frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
 				leaseReportNudged: false,
 			},
-			steer: TRANSITION_STEERS.dispatch(statements),
+			steer: intent
+				? `${TRANSITION_STEERS.dispatch(statements)}\n\nDecision this experiment informs: ${intent}`
+				: TRANSITION_STEERS.dispatch(statements),
 		};
 	}
 
@@ -610,6 +782,24 @@ export class BeliefLoopController {
 		// Attach the deterministic tool-operation record alongside the model summary so the
 		// handoff stays accurate even if the summarizer omits a completed action.
 		const content = operationRecord ? `${summary}\n\nCompleted operations:\n${operationRecord}` : summary;
+		// Fast path has no belief loop, so its task result must be submitted explicitly through
+		// `report_outcome` — the same `TaskOutcome` channel `conclude` uses. A clean tool log is
+		// operational evidence, not a completion judgment: without an explicit submission the
+		// fast path is a failure that hands back to the belief loop.
+		const submitted = this.taskOutcome;
+		if (!submitted && !this.fastPathFailure) {
+			this.fastPathFailure = true;
+		}
+		// A submitted outcome that still carries blockers is not a completed delivery: reading
+		// only the tool log would mark it success. Blockers therefore force the failure handoff.
+		if (submitted?.blockers) {
+			this.fastPathFailure = true;
+		}
+		this.taskOutcome = submitted ?? {
+			result: summary,
+			evidence: operationRecord || "no tool results were recorded",
+			blockers: "no explicit delivered result was reported",
+		};
 		this.recordDomainDistillation(summary);
 		try {
 			await this.host.sendCustomMessage(
@@ -621,6 +811,9 @@ export class BeliefLoopController {
 						runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 						outcome: this.fastPathFailure ? "failure" : "success",
 						request: this.currentTaskRequestText,
+						delivered: this.taskOutcome?.result,
+						verifiedBy: this.taskOutcome?.evidence,
+						blockers: this.taskOutcome?.blockers,
 					},
 				},
 				{ triggerTurn: false },
@@ -758,10 +951,13 @@ export class BeliefLoopController {
 
 	private roleToolNames(): string[] {
 		const tools = ROLE_SPECS[this.role].tools;
-		if (typeof tools === "function") {
-			return tools({ fullActiveToolNames: this.fullActiveToolNames });
+		const names = typeof tools === "function" ? tools({ fullActiveToolNames: this.fullActiveToolNames }) : [...tools];
+		// The fast path is the execution role without a belief loop, so it is the only surface
+		// that gets `report_outcome` — its explicit task-result submission.
+		if (this.loopState.role === "execution" && this.loopState.fastPath && !names.includes("report_outcome")) {
+			return [...names, "report_outcome"];
 		}
-		return [...tools];
+		return names;
 	}
 
 	roleModelFor(role: "propose" | "distill" | "execution" | "finalReport"): Model<any> | undefined {

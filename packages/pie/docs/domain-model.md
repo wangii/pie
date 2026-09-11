@@ -170,9 +170,22 @@ Inconclusive -> Inconclusive | Supported | Refuted
 Proposed | Supported | Refuted | Inconclusive -> Superseded
 ```
 
-Task-boundary pruning removes ids from `activeBeliefs`; it does not delete
-historical Belief records or reuse their ids. This preserves Task/Frame
-provenance while keeping the next task's working set small.
+A task boundary resets the task's *focus* rather than pruning the registry. Every
+Belief record is retained — supported, refuted, inconclusive, superseded, and
+leftover proposed alike — and ids are never reused, so a later Task can select a
+prior refutation or inconclusive judgment again. Retaining only supported records
+would have made inheritance accumulate confirmations and drop counter-evidence.
+
+The task's scope is therefore declared explicitly, by the control-only
+`focus_beliefs` tool, into a `FocusSet` that is cleared at the boundary and never
+inherited. The slice is runtime control state: membership never changes a
+Belief's status, and it is not persisted as a Belief or as a domain event.
+
+`activeBeliefs` remains a separate, derived record — the ids of every open
+(proposed, inconclusive, or supported) Belief at the moment a delta is applied,
+also used to populate `inheritedBeliefs` at `TaskOpened`. It describes what was
+open, not what the task is acting on; `FocusSet` is the authoritative scope, and
+an unresolved Belief outside it neither dispatches nor blocks conclusion.
 
 Routing is not encoded as a Belief domain in the target model. A routing
 decision is control metadata, not a world assertion. Its reason explains the
@@ -196,7 +209,8 @@ struct Routing {
 
 There is one Routing record on the outer `TaskFrame`. `FastPathFrame` does not
 repeat it. Routing is written through the control-only `route_task` tool. Fast-path dispatch is
-blocked while any proposed belief remains; an immaterial proposal must be explicitly retracted.
+blocked while an unresolved belief *in the task's focus* remains; a belief outside the focus does
+not block, and an immaterial in-focus proposal must be explicitly retracted.
 
 ### Plan
 
@@ -209,8 +223,12 @@ struct Plan {
 ```
 
 `selectedToExplore` records the coherent beliefs chosen by propose for one execution episode.
-`intent` is optional and must not be synthesized by the GUI. Plan is harness bookkeeping, not a
-separate cognitive role.
+`intent` names the task decision that episode's outcome could change ("whether to change the caller
+or the adapter", not "probe belief-1"). Propose authors both through `select_experiment`, so the
+intent is model-produced rather than synthesized by the GUI or the harness; it is required on that
+path and the runtime only falls back to a mechanical `Probe <ids>` label when a dispatch did not
+come from an explicit selection. `selectedToExplore` is a subset of the task's declared focus. Plan
+is harness bookkeeping, not a separate cognitive role.
 
 ### Execution
 

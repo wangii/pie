@@ -16,6 +16,19 @@ import { formatSkillCatalogForPrompt, formatSkillsForPrompt, type Skill } from "
  */
 export type SystemPromptRole = "coding" | "propose" | "distill" | "execution" | "finalReport";
 
+/**
+ * Whether a role receives the `<project_context>` block. The block is normally gated on the
+ * `read` tool, because a role that cannot read files should not be handed instructions like
+ * "read files in full". The belief-loop decision roles are the exception: they make the
+ * epistemic and selection decisions — which action to take, whether evidence settles a belief,
+ * whether a referent needs refining — so project constraints ("`dist/` is generated output",
+ * "never edit the vendored tree") change their decisions even though they cannot act on them
+ * directly. Execution is not listed because it has `read` and takes the gate above.
+ */
+function receivesProjectContext(role: SystemPromptRole, hasRead: boolean): boolean {
+	return hasRead || role === "propose" || role === "distill";
+}
+
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
@@ -64,9 +77,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += appendSection;
 		}
 
-		// Append project context files (only if read tool is available)
+		// Append project context files (only if read tool is available, or a decision role)
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
-		if (customPromptHasRead && contextFiles.length > 0) {
+		if (receivesProjectContext(role, customPromptHasRead) && contextFiles.length > 0) {
 			prompt += "\n\n<project_context>\n\n";
 			prompt += "Project-specific instructions and guidelines:\n\n";
 			for (const { path: filePath, content } of contextFiles) {
@@ -190,10 +203,10 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += appendSection;
 	}
 
-	// Append project context files (only if read tool is available — a role that cannot
-	// read files should not be handed project instructions like "read files in full",
-	// which would only mislead it; same gate as the skills block below).
-	if (hasRead && contextFiles.length > 0) {
+	// Append project context files (gated as described on `receivesProjectContext`; the skills
+	// block below stays gated on `read` alone, since skills are only useful to a role that can
+	// load them).
+	if (receivesProjectContext(role, hasRead) && contextFiles.length > 0) {
 		prompt += "\n\n<project_context>\n\n";
 		prompt += "Project-specific instructions and guidelines:\n\n";
 		for (const { path: filePath, content } of contextFiles) {

@@ -69,11 +69,14 @@ describe("defaultTools setting", () => {
 			"declare_belief",
 			"edit",
 			"find",
+			"focus_beliefs",
 			"grep",
 			"ls",
 			"powershell",
 			"read",
+			"report_outcome",
 			"route_task",
+			"select_experiment",
 			"view_beliefs",
 			"write",
 		]);
@@ -82,6 +85,8 @@ describe("defaultTools setting", () => {
 			"find",
 			"route_task",
 			"declare_belief",
+			"focus_beliefs",
+			"select_experiment",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -131,9 +136,11 @@ describe("defaultTools setting", () => {
 			"conclude",
 			"declare_belief",
 			"dynamic_tool",
+			"focus_beliefs",
 			"grep",
 			"route_task",
 			"sdk_tool",
+			"select_experiment",
 			"static_tool",
 			"view_beliefs",
 		]);
@@ -153,6 +160,8 @@ describe("defaultTools setting", () => {
 			"grep",
 			"route_task",
 			"declare_belief",
+			"focus_beliefs",
+			"select_experiment",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -184,15 +193,26 @@ describe("defaultTools setting", () => {
 			"declare_belief",
 			"edit",
 			"find",
+			"focus_beliefs",
 			"grep",
 			"ls",
 			"powershell",
 			"read",
+			"report_outcome",
 			"route_task",
+			"select_experiment",
 			"view_beliefs",
 			"write",
 		]);
-		expect(session.getActiveToolNames()).toEqual(["ls", "route_task", "declare_belief", "view_beliefs", "conclude"]);
+		expect(session.getActiveToolNames()).toEqual([
+			"ls",
+			"route_task",
+			"declare_belief",
+			"focus_beliefs",
+			"select_experiment",
+			"view_beliefs",
+			"conclude",
+		]);
 		session.dispose();
 	});
 });

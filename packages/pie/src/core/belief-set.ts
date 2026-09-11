@@ -110,6 +110,74 @@ export interface RoutingDelta {
 	readonly reason?: string;
 }
 
+/**
+ * An explicit experiment selection produced by propose: the belief subset the next
+ * execution probes and the task decision the probe informs. Control metadata, not a belief.
+ */
+export interface ExperimentSelection {
+	/** Which task decision, action, or conclusion this experiment's outcome could change. */
+	readonly intent: string;
+	/** The belief ids forming one coherent experiment. */
+	readonly beliefIds: readonly string[];
+}
+
+/**
+ * The task's delivered result: what was actually delivered, the evidence that it was delivered,
+ * and any remaining blocker. Stored outside the BeliefSet because it is a task outcome, not a
+ * world belief — epistemic sufficiency and task completion are separate judgments.
+ */
+export interface TaskOutcome {
+	readonly result: string;
+	readonly evidence: string;
+	readonly blockers?: string;
+}
+
+/**
+ * Task focus: the belief ids the current task is acting on, selected independently of any
+ * single experiment. Independent of the BeliefSet: membership never changes a belief's truth
+ * status, so a belief can leave the focus slice while remaining (say) refuted or inconclusive,
+ * and `clear` drops no history. The focus is authoritative from the start and defaults to the
+ * empty set; there is no undeclared "all beliefs" fallback, so a belief outside the focus
+ * neither dispatches nor blocks conclusion unless the task puts it back in focus.
+ */
+export class FocusSet {
+	private _beliefIds: string[] = [];
+	private _declared = false;
+
+	get beliefIds(): readonly string[] {
+		return this._beliefIds;
+	}
+
+	/** Whether the task has explicitly declared its focus this task (an empty declaration still
+	 *  counts). Starts `false`: a task that has not declared anything has no focus, not a default
+	 *  "everything" one, so `select_experiment` can require the declaration before any dispatch. */
+	get declared(): boolean {
+		return this._declared;
+	}
+
+	/** Replace the focus with the given ids, preserving first-seen order and dropping duplicates. */
+	select(beliefIds: readonly string[]): void {
+		const seen = new Set<string>();
+		this._beliefIds = beliefIds.filter((id) => {
+			if (seen.has(id)) return false;
+			seen.add(id);
+			return true;
+		});
+		this._declared = true;
+	}
+
+	/** Task boundary: drop the slice and the declaration. A new task declares its own focus and
+	 *  never inherits the previous one; belief records are untouched. */
+	reset(): void {
+		this._beliefIds = [];
+		this._declared = false;
+	}
+
+	has(id: string): boolean {
+		return this._beliefIds.includes(id);
+	}
+}
+
 /** Thrown when a delta names an invalid statement or an illegal transition. */
 export class BeliefValidationError extends Error {}
 
@@ -290,28 +358,20 @@ export class BeliefSet {
 	}
 
 	/**
-	 * Task-end cleanup: keep only supported world knowledge that still means something
-	 * to the next task. Refuted, inconclusive, superseded, and leftover proposed entries are dropped.
-	 * Returns the removed records.
-	 *
-	 * Removed ids are never reused.
+	 * Task-end cleanup. Task focus is reset separately (see `FocusSet`); belief records are
+	 * history and are retained across tasks so a prior refutation or inconclusive judgment can
+	 * be selected again. This method therefore removes nothing and exists only as the task
+	 * boundary hook. Ids are allocated from a monotonic counter, so a retained record never
+	 * collides with a later one.
 	 */
 	pruneForNewTask(): Belief[] {
-		const removed: Belief[] = [];
-		this._beliefs = this._beliefs.filter((b) => {
-			const keep = statusOf(b) === "supported";
-			if (!keep) {
-				removed.push(b);
-			}
-			return keep;
-		});
-		return removed;
+		return [];
 	}
 
 	private _ensureCapacity(): void {
 		if (this._beliefs.length >= MAX_BELIEFS) {
 			throw new BeliefValidationError(
-				`Belief set capacity reached: at most ${MAX_BELIEFS} beliefs may be held; settle or complete the task to free records.`,
+				`Belief set capacity reached: at most ${MAX_BELIEFS} beliefs are retained, including history from earlier tasks.`,
 			);
 		}
 	}

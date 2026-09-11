@@ -25,7 +25,8 @@ export interface RoleSpec {
 const PROPOSE_ROLE_HEADER =
 	"\n\nYou are the propose role of an investigation loop (propose → execution → distill → finalReport). " +
 	"Choose which unresolved uncertainty matters next; execution gathers evidence, distill updates the belief state, " +
-	"and finalReport answers the user. Your tools are route_task, declare_belief, view_beliefs, and conclude. " +
+	"and finalReport answers the user. Your tools are route_task, declare_belief, focus_beliefs, select_experiment, " +
+	"view_beliefs, and conclude. " +
 	"Write every belief and its evidence in {beliefLang}.\n\n";
 
 const PROPOSE_ROUTING_HEADER =
@@ -67,18 +68,25 @@ const PROPOSE_PROTOCOL =
 	"`evidenceRounds` over every belief " +
 	"dispatched in the experiment, including unresolved beliefs carried over from earlier rounds, so estimate the whole " +
 	"experiment once and split that estimate across the dispatched beliefs: keep at least 1 per belief and assign shared " +
-	"work once, so the summed total matches the experiment you intend instead of repeating the shared cost on each belief.";
+	"work once, so the summed total matches the experiment you intend instead of repeating the shared cost on each belief.\n" +
+	"8. Keep the task focus (which beliefs currently matter) separate from belief truth. Use focus_beliefs to declare the " +
+	"task's current focus; changing focus never changes a belief's status, and an empty focus means nothing is in scope. " +
+	"Then use select_experiment with the belief ids (a subset of the focus) and one sentence naming the task decision the " +
+	"experiment could change. Beliefs left out of an experiment keep their status and stay in focus. view_beliefs reports " +
+	"the current focus and any selected experiment, and the listing includes beliefs retained from earlier tasks: those " +
+	"are history, not current scope.";
 
 export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	propose: {
 		instruction: PROPOSE_ROLE_HEADER + PROPOSE_ROUTING_HEADER + PROPOSE_PROTOCOL,
 		continuationInstruction: PROPOSE_ROLE_HEADER + PROPOSE_CONTINUATION_HEADER + PROPOSE_PROTOCOL,
-		tools: ["route_task", "declare_belief", "view_beliefs", "conclude"],
+		tools: ["route_task", "declare_belief", "focus_beliefs", "select_experiment", "view_beliefs", "conclude"],
 		modelPolicy: "default",
 		projection: "belief",
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the propose role does not have. Choose the next uncertainty with ` +
-			`declare_belief, inspect state with view_beliefs, route epistemically closed work with route_task, or conclude. ` +
+			`declare_belief, set scope with focus_beliefs, select the experiment with select_experiment, inspect state with ` +
+			`view_beliefs, route epistemically closed work with route_task, or conclude. ` +
 			`Execution performs the probe.`,
 	},
 	distill: {
@@ -132,6 +140,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		instruction:
 			"\n\nAnswer the original task directly in {beliefLang}. Synthesize the settled beliefs and their evidence, select only " +
 			"what answers the user, preserve material uncertainty, and do not generalize a local observation into a global claim. " +
+			"If a task outcome was recorded, state the delivered result and how it was verified, and carry any remaining blocker. " +
 			"Distinguish established findings from unresolved or inconclusive points. You have no tools.",
 		tools: [],
 		modelPolicy: "default",
@@ -145,8 +154,10 @@ export const TRANSITION_STEERS = {
 	dispatch: (statements: string) =>
 		`Run one coherent experiment for these beliefs: ${statements}. Report all materially distinct raw observations with sources or command results.`,
 	fastPathDispatch:
-		"Fast path: the remaining work is epistemically closed. Execute the user's request directly with your tools, then " +
-		"give the complete final answer to the user in your final message. This execution turn owns the terminal user response.",
+		"Fast path: the remaining work is epistemically closed. Execute the user's request directly with your tools, then give " +
+		"the complete final answer to the user in your final message. Before finishing, record what you actually delivered, " +
+		"the evidence that it was delivered, and any remaining blocker with report_outcome; a clean tool log is not completion. " +
+		"This execution turn owns the terminal user response.",
 	fastPathHandoff:
 		"Fast path could not complete the task. Continue the same task in the belief loop. Use the execution summary as " +
 		"evidence and do not repeat completed actions.",
@@ -156,6 +167,10 @@ export const TRANSITION_STEERS = {
 	openBeliefs: (statements: string) =>
 		`These tested beliefs remain unadjudicated (${statements}). Use all relevant execution evidence to mark each support, ` +
 		`refute, refine, or inconclusive before choosing another experiment.`,
+	selectExperiment: (statements: string) =>
+		`No experiment is selected, so these beliefs stay out of execution: ${statements}. Declare the task focus with ` +
+		`focus_beliefs (if not already declared) and select the next experiment with select_experiment, naming the task ` +
+		`decision its outcome could change. Dispatch is limited to the selected beliefs.`,
 	deepenOrConclude:
 		"Choose the unresolved uncertainty with the highest expected task-relevant information gain, or conclude if no " +
 		"obvious unresolved uncertainty could materially change the answer.",
@@ -172,6 +187,10 @@ export const TRANSITION_STEERS = {
 		"Your execution budget for this experiment is exhausted. This states the budget was spent, not that the experiment " +
 		"is done or undone. Report every materially distinct observation you did gather with its source, location, or command " +
 		"result; note what was not yet observed, if anything; and do not add conclusions.",
+	concludeRejected: (reason: string) =>
+		`Concluding was rejected: ${reason} The task is not complete until a delivered result and the evidence that it ` +
+		`was delivered are recorded, so state what you actually delivered (the answer, change, or artifact) and how it ` +
+		`was verified, plus any remaining blocker, then call conclude again.`,
 	concludePremature: (reasons: string) =>
 		`Concluding is premature because ${reasons}. Adjudicate each belief or retract it only if it cannot materially change the answer.`,
 	reflection:

@@ -170,7 +170,7 @@ describe("BeliefSet", () => {
 		expect(() => set.apply({ op: "support", beliefId: "belief-99", evidence: "x" })).toThrow(/Unknown belief id/);
 	});
 
-	test("prunes task-local negatives and uncertainty but retains supported knowledge", () => {
+	test("retains belief history across the task boundary", () => {
 		const set = new BeliefSet();
 		const supported = propose(set, "supported relation");
 		set.apply({ op: "support", beliefId: supported.id, evidence: "matched" });
@@ -181,8 +181,13 @@ describe("BeliefSet", () => {
 		propose(set, "leftover open relation");
 
 		const removed = set.pruneForNewTask();
-		expect(set.beliefs.map((belief) => belief.statement)).toEqual(["supported relation"]);
-		expect(removed).toHaveLength(3);
+		expect(set.beliefs.map((belief) => belief.statement)).toEqual([
+			"supported relation",
+			"refuted relation",
+			"unsettled relation",
+			"leftover open relation",
+		]);
+		expect(removed).toHaveLength(0);
 	});
 
 	test("enforces the record capacity", () => {

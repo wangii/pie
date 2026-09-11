@@ -140,7 +140,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- view_beliefs:");
 		});
 
-		test("non-read roles omit project context files", () => {
+		test("belief-loop decision roles receive project constraints without read guidance", () => {
 			const contextFiles = [{ path: "AGENTS.md", content: "read files in full" }];
 			const coding = buildSystemPrompt({ contextFiles, skills: [], cwd: process.cwd() });
 			const epistemic = buildSystemPrompt({
@@ -151,13 +151,34 @@ describe("buildSystemPrompt", () => {
 				skills: [],
 				cwd: process.cwd(),
 			});
+			const distill = buildSystemPrompt({
+				role: "distill",
+				selectedTools: ["declare_belief", "view_beliefs", "conclude"],
+				toolSnippets: { declare_belief: "Record beliefs", view_beliefs: "View beliefs" },
+				contextFiles,
+				skills: [],
+				cwd: process.cwd(),
+			});
+			const finalReport = buildSystemPrompt({
+				role: "finalReport",
+				selectedTools: [],
+				contextFiles,
+				skills: [],
+				cwd: process.cwd(),
+			});
 
 			// The coding role has read, so it receives the project instructions…
 			expect(coding).toContain("<project_context>");
 			expect(coding).toContain("read files in full");
-			// …but the epistemic role (no read) does not, matching the skills gate.
-			expect(epistemic).not.toContain("<project_context>");
-			expect(epistemic).not.toContain("read files in full");
+			// The decision roles have no read but still need project constraints, which affect which
+			// action they select and how they read the evidence, so they receive the files as well.
+			expect(epistemic).toContain("<project_context>");
+			expect(epistemic).toContain("read files in full");
+			expect(distill).toContain("<project_context>");
+			expect(distill).toContain("read files in full");
+			// finalReport writes the answer rather than deciding the epistemic state, so it stays
+			// on the original read gate.
+			expect(finalReport).not.toContain("<project_context>");
 		});
 
 		test("instructs models to resolve pi docs under absolute base paths", () => {

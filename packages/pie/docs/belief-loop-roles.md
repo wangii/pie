@@ -30,15 +30,19 @@ They are not cognitive phases and are not beliefs.
 
 ## Invariants
 
-1. Beliefs are provisional and task-local.
+1. Beliefs are provisional. Records are retained across tasks as history; the task's *focus* —
+   which beliefs it acts on — is task-local and never inherited.
 2. A belief is an evidence-revisable relational judgment about code, product behavior, a user
    requirement, or a relevant convention.
 3. Execution observes or intervenes; it does not interpret epistemic meaning.
 4. Distill changes epistemic state from evidence.
-5. Propose decides which unresolved uncertainty matters next.
+5. Propose decides which unresolved uncertainty matters next, and which task decision that
+   experiment could change.
 6. Names are provisional pointers. Refine a referent only when evidence makes a distinction
    relevant to the task.
 7. Do not investigate uncertainty that cannot materially change the task outcome.
+8. Focus is scope, not truth. Entering or leaving the focus slice never changes a belief's
+   status.
 
 Routing, workflow state, exploration requests, coverage bookkeeping, and acceptance criteria do
 not belong in `BeliefSet`. Routing is recorded separately by `route_task` in `RoutingSet`. The
@@ -48,15 +52,52 @@ user request remains the task target rather than being copied into framing belie
 
 | role | responsibility | tools | model |
 |---|---|---|---|
-| `propose` | choose the next material uncertainty; declare one coherent experiment's beliefs | `route_task`, `declare_belief`, `view_beliefs`, `conclude` | default |
-| `execution` | gather all materially distinct raw observations; perform minimal interventions when needed | active execution tools plus read-only `view_beliefs` | `pie.executionModel` |
+| `propose` | choose the next material uncertainty; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `view_beliefs`, `conclude` | default |
+| `execution` | gather all materially distinct raw observations; perform minimal interventions when needed | active execution tools plus read-only `view_beliefs` (fast path also `report_outcome`) | `pie.executionModel` |
 | `distill` | adjudicate tested beliefs, inspect residual, and refine the world model | `declare_belief`, `view_beliefs`, `conclude` | `pie.distillationModel` |
 | `finalReport` | synthesize the evidence-grounded answer and preserve uncertainty | none | default |
 
-There is no independent batching planner. Beliefs declared together by propose form one coherent
-execution episode. This removes a model call that produced no evidence and optimized belief count
-rather than task success. The domain `PlanProduced` event remains an implementation record of the
-selected beliefs; it is not a cognitive role.
+There is no independent batching planner. Propose selects the beliefs for one coherent execution
+episode and states the decision that episode informs. This removes a model call that produced no
+evidence and optimized belief count rather than task success. The domain `PlanProduced` event
+remains an implementation record of the selection, including the propose-authored `intent`; it is
+not a cognitive role.
+
+The decision roles (`propose`, `distill`) receive the `<project_context>` block even though they
+have no `read` tool. That block is normally gated on `read`, but project constraints ("`dist/` is
+generated output", "never edit the vendored tree") change which action propose selects and how
+distill reads evidence, so withholding them would hide part of the basis for the decision.
+`finalReport` writes rather than decides and stays on the `read` gate.
+
+## Task focus and experiment selection
+
+The belief set is history; the focus is scope. Two control-only tools keep them apart:
+
+- `focus_beliefs` declares the belief ids the task currently acts on. It *replaces* the slice, so
+  dropping a belief from focus — for example an unresolved question that no longer bears on the
+  fix — changes only the task's attention, never the belief's status. A refuted or inconclusive
+  belief can be put back if it becomes relevant again, which is why records are retained rather
+  than pruned to the supported ones.
+- `select_experiment` names the subset of the focus to probe next, plus one sentence for the task
+  decision the outcome could change ("whether to change the caller or the adapter", not "learn
+  about the network layer"). Dispatch is limited to that subset; beliefs left out keep their
+  status and stay in focus.
+
+A task must declare its focus before it can select an experiment, and a new task starts
+undeclared: focus is never inherited, because the previous task's scope is not evidence about
+this one. Changing the focus invalidates an already-selected experiment, so a selection is never
+silently re-scoped; re-declaring the *same* scope does not, since tools run in call order within a
+turn.
+
+Dispatch is not automatic. An unresolved belief the task owns — declared during this task, or
+already in focus — with no experiment selected produces a steer asking for the selection. Retained
+history from earlier tasks is excluded from that steer: it neither dispatches nor re-enters the
+task's attention unless the task focuses it again.
+
+Because records are retained, the `view_beliefs` listing is history rather than current scope. It
+therefore opens with a control-metadata header — `[FOCUS]` for the current slice, and
+`[SELECTED EXPERIMENT]` when one is pending — so the model reads its scope before its history
+instead of reconstructing the slice from the transcript. Neither line is a belief.
 
 ## Propose objective
 
@@ -69,6 +110,10 @@ relative to:
 - side-effect risk;
 - evidence dependencies;
 - ability to prevent substantial wasted work.
+
+Information gain is worth something only when it reaches the task: the selection must name the
+action, conclusion, or answer the outcome could change. An unknown whose resolution cannot change
+any of those is out of scope even when it would be interesting to know.
 
 There is no fixed three-belief limit. One natural experiment may test any coherent number of
 beliefs. Review checks such as internal consistency, summary/body drift, reverse drift, and
@@ -122,18 +167,39 @@ candidate beliefs directly implied by an observation; propose decides whether th
 matter enough to execute next. Derived reasoning from supported beliefs is not automatically a new
 empirical assumption.
 
-## Conclusion and reflection
+## Conclusion, task outcome, and reflection
 
-`conclude` is blocked while a proposed belief remains. Before terminal handoff, propose or distill
-gets one cheap adversarial check:
+`conclude` is blocked while a proposed belief remains unadjudicated **within the task's scope** —
+either in the focus slice, or dispatched by the current experiment (an experiment's outcome must be
+adjudicated regardless of later focus changes). An unresolved belief outside the focus does not
+block conclusion: the task has said it is not acting on it. Only `proposed` (unadjudicated) beliefs
+block; an `inconclusive` belief that has been adjudicated does not.
+
+Before terminal handoff, propose or distill gets one cheap adversarial check:
 
 > Is there any obvious unresolved uncertainty that could materially change the answer? If yes,
 > investigate it. Otherwise conclude.
 
 This single guard gates every normal final report entry, including the propose path that falls
 through to finalReport when there is no open work — it is not bypassed by omitting an explicit
-`conclude`. Only `proposed` (unadjudicated) beliefs block conclusion; an `inconclusive` belief that
-has been adjudicated does not.
+`conclude`.
+
+### Epistemic sufficiency is not task completion
+
+Concluding also records a **task outcome**, held outside the belief set: what was actually
+delivered, the evidence that it was delivered, and any remaining blocker. The same settled beliefs
+can answer an explanation request and still fail a change request that also required the change to
+exist and be verified, so the two judgments are recorded separately:
+
+- `result` — the answer, change, or artifact actually delivered, not a restatement of beliefs;
+- `evidence` — the observation or verification showing the delivery happened (for a change, that it
+  works), with source or command result;
+- `blockers` — known limitations that remain.
+
+A `conclude` call that is refused — blank `result`/`evidence` — records no outcome and must not
+advance the handoff; the loop steers back for the missing delivery record. The outcome is persisted
+as a `task_outcome` session entry and included in `<final_report_context>`, so it survives the final
+turn and branch replay.
 
 There is no coverage, ontology, conjunction, or recursive completeness protocol. Inconclusive
 beliefs are included in `<final_report_context>` so finalReport can preserve uncertainty rather
@@ -146,8 +212,9 @@ relevant beliefs, combine evidence, and control uncertainty.
 
 Fast path is based on epistemic closure, not operational simplicity. `route_task` may choose it only
 when no unresolved belief could materially change the selected action or its safety. The controller
-also blocks a fast-path route while any proposed belief remains; a belief must first be adjudicated
-or explicitly retracted as immaterial.
+also blocks a fast-path route while an unresolved belief in the task's focus remains; a belief must
+first be adjudicated or explicitly retracted as immaterial. An unresolved belief outside the focus
+does not block, because the task has declared it is not acting on it.
 
 Terminal ownership is unique:
 
@@ -159,5 +226,17 @@ The execution role writes the terminal response. A hidden `fast_path_distillatio
 completed actions and blockers for session continuity, but neither distill nor finalReport writes a
 second user answer. A failed run returns to propose without replaying the consumed route.
 
-At task boundaries, only supported product/code beliefs survive as session knowledge. Refuted,
-inconclusive, superseded, and leftover proposed records are pruned. Routing is cleared separately.
+The fast path has no belief loop, so it cannot `conclude`: it submits the same task outcome through
+`report_outcome` instead. A clean tool log is operational evidence, not a completion judgment.
+Without an explicit submission the run is a failure that hands back to the belief loop, and a
+submitted outcome that still carries a blocker is likewise a failure — a partially delivered change
+is not a completed one.
+
+At task boundaries the focus slice is reset and must be re-declared; belief records are *not*
+pruned. Supported, refuted, inconclusive, superseded, and leftover proposed records all survive as
+history, because a prior refutation or inconclusive judgment can be selected again — retaining only
+supported conclusions would let the inheritance mechanism accumulate confirmations and lose the
+counter-evidence. Routing is cleared separately.
+
+> Consequence: belief ids are allocated from a monotonic counter and records are never reclaimed, so
+> `MAX_BELIEFS` is a budget for the whole session rather than for one task.
