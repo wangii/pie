@@ -194,8 +194,12 @@ export function createFocusBeliefsToolDefinition(
 				for (const beliefId of beliefIds) {
 					if (!beliefSet.get(beliefId)) throw new Error(`Unknown belief id: ${beliefId}.`);
 				}
-				focusSet.select(beliefIds);
-				onFocus?.(beliefIds);
+				// The controller owns the slice: it compares the declared ids against the slice it
+				// currently holds to tell a re-declaration from a real scope change. Writing here
+				// first would make that comparison always report "unchanged". Only write directly
+				// when no controller is attached (a bare tool use, e.g. in a test).
+				if (onFocus) onFocus(beliefIds);
+				else focusSet.select(beliefIds);
 				return {
 					content: [
 						{

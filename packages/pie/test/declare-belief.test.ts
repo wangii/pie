@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { BeliefSet, RoutingSet } from "../src/core/belief-set.ts";
-import { createDeclareBeliefToolDefinition, createRouteTaskToolDefinition } from "../src/core/tools/declare-belief.ts";
+import { BeliefSet, FocusSet, RoutingSet } from "../src/core/belief-set.ts";
+import {
+	createDeclareBeliefToolDefinition,
+	createFocusBeliefsToolDefinition,
+	createRouteTaskToolDefinition,
+} from "../src/core/tools/declare-belief.ts";
 import { createViewBeliefsToolDefinition } from "../src/core/tools/view-beliefs.ts";
 
 describe("declare_belief tool", () => {
@@ -180,6 +184,53 @@ describe("route_task tool", () => {
 				undefined as never,
 			),
 		).rejects.toThrow("Routing rejected");
+	});
+});
+
+describe("focus_beliefs tool", () => {
+	// The focus slice is owned by the controller, which compares the declared ids against the
+	// slice it currently holds to tell a re-declaration from a real scope change (a real change
+	// invalidates an experiment selected under the earlier scope). If the tool also writes the
+	// slice, that comparison is made against the value the tool just wrote and always reports
+	// "unchanged", so the invalidation silently never fires.
+	test("leaves the focus write to the controller callback", async () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the cancellation signal reaches the request",
+			domain: "code",
+			expectation: "the request observes the cancellation",
+			evidenceRounds: 1,
+		});
+		const focusSet = new FocusSet();
+		let focusBeforeCallback: readonly string[] | undefined;
+		const tool = createFocusBeliefsToolDefinition(set, focusSet, () => {
+			focusBeforeCallback = focusSet.beliefIds;
+		});
+
+		await tool.execute("tc-1", { beliefIds: ["belief-1"] }, undefined, undefined, undefined as never);
+
+		// The controller must still see the pre-declaration slice when its callback runs, and the
+		// tool must leave the write to it rather than performing it first.
+		expect(focusBeforeCallback).toEqual([]);
+		expect(focusSet.beliefIds).toEqual([]);
+	});
+
+	test("writes the slice itself when no controller is attached", async () => {
+		const set = new BeliefSet();
+		set.apply({
+			op: "propose",
+			statement: "the cancellation signal reaches the request",
+			domain: "code",
+			expectation: "the request observes the cancellation",
+			evidenceRounds: 1,
+		});
+		const focusSet = new FocusSet();
+		const tool = createFocusBeliefsToolDefinition(set, focusSet);
+
+		await tool.execute("tc-1", { beliefIds: ["belief-1"] }, undefined, undefined, undefined as never);
+
+		expect(focusSet.beliefIds).toEqual(["belief-1"]);
 	});
 });
 
