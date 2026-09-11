@@ -61,13 +61,31 @@ void renderBeliefLane(const pie::gui::NativeGuiModel& m, const std::string& view
 
         ImGui::PopID();
 
-        // Left accent bar for selected beliefs.
-        if (isSel) {
+        // Left accent markers: two independent facts about this belief, drawn so that
+        // neither hides the other.
+        //   - kAccent      = the displayed frame's plan selected this belief;
+        //   - kFocusAccent = the task declared it is acting on this belief.
+        // Scope is not status: a focused belief keeps its own status color, and an
+        // out-of-focus one is retained history that stays fully readable. Nothing is
+        // marked until the task declares a focus, matching the graph view.
+        //
+        // The selected marker hangs in the gutter left of the row. That gutter is only a
+        // few pixels wide, so the focus marker is drawn inside the row at its left edge
+        // instead: a second bar in the gutter is clipped by the child's clip rect.
+        const bool inFocus = m.beliefInSelectedTaskFocus(b.id);
+        if (isSel || inFocus) {
             ImVec2 end = ImGui::GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                ImVec2(start.x - 4.0f, start.y),
-                ImVec2(start.x - 1.0f, end.y),
-                ImGui::GetColorU32(kAccent));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (isSel) {
+                dl->AddRectFilled(ImVec2(start.x - 4.0f, start.y),
+                                  ImVec2(start.x - 1.0f, end.y),
+                                  ImGui::GetColorU32(kAccent));
+            }
+            if (inFocus) {
+                dl->AddRectFilled(ImVec2(start.x + 1.0f, start.y),
+                                  ImVec2(start.x + 4.0f, end.y),
+                                  ImGui::GetColorU32(kFocusAccent));
+            }
         }
         ImGui::Spacing();
     }

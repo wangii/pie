@@ -15,7 +15,7 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 | 术语 | 含义 | 出处 |
 |------|------|------|
 | **Status Bar**（状态栏） | 显示 session/frame/stage 指示器与 EXECUTING 阶段的当前工具；纯显示。 | `src/StatusBar.h` `renderStatusBar` |
-| **Belief Lane**（信念集栏） | 渲染当前信念集合（belief set）的三条栏之一。 | `src/BeliefLane.h` `renderBeliefLane` |
+| **Belief Lane**（信念集栏） | 渲染当前信念集合（belief set）的三条栏之一。每行可带两条独立的左侧强调标记：`kAccent`（挂在行左侧槽内）表示该信念被**当前帧的 plan 选中**；`kFocusAccent`（画在行内左边缘）表示该信念在**任务关注范围内**。后者画在行内而非槽内，因为行左槽只有几像素宽、已被前者占用，第二条会被子窗口裁剪矩形裁掉。 | `src/BeliefLane.h` `renderBeliefLane` |
 | **Cognitive Lane**（认知过程栏） | 渲染认知过程（plan/execution/distillation）的三条栏之一。 | `src/CognitiveLane.h` `renderCognitiveLane` |
 | **Execution Lane**（执行栏） | 渲染执行轨迹（工具调用与输出）的三条栏之一。 | `src/ExecutionLane.h` `renderExecutionLane` |
 | **Lane**（栏） | 主工作区中并排（或窄窗时垂直堆叠）的三列内容区域；有左/中/右三条。 | `src/LayoutMetrics.h` `laneRects` |

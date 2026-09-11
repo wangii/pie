@@ -10,6 +10,11 @@ const ImVec4 kGreen(0.45f, 0.79f, 0.47f, 1.0f);
 const ImVec4 kAmber(0.95f, 0.77f, 0.38f, 1.0f);
 const ImVec4 kRed(0.86f, 0.38f, 0.35f, 1.0f);
 const ImVec4 kGray(0.62f, 0.62f, 0.62f, 1.0f);
+// Task-focus marker for the belief lane's left accent bar. The same color the
+// graph view uses for its focus accent (GraphStyle.focusAccent), so the marker
+// reads identically in both views. Distinct from kAccent, which marks the beliefs
+// the displayed frame's plan selected.
+const ImVec4 kFocusAccent(0.43f, 0.78f, 0.86f, 1.0f);
 // Dark gray background used to highlight the pane/paragraph that corresponds
 // to the current flow step (the CursorChanged stage): PLAN / DISTILLATION /
 // PROPOSALS paragraphs in the cognitive lane, or the right execution lane for

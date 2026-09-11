@@ -19,6 +19,10 @@ extern const ImVec4 kGreen;
 extern const ImVec4 kAmber;
 extern const ImVec4 kRed;
 extern const ImVec4 kGray;
+// Left-accent marker for a belief in the selected task's focus slice. Scope, not
+// status: the belief keeps its own status color, and the marker only says the task
+// is acting on it. Matches the graph view's GraphStyle.focusAccent.
+extern const ImVec4 kFocusAccent;
 extern const ImVec4 kPaneBgDark;
 
 // Animated background for the current flow-step pane (user-approved exception
