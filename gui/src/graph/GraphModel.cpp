@@ -87,6 +87,46 @@ std::string beliefNodeTitle(const GraphNode& n) {
     return label;
 }
 
+namespace {
+
+// Collapse runs of whitespace (including newlines) to single spaces and trim, so a multi-line
+// intent still reads as one label fragment.
+std::string collapseWhitespace(const std::string& text) {
+    std::string out;
+    bool pendingSpace = false;
+    for (const char c : text) {
+        const bool space = c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        if (space) {
+            pendingSpace = !out.empty();
+            continue;
+        }
+        if (pendingSpace) out.push_back(' ');
+        pendingSpace = false;
+        out.push_back(c);
+    }
+    return out;
+}
+
+// Longest decision fragment the Plan label carries. The drawn label is clipped to the node
+// rect anyway, so this bounds the string the view has to lay out rather than the visible text.
+constexpr std::size_t kPlanIntentLabelMax = 44;
+
+} // namespace
+
+std::string planNodeTitle(const GraphNode& n) {
+    const std::string number = n.title.empty() ? n.id.value : n.title;
+    std::string label = "Plan " + number;
+    const std::string decision = collapseWhitespace(n.compactText);
+    if (decision.empty()) return label;
+    label += " · ";
+    if (decision.size() <= kPlanIntentLabelMax) {
+        label += decision;
+    } else {
+        label += decision.substr(0, kPlanIntentLabelMax) + "…";
+    }
+    return label;
+}
+
 bool edgeIsCreate(EdgeSemanticType t, const std::optional<BeliefOperation>& op) {
     if (!op || *op != BeliefOperation::Create) return false;
     return t == EdgeSemanticType::DistillToBelief ||
@@ -96,6 +136,20 @@ bool edgeIsCreate(EdgeSemanticType t, const std::optional<BeliefOperation>& op) 
 GraphTaskState projectGraphTask(const NativeGuiModel& model) {
     GraphTaskState state;
     const std::vector<LoopFrame> frames = model.frames();
+
+    // Task scope and delivery are per-TASK, while this projection walks every frame the model
+    // holds. They therefore come from the one selected task, not from the frame loop. A model
+    // with no TaskOpened yet (some fixtures open frames directly) projects with no scope and no
+    // outcome rather than failing.
+    const Task* task = model.selectedTask();
+    if (task) {
+        state.focusDeclared = task->focus.declared;
+        state.focusBeliefIds = task->focus.beliefIds;
+        state.taskOutcome.present = task->outcome.present;
+        state.taskOutcome.result = task->outcome.result;
+        state.taskOutcome.evidence = task->outcome.evidence;
+        state.taskOutcome.blockers = task->outcome.blockers;
+    }
 
     // Each result Belief's display anchor frame is the frame of its producing
     // Propose node. A distill-produced delta is projected to the successor
@@ -130,6 +184,9 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model) {
         node.fullText = b.statement;
         if (!b.expectation.empty()) node.fullText += std::string("  (expects ") + b.expectation + ")";
         node.creationOrder = beliefOrder++;
+        // Scope is task-level, so it comes from the selected task's declaration; beliefs stay
+        // session-global and keep whatever frame anchor the runtime gave them.
+        node.inFocus = task != nullptr && task->focus.has(b.id);
         // Anchor to the frame of the Belief's producing Propose; fall back to the
         // runtime's committed createdInFrame when no propose owns it.
         auto anchorIt = beliefAnchorFrame.find(b.id);

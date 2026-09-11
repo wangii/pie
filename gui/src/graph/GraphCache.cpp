@@ -40,7 +40,17 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
         h = hashMix(h, n.creationOrder);
         h = hashMix(h, n.executionOrder.value_or(0));
         h = hashMix(h, n.displayType.empty() ? 0 : static_cast<unsigned char>(n.displayType[0]));
+        h = hashMix(h, n.inFocus ? 1 : 0);
     }
+    // The outcome band changes derived geometry (it advances the canvas height), so it is part of
+    // the layout fingerprint even though it owns no node.
+    h = hashMix(h, state.taskOutcome.present ? 1 : 0);
+    h = hashMixStr(h, state.taskOutcome.result);
+    h = hashMixStr(h, state.taskOutcome.evidence);
+    h = hashMixStr(h, state.taskOutcome.blockers);
+    h = hashMix(h, state.focusDeclared ? 1 : 0);
+    h = hashMix(h, state.focusBeliefIds.size());
+    for (const std::string& id : state.focusBeliefIds) h = hashMixStr(h, id);
     h = hashMix(h, state.edges.size());
     for (const GraphEdge& e : state.edges) {
         for (unsigned char c : e.source.value) h = hashMix(h, c);

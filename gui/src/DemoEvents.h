@@ -8,8 +8,9 @@
 // names its Execution inputs and BeliefDelta outputs; BeliefDeltaApplied names
 // the resulting immutable Belief records).
 //
-// One task, one belief-loop frame: two proposed beliefs, a plan selecting them,
-// two executions (one failing), a distillation, and the task closed.
+// One task, one belief-loop frame: two proposed beliefs, a declared task focus,
+// a plan selecting the focused one, two executions (one failing), a distillation,
+// the recorded task outcome, and the task closed.
 
 #pragma once
 
@@ -26,6 +27,9 @@ inline std::vector<std::string> demoEvents() {
         R"({"type":"FrameOpened","schemaVersion":1,"eventId":"ev-3","timestamp":"t0","taskId":"task-1","frameId":"frame-1","ordinal":1})",
         R"({"type":"RoutingDecided","schemaVersion":1,"eventId":"ev-4","timestamp":"t0","taskId":"task-1","frameId":"frame-1","routing":{"id":"routing-1","statement":"investigation is required","decision":"belief-loop","suitabilityProbability":0.3,"successProbability":0.9,"estimatedSteps":2,"difficulty":"medium","reason":"requires evidence"}})",
         R"({"type":"FrameBodySelected","schemaVersion":1,"eventId":"ev-5","timestamp":"t0","taskId":"task-1","frameId":"frame-1","body":"belief-loop","openBeliefsAtStart":[]})",
+        // Task scope, declared before the plan it constrains. belief-2 is deliberately left
+        // out: it stays in the belief column as retained history the task is not acting on.
+        R"({"type":"FocusDeclared","schemaVersion":1,"eventId":"ev-5b","timestamp":"t0","taskId":"task-1","beliefIds":["belief-1"]})",
 
         // ---- Two proposed beliefs (explicit immutable records) ----
         R"({"type":"BeliefDeltaApplied","schemaVersion":1,"eventId":"ev-6","timestamp":"t0","taskId":"task-1","frameId":"frame-1","delta":{"id":"delta-1","frameId":"frame-1","producerPhase":"propose","operation":"propose","resultBeliefId":"belief-1","resultingBeliefs":[{"id":"belief-1","statement":"project uses pytest","domain":"code","expectation":"pytest is importable","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["belief-1"]})",
@@ -49,7 +53,10 @@ inline std::vector<std::string> demoEvents() {
 
         // ---- Frame and task close ----
         R"({"type":"FrameClosed","schemaVersion":1,"eventId":"ev-16","timestamp":"t2","taskId":"task-1","frameId":"frame-1"})",
-        R"({"type":"TaskClosed","schemaVersion":1,"eventId":"ev-17","timestamp":"t2","taskId":"task-1","status":"completed"})",
+        // What the task delivered, recorded by `conclude` before the task closes. Task-level, so
+        // it renders as a band below the last LoopFrame rather than inside any one of them.
+        R"({"type":"TaskOutcomeRecorded","schemaVersion":1,"eventId":"ev-17","timestamp":"t2","taskId":"task-1","outcome":{"result":"reported that the runtime lacks the declared pytest dependency","evidence":"requirements.txt declares pytest==8.0 while pip show pytest exits 1","blockers":"only the local runtime was checked"}})",
+        R"({"type":"TaskClosed","schemaVersion":1,"eventId":"ev-18","timestamp":"t2","taskId":"task-1","status":"completed"})",
     };
 }
 

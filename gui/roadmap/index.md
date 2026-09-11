@@ -22,7 +22,7 @@ rendering structures are not a second source of business truth.
 |-------|-------|--------|---------------|
 | [Phase 0](phase-0-foundations.md) | Foundations / boundary | Implemented | 4, 24-28 |
 | [Phase 1](phase-1-p0-workspace.md) | P0 workspace | Implemented | 1-3, 5-18, 21-23, 29-31 |
-| [Phase 2](phase-2-node-graph-contract.md) | P0 Node Graph View | Implemented (M0-M9) | Node Graph View spec 1-32 |
+| [Phase 2](phase-2-node-graph-contract.md) | P0 Node Graph View | Implemented (M0-M10) | Node Graph View spec 1-32 |
 | [Phase 3](phase-3-p1-inspection.md) | P1 inspection / navigation | Partial | 19, 20, 30 (P1) |
 | [Phase 4](phase-4-future-integrations.md) | Future integrations | Not started | 24-26, 29-31 (future) |
 
@@ -32,7 +32,7 @@ rendering structures are not a second source of business truth.
   headless model test (`pi_gui_model_test`, 37/37) and an instruction
   serialization/pipe test (`pi_gui_instruction_test`, 8/8), plus a successful
   `cmake --build .` and `ctest` (2/2).
-- **Implemented (M0-M9)**: Phase 2. The P0 Node Graph View is built for M0-M9:
+- **Implemented (M0-M10)**: Phase 2. The P0 Node Graph View is built for M0-M10:
   `src/graph/` gains `GraphModel` (runtime contract), `PieGraphLayout` (layout
   engine), `GraphView` (a read-only custom ImGui canvas), `GraphRouting`
   (m4 edge routing), `GraphInteraction` (m5 selection dependency path),
@@ -41,7 +41,11 @@ rendering structures are not a second source of business truth.
   m7 stage indicator lives in `GraphView`; a Cmd/Ctrl+G Text<->Graph toggle
   lives in `App.cpp`; and the headless `pi_gui_graph_test`
   (M1 projection + M3 layout), `pi_gui_graph_m456_test` (m4/m5/m6), and
-  `pi_gui_graph_m789_test` (m7/m8/m9) cover the implementation. LoopFrames are
+  `pi_gui_graph_m789_test` (m7/m8/m9) cover the implementation; m10 (task scope
+  and delivered outcome) adds `GraphNode.inFocus` and the task-level
+  `GraphTaskState` fields, the focus accent bar, the `planNodeTitle` decision
+  label, and the layout-hosted outcome band, covered by `pi_gui_graph_test` and
+  `pi_gui_graph_label_layout_test`. LoopFrames are
   logical propose cycles within a task, stacked top-to-bottom in the fixed
   Belief / Plan+Distillation / Execution layout.
 - **Partial**: Phase 3. Belief filtering and frame search are implemented;

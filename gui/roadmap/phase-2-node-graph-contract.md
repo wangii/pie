@@ -1,7 +1,7 @@
 # Phase 2 — P0 Node Graph View
 
 A second main view for the PIE Native GUI, beside the existing three-lane
-column/text view. **M0-M9 are implemented** (see the Deliverables table).
+column/text view. **M0-M10 are implemented** (see the Deliverables table).
 
 ## Purpose
 
@@ -35,6 +35,7 @@ Candidates, Success Criterion).
 | Read-only node-editor canvas (hidden pins, no drag/create/delete, no library layout persistence) | custom `GraphView` canvas (see deviation below) | Implemented (M0/M2) `src/graph/GraphView.*` |
 | PIE layout engine (`PieGraphLayout`) | `gui/src/graph/pie_graph_layout.*` | Implemented (M3) `src/graph/PieGraphLayout.*` |
 | Runtime contract (`GraphNode`/`GraphEdge`/`GraphTaskState`) | `gui/src/graph/graph_model.*` | Implemented (M1) `src/graph/GraphModel.*` |
+| Task scope + delivered outcome in the graph (focus accent, Plan decision label, outcome band) | `gui/src/graph/*` + `Model.*` | Implemented (M10) |
 
 ### Implementation deviation: custom canvas instead of vendored node-editor
 
@@ -184,12 +185,45 @@ current frame. They use distinct domain colors, so the belief element itself
 carries the domain role. Beliefs without a routing/framing domain stay in the
 global creation-order left column.
 
+### Task scope (M10)
+
+Beliefs are session-global and, since the runtime retains every record across
+tasks, the left column is history rather than current scope. Two task-level
+events make the current scope and delivery explicit; neither is inferred:
+
+- `FocusDeclared` gives the selected task's focus slice. A Belief node in that
+  slice draws a left accent bar (`focusAccent`). The bar deliberately does not
+  reuse the `dimMuted` alpha — that already means "outside the dependency
+  query" — and it yields its position to the CURRENT bar so the two never
+  overlap. An out-of-focus Belief is retained history: it keeps its status color
+  and stays fully readable.
+- `TaskOutcomeRecorded` gives what the task delivered. It renders as a band
+  below the last LoopFrame, spanning the belief column through the execution
+  column, showing `Delivered:`, `Verified by:`, and `Blockers:` when present.
+  The band is layout-hosted (`PieGraphLayout.taskOutcomeRect`, counted into
+  `canvasHeight`), not an overlay, so it scrolls with the frames and obscures
+  nothing. It shares `GraphCache::stateFingerprint` because it moves canvas
+  geometry; it is not captured by `GraphLive`, which freezes only closed-frame
+  geometry.
+
+### Plan node label (M10)
+
+A Plan node has no tooltip (explicit user request), so its `compactText` — the
+runtime's `plan.intent`, now a model-authored decision sentence such as
+"whether to change the caller or the adapter" — had no render path and every
+Plan node read as the word "Plan". `planNodeTitle` (headless, unit-tested, the
+Plan counterpart of `beliefNodeTitle`) appends the collapsed decision to the
+family label: `Plan P-1 · <decision>`, truncated with an ellipsis and clipped by
+the node rect. An empty intent degrades to exactly the previous label.
+
 ### CURRENT vs SELECTED
 
 CURRENT and SELECTED are distinct states. CURRENT = which node the runtime is
 executing now; SELECTED = which node the user is inspecting. Only the CURRENT
 node is highlighted (with its stage-indicator); the current LoopFrame is not
-extra-highlighted, and no animation is used.
+extra-highlighted, and no animation is used. The M10 focus bar is a third,
+independent distinction (which beliefs the task is acting on) and must not be
+conflated with either.
 
 ### Read-only contract
 
@@ -233,6 +267,7 @@ struct GraphNode {
     NodeVisualState state;
     uint64_t creation_order;
     optional<uint64_t> execution_order;
+    bool in_focus;                // Belief only: in the selected task's declared focus
 };
 
 struct GraphEdge {
@@ -248,10 +283,16 @@ struct GraphTaskState {
     vector<GraphEdge> edges;
     vector<LoopFrameInfo> frames;
     optional<NodeId> current_node;
+    // Task-level scope and delivery. Copied from the SELECTED task, not from any
+    // frame: the projection walks every frame the model holds, so these cannot be
+    // per-frame fields.
+    bool focus_declared;
+    vector<string> focus_belief_ids;
+    GraphTaskOutcome task_outcome;   // {present, result, evidence, blockers}
 };
 ```
 
-### Milestones (M0-M9)
+### Milestones (M0-M10)
 
 ```text
 M0 Canvas        node-editor integration spike (Cmd+G toggle, pan/zoom/select,
@@ -282,9 +323,14 @@ M8 Performance   50 frames / 500 nodes: layout cache, adjacency cache, render
 M9 Polish        spacing, typography, borders, dim ratios, arrows, padding, sizes
                  (centralized GraphStyle config consumed by GraphView / layout /
                  routing)  [implemented]
+M10 Task scope   task-level focus and delivered outcome made visible: FocusDeclared /
+    and outcome  TaskOutcomeRecorded consumed and folded onto the Task; a focus accent
+                 bar on in-focus Belief nodes; the Plan node label carries the decision
+                 the plan informs; a task outcome band below the last LoopFrame
+                 (layout-hosted, counted into canvasHeight)  [implemented]
 ```
 
-Implementation order is M0 → M9; the real technical risk concentrates in M3+M4
+Implementation order is M0 → M10; the real technical risk concentrates in M3+M4
 (keeping a feedback loop legible under "global beliefs + horizontally growing
 frames"). Do not over-invest in node label detail before M3/M4.
 

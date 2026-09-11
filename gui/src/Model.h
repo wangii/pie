@@ -185,6 +185,31 @@ struct LoopFrame {
     History history = History::Closed;
 };
 
+// Task focus: the belief ids the task declared it is acting on. Scope, not truth —
+// membership never changes a belief's status. `declared == false` means the task has not
+// declared a focus yet, which is distinct from a declared-but-empty focus (the task has said
+// nothing is in scope). Set only by the FocusDeclared domain event; never inferred.
+struct TaskFocus {
+    bool declared = false;
+    std::vector<BeliefId> beliefIds;
+    bool has(const BeliefId& id) const {
+        for (const BeliefId& candidate : beliefIds) {
+            if (candidate == id) return true;
+        }
+        return false;
+    }
+};
+
+// Task outcome: what the task actually delivered, the evidence that it was delivered, and any
+// remaining blocker. Recorded by conclude / report_outcome. A task result, not a world belief:
+// epistemic sufficiency and task completion are separate judgments.
+struct TaskOutcome {
+    bool present = false;
+    std::string result;
+    std::string evidence;
+    std::string blockers;
+};
+
 // One user Task: the ordered projection of TaskFrames on the selected branch.
 struct Task {
     TaskId id;
@@ -195,6 +220,8 @@ struct Task {
     std::vector<BeliefId> inheritedBeliefs;
     std::vector<BeliefId> introducedBeliefs;
     std::vector<FrameId> frames; // ordered
+    TaskFocus focus;              // task scope (FocusDeclared)
+    TaskOutcome outcome;          // delivered result (TaskOutcomeRecorded)
 };
 
 // P1 frame search: case-insensitive substring test over the frame's display
@@ -279,6 +306,13 @@ public:
 
     // Determine whether a belief is selected (in the active frame's plan).
     bool isSelectedInCurrentFrame(const BeliefId& b) const;
+
+    // The selected task's declared focus, or nullptr when there is no selected task. A non-null
+    // result with declared == false means the task has not declared a focus yet.
+    const TaskFocus* selectedTaskFocus() const;
+    // True only when the selected task has declared a focus that contains `id`. Undeclared focus
+    // answers false: nothing is in scope until the task says so.
+    bool beliefInSelectedTaskFocus(const BeliefId& id) const;
 
     // Display label for a belief id: the stored "B<n>" label, or the raw id when
     // the belief is unknown. Presentation only; never used for correlation.

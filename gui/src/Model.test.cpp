@@ -48,6 +48,7 @@ static void feedDemoTask(NativeGuiModel& m) {
     m.applyLine(R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-1","ordinal":1})");
     m.applyLine(R"({"type":"RoutingDecided","taskId":"task-1","frameId":"frame-1","routing":{"id":"r-1","statement":"s","decision":"belief-loop","suitabilityProbability":0.3,"successProbability":0.9,"estimatedSteps":2,"difficulty":"medium","reason":"needs evidence"}})");
     m.applyLine(R"({"type":"FrameBodySelected","taskId":"task-1","frameId":"frame-1","body":"belief-loop","openBeliefsAtStart":[]})");
+    m.applyLine(R"({"type":"FocusDeclared","taskId":"task-1","beliefIds":["belief-1","belief-2"]})");
 
     std::string d1 = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"frame-1\",\"delta\":{\"id\":\"delta-1\",\"frameId\":\"frame-1\",\"producerPhase\":\"propose\",\"operation\":\"propose\",\"resultBeliefId\":\"belief-1\",\"resultingBeliefs\":[" + beliefRecord("belief-1", "project uses pytest", "code", "pytest is importable") + "]},\"activeBeliefs\":[\"belief-1\"]}";
     m.applyLine(d1);
@@ -66,6 +67,7 @@ static void feedDemoTask(NativeGuiModel& m) {
     m.applyLine(d4);
     m.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-1","distillation":{"id":"distill-1","inputs":["exec-1","exec-2"],"contents":"declared vs runtime differ","outputs":["delta-3","delta-4"]}})");
     m.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-1"})");
+    m.applyLine(R"({"type":"TaskOutcomeRecorded","taskId":"task-1","outcome":{"result":"reported the pytest mismatch","evidence":"requirements.txt vs pip show","blockers":"only the local runtime was checked"}})");
     m.applyLine(R"({"type":"TaskClosed","taskId":"task-1","status":"completed"})");
 }
 
@@ -109,9 +111,81 @@ int main() {
         check(b1 && b1->createdInFrame == "frame-1", "belief 1 provenance explicit");
         check(!b1->label.empty(), "belief 1 has a display label");
 
+        // Task scope is a declaration, not a belief: the recorded slice is the declared one and
+        // membership is answered from it.
+        check(task && task->focus.declared, "focus declared");
+        check(task && task->focus.beliefIds.size() == 2, "focus holds both declared beliefs");
+        check(model.beliefInSelectedTaskFocus("belief-1"), "belief-1 is in the task focus");
+        check(!model.beliefInSelectedTaskFocus("belief-9"), "an undeclared belief is out of focus");
+
+        // Task outcome is recorded separately from belief settlement, with its blocker intact.
+        check(task && task->outcome.present, "task outcome recorded");
+        check(task && task->outcome.result == "reported the pytest mismatch", "task outcome result");
+        check(task && task->outcome.evidence == "requirements.txt vs pip show", "task outcome evidence");
+        check(task && task->outcome.blockers == "only the local runtime was checked", "task outcome blockers");
+
         // Task closed clears the active task and cursor.
         check(model.activeTask() == nullptr, "no active task after close");
         check(!model.cursor().valid(), "cursor invalid after close");
+        // The closed task keeps its scope and outcome readable (the graph still renders them).
+        check(model.selectedTask() == task, "closed task remains the selected task");
+    }
+
+    // ---------------------------------------------------------------------
+    // Task focus: an undeclared focus is distinct from a declared-but-empty
+    // one, re-declaration replaces, and one task's focus never leaks to another.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-a","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        const auto* undeclared = model.taskById("task-a");
+        check(undeclared && !undeclared->focus.declared, "focus starts undeclared");
+        check(undeclared && undeclared->focus.beliefIds.empty(), "undeclared focus holds no ids");
+        check(model.selectedTaskFocus() != nullptr, "selected task exposes a focus record");
+        check(!model.beliefInSelectedTaskFocus("belief-1"), "nothing is in focus before a declaration");
+
+        model.applyLine(R"({"type":"FocusDeclared","taskId":"task-a","beliefIds":[]})");
+        const auto* empty = model.taskById("task-a");
+        check(empty && empty->focus.declared, "an empty declaration still counts as declared");
+        check(empty && empty->focus.beliefIds.empty(), "declared-empty focus holds no ids");
+
+        model.applyLine(R"({"type":"FocusDeclared","taskId":"task-a","beliefIds":["belief-1","belief-2"]})");
+        check(model.beliefInSelectedTaskFocus("belief-1"), "declaration adds belief-1 to focus");
+        model.applyLine(R"({"type":"FocusDeclared","taskId":"task-a","beliefIds":["belief-2"]})");
+        const auto* replaced = model.taskById("task-a");
+        check(replaced && replaced->focus.beliefIds.size() == 1, "re-declaration replaces rather than merges");
+        check(!model.beliefInSelectedTaskFocus("belief-1"), "the dropped belief left the focus");
+
+        // Task b declares its own scope; task a's record is untouched. The selected task is a.
+        model.applyLine(R"({"type":"TaskClosed","taskId":"task-a","status":"completed"})");
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-b","parentTaskId":"task-a","initialPrompt":{"id":"p2","original":"y","effective":"y"},"inheritedBeliefs":["belief-2"]})");
+        model.applyLine(R"({"type":"FocusDeclared","taskId":"task-b","beliefIds":["belief-3"]})");
+        const auto* taskA = model.taskById("task-a");
+        check(taskA && taskA->focus.beliefIds.size() == 1 && taskA->focus.beliefIds[0] == "belief-2",
+              "task-b's declaration does not alter task-a's focus");
+        check(model.selectedTask() == taskA, "selection still describes task-a after task-b opens");
+        check(model.beliefInSelectedTaskFocus("belief-2"), "focus answers from the selected task");
+    }
+
+    // ---------------------------------------------------------------------
+    // Task outcome: blockers are optional, and a malformed line with no result
+    // must not produce a band.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-o","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        model.applyLine(R"({"type":"TaskOutcomeRecorded","taskId":"task-o","outcome":{"result":"answered from the logs","evidence":"the log line is unambiguous"}})");
+        const auto* t = model.taskById("task-o");
+        check(t && t->outcome.present, "outcome recorded");
+        check(t && t->outcome.blockers.empty(), "no blockers recorded");
+        check(t && t->outcome.result == "answered from the logs", "outcome result");
+    }
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-o2","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        model.applyLine(R"({"type":"TaskOutcomeRecorded","taskId":"task-o2","outcome":{"result":"","evidence":"orphan evidence"}})");
+        const auto* t = model.taskById("task-o2");
+        check(t && !t->outcome.present, "an empty result does not count as a recorded outcome");
     }
 
     // ---------------------------------------------------------------------

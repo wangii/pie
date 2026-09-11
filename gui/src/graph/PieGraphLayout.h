@@ -43,6 +43,9 @@ struct PieGraphLayout {
     std::map<std::string, GraphRect> distillRegionRects;  // lower middle band, keyed by frame id
     std::map<std::string, GraphRect> executionRegionRects;// right column, keyed by frame id
     GraphRect beliefColumnRect;                   // global left column
+    // Task-level outcome band below the last LoopFrame. Zero width when the task recorded no
+    // outcome. Task scope, not frame content, so it is not cached per closed frame.
+    GraphRect taskOutcomeRect;
     float canvasWidth = 0.0f;
     float canvasHeight = 0.0f;
 };

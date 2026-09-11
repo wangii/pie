@@ -22,6 +22,7 @@ using pie::gui::projectGraphTask;
 using pie::gui::computeGraphLayout;
 using pie::gui::stabilizeLiveLayout;
 using pie::gui::beliefNodeTitle;
+using pie::gui::planNodeTitle;
 using pie::gui::edgeIsCreate;
 using pie::gui::GraphNode;
 using pie::gui::NodeId;
@@ -443,6 +444,120 @@ int main() {
         check(beliefNodeTitle(b) == "Belief B1 (superseded)", "code domain keeps Belief prefix (no Target/Route)");
         b.title = "";
         check(beliefNodeTitle(b) == "Belief B1 (superseded)", "empty title falls back to id");
+    }
+
+    // ---------------------------------------------------------------------
+    // planNodeTitle: the Plan node must carry the decision the plan informs.
+    // Plan nodes have no tooltip, so the label is the only place the intent can
+    // appear; an empty intent must degrade to exactly the pre-change label.
+    // ---------------------------------------------------------------------
+    {
+        GraphNode p;
+        p.id = NodeId{"P-1"};
+        p.title = "P-1";
+        p.family = NodeFamily::Plan;
+        check(planNodeTitle(p) == "Plan P-1", "no intent -> bare family label");
+        p.compactText = "whether to change the caller or the adapter";
+        check(planNodeTitle(p) == "Plan P-1 · whether to change the caller or the adapter",
+              "intent is appended to the family label");
+        p.compactText = "  whether  to\nchange\tthe adapter  ";
+        check(planNodeTitle(p) == "Plan P-1 · whether to change the adapter",
+              "whitespace and newlines collapse to single spaces");
+        p.compactText.clear();
+        p.compactText.assign(80, 'x');
+        const std::string truncated = planNodeTitle(p);
+        check(truncated.size() < 80, "a long intent is truncated");
+        check(truncated.rfind("…") != std::string::npos, "truncation is marked with an ellipsis");
+        p.title = "";
+        p.compactText.clear();
+        check(planNodeTitle(p) == "Plan P-1", "empty title falls back to the id");
+
+        // Non-Plan families are untouched by this builder.
+        GraphNode e;
+        e.id = NodeId{"E-1"};
+        e.family = NodeFamily::Execution;
+        e.title = "read requirements.txt";
+        check(e.title == "read requirements.txt", "execution label is unaffected");
+    }
+
+    // ---------------------------------------------------------------------
+    // Task scope and task outcome: projected from the SELECTED task, and the
+    // outcome band is placed below every LoopFrame without moving existing
+    // geometry.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"TaskOpened","taskId":"task-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        model.applyLine(R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-1","ordinal":1})");
+        delta(model, "frame-1", "delta-1", "propose", "belief-1");
+        delta(model, "frame-1", "delta-2", "propose", "belief-2");
+        // belief-1 is in scope, belief-2 is retained history the task is not acting on.
+        model.applyLine(R"({"type":"FocusDeclared","taskId":"task-1","beliefIds":["belief-1"]})");
+        model.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-1","plan":{"id":"plan-1","selectedToExplore":["belief-1"],"intent":"whether to change the caller or the adapter"}})");
+        model.applyLine(R"({"type":"CursorChanged","taskId":"task-1","frameId":"frame-1","stage":"executing"})");
+
+        GraphTaskState state = projectGraphTask(model);
+        check(state.focusDeclared, "projection reports the declared focus");
+        check(state.focusBeliefIds.size() == 1 && state.focusBeliefIds[0] == "belief-1",
+              "projection carries the focus ids verbatim");
+
+        const GraphNode* inFocus = nullptr;
+        const GraphNode* retained = nullptr;
+        const GraphNode* plan = nullptr;
+        for (const GraphNode& n : state.nodes) {
+            if (n.id.value == "belief-1") inFocus = &n;
+            if (n.id.value == "belief-2") retained = &n;
+            if (n.family == NodeFamily::Plan) plan = &n;
+        }
+        check(inFocus && inFocus->inFocus, "the focused belief is marked in focus");
+        check(retained && !retained->inFocus, "a belief outside the focus is retained history");
+        check(inFocus && !inFocus->frameId.has_value(), "focus does not make a belief frame-owned");
+        check(plan && planNodeTitle(*plan).find("whether to change the caller or the adapter") != std::string::npos,
+              "the projected Plan node surfaces its decision through planNodeTitle");
+
+        // No outcome yet: no band, and the canvas is exactly the pre-change geometry.
+        PieGraphLayout before = computeGraphLayout(state);
+        check(before.taskOutcomeRect.w == 0.0f, "no outcome -> no band");
+
+        model.applyLine(R"({"type":"TaskOutcomeRecorded","taskId":"task-1","outcome":{"result":"changed the adapter","evidence":"the propagation test passed","blockers":"the timeout path is untested"}})");
+        GraphTaskState withOutcome = projectGraphTask(model);
+        check(withOutcome.taskOutcome.present, "projection reports the recorded outcome");
+        check(withOutcome.taskOutcome.blockers == "the timeout path is untested", "projection carries blockers");
+
+        PieGraphLayout after = computeGraphLayout(withOutcome);
+        check(after.taskOutcomeRect.w > 0.0f && after.taskOutcomeRect.h > 0.0f, "outcome band has positive size");
+        check(after.canvasHeight > before.canvasHeight, "the band extends the canvas");
+        // The band sits below every frame and overlaps no node.
+        float lowestFrameBottom = 0.0f;
+        for (const auto& entry : after.frameRects) {
+            const float bottom = entry.second.y + entry.second.h;
+            if (bottom > lowestFrameBottom) lowestFrameBottom = bottom;
+        }
+        check(after.taskOutcomeRect.y >= lowestFrameBottom, "the band is placed below the last LoopFrame");
+        for (const auto& entry : after.nodeRects) {
+            const GraphRect& n = entry.second;
+            const bool overlaps = after.taskOutcomeRect.x < n.x + n.w && n.x < after.taskOutcomeRect.x + after.taskOutcomeRect.w &&
+                                  after.taskOutcomeRect.y < n.y + n.h && n.y < after.taskOutcomeRect.y + after.taskOutcomeRect.h;
+            check(!overlaps, "the band overlaps no node rect");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // A model with frames but no task projects without scope or outcome rather
+    // than failing (several fixtures open frames directly).
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        model.applyLine(R"({"type":"FrameOpened","taskId":"task-x","frameId":"frame-x","ordinal":1})");
+        delta(model, "frame-x", "delta-x", "propose", "belief-x");
+        GraphTaskState state = projectGraphTask(model);
+        check(!state.focusDeclared, "no task -> focus stays undeclared");
+        check(!state.taskOutcome.present, "no task -> no outcome");
+        bool anyInFocus = false;
+        for (const GraphNode& n : state.nodes) {
+            if (n.inFocus) anyInFocus = true;
+        }
+        check(!anyInFocus, "no task -> nothing is in focus");
     }
 
     if (failures == 0) std::printf("PASS\n");

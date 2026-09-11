@@ -63,6 +63,25 @@ struct GraphStyle {
     Rgb textBody{230, 235, 240};
     Rgb currentAccent{255, 200, 90};
 
+    // --- Task focus accent (left bar on Belief nodes in the selected task's focus) ---
+    // Distinct from currentAccent: the CURRENT marker is which node the runtime is executing,
+    // the focus bar is which beliefs the task is acting on. Kept separate from the dimMuted
+    // alpha path, which means "outside the dependency query".
+    float focusBarWidth = 4.0f;
+    Rgb focusAccent{110, 200, 220};
+
+    // --- Task outcome band (below the last LoopFrame) ---
+    // Height is derived, not fixed: the band carries a label plus three or four
+    // content lines, so a constant would clip the last line whenever blockers are
+    // present. GraphStyle is ImGui-free, so this is a per-line estimate rather than
+    // a measured text height.
+    float outcomeBandLineH = 24.0f;
+    float outcomeBandPad = 10.0f;
+    int outcomeBandAlpha = 40;
+    Rgb outcomeBandFill{48, 76, 86};
+    Rgb outcomeLabel{150, 200, 215};
+    Rgb outcomeBlockers{232, 150, 120};
+
     // --- Dim ratios (selection / dependency query) ---
     float dimMuted = 0.38f;       // node alpha when outside the dependency set
     float edgeAlphaPath = 0.9f;   // route on the selected dependency path

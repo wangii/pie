@@ -219,6 +219,10 @@ std::vector<std::string> arrayElements(const std::string& v) {
     size_t depth = 0;
     bool inStr = false;
     size_t start = 1;
+    // Index of the ']' that closes this array. Bounding the last element by it (rather than by
+    // the end of the raw value) keeps trailing structure out of the element: a raw value can be
+    // followed by the enclosing object's '}', and an empty array must yield no elements at all.
+    size_t end = v.size();
     for (size_t i = 1; i < v.size(); ++i) {
         char c = v[i];
         if (inStr) {
@@ -228,11 +232,11 @@ std::vector<std::string> arrayElements(const std::string& v) {
         }
         if (c == '"') inStr = true;
         else if (c == '[' || c == '{') ++depth;
-        else if (c == ']' || c == '}') { if (depth == 0) break; --depth; }
+        else if (c == ']' || c == '}') { if (depth == 0) { end = i; break; } --depth; }
         else if (c == ',' && depth == 0) { out.push_back(trim(v.substr(start, i - start))); start = i + 1; }
     }
-    if (start < v.size()) {
-        std::string last = trim(v.substr(start, v.size() - 1 - start));
+    if (start < end) {
+        std::string last = trim(v.substr(start, end - start));
         if (!last.empty()) out.push_back(last);
     }
     return out;
@@ -546,6 +550,16 @@ bool NativeGuiModel::isSelectedInCurrentFrame(const BeliefId& b) const {
     return false;
 }
 
+const TaskFocus* NativeGuiModel::selectedTaskFocus() const {
+    const Task* task = selectedTask();
+    return task ? &task->focus : nullptr;
+}
+
+bool NativeGuiModel::beliefInSelectedTaskFocus(const BeliefId& id) const {
+    const TaskFocus* focus = selectedTaskFocus();
+    return focus != nullptr && focus->has(id);
+}
+
 std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
     const Belief* b = belief(id);
     return b && !b->label.empty() ? b->label : id;
@@ -662,6 +676,29 @@ bool NativeGuiModel::applyDomainLine(const std::string& line) {
         if (task && rawValue(line, "target", targetRaw)) {
             task->targetStatement = str(targetRaw, "statement");
             if (task->prompt.empty()) task->prompt = task->targetStatement;
+        }
+        return true;
+    }
+    if (type == "FocusDeclared") {
+        auto* task = const_cast<Task*>(taskById(str(line, "taskId")));
+        if (task) {
+            // The event's presence IS the declaration, so an empty array means "declared and
+            // empty" (nothing in scope), not "undeclared".
+            task->focus.declared = true;
+            task->focus.beliefIds = strArrayField(line, "beliefIds");
+        }
+        return true;
+    }
+    if (type == "TaskOutcomeRecorded") {
+        auto* task = const_cast<Task*>(taskById(str(line, "taskId")));
+        std::string outcomeRaw;
+        if (task && rawValue(line, "outcome", outcomeRaw)) {
+            task->outcome.result = str(outcomeRaw, "result");
+            task->outcome.evidence = str(outcomeRaw, "evidence");
+            task->outcome.blockers = str(outcomeRaw, "blockers");
+            // Derive presence from a non-empty result so a malformed line cannot produce a band
+            // with nothing in it.
+            task->outcome.present = !task->outcome.result.empty();
         }
         return true;
     }

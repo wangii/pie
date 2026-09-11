@@ -290,6 +290,19 @@ PieGraphLayout computeGraphLayout(const GraphTaskState& state) {
         rowTop = contentTop + stackHeight(columnBeliefs.size());
     }
 
+    // The task-level outcome band sits below the last LoopFrame, spanning the belief column
+    // through the execution column. Computed after every row has been placed so no existing
+    // node/frame geometry depends on it; `rowTop` is then only read by the canvas sizing below,
+    // which counts the band in without extra arithmetic.
+    if (state.taskOutcome.present) {
+        const float bandW = executionX + st.nodeW + st.framePad - beliefX;
+        // Label + Delivered + Verified by, plus Blockers when one was recorded.
+        const float bandLines = state.taskOutcome.blockers.empty() ? 3.0f : 4.0f;
+        const float bandH = st.outcomeBandPad * 2.0f + bandLines * st.outcomeBandLineH;
+        out.taskOutcomeRect = GraphRect{beliefX, rowTop, bandW, bandH};
+        rowTop += bandH + st.rowGap;
+    }
+
     out.beliefColumnRect = paddedBounds(columnBeliefs, out.nodeRects, st.framePad * 0.5f);
     if (out.beliefColumnRect.w <= 0.0f) {
         out.beliefColumnRect = GraphRect{beliefX - st.framePad * 0.5f,

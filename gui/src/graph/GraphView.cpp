@@ -266,6 +266,37 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         //                      st.beliefRegionLabel.b, 230), label);
     }
 
+    // --- Task outcome band: what the task delivered, below the last LoopFrame. Task-level
+    // chrome, so it is not part of the dependency query (no `alpha`) and draws nothing when the
+    // task recorded no outcome — which is the truthful state for an in-flight task. ---
+    if (state.taskOutcome.present && layout.taskOutcomeRect.w > 0.0f) {
+        GraphRect r = layout.taskOutcomeRect;
+        ImVec2 p0 = toScreen(r.x, r.y);
+        ImVec2 p1 = toScreen(r.x + r.w, r.y + r.h);
+        dl->AddRectFilled(p0, p1,
+                          IM_COL32(st.outcomeBandFill.r, st.outcomeBandFill.g, st.outcomeBandFill.b,
+                                   st.outcomeBandAlpha),
+                          st.frameRadius);
+        drawDashedRect(dl, p0, p1,
+                       IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, st.frameBorderAlpha),
+                       st.frameBorderWidth * view.zoom, view.zoom);
+        const ImVec4 clip(p0.x, p0.y, p1.x, p1.y);
+        const float lineH = ImGui::GetTextLineHeight();
+        float ty = p0.y + st.outcomeBandPad;
+        const float tx = p0.x + st.outcomeBandPad;
+        auto bandLine = [&](const std::string& text, const GraphStyle::Rgb& color) {
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, ty),
+                        IM_COL32(color.r, color.g, color.b, 255), text.c_str(), nullptr, 0.0f, &clip);
+            ty += lineH;
+        };
+        bandLine("Task outcome", st.outcomeLabel);
+        bandLine("Delivered: " + state.taskOutcome.result, st.textBody);
+        bandLine("Verified by: " + state.taskOutcome.evidence, st.textBody);
+        if (!state.taskOutcome.blockers.empty()) {
+            bandLine("Blockers: " + state.taskOutcome.blockers, st.outcomeBlockers);
+        }
+    }
+
     // --- Edges: typed, directed, routed (m4). Belief read/write edges use
     // orthogonal cross-region routes; local edges keep a short curve. The m5
     // dependency set drives emphasis on selection.
@@ -350,7 +381,9 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
             // lives in the hover tooltip below.
             title = beliefNodeTitle(n);
         } else if (n.family == NodeFamily::Plan) {
-            title = "Plan";
+            // The model-authored decision the plan informs, not just the word "Plan": Plan nodes
+            // have no tooltip, so this is the only place their intent can appear.
+            title = planNodeTitle(n);
         } else if (n.family == NodeFamily::Execution) {
             // Simplified "<tool> <command>" label (no "exec:" prefix, no wrap).
             title = n.title.empty() ? n.id.value : n.title;
@@ -395,9 +428,21 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
                     ImVec2(labelX, cy - ts.y * 0.5f), textCol, title.c_str(),
                     nullptr, 0.0f, &labelClip);
 
-        // Current stage indicator (small accent bar) for the CURRENT node.
-        if (current) {
-            dl->AddRectFilled(p0, ImVec2(p0.x + st.currentBarWidth, p1.y), IM_COL32(st.currentAccent.r, st.currentAccent.g, st.currentAccent.b, 255));
+        // Left-edge accent bars: the CURRENT node marker, and the focus bar for a belief the
+        // selected task is acting on. Focus deliberately does not reuse the dim alpha path,
+        // which already means "outside the dependency query"; it fades with `alpha` so it obeys
+        // an active query like the ring and text do.
+        const NodeAccentBars bars =
+            nodeAccentBars(r, current, n.inFocus, st.currentBarWidth, st.focusBarWidth);
+        if (bars.current.w > 0.0f) {
+            dl->AddRectFilled(toScreen(bars.current.x, bars.current.y),
+                              toScreen(bars.current.x + bars.current.w, bars.current.y + bars.current.h),
+                              IM_COL32(st.currentAccent.r, st.currentAccent.g, st.currentAccent.b, 255));
+        }
+        if (bars.focus.w > 0.0f) {
+            dl->AddRectFilled(toScreen(bars.focus.x, bars.focus.y),
+                              toScreen(bars.focus.x + bars.focus.w, bars.focus.y + bars.focus.h),
+                              IM_COL32(st.focusAccent.r, st.focusAccent.g, st.focusAccent.b, (int)(255 * alpha)));
         }
 
         // Selection hit test (only read-only select; no drag).
@@ -444,8 +489,12 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state, const Pi
         const float lgPad = 8.0f, lgLineH = 20.0f, lgRowGap = 6.0f;
         const float lgW = 330.0f;
         const float lgH = lgPad * 2.0f + (int)(sizeof(labels) / sizeof(labels[0])) * (lgLineH + lgRowGap);
+        // Top-left, as this overlay has always documented itself. It was drawn at the
+        // bottom-left, where it covered the task outcome band: the band is canvas content that
+        // always ends up at the bottom of the task, so a bottom-anchored overlay always hides
+        // it. At the top the legend only ever covers whatever row happens to be scrolled there.
         ImVec2 lg0(origin.x + lgPad,
-                   origin.y + gridSize.y - lgH - lgPad);
+                   origin.y + lgPad);
         dl->AddRectFilled(lg0, ImVec2(lg0.x + lgW, lg0.y + lgH), IM_COL32(22, 24, 28, 220), st.frameRadius, 0);
         dl->AddRect(lg0, ImVec2(lg0.x + lgW, lg0.y + lgH), IM_COL32(st.frameBorder.r, st.frameBorder.g, st.frameBorder.b, 120), st.frameRadius, 0, 1.0f);
         float ly = lg0.y + lgPad;

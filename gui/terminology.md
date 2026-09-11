@@ -61,6 +61,8 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 | **DistillationOutput**（蒸馏输出） | distillation 阶段输出：label（`D-<n>`）、输入 ID、unexplained 与 interpretation。 | `src/Model.h` |
 | **ToolCall**（工具调用） | 一次执行工具调用：id（`E-<n>`）、tool、command、result、warning、status、expanded。 | `src/Model.h` |
 | **Proposal**（提案） | 一条提议的信念变更；`op` 语义：`+` 创建、`~` 修改、`-` 移除/失效、`?` 未决。 | `src/Model.h` |
+| **TaskFocus**（任务关注范围） | 任务声明"当前在用的 belief id 切片"。是**范围**而非真值：进出切片不改变 belief 的 status。`declared == false` 表示本任务尚未声明（与"声明为空"不同）。仅由 `FocusDeclared` 事件设置，GUI 不推断。注意与 **Focus Current**（视口平移）是不同的概念，代码中一律写作 `taskFocus`/`inFocus`。 | `src/Model.h` `TaskFocus` |
+| **TaskOutcome**（任务结果） | 任务实际交付了什么、由什么证据验证、剩余阻塞。是任务结果而非世界信念：认识充分性与任务完成是两件事。仅由 `TaskOutcomeRecorded` 事件设置。 | `src/Model.h` `TaskOutcome` |
 | **RpcApplyResult**（RPC 应用结果） | 应用一行事件的结果：`Applied/Ignored/Error`。 | `src/Model.h` |
 | **LoopFrame::History**（帧历史标记） | 记录帧的历史状态枚举：`Closed/Unresolved/Falsified/NewBelief/Revised/Current`。 | `src/Model.h`（`LoopFrame::History`） |
 
@@ -72,6 +74,8 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 |------|------|------|
 | **FrameOpened** | 打开一个新循环帧。 | `src/Model.cpp` |
 | **BeliefsSelected**（复数） | 选择该帧要处理的信念。 | `src/Model.cpp` |
+| **FocusDeclared** | 声明任务的关注范围（task 级，替换式）。事件存在即"已声明"，`beliefIds: []` 表示"已声明但为空"。仅在首次声明与范围变化时发出。 | `src/Model.cpp` |
+| **TaskOutcomeRecorded** | 记录任务交付结果（task 级）。仅在记录发生**变化**时发出，避免反思用的第二次 `conclude` 重复发送。 | `src/Model.cpp` |
 | **PlanProduced** | 生成规划输出。 | `src/Model.cpp` |
 | **ExecutionStarted** | 开始执行。 | `src/Model.cpp` |
 | **ToolCalled** | 发起一次工具调用。 | `src/Model.cpp` |

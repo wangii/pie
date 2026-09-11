@@ -104,6 +104,10 @@ struct GraphNode {
     uint64_t creationOrder = 0;      // stable, creation-order key (Belief grid)
     std::optional<uint64_t> executionOrder;  // runtime execution order (Execution)
     std::optional<BeliefOperation> beliefOperation;  // Distill->Belief / Propose->Belief create/update (drives dashed styling)
+    // Belief only: this belief id is in the selected task's declared focus. Scope, not truth —
+    // an out-of-focus belief is retained history the task has said it is not acting on, and it
+    // keeps whatever status the runtime gave it. False when no task has declared a focus.
+    bool inFocus = false;
 };
 
 // Build a Belief node's display title: "<Category> <number>" plus a parenthesized
@@ -114,6 +118,13 @@ struct GraphNode {
 // view layer calls it and never builds a Belief label inline. Non-Belief node
 // labels are built by the view layer and are unaffected.
 std::string beliefNodeTitle(const GraphNode& n);
+
+// Build a Plan node's display label. The node stays recognizably a Plan ("Plan <number>"), and
+// the model-authored decision the plan informs — the projection's `compactText`, set from the
+// runtime's `plan.intent` — is appended because it is the plan's most valuable content and Plan
+// nodes deliberately have no tooltip. Headless/ImGui-free so a unit test can assert it; the view
+// layer calls it and never builds a Plan label inline. Non-Plan nodes are unaffected.
+std::string planNodeTitle(const GraphNode& n);
 
 // True for a write-back edge that creates a new belief. Create is a sub-state
 // of the write-back semantic (Distill->Belief / Propose->Belief): it renders
@@ -142,12 +153,26 @@ struct LoopFrameInfo {
     std::string routingReason;
 };
 
+// The task's delivered result, rendered by the view as a band below the last LoopFrame. Task
+// level, not frame content: it belongs to no LoopFrame, so it carries no frameId.
+struct GraphTaskOutcome {
+    bool present = false;
+    std::string result;
+    std::string evidence;
+    std::string blockers;
+};
+
 // The read-only semantic task state the graph renders.
 struct GraphTaskState {
     std::vector<GraphNode> nodes;
     std::vector<GraphEdge> edges;
     std::vector<LoopFrameInfo> frames;
     std::optional<NodeId> currentNode;  // the single CURRENT node
+    // The selected task's scope and delivery. Repeated here so the renderer never reaches back
+    // into the runtime model; `focusDeclared` separates "declared, empty" from "undeclared".
+    bool focusDeclared = false;
+    std::vector<std::string> focusBeliefIds;  // verbatim, for the renderer / legend
+    GraphTaskOutcome taskOutcome;
 };
 
 // Project the runtime model into a GraphTaskState (Phase 2 M1). Beliefs are
