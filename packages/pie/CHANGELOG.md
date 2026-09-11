@@ -5,6 +5,7 @@
 ### Added
 
 - Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
+- Added per-model `reserveTokens` and `keepRecentTokens` settings through `compaction.modelOverrides`, with ordinary compaction settings as fallback ([#8133](https://github.com/earendil-works/pi-mono/issues/8133)).
 
 ### Changed
 
