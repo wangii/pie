@@ -63,6 +63,7 @@ export {
 	type Task,
 	type TaskFrame,
 	type TaskId,
+	type TaskOutcome,
 } from "./core/agent-session-domain.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
 // Compaction

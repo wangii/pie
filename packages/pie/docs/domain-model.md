@@ -85,6 +85,19 @@ struct Task {
   std::vector<BeliefId> inheritedBeliefs;
   std::vector<BeliefId> introducedBeliefs;
   std::vector<TaskFrame> frames;
+
+  // Task scope: the beliefs this task is acting on. Never inherited; a new Task
+  // starts undeclared.
+  std::vector<BeliefId> focus;
+  bool focusDeclared;
+  // What the task delivered, and how it was verified. Absent until recorded.
+  std::optional<TaskOutcome> taskOutcome;
+};
+
+struct TaskOutcome {
+  std::string result;
+  std::string evidence;
+  std::optional<std::string> blockers;
 };
 
 struct InitialPrompt {
@@ -179,7 +192,11 @@ would have made inheritance accumulate confirmations and drop counter-evidence.
 The task's scope is therefore declared explicitly, by the control-only
 `focus_beliefs` tool, into a `FocusSet` that is cleared at the boundary and never
 inherited. The slice is runtime control state: membership never changes a
-Belief's status, and it is not persisted as a Belief or as a domain event.
+Belief's status, and it is never a Belief. It is published as the task-scoped
+`FocusDeclared` event and folded onto the Task record, so a viewer can render the
+task's scope without inferring it. The event's presence is the declaration, so
+`beliefIds: []` means "declared, nothing in scope" — distinct from a Task that
+has not declared a focus.
 
 `activeBeliefs` remains a separate, derived record — the ids of every open
 (proposed, inconclusive, or supported) Belief at the moment a delta is applied,
@@ -339,6 +356,8 @@ event vocabulary:
 TaskOpened
 TaskClosed
 TargetDefined
+FocusDeclared          (task scope: the belief ids the task acts on)
+TaskOutcomeRecorded    (what the task delivered, and how it was verified)
 
 FrameOpened
 RoutingDecided
@@ -367,6 +386,13 @@ Required correlation fields:
   of deltas whose `producerPhase` is `Distill`;
 - `BeliefDeltaApplied` carries the producer phase, source/result Belief ids, and
   resulting immutable record/provenance;
+- `FocusDeclared` carries the task-scoped belief-id slice verbatim, replacing any
+  earlier declaration. It is emitted on the first declaration and on a change,
+  not on a restatement, since a restatement does not change the folded Task;
+- `TaskOutcomeRecorded` carries the task-scoped `result`/`evidence`/`blockers`.
+  It is emitted only for a delivery a model recorded through `conclude` /
+  `report_outcome`; the fast path's synthesized failure outcome is runtime
+  bookkeeping and deliberately stays out of the event stream;
 - `FrameOpened`/`FrameClosed` are emitted by the runtime. `PROPOSING`, a second
   plan, or a second distillation is never used by the GUI as a frame delimiter.
 

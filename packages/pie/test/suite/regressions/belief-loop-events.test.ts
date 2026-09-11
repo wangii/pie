@@ -80,6 +80,89 @@ describe("belief-loop event family", () => {
 		expect(distillations[0].distillation.outputs).not.toContain(
 			firstFrameDeltas.find((event) => event.delta.producerPhase === "propose")?.delta.id,
 		);
+
+		// Task scope and task delivery are task-level, so both events carry taskId and land inside
+		// the task's lifetime: the focus declaration precedes the plan it scopes, and the outcome
+		// precedes the close.
+		const focus = harness.eventsOfType("FocusDeclared");
+		expect(focus).toHaveLength(1);
+		expect(focus[0].taskId).toBe(taskOpened[0].taskId);
+		expect(focus[0].beliefIds).toEqual(["belief-1", "belief-2"]);
+		expect(harness.events.indexOf(focus[0])).toBeLessThan(
+			harness.events.indexOf(plans.find((event) => event.plan.selectedToExplore.length > 0)!),
+		);
+
+		const outcomes = harness.eventsOfType("TaskOutcomeRecorded");
+		expect(outcomes).toHaveLength(1);
+		expect(outcomes[0].taskId).toBe(taskOpened[0].taskId);
+		expect(outcomes[0].outcome.result).toBe("delivered");
+		expect(outcomes[0].outcome.evidence).toBe("observed");
+		expect(harness.events.indexOf(outcomes[0])).toBeLessThan(
+			harness.events.indexOf(harness.eventsOfType("TaskClosed")[0]),
+		);
+	});
+
+	it("declares focus once per distinct scope and not on a restatement", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the cache survives logout",
+					domain: "product",
+					expectation: "a post-logout read keeps the value",
+					evidenceRounds: 1,
+				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+			]),
+			// Same scope restated: no second event, since the fold's output does not change.
+			fauxAssistantMessage([
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("select_experiment", { intent: "what the answer must report", beliefIds: ["belief-1"] }),
+			]),
+			fauxAssistantMessage("Observed:\n- logout kept the value."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "logout kept the value as predicted",
+				}),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("the cache survives logout"),
+		]);
+
+		await harness.session.prompt("is the cache persistent?");
+
+		expect(harness.eventsOfType("FocusDeclared")).toHaveLength(1);
+	});
+
+	it("records no task outcome when the fast path reports none", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("route_task", {
+					decision: "fast-path",
+					reason: "epistemically closed",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 2,
+					difficulty: "low",
+				}),
+			]),
+			// The fast path completes with tools but never submits a delivery record. The runtime
+			// synthesizes a failure outcome for continuity, and that synthesized value must stay out
+			// of the domain stream: it is runtime bookkeeping, not something the model delivered.
+			fauxAssistantMessage([fauxToolCall("read", { file_path: "README.md" })]),
+			fauxAssistantMessage("Done."),
+		]);
+
+		await harness.session.prompt("summarize the readme");
+
+		expect(harness.eventsOfType("TaskOutcomeRecorded")).toHaveLength(0);
 	});
 
 	it("records both immutable belief records changed by evidence-supported refine", async () => {

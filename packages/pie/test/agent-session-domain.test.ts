@@ -178,6 +178,127 @@ describe("agent session domain replay", () => {
 		expect(statusOfDomainBelief(snapshot.beliefs.get("belief-1")!)).toBe("proposed");
 	});
 
+	it("folds task focus and task outcome onto the task record", () => {
+		const prefix = beliefLoopEvents().slice(0, 3);
+		const events: AgentSessionDomainEvent[] = [
+			...prefix,
+			{
+				...base,
+				type: "FocusDeclared",
+				eventId: "event-focus-1",
+				taskId: "task-1",
+				beliefIds: ["belief-1", "belief-2"],
+			},
+			{
+				...base,
+				type: "TaskOutcomeRecorded",
+				eventId: "event-outcome-1",
+				taskId: "task-1",
+				outcome: { result: "changed the adapter", evidence: "the propagation test passed" },
+			},
+		];
+		const snapshot = replayAgentSessionDomainEvents("session-1", events);
+		const task = snapshot.tasks.get("task-1");
+
+		expect(task?.focusDeclared).toBe(true);
+		expect(task?.focus).toEqual(["belief-1", "belief-2"]);
+		expect(task?.taskOutcome?.result).toBe("changed the adapter");
+		expect(task?.taskOutcome?.evidence).toBe("the propagation test passed");
+		expect(task?.taskOutcome?.blockers).toBeUndefined();
+	});
+
+	it("starts a task with an undeclared focus and distinct from a declared-empty one", () => {
+		const prefix = beliefLoopEvents().slice(0, 3);
+		const undeclared = replayAgentSessionDomainEvents("session-1", prefix).tasks.get("task-1");
+		expect(undeclared?.focusDeclared).toBe(false);
+		expect(undeclared?.focus).toEqual([]);
+
+		const declared = replayAgentSessionDomainEvents("session-1", [
+			...prefix,
+			{ ...base, type: "FocusDeclared", eventId: "event-focus-1", taskId: "task-1", beliefIds: [] },
+		]).tasks.get("task-1");
+		expect(declared?.focusDeclared).toBe(true);
+		expect(declared?.focus).toEqual([]);
+	});
+
+	it("replaces the focus on re-declaration and keeps the last outcome", () => {
+		const prefix = beliefLoopEvents().slice(0, 3);
+		const snapshot = replayAgentSessionDomainEvents("session-1", [
+			...prefix,
+			{ ...base, type: "FocusDeclared", eventId: "event-focus-1", taskId: "task-1", beliefIds: ["belief-1"] },
+			{ ...base, type: "FocusDeclared", eventId: "event-focus-2", taskId: "task-1", beliefIds: ["belief-2"] },
+			{
+				...base,
+				type: "TaskOutcomeRecorded",
+				eventId: "event-outcome-1",
+				taskId: "task-1",
+				outcome: { result: "first attempt", evidence: "one test passed", blockers: "the second is untested" },
+			},
+			{
+				...base,
+				type: "TaskOutcomeRecorded",
+				eventId: "event-outcome-2",
+				taskId: "task-1",
+				outcome: { result: "both call sites changed", evidence: "both tests passed" },
+			},
+		]);
+		const task = snapshot.tasks.get("task-1");
+
+		expect(task?.focus).toEqual(["belief-2"]);
+		expect(task?.taskOutcome?.result).toBe("both call sites changed");
+		expect(task?.taskOutcome?.blockers).toBeUndefined();
+	});
+
+	it("accepts a focus id with no belief record yet", () => {
+		// `onBeliefDelta` returns early when no frame is open, so a declared belief can exist in the
+		// BeliefSet before any BeliefDeltaApplied reaches the snapshot. Rejecting such an id would
+		// abort a live turn, so the fold must not require the belief to be present.
+		const prefix = beliefLoopEvents().slice(0, 3);
+		const snapshot = replayAgentSessionDomainEvents("session-1", [
+			...prefix,
+			{ ...base, type: "FocusDeclared", eventId: "event-focus-1", taskId: "task-1", beliefIds: ["belief-99"] },
+		]);
+		expect(snapshot.tasks.get("task-1")?.focus).toEqual(["belief-99"]);
+	});
+
+	it("rejects focus and outcome on an unknown or closed task, and an empty delivery", () => {
+		const prefix = beliefLoopEvents().slice(0, 3);
+		const closed = beliefLoopEvents();
+		const expectRejected = (event: AgentSessionDomainEvent, events: AgentSessionDomainEvent[] = prefix) => {
+			expect(() => replayAgentSessionDomainEvents("session-1", [...events, event])).toThrow(DomainReplayError);
+		};
+
+		expectRejected({ ...base, type: "FocusDeclared", eventId: "e", taskId: "task-404", beliefIds: [] });
+		expectRejected({
+			...base,
+			type: "TaskOutcomeRecorded",
+			eventId: "e",
+			taskId: "task-404",
+			outcome: { result: "r", evidence: "e" },
+		});
+		expectRejected({ ...base, type: "FocusDeclared", eventId: "e", taskId: "task-1", beliefIds: [] }, closed);
+		expectRejected(
+			{
+				...base,
+				type: "TaskOutcomeRecorded",
+				eventId: "e",
+				taskId: "task-1",
+				outcome: { result: "  ", evidence: "observed" },
+			},
+			prefix,
+		);
+		expectRejected(
+			{
+				...base,
+				type: "TaskOutcomeRecorded",
+				eventId: "e",
+				taskId: "task-1",
+				outcome: { result: "delivered", evidence: "" },
+			},
+			prefix,
+		);
+	});
+
 	it("persists domain events as non-context custom entries and replays the active branch", () => {
 		const session = SessionManager.inMemory(process.cwd(), { id: "session-1" });
 		for (const event of beliefLoopEvents()) appendAgentSessionDomainEvent(session, event);

@@ -52,6 +52,7 @@ export {
 	type Task,
 	type TaskFrame,
 	type TaskId,
+	type TaskOutcome,
 } from "./agent-session-domain.ts";
 export {
 	AgentSessionRuntime,

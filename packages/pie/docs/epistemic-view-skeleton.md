@@ -90,3 +90,7 @@ Focus sits beside this flow rather than in it: `focus_beliefs` decides what the 
 and `select_experiment` picks the subset to probe. Neither is an arrow into the belief set, so
 neither can settle a belief, and an unresolved belief outside the focus neither dispatches nor
 blocks conclusion.
+
+Both are published explicitly — `FocusDeclared` and `TaskOutcomeRecorded` are task-scoped domain
+events folded onto the Task — so a viewer renders the scope and the delivered result directly
+instead of inferring them from which beliefs happened to be dispatched.

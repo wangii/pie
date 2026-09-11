@@ -61,6 +61,19 @@ export interface Target {
 	readonly statement: string;
 }
 
+/**
+ * What the task actually delivered, the evidence that it was delivered, and any remaining
+ * blocker. A task outcome, not a world belief: epistemic sufficiency ("the beliefs are settled")
+ * and task completion ("the user's request was delivered and verified") are separate judgments,
+ * so this lives on the Task rather than in the Belief registry. Kept field-for-field identical to
+ * the runtime's `TaskOutcome` so one record has one spelling everywhere.
+ */
+export interface TaskOutcome {
+	readonly result: string;
+	readonly evidence: string;
+	readonly blockers?: string;
+}
+
 export interface SupportEvidence {
 	readonly evidence: string;
 }
@@ -194,6 +207,14 @@ export interface Task {
 	readonly inheritedBeliefs: readonly BeliefId[];
 	readonly introducedBeliefs: readonly BeliefId[];
 	readonly frames: readonly TaskFrame[];
+	/**
+	 * The belief ids this task declared it is acting on. Scope, not truth: membership never
+	 * changes a belief's status, and the slice is never inherited from the parent task.
+	 * `focusDeclared` separates "declared, and the slice is empty" from "not declared yet".
+	 */
+	readonly focus: readonly BeliefId[];
+	readonly focusDeclared: boolean;
+	readonly taskOutcome?: TaskOutcome;
 }
 
 export interface AgentSessionCursor {
@@ -236,6 +257,11 @@ export type AgentSessionDomainEvent =
 	  })
 	| (TaskEventBase & { type: "TaskClosed"; status: Exclude<TaskStatus, "active"> })
 	| (TaskEventBase & { type: "TargetDefined"; target: Target })
+	// Task scope, not frame content: the focus slice the task acts on, and the outcome it
+	// delivered. The event's presence IS the declaration — `beliefIds: []` is "declared and
+	// empty", distinct from a task that never declared a focus.
+	| (TaskEventBase & { type: "FocusDeclared"; beliefIds: readonly BeliefId[] })
+	| (TaskEventBase & { type: "TaskOutcomeRecorded"; outcome: TaskOutcome })
 	| (TaskEventBase & { type: "FrameOpened"; frameId: FrameId; ordinal: number })
 	| (FrameEventBase & { type: "RoutingDecided"; routing: Routing })
 	| (FrameEventBase & {
@@ -356,6 +382,10 @@ export function applyAgentSessionDomainEvent(
 				inheritedBeliefs: [...event.inheritedBeliefs],
 				introducedBeliefs: [],
 				frames: [],
+				// A new task inherits beliefs, never scope: the parent's focus says nothing about
+				// what this task is acting on, so it starts undeclared.
+				focus: [],
+				focusDeclared: false,
 			};
 			const tasks = new Map(snapshot.tasks);
 			tasks.set(task.id, task);
@@ -378,6 +408,27 @@ export function applyAgentSessionDomainEvent(
 			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
 			if (task.initialTarget) fail(event, `task ${task.id} target is immutable`);
 			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, initialTarget: event.target }) };
+		}
+		case "FocusDeclared": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			// Re-declaration replaces, matching FocusSet's replace semantics: a task may restate or
+			// narrow its scope, and the last declaration wins. No belief-existence check: a focus id
+			// can name a belief that has no BeliefDeltaApplied yet (see `onBeliefDelta`'s
+			// no-current-frame early return), which is a legitimate in-flight state.
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, { ...task, focus: [...event.beliefIds], focusDeclared: true }),
+			};
+		}
+		case "TaskOutcomeRecorded": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			if (!event.outcome.result.trim()) fail(event, "task outcome has no result");
+			if (!event.outcome.evidence.trim()) fail(event, "task outcome has no evidence");
+			// Last-wins: the loop can refuse a `conclude` after the tool recorded its outcome, and
+			// the model may conclude again with a corrected delivery record.
+			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, taskOutcome: event.outcome }) };
 		}
 		case "FrameOpened": {
 			const task = requireTask(snapshot, event);
@@ -552,6 +603,11 @@ export function applyAgentSessionDomainEvent(
 			const body = { ...frame.body, distillation: event.distillation };
 			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };
 		}
+		default:
+			// An unrecognized type means a log written by a newer runtime is being replayed by an
+			// older build. Fail loudly: falling through would return an undefined snapshot and crash
+			// much later with no trace of the cause.
+			return fail(event, `unknown domain event type`);
 	}
 }
 

@@ -99,6 +99,11 @@ therefore opens with a control-metadata header — `[FOCUS]` for the current sli
 `[SELECTED EXPERIMENT]` when one is pending — so the model reads its scope before its history
 instead of reconstructing the slice from the transcript. Neither line is a belief.
 
+The slice is published as the task-scoped `FocusDeclared` domain event and folded onto the Task
+record, so a viewer (the native GUI's graph view) renders scope without inferring it. The event is
+emitted on the first declaration and on any change, not on a restatement: the fold would not
+change, and a model may restate its scope every turn.
+
 ## Propose objective
 
 Propose selects the coherent experiment with the highest expected task-relevant information gain
@@ -198,8 +203,12 @@ exist and be verified, so the two judgments are recorded separately:
 
 A `conclude` call that is refused — blank `result`/`evidence` — records no outcome and must not
 advance the handoff; the loop steers back for the missing delivery record. The outcome is persisted
-as a `task_outcome` session entry and included in `<final_report_context>`, so it survives the final
-turn and branch replay.
+as a `task_outcome` session entry, published as the task-scoped `TaskOutcomeRecorded` domain event,
+and included in `<final_report_context>`, so it survives the final turn and branch replay. The
+event is emitted when the record changes, so the loop's second `conclude` (the one that actually
+finishes, after the adversarial reflection) does not repeat it. The custom message keeps its own
+`delivered`/`verifiedBy`/`blockers` key names; the domain event uses the type's `result`/`evidence`
+/`blockers`.
 
 There is no coverage, ontology, conjunction, or recursive completeness protocol. Inconclusive
 beliefs are included in `<final_report_context>` so finalReport can preserve uncertainty rather
@@ -231,6 +240,13 @@ The fast path has no belief loop, so it cannot `conclude`: it submits the same t
 Without an explicit submission the run is a failure that hands back to the belief loop, and a
 submitted outcome that still carries a blocker is likewise a failure — a partially delivered change
 is not a completed one.
+
+A submitted outcome is published as `TaskOutcomeRecorded` like any other. The synthesized failure
+outcome the runtime records for continuity is not: it is derived from the tool log and the absence
+of a submission rather than delivered by the model, and publishing it would put a sentence the
+model never wrote into the channel a viewer renders as the task's delivered result. A viewer
+therefore shows "no outcome recorded", which is the truthful state, and the failure handoff back
+into the belief loop supplies the real one.
 
 At task boundaries the focus slice is reset and must be re-declared; belief records are *not*
 pruned. Supported, refuted, inconclusive, superseded, and leftover proposed records all survive as

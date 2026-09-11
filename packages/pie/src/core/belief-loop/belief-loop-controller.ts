@@ -75,6 +75,12 @@ function sameBeliefIds(a: readonly string[], b: readonly string[]): boolean {
 	return true;
 }
 
+/** Whether two recorded task outcomes describe the same delivery. Used to keep a restated
+ *  conclusion from re-emitting an event that would not change the folded task record. */
+function sameTaskOutcome(a: TaskOutcome, b: TaskOutcome): boolean {
+	return a.result === b.result && a.evidence === b.evidence && (a.blockers ?? "") === (b.blockers ?? "");
+}
+
 export function selectRoleThinkingLevel(
 	role: LoopState["role"],
 	loopState: LoopState,
@@ -292,15 +298,47 @@ export class BeliefLoopController {
 	 *  before restating the same focus must not lose the selection. */
 	setFocus(beliefIds: readonly string[]): void {
 		const changed = !sameBeliefIds(this.focusSet.beliefIds, beliefIds);
+		const declaredBefore = this.focusSet.declared;
 		this.focusSet.select(beliefIds);
 		if (changed) {
 			this.pendingExperiment = undefined;
 		}
+		// Emit when the fold's output would change: the first declaration, and any later change.
+		// Restating the same scope is a no-op the model may repeat each turn, and a session entry
+		// per restatement would be pure noise.
+		if (!declaredBefore || changed) {
+			this.emitFocusDeclared(beliefIds);
+		}
+	}
+
+	private emitFocusDeclared(beliefIds: readonly string[]): void {
+		if (!this.currentTaskId) return;
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "FocusDeclared",
+			taskId: this.currentTaskId,
+			beliefIds: [...beliefIds],
+		});
 	}
 
 	/** Record what the task delivered and how it was verified (distinct from belief settlement). */
 	recordOutcome(outcome: TaskOutcome): void {
+		const previous = this.taskOutcome;
 		this.taskOutcome = outcome;
+		if (!this.currentTaskId) return;
+		// Emit only when the record changes. The loop calls `conclude` twice for a normal
+		// conclusion (once for the adversarial reflection, once to finish), and a restated
+		// identical record is not a new delivery.
+		if (previous && sameTaskOutcome(previous, outcome)) return;
+		// Emitted at tool time, so a `conclude` the propose/distill transition then refuses has
+		// already produced an event. That is deliberate: the fold is last-wins, so a corrected
+		// conclusion supersedes it, and a viewer shows the latest delivered result either way.
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "TaskOutcomeRecorded",
+			taskId: this.currentTaskId,
+			outcome: { result: outcome.result, evidence: outcome.evidence, blockers: outcome.blockers },
+		});
 	}
 
 	/** Unresolved beliefs within the task focus slice. The focus is authoritative and defaults
