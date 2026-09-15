@@ -134,9 +134,11 @@ Its boundary must also not split an exchange, whoever appends it: the same rule 
 Older heads are controls, not retained context entries: the newest head replaces them and carries
 any predecessor summary information it still needs.
 
-Stored `edits` omit or replace the model projection of earlier visible entries. They may not target
-a `system` entry: an edit that omits the epoch baseline would make the prompt vanish while the next
-generation's `sent` fold still reads it as delivered (§8.2), so the commit rejects. Edits are folded in
+Stored `edits` omit or replace the model projection of earlier visible entries. Arbitrary edits may
+not target managed `system` entries: they could make model instructions disagree with canonical
+prepared section state (§8.2), so the commit rejects. The sole exception is generation preparation
+appending a complete fresh baseline with omission edits for superseded managed baselines/deltas.
+Those controls and their replacement instructions commit together (§8.2). Edits are folded in
 transcript order; the newest applicable edit for a target wins. The target entry is never changed,
 and an edit whose target is outside the selected range is a no-op. Retained edit entries apply again
 on later turns. Tool-result pruning and shortening are edits. Dynamic policies such as "always keep
@@ -145,26 +147,39 @@ change. There is no `compose` callback or read-time entry-kind behavior.
 
 The built-ins are `user`, `assistant`, `tool_result`, `system`, `notice`, `summary`, `handoff` and
 `reset`. Their writers materialize model messages when they append. `reset` stores no model;
-`handoff` stores its message and starts a context; `system` stores the exact pi-ai `SystemMessage`
-at its transcript position, so the prompt in force at any entry is on record and a provider's
-cached prefix is never rewritten:
+`handoff` stores its message and starts a context; managed `system` entries store the exact pi-ai
+`SystemMessage` prepared at their transcript position. They record canonical prepared instructions,
+not proof that a provider received them. Pi-ai owns provider translation and best-effort cache
+preservation; immutable entries alone do not guarantee an unchanged wire prefix:
 
 ```ts
+type SectionChange =
+  | { readonly key: string; readonly action: "set"; readonly value: JsonValue; readonly rendered: string }
+  | { readonly key: string; readonly action: "remove" };
+
 interface SystemData {
-  readonly baseline?: true;              // opens an epoch (§8.2)
-  readonly sections?: readonly { key: string; text: string }[];   // in render order; baseline: all; delta: the changed ones
-  readonly toolsAdded?: readonly Tool[]; // complete definitions as sent, never names resolved later
-  readonly toolsRemoved?: readonly Tool[];
+  readonly baseline?: true;              // complete prepared section state (§8.2)
+  readonly sections?: readonly SectionChange[];
 }
 
-type SystemEntry = EntryBase & EntryData<SystemData> & ModelProjection<SystemMessage>;
+type SystemEntry = EntryBase & EntryData<SystemData> & ModelProjection<SystemMessage>
+  & Partial<ContextEdits>;               // fresh baseline may omit superseded managed entries
 ```
 
-Definitions and sections are stored in `data` for the next generation's structured comparison and
-in the materialized message in `model`. A changed description, schema or section order is therefore
-a delta like any other. Plugin-defined entries omit `model` when the model should not see them.
-The kind types reads and writes; stored objects are trusted after wire validation (§7.3), and a kind
-that changes its data shape ships a migration.
+A baseline stores the complete ordered section state as set records. A delta stores changed sets
+and explicit removals. Payloads are JSON; null is a valid payload, not deletion. `rendered` is the
+final section text, so a missing renderer never prevents replay or construction of a fresh baseline.
+Diff by key, payload and rendered text; reordering alone emits nothing. A payload-only change still
+persists a section-state delta but needs no instruction message (`model: []`). Rendered changes and
+removals produce materialized system messages. Never parse prose to reconstruct section state.
+
+Complete tool definitions are stored only in the SystemMessage `toolsAdded`/`toolsRemoved` fields,
+not duplicated in `data`. Added definitions are upserts by name, including same-name schema changes;
+removals contain the previous complete definitions. Apply removals before additions. Section and tool
+names are unique within their respective change lists; structural comparison ignores incidental JSON
+object-key order. Plugin-defined entries omit `model` when the model should not see them. The kind
+types reads and writes; stored objects are trusted after wire validation (§7.3), and a kind that changes
+its data shape ships a migration.
 
 ```ts
 type ToolResultEntry = EntryBase & EntryData<ToolResultData> & ModelProjection<ToolResultMessage>;
@@ -214,6 +229,11 @@ On a cold handle, cost is the fork-aware candidate range plus edit folding and f
 necessarily the final projected-message count. Memory and JSONL answer from their in-memory indexes;
 SQLite performs indexed head/range reads. Warm handles process only appended entries. The cache is a
 convenience owned by the handle and may be garbage-collected with it; the transcript is the truth.
+Generation preparation persists `state.requestThrough` and captures its effective context snapshot
+on the line after the complete batch is durable (§8.2). The snapshot copies the selected reference
+array, not immutable entry bodies. Later cache updates never mutate that array or its effective
+replacement projections; request-local normalization/hooks copy what they change. Historical cutoff
+reconstruction does not rewind the live cache, and request-only references are released after use.
 
 ### 2.3 Compaction and reset
 
@@ -227,8 +247,10 @@ context     [50 summary, 30 user, 40 asst]
 ```
 
 The summary is newer than 30 and 40 but projects before them. The summarized prefix must end on a
-complete exchange, lie inside the current context, include the previous head's information, and not
-separate a `system` entry from the exchange it governs. A summary prepared against an old context
+complete exchange, lie inside the current context and include the previous head's information.
+Managed system entries retained across a head are explicitly superseded by the next prepared baseline
+(§8.2); this does not split the retained tool exchange or add hidden filtering to generic projection.
+A summary prepared against an old context
 may still land later: ordinary entries appended while it runs are at or after its prepared retained
 boundary and remain in the range. Only a competing head invalidates it; intervening context edits
 do not (§8.4).
@@ -309,7 +331,7 @@ history through X:
 await runtime.commit(tx => {
   tx.value(planMode).set(true);                             // 300
   const result = tx.entry(toolResultKind, { data: resultData, model: [message] }); // 301
-  tx.settle(task, { status: "done", call: task.state.call, assistant: task.state.assistant, output, result });   // 302
+  tx.settle(task, "done", { call: task.state.call, assistant: task.state.assistant, output, result });   // 302
 }, call);
 
 await conv.value(model).set("claude-opus-5", call);               // 303, a later commit
@@ -471,7 +493,7 @@ const partial = await runtime.scratch(sc => sc.list(frames).read(), call);
 // settlement: the result becomes an entry; settle retires the scope in the same commit
 await runtime.commit(tx => {
   const id = tx.entry(assistantKind, { model: [assemble(partial)] });
-  tx.settle(task, { status: "done", call: task.state.call, assistant: task.state.assistant, output, result: id });
+  tx.settle(task, "done", { inputs: task.state.inputs, assistant: id });
 }, call);
 ```
 
@@ -503,13 +525,13 @@ supplies the inputs, progress and outcome that must survive a process.
 ```ts
 type TaskRole = "start" | "inflight" | "terminal";
 
-interface TaskStateBase { readonly status: string }
+type TaskStateBase = JsonObject & { readonly status: string };   // state is strict JSON with a status
+type TaskRoles<S extends TaskStateBase> = Readonly<Record<S["status"], TaskRole>>;
 
 interface Task<State extends TaskStateBase = TaskStateBase> {
   readonly id: Id;
   readonly conversationId: Id;
   readonly kind: string;
-  readonly status: string;              // = state.status, stored and indexed so storage never decodes state
   readonly role: TaskRole;              // materialized from the kind's roles map on every write
   readonly state: State;                // a tagged union; the status is its discriminant
   readonly after: readonly Id[];        // dependencies, fixed at creation
@@ -533,8 +555,9 @@ type ToolStates =
   | { status: "aborted";  call: ToolCall; assistant: Id; output: ToolOutputState; result: Id };
 ```
 
-`Task.status` duplicates `state.status` because storage indexes it and the driver compares it
-without decoding state; `Tx` writes both from the one variant it was given, so they cannot diverge.
+The status lives only in `state.status`. Storage extracts it into an indexed column when it writes
+the record, so a scan never decodes state, and `role` is on the record because a reader of an
+unregistered kind cannot compute it from the kind's map. `Tx` derives the role on every write.
 Fields common to every variant must have the same type in each.
 
 A kind maps its statuses to three roles:
@@ -555,10 +578,16 @@ one terminal variant to every state union, carrying the fields common to all of 
 variants:
 
 ```ts
-type Common<S> = UnionToIntersection<S>;                              // fields present in every variant
-type Orphaned<S> = Omit<Common<S>, "status"> & { status: "orphaned" };
-type ToolState = ToolStates | Orphaned<ToolStates>;                   // { status: "orphaned"; call; assistant }
+type CommonPayload<S extends TaskStateBase> = Pick<S, Exclude<keyof S, "status">>;
+type Orphaned<S extends TaskStateBase> = CommonPayload<S> & { readonly status: "orphaned" };
+type ToolState = ToolStates | Orphaned<ToolStates>; // orphaned carries only call and assistant
 ```
+
+`keyof S` selects the keys present in every union member; `Pick` keeps their types and optionality.
+This is the intersection of field names, not a TypeScript intersection of the variants (which would
+intersect incompatible status literals into `never`). Kind definition rejects inconsistent types or
+optionality for common fields, and rejects a user-declared `orphaned` status. A field optional in every
+variant remains optional on orphaned; a variant-specific field is not exposed.
 
 It is written in one situation only: at open, for a live foreground task whose kind is not
 registered in this process (§6.4). The stored record keeps whatever fields it had; the type
@@ -569,24 +598,49 @@ when their kind returns. This is the only case in which the harness settles a ta
 ### 5.2 Kinds
 
 ```ts
-interface TaskKind<States extends TaskStateBase, Hooks extends HookPoints = {}, Config extends ConfigSpec = {}, Preview = never> {
+declare const taskType: unique symbol; // compiler-only witness; never populated or serialized
+interface TaskType<S extends TaskStateBase, R extends TaskRoles<S>> {
+  readonly [taskType]?: { readonly state: (state: S) => S; readonly roles: R };
+}
+type TypedTask<S extends TaskStateBase, R extends TaskRoles<S>> = Task<S> & TaskType<S, R>;
+interface TaskDefinition<S extends TaskStateBase, R extends TaskRoles<S>> extends TaskType<S, R> {
   readonly kind: string;
-  readonly initialStatus: States["status"];
-  readonly roles: Readonly<Record<States["status"], TaskRole>>;   // `orphaned` is added as terminal (§5.1)
+  readonly roles: R;
+}
+
+interface TaskKind<States extends TaskStateBase, Hooks extends HookPoints = {}, Config extends ConfigSpec = {},
+                   Preview = never, R extends TaskRoles<States> = TaskRoles<States>> extends TaskDefinition<States, R> {
+  readonly initialStatus: StatesWithRole<States, R, "start">["status"]; // helper in §9.2
+  is(task: Task | undefined): task is ReadTask<States, R>;
   readonly turn?: true;                             // this kind drives a turn (§5.8)
   readonly hooks?: HookSpecs<Hooks>;                // the points this kind runs (§8.7)
   readonly config?: Config;                         // the values this kind reads (below)
   preview?: {                                       // what UIs see while the task runs (§9.4)
     init(scratch: ScratchReader): Preview;          //   built once, on attach or reopen, from durable scratch
   };                                                //   afterwards the kind mutates runtime.preview.state in place
-  execute(task: Task<States>, runtime: TaskRuntime, call: Call): Promise<void>;
-  recover(task: Task<States>, runtime: TaskRuntime, call: Call): Promise<void>;
-  abort(task: Task<States>, runtime: TaskRuntime, call: Call): Promise<void>;
+  execute(task: TypedTask<States, R>, runtime: TaskRuntime, call: Call): Promise<void>;
+  recover(task: TypedTask<States, R>, runtime: TaskRuntime, call: Call): Promise<void>;
+  abort(task: TypedTask<States, R>, runtime: TaskRuntime, call: Call): Promise<void>;
 }
 
-type TaskState<K> = K extends TaskKind<infer S, any, any, any> ? S | Orphaned<S> : never;  // what readers see
-}
+type ReadTask<S extends TaskStateBase, R extends TaskRoles<S>> =
+  TypedTask<S | Orphaned<S>, R & { readonly orphaned: "terminal" }>;
+type TaskState<K> = K extends TaskDefinition<infer S, infer R> ? S | Orphaned<S> : never;
 ```
+
+`Task` remains the raw stored record. `TypedTask` adds only a compile-time witness for the complete
+state union and literal role map, so narrowing `task.state` does not lose the other transition targets.
+Typed reads include `orphaned`; execute/recover/abort receive only the kind's declared variants.
+The witness is not a runtime capability: invocation identity and current durable state still decide
+write authority on the line.
+
+Use `defineTaskKind<States>()({ ... })`: the first call binds the declared union (and optional hook,
+config and preview types); the second infers the literal roles from the definition. It checks an exact
+role-map entry for each declared status, a start-role initial status and common-field compatibility.
+Its return type retains `TaskDefinition<States, R>`, including the compiler-only state witness;
+otherwise kind-witnessed reads could infer statuses from roles but lose their payload types.
+Do not widen the result to a generic `TaskKind<States>` or its roles to `TaskRoles<States>` when using
+typed mutations: that would discard the information needed to distinguish patch from settle.
 
 A kind that reads config declares it, so the values it depends on are on the kind and nowhere
 else, typed, and usable by callers that initialize a conversation:
@@ -594,7 +648,7 @@ else, typed, and usable by callers that initialize a conversation:
 ```ts
 type ConfigSpec = Record<string, Value<any>>;
 
-const generationKind = defineTaskKind({
+const generationKind = defineTaskKind<GenerationState>()({
   kind: "generation",
   config: {
     model:         conversationValue<ModelId>("pi.model", { rewind: true }),
@@ -626,7 +680,7 @@ interface TaskRuntime {
   readonly preview: Tracker<Preview>;              // flushed after successful scratch commits
   now(): number;                                  // injected clock, not Date.now() in task code
   sleep(untilMs: number, call: Call): Promise<void>;
-  config<C extends ConfigSpec>(kind: TaskKind<unknown, HookPoints, C>, call: Call): Promise<ConfigValues<C>>;
+  config<C extends ConfigSpec>(kind: { readonly kind: string; readonly config?: C }, call: Call): Promise<ConfigValues<C>>;
   conversation(id: Id, call: Call): Promise<ConversationHandle | undefined>;
   abortTask(id: Id, call: Call): Promise<void>;
   waitForTask(id: Id, options: { budgetMs?: number } | undefined, call: Call): Promise<boolean>;
@@ -635,7 +689,7 @@ interface TaskRuntime {
   value(addr) / list(addr)                         // session state handles; async methods take Call
   readonly models: ModelRegistry;                  // stream/deferred operations take Call
   readonly tools: ToolRegistry;
-  hooks<H extends HookPoints>(kind: TaskKind<unknown, H>): HookRunner<H>; // run(point, input, call)
+  hooks<H extends HookPoints>(kind: { readonly kind: string; readonly hooks?: HookSpecs<H> }): HookRunner<H>; // run(point, input, call)
   readonly env: ExecutionEnv;                      // existing Context-final methods; no wrappers
 }
 ```
@@ -650,15 +704,20 @@ transaction reads use the transaction view without another Call:
 
 ```ts
 // public/runtime
-getTask<S>(kind: TaskKind<S>, id: Id, call: Call): Promise<Task<S> | undefined>;
-getTasks<S>(kind: TaskKind<S>, ids: readonly Id[], call: Call): Promise<ReadonlyMap<Id, Task<S>>>;
-// inside Tx: same asynchronous reads, but no additional Call
-getTask<S>(kind: TaskKind<S>, id: Id): Promise<Task<S> | undefined>;
-getTasks<S>(kind: TaskKind<S>, ids: readonly Id[]): Promise<ReadonlyMap<Id, Task<S>>>;
+getTask<S extends TaskStateBase, R extends TaskRoles<S>>(
+  kind: TaskDefinition<S, R>, id: Id, call: Call): Promise<ReadTask<S, R> | undefined>;
+getTasks<S extends TaskStateBase, R extends TaskRoles<S>>(
+  kind: TaskDefinition<S, R>, ids: readonly Id[], call: Call): Promise<ReadonlyMap<Id, ReadTask<S, R>>>;
+// inside Tx: same asynchronous typed reads, but no additional Call
+getTask<S extends TaskStateBase, R extends TaskRoles<S>>(
+  kind: TaskDefinition<S, R>, id: Id): Promise<ReadTask<S, R> | undefined>;
+getTasks<S extends TaskStateBase, R extends TaskRoles<S>>(
+  kind: TaskDefinition<S, R>, ids: readonly Id[]): Promise<ReadonlyMap<Id, ReadTask<S, R>>>;
 ```
 
-The getter returns `Task<S>` without casts, or `undefined` when the task is missing or of another
-kind; without the kind it returns the untyped task, and `kind.is(task)` narrows.
+The getter returns `ReadTask<S, R>` without casts, or `undefined` when the task is missing or of another
+kind; without the kind it returns the untyped task. `kind.is(task)` narrows to the same read type.
+A bare numeric id supplies no state/role witness for typed mutation; read it with its kind first.
 
 ### 5.3 What an execution may do
 
@@ -715,7 +774,7 @@ await runtime.commit(tx => {
     after: tools,
     state: { status: "waiting", assistant, tools, inputs: task.state.inputs },
   });
-  tx.settle(task, { status: "done", inputs: task.state.inputs, assistant });
+  tx.settle(task, "done", { inputs: task.state.inputs, assistant });
 }, call);
 ```
 
@@ -726,7 +785,7 @@ typed getter, narrows on their status, and decides what happens next:
 ```ts
 async execute(task, runtime, call) {
   await runtime.commit(async tx => {
-    const tools = await tx.getTasks(toolKind, task.state.tools);            // Map<id, Task<ToolState>>
+    const tools = await tx.getTasks(toolKind, task.state.tools);            // Map<id, ReadTask<ToolStates, typeof toolKind.roles>>
     const outcomes: ToolOutputState[] = [];
     for (const t of tools.values()) {
       switch (t.state.status) {
@@ -743,7 +802,7 @@ async execute(task, runtime, call) {
         tx.value(inputResult(inputId)).set({ status: "unanswered", requestId: r.requestId, entry: r.entry,
                                              reason: "terminated" });
       }
-      return tx.settle(task, { status: "stopped", assistant: task.state.assistant, tools: task.state.tools });   // no successor
+      return tx.settle(task, "stopped", { assistant: task.state.assistant, tools: task.state.tools });   // no successor
     }
     const added = outcomes.flatMap(o => o.addedTools ?? []);
     const selectedTools = added.length ? [...current, ...added] : current;
@@ -754,7 +813,7 @@ async execute(task, runtime, call) {
     });
     const inputs = await landPostToolsInbox(tx, task.conversationId, task.state.inputs); // writes + steer (§8.1)
     tx.task(generationKind, { state: { status: "pending", ...nextGeneration(task, { selectedTools, inputs }) } });
-    tx.settle(task, { status: "done", assistant: task.state.assistant, tools: task.state.tools, inputs });
+    tx.settle(task, "done", { assistant: task.state.assistant, tools: task.state.tools, inputs });
   }, call);
 }
 ```
@@ -1196,8 +1255,8 @@ type MainWrite =
   | { type: "deleteConversation"; id: number }
   | { type: "entry";   entry: Entry }
   | { type: "task";    task: Task }
-  | { type: "patch";   id: number; status?: string; role?: TaskRole; state?: JsonValue; abort?: true }
-  | { type: "settle";  id: number; status: string; role: "terminal"; state: JsonValue }; // also retires scratch
+  | { type: "patch";   id: Id; role: TaskRole; state: TaskStateBase; abort?: true }
+  | { type: "settle";  id: Id; role: "terminal"; state: TaskStateBase };  // also retires scratch
 
 type CommitBatch =
   | { readonly kind: "main";    readonly writes: readonly MainWrite[] }
@@ -1215,7 +1274,8 @@ committed state plus earlier writes in the batch (kinds validate status transiti
 enforces ownership, dependencies, exchange rules and admission; nobody validates payload shapes:
 stored objects are trusted, and schema validation belongs at wire boundaries). For an entry with
 `head`, validation requires the stored id to be visible and at or after the previous fork-visible
-head's stored boundary. Stored edit targets must be earlier visible entries. Input-result transitions
+head's stored boundary. Stored edit targets must be earlier visible entries; managed-system targets
+are restricted to baseline supersession (§2.1). Input-result transitions
 are validated, terminal results cannot change, and consuming/cancelling an inbox element writes its
 result in the same batch. No entry-kind code runs. Storage checks scope, sequences and structure,
 prepares only touched data, persists atomically, publishes. A commit with no writes writes nothing.
@@ -1231,7 +1291,7 @@ one line per batch:
 {"first":100,"writes":[
   {"type":"value.set","conversationId":1,"namespace":"plugin.plan","value":true},
   {"type":"entry","conversationId":1,"kind":"user","model":[{"role":"user","content":"Inspect","timestamp":0}]},
-  {"type":"task","conversationId":1,"kind":"generation","status":"pending"}]}
+  {"type":"task","conversationId":1,"kind":"generation","state":{"status":"pending"}}]}
 ```
 
 Write all bytes, then publish in-memory changes, never before. Durability against process crash is
@@ -1376,19 +1436,15 @@ create:      capture inputs, the kind's declared config (model, thinking, select
              §5.2, rewindable values), provider options and retry policy, so a retry uses what the
              attempt used
 execute:     if a collapse is needed by threshold: { create collapse C; create generation G' after:[C]; settle }
-             desired = system_instructions hook, per conversation: keyed sections (the host's identity,
-                       cwd, skills, context files; a plugin's plan_mode) merged across handlers and
-                       rendered in declared order, plus tool definitions selected from the catalogue;
-                       none of these host prompt sources is stored as config
-             sent    = the newest baseline `system` entry in the context plus the deltas after it;
-                       deltas before it (kept by a compaction) are subsumed and ignored, by the fold
-                       and by request projection alike
-             { if no sent: system entry with the baseline (text + full tool definitions);
-               else if sent ≠ desired: system entry with the diff, per section ("the plan_mode guidance
-               now applies: …", "the cwd section changed: …") and toolsAdded / toolsRemoved as full
-               definitions (a changed schema counts);  status streaming }
-             project model context; before_request with Call; runtime validates writes on the line
-             stream; frames to scratch
+             desired = seed typed section draft from durable prepared values/rendered text;
+                       run system_instructions handlers, then touched renderers/wrappers outside line;
+                       capture complete desired tool definitions; no discovery/cache callbacks in storage
+             { inspect current head and effective managed system entries;
+               if no valid current-epoch baseline: append full baseline plus stored omission edits;
+               else if prepared state differs from desired: append materialized section/tool delta;
+               capture requestThrough = exact resulting transcript tip; status streaming }
+             project at requestThrough, not the later tail; before_request with Call on a request copy
+             validate messages-only mode and capture actually offered tools; stream; frames to scratch
 outcome:
   calls        { assistant; tools; post_tools carrying inputs; settle done }
   final        { assistant; resolve every current input; place next-group inbox items and successor if any;
@@ -1402,19 +1458,196 @@ outcome:
                  durable mark present → TaskCancelled; execute unwinds; driver calls abort below
 ```
 
-**Prompt and tools.** Two things the lane harness fuses are kept apart. What the client wants is
-config: model, thinking level and selected tools are rewindable conversation values (a fork at an
-entry gets the ones in force there; a child is initialized explicitly); the catalogue and the
-prompt inputs are the host's and are asked for each turn through `system_instructions`. What the model has been told is the `system` entries in the
-transcript: the baseline that opened the current epoch and one entry per change delivered since.
-The generation diffs the two at the top of every turn and writes only the delta. A head (summary,
-handoff, reset) starts a new epoch: the context has no baseline after it, so the next generation
-writes a fresh one, and any older delta a compaction kept is subsumed by it and dropped at projection; a fork carries
-the sent-state in its prefix and diffs against its own config; a restart with a changed host
-emits "these sections now apply" and nothing else. Request projection puts the epoch's stored
-baseline message in the provider's baseline slot, later stored system messages at their positions,
-and the folded tool set as the callable list, or folds
-everything into one top-level prompt on providers without native system messages.
+**Durable configuration, prepared instructions.** Config changes persist immediately as ordinary
+scoped value writes: model/thinking/selected tools/profile rewind with forks, while each other address
+keeps its declared policy. Host files and catalogue implementations are not stored as configuration.
+The `system_instructions` hook uses the generation's captured config to produce desired sections and
+complete selected tool definitions. Its answer is prepared outside the line. A system entry records
+canonical instructions prepared for a request, not proof of delivery or an external acknowledgement.
+
+**Typed section definitions and one mutable draft.** A token identifies a JSON payload type and an
+append-time renderer. It is not an entry kind, discovery callback or read-time projection hook:
+
+```ts
+interface SystemSection<T> {
+  readonly key: string;
+  render(value: T): string;
+}
+
+interface SystemSectionDraft {
+  get<T>(section: SystemSection<T>): T | undefined; // owned copy; call set to change the draft
+  set<T>(section: SystemSection<T>, value: T): void;
+  delete(section: string | { readonly key: string }): void;
+  wrap<T>(section: SystemSection<T>, transform: (text: string) => string): void;
+}
+
+interface SkillInfo { name: string; description: string }
+const skillsSection = defineSystemSection<SkillInfo[]>({
+  key: "pi.skills",
+  render: skills => skills.map(skill => `- ${skill.name}: ${skill.description}`).join("\n"),
+});
+```
+
+Built-in definitions are exported through `systemSections`: identity carries a string, environment
+carries structured data such as `{ cwd: string }`, and skills carries typed skill descriptions.
+Plugins may define others. Payloads must be JSON-representable. Typed getters use the registered definition's
+payload contract; plugins need no casts. Registration rejects duplicate keys; replacing a definition
+must preserve the persisted payload shape or migrate it. Payload shape validation belongs at wire
+boundaries, as for other typed stored values, not to arbitrary renderer casts.
+
+Every preparation seeds a private ordered draft from durable section values and rendered text. Hooks
+edit that same draft in registration order, harness-wide first and innermost scope last. Under the
+skip-failed-handler policy, discard that handler's mutations/wrappers while retaining earlier changes;
+a failed refresh must not publish a partial deletion. `set` replaces
+an existing payload in place; a new key appends. `delete` explicitly removes a key (even by string when
+its renderer is unavailable). `get`/`set`/`wrap` require a registered compatible definition. Thus a later
+plugin can filter or append typed skills by get-and-set, rather than parsing rendered prose. Hooks
+return only optional complete desired `tools`; the last supplied list wins, omission preserves an
+earlier handler's list, and no supplied list means no desired tools.
+
+After hooks, render touched sections outside the line. `wrap` composes text transforms in registration
+order after the section renderer, without mutating the shared token. Wrappers live only in this draft;
+only their final text is stored. Untouched seeded sections retain their stored rendered text, including
+when their contributor or renderer is absent. An explicit set/wrap or compatible renderer replacement
+recomputes that text. Refreshing a base intentionally rebuilds its wrappers; preserving a missing
+wrapper across such a refresh is not promised. Freeze/discard the draft after preparation; later leaked
+callbacks cannot alter the committed snapshot.
+
+**No accidental accumulation.** Host hooks should set complete authoritative base payloads each time
+before transformation plugins run. Otherwise the composed transformation chain must reach a fixed
+point when applied to its own previous output; each handler being individually idempotent is not enough.
+Blindly appending to a seeded array/text each preparation would accumulate duplicates. Registration
+order provides composition, not automatic deduplication of arbitrary payloads.
+
+Diff final JSON payloads and rendered text by key, ignoring incidental object-key order. Persist changed
+payloads even if rendering is identical; those changes can be data-only system entries (`model: []`).
+Changed rendering with identical payload also emits an instruction update, including renderer/wrapper
+changes. Baselines and simultaneous changes use draft order; pure reordering is a no-op. There is no
+separate order option, order-change message or generic source-renderer framework.
+
+**Durable seed, independent of model retention.** Reconstruct canonical section state through the
+fork-visible target by reading managed `system` entries back to the latest baseline, then folding their
+section records forward. Use existing indexed kind scans and an optional per-handle prepared-state
+cache. A fresh baseline checkpoints the complete state. This fold is independent of model heads and
+projection edits: an omitted historical model message does not erase its persisted section payload.
+That is how an unavailable plugin's instructions survive a compaction that dropped its old baseline.
+No extra full-state value, blob store or storage API is required.
+
+Separately inspect the effective model projection to decide whether it has a usable current-epoch
+baseline. Arbitrary edits targeting managed system entries reject (§2.1); changing instructions uses
+the section draft instead. Supersession omissions written by the current baseline do not trigger
+another rebaseline. A fresh baseline uses the canonical payload/rendered seed plus this preparation's
+changes, even when the previous model baseline fell outside the retained range.
+
+Hook-private discovery/cache state stays in closures or host services, not in section records.
+Refresh skills through filesystem events or bounded polling, not remote scans per hook call. A failed
+refresh is not a deletion: retain the last successful snapshot; seed first use before claiming a base.
+Missing hook registration also is not deletion; use the draft's explicit delete operation.
+
+Fold effective pi-ai system-message tool fields from all projected messages, including declarations
+outside managed entries. Diff complete definitions structurally by name. Additions and same-name
+replacements emit `toolsAdded`; removals emit the previous stored definition in `toolsRemoved`.
+Tools-only changes may use empty content. The adapter, not pico, renders compatibility notices.
+
+```text
+100 user
+110 system baseline: identity + plan_mode; toolsAdded=[read, write]
+120 assistant
+125 config commit: plan_mode=true; selectedTools=[read, grep]       (not a transcript entry)
+130 user
+140 system delta: replace plan_mode; toolsRemoved=[write]; toolsAdded=[grep]
+150 assistant
+```
+
+A crash between 125 and 140 preserves the config; the next generation prepares the missing change.
+A crash after 140 but before the provider call also preserves that entry. An unchanged hook answer
+produces no duplicate delta. Neither event proves the provider saw the instructions. A fork uses its
+visible prefix and inherited rewindable config; changed host sources on restart may cause a new delta,
+but cannot rewrite old messages.
+
+**Head changes and fresh baselines.** A current-epoch baseline is a managed baseline after the newest
+visible head entry in transcript order (not after its retained boundary). With none, append a complete
+baseline carrying ordinary omission edits for superseded retained managed system entries. Include old
+baselines as well as deltas, but never unrelated system notices. Store the omissions on that same
+baseline entry, not on the head, so arbitrary head writers remain generic and a fork cannot land
+between replacement instructions and their omission controls.
+
+```text
+10 user; 11 baseline; 20 assistant; 30 user; 31 system delta; 35 job notice; 40 assistant; 50 user
+60 summary, head=30
+context at 60: [60 summary, 30 user, 31 delta, 35 notice, 40 assistant, 50 user]
+70 assistant
+80 user
+81 system { baseline:true, full sections, full desired toolsAdded,
+            edits:[{ target:31, action:omit }] }
+context at 81: [60 summary, 30 user, 35 notice, 40 assistant, 50 user, 70 assistant, 80 user, 81 baseline]
+```
+
+The baseline stays at its appended position after the retained tail. Before preparation, old retained
+system entries remain visible; generic context derivation never secretly suppresses them. Every
+request goes through preparation first. Repeated heads use the same rule. Reset/handoff often leave
+no old managed entries inside the retained range, so the new baseline needs no omission targets.
+Compute the remaining tool fold after planned omissions: a baseline adds the complete desired tool
+set and explicitly removes unwanted declarations that remain from other effective system messages.
+`baseline:true` is pico metadata, not a magic reset understood by pi-ai.
+
+**Frozen request cutoff and cache.** The generation stores the following request-specific field:
+
+```ts
+// Request fields on the streaming variant; other generation variants/fields are omitted.
+interface GenerationStreamingState {
+  readonly status: "streaming";
+  readonly inputs: readonly Id[];
+  readonly requestThrough: Id; // inclusive transcript entry cutoff, required after preparation
+}
+```
+
+Capture the durable section-state cursor and registered definitions before running hooks/renderers
+outside the line. Preparation retains that definition snapshot; later registrations affect subsequent
+preparations. On the line, verify that no concurrent managed section-state write changed the seed;
+if one did, rerun preparation outside the line. A head-only change does not stale the section seed.
+Then inspect the current head and effective model state, choose baseline versus delta, and persist
+the new system entry if needed and the generation's inflight intent with `requestThrough`.
+The cutoff is the resulting transcript tip, even when no system entry was needed. Deferred variants
+retain the cutoff for their prepared request; an unprepared pending variant has none. After persistence,
+while still on the line, catch up the handle's context cache and capture a separate immutable array
+of the selected entry references and effective replacement projections. This is the request snapshot;
+entry bodies are immutable and can be shared. Never hand out mutable cache bookkeeping or mutate a
+published replacement. Request-local normalization/hooks copy the objects they modify.
+
+```text
+prepare through 51 → requestThrough=51, snapshot captured
+head 60 lands     → live cache advances; request snapshot stays unchanged
+request streams   → uses snapshot through 51
+next preparation  → sees head 60; writes a fresh baseline if required
+```
+
+If a head lands while the hook is running, preparation sees the new head and chooses a baseline.
+If it lands after preparation, the captured request is unaffected. Historical/recovery reads through
+`requestThrough` derive independently from storage when the live cache has advanced; they do not rewind
+it. Release request-only references after use; no registry of historical cache versions is retained.
+The cutoff identifies canonical transcript input, not arbitrary request-local hook changes.
+
+**Pi-ai owns provider translation.** Pico passes only `{ messages }`, with neither top-level
+`systemPrompt` nor `tools`, even when there are no selected tools. Both fields absent selects the
+agreed pi-ai system-message mode; explicit empty strings/arrays are not absence. Adapters translate
+the stored message history for their provider/model, preserving cache prefixes where possible.
+Unsupported mid-conversation instruction/tool changes fall back to `<system>`-bracketed user messages
+at their historical positions and adapter-derived bulk wire tool declarations. Pico never hoists a
+baseline, flattens historical changes into a rewritten prompt, or sends a parallel top-level tool list.
+Fallback user messages do not have native system priority; cache reuse is best-effort, not universal.
+
+The pi-ai `SystemMessage` shape comes from [PR #9116](https://github.com/earendil-works/pi/pull/9116);
+[PR #9117](https://github.com/earendil-works/pi/pull/9117) covers coding-agent prompt/tool deltas. These
+were open when this contract was reviewed. Messages-only mode and its adapter fixtures are an external
+integration requirement, not a claim that the current main branch already implements them.
+
+**Request-local overrides.** `before_request` receives a private request copy and may transform it.
+Validate afterward that it remains messages-only. Such transformations neither mutate stored entries
+nor alter the canonical section fold for the next generation. Exact transformed-request audit requires
+separate optional capture; the transcript alone records only canonical preparation. Validate returned
+tool calls against the definitions actually offered after transformation, plus implementation and
+permission checks—not today's catalogue or the untransformed tool set.
 
 One task lives through retries and deferral; retries share a budget carried in state. Overflow
 does not keep the generation alive: it settles and hands the retry to the collapse's settlement,
@@ -1472,10 +1705,13 @@ budget runs out, the call settles now with what it has, `out.delegate(job)` and 
 work continues as the job:
 
 ```ts
-const job = await runtime.commit(tx => {
+const job = await runtime.commit(async tx => {
+  const task = await tx.getTask(toolKind, runtime.taskId);
+  if (task?.state.status !== "running") throw new Error("Expected a running tool");
+  const { status, ...payload } = task.state;
   const id = tx.task(jobKind, { background: true,
     state: { status: "planned", cmd, cwd, origin: { tool: "bash", task: runtime.taskId, callId: toolCallId } } });
-  tx.patch(task, { jobId: id, cancelJobOnAbort: true });        // partial: still "running" (§9.2)
+  tx.patch(task, status, { ...payload, jobId: id, cancelJobOnAbort: true }); // complete running payload
   return id;
 }, call);
 const done = await runtime.waitForTask(job, { budgetMs: runtime.budgetMs }, call);
@@ -1572,12 +1808,18 @@ last complete exchange before the launching one.
 A job is a background task that runs a process. Its state:
 
 ```ts
-interface JobState {
+type JobInput = {
   cmd: string; cwd: string; limits?: ShellOutputLimits;
-  origin?: { tool: string; task: Id; callId: string };   // the call that started it, so UIs render it with that tool's component
-  every?: number; notBefore?: number; rerun?: "safe";     // recurrence and recovery policy
-  startedAt?: number; output?: ToolOutputState; exitCode?: number;
-}
+  origin?: { tool: string; task: Id; callId: string }; // originating call, for UIs
+  every?: number; notBefore?: number; rerun?: "safe"; // recurrence and recovery policy
+};
+type JobState = JobInput & (
+  | { status: "planned" }
+  | { status: "running"; startedAt: number }
+  | { status: "exited"; output: ToolOutputState; exitCode: number }
+  | { status: "killed"; output: ToolOutputState }
+  | { status: "lost" }
+);
 ```
 
 Starting one is creating the task; a tool does it in its execute (§8.3), a UI in a commit:
@@ -1634,10 +1876,9 @@ kind and point; the harness only routes:
 type HookPoints = Record<string, { input: unknown; output: unknown }>;
 
 interface GenerationHooks extends HookPoints {
-  system_instructions: { input: { conversationId: number; config: GenerationConfig };   // per conversation, not per harness
-                         output: { sections: Record<string, string | undefined>; tools: readonly Tool[] } };
-                         // sections merge by key across handlers (a plugin adds plan_mode; undefined removes);
-                         // the generation renders them in the host's declared order; tools are definitions
+  system_instructions: { input: { conversationId: number; config: GenerationConfig; sections: SystemSectionDraft };
+                         output: void | { tools?: readonly Tool[] } }; // sections mutate one shared preparation draft
+                         // handlers run sequentially; new keys append; set replaces; delete is explicit
   before_request: { input: { request: ProviderRequest }; output: { request?: ProviderRequest } };
   after_response: { input: { response: AssistantMessage; usage: Usage }; output: void };
   on_yield:       { input: { answer: AssistantEntry }; output: { continue?: string } };
@@ -1652,8 +1893,8 @@ interface CollapseHooks extends HookPoints {
                      output: { decline?: boolean; instructions?: string; summary?: string } };
 }
 
-const generationKind: TaskKind<GenerationState, GenerationHooks> = { ..., hooks: { before_request: {}, after_response: {}, on_yield: { failClosed: false } } };
-const toolKind:       TaskKind<ToolState, ToolHooks>             = { ..., hooks: { before_tool: { failClosed: true }, after_tool: {} } };
+const generationKind = defineTaskKind<GenerationState, GenerationHooks>()({ ..., hooks: { before_request: {}, after_response: {}, on_yield: { failClosed: false } } });
+const toolKind = defineTaskKind<ToolStates, ToolHooks>()({ ..., hooks: { before_tool: { failClosed: true }, after_tool: {} } });
 
 // a plugin registers a handler
 harness.hooks.on(toolKind, "before_tool", async ({ toolName, args }, call) => {
@@ -1711,13 +1952,16 @@ interface ConversationHandle {
   fork(options: { at: Id | "start"; abort?: boolean; values? }, call: Call): Promise<ConversationHandle>;
   spawn(options, call: Call): Promise<Id>;
   value(addr) / list(addr) // async reads/writes take a final Call
-  config<C>(kind: TaskKind<unknown, HookPoints, C>): { get(call: Call): Promise<ConfigValues<C>>; set(partial: Partial<ConfigValues<C>>, call: Call): Promise<void> };
+  config<C extends ConfigSpec>(kind: { readonly kind: string; readonly config?: C }): { get(call: Call): Promise<ConfigValues<C>>; set(partial: Partial<ConfigValues<C>>, call: Call): Promise<void> };
   readonly hooks: { on(kind, point, handler, o?: { subtree?: boolean }): () => void };   // scoped to this conversation (§8.7)
   readonly settings: ConfigHandle<GenerationConfig>;   // sugar: config(generationKind)
   commit<T>(plan: (tx: ConversationTx) => T | Promise<T>, call: Call): Promise<T>;
 }
 
 interface Harness {
+  readonly entryKinds: EntryKindRegistry; // mutable registration (§9.6)
+  readonly taskKinds: TaskKindRegistry;
+  readonly sections: SystemSectionRegistry;
   root(call: Call): Promise<ConversationHandle>;
   conversation(id: Id, call: Call): Promise<ConversationHandle | undefined>;
   conversations(query, call: Call): Promise<Page<Conversation>>;
@@ -1774,6 +2018,21 @@ interface EntryDraft {
   readonly edits?: readonly ContextEdit[];
 }
 
+// Distribute over the declared variants; orphaned is never a public write target.
+type StatesWithRole<S extends TaskStateBase, R extends TaskRoles<S>, Role extends TaskRole> =
+  S extends TaskStateBase
+    ? S["status"] extends "orphaned" ? never : R[S["status"]] extends Role ? S : never
+    : never;
+
+// Keep status and payload correlated, even when callers pass unions.
+type WriteArgs<S extends TaskStateBase> = S extends TaskStateBase
+  ? [status: S["status"], payload: Omit<S, "status">]
+  : never;
+type ExactWrite<S extends TaskStateBase, A extends WriteArgs<S>> = A & [
+  status: A[0],
+  payload: Record<Exclude<keyof A[1], keyof Omit<Extract<S, { status: A[0] }>, "status">>, never>,
+];
+
 interface Tx {
   // reads (committed state)
   getEntry(id) / getEntry(kind, id) / getEntries(...) / getTask(id) / getTask(kind, id) / getTasks(...)
@@ -1783,27 +2042,48 @@ interface Tx {
   entry<E extends Entry>(kind: EntryKind<E>, conversationId: Id, input: EntryInput<E>): Id;   // §5.8
   write<E extends Entry>(kind: EntryKind<E>, input: EntryInput<E>): Id;   // inputId; appends now or queues (§5.8)
   queueInput(input: QueuedInput): Id;                                     // inputId (§8.1)
-  task<S>(kind: TaskKind<S>, spec: { state: S; after?: Id[]; background?: true; owns?: Id[] }): Id;
-  // stay in the current variant: a partial of that variant, no status
-  patch<S extends TaskStateBase, K extends S["status"]>(
-    task: Task<S> & { state: { status: K } },
-    changes: Partial<Omit<Extract<S, { status: K }>, "status">>): void;
-  // move to another variant, or patch by id: the whole variant
-  patch<S extends TaskStateBase>(task: Task<S> | Id, state: NonTerminal<S>): void;
-  settle<S extends TaskStateBase>(task: Task<S> | Id, state: Terminal<S>): void;   // terminal; retires scratch
-  // NonTerminal<S> / Terminal<S> are S filtered by the kind's roles map. The partial overload needs a task
-  // whose variant the compiler can see (the normal case inside a kind's methods); a bare id or an unnarrowed
-  // union falls back to the whole-variant form, so no field of another variant is smuggled in and a partial
-  // cannot change status:
-  //   tx.patch(task, { jobId });                                          // still "running"
-  //   tx.patch(task, { status: "running", call, assistant, args, replay }); // planned → running
-  //   tx.settle(task, { status: "done", call, assistant, output, result }); // terminal
+  task<S extends TaskStateBase, R extends TaskRoles<S>>(kind: TaskDefinition<S, R>,
+    spec: { state: S; after?: Id[]; background?: true; owns?: Id[] }): Id;
+  patch<S extends TaskStateBase, R extends TaskRoles<S>,
+        A extends NoInfer<WriteArgs<StatesWithRole<S, R, "start" | "inflight">>>>(
+    task: TypedTask<S, R>, ...args: A & NoInfer<ExactWrite<StatesWithRole<S, R, "start" | "inflight">, A>>): void;
+  settle<S extends TaskStateBase, R extends TaskRoles<S>,
+         A extends NoInfer<WriteArgs<StatesWithRole<S, R, "terminal">>>>(
+    task: TypedTask<S, R>, ...args: A & NoInfer<ExactWrite<StatesWithRole<S, R, "terminal">, A>>): void;
   createConversation(spec): Id;  deleteConversation(id: Id): void;
 }
 ```
 
-The implementation is small enough to show. It numbers as it goes, keeps the one ordering rule, and
-hands storage a batch; storage numbers from its own `lastSeq` and gets the same ids (§7.3).
+Both operations take an explicit target status and its **complete payload without status**:
+
+```ts
+tx.patch(task, "running", { call, assistant, args, replay });
+tx.settle(task, "done", { call, assistant, output, result });
+
+// Same-status update: narrow, remove the tag, then supply the full replacement.
+if (task.state.status === "running") {
+  const { status, ...payload } = task.state;
+  tx.patch(task, status, { ...payload, jobId });
+}
+```
+
+There is no status-free or partial-merge overload. Both writes replace the stored state with
+`{ ...payload, status }`; fields from the previous variant are not retained implicitly. `patch`
+accepts start/inflight targets, `settle` terminal targets and retires scratch. Neither permits
+`orphaned`; only open's internal orphan handling writes it. Same-status replacement remains valid
+but does not advance `statusEpoch`. Creation still receives the complete initial tagged state.
+An invocation's task snapshot does not change after patch; read again when a later replacement
+needs state committed since that snapshot, or carry the explicitly constructed next payload.
+
+`WriteArgs` is a union of status/payload tuples: a union-valued status and an unrelated payload do
+not prove a valid pair. `NoInfer` prevents arguments from widening the task's known union/role map.
+`ExactWrite` rejects extra top-level keys visible in a variable or spread, not just object literals,
+including a duplicated status. These are static checks, not runtime schema validation: casts, erased
+extra fields and nested structural typing still follow TypeScript's limits. Wire boundaries validate
+untrusted payloads; line validation checks current liveness, invocation ownership and allowed roles.
+
+The implementation below shows erased runtime signatures; the public signatures are above. It
+numbers as it goes, keeps the one ordering rule, and hands storage a batch; storage numbers from its own `lastSeq` and gets the same ids (§7.3).
 
 ```ts
 class Tx {
@@ -1846,22 +2126,30 @@ class Tx {
     this.push({ type: "entry", entry });
     return id;
   }
-  task<S>(kind: TaskKind<S>, spec: { conversationId: number; state: S; after?: number[]; background?: true; owns?: number[] }): number {
+  task<S extends TaskStateBase, R extends TaskRoles<S>>(
+    kind: TaskDefinition<S, R> & { readonly initialStatus: S["status"]; readonly turn?: true }, spec: {
+    conversationId: Id; state: S; after?: Id[]; background?: true; owns?: Id[];
+  }): Id {
     const id = this.seq + 1;
-    const status = kind.initialStatus;
-    const role = getOrThrow(kind.roles[status]);
-    this.push({ type: "task", task: { id, kind: kind.kind, status, role, ...spec } });
+    if (spec.state.status !== kind.initialStatus) throw new Error(`initial status must be ${kind.initialStatus}`);
+    const role = getOrThrow(kind.roles[spec.state.status]);
+    this.push({ type: "task", task: { id, kind: kind.kind, role, turn: kind.turn, ...spec } });
     return id;
   }
-  patch(id: number, changes: { status?: string; state?: JsonValue; abort?: true }) {
-    const role = changes.status === undefined ? {} : { role: this.roleFor(id, changes.status) };
-    this.push({ type: "patch", id, ...changes, ...role });
+  patch(task: Task, status: string, payload: JsonObject) {
+    if (Object.hasOwn(payload, "status")) throw new Error("payload must not include status");
+    const role = this.roleFor(task.id, status);
+    if (role === "terminal") throw new Error(`${status} requires settle`);
+    this.push({ type: "patch", id: task.id, role, state: { ...payload, status } });
   }
-  settle(id: number, status: string, state: JsonValue) {
-    if (this.roleFor(id, status) !== "terminal") throw new Error(`${status} is not terminal`);
-    this.push({ type: "settle", id, status, role: "terminal", state });
+  settle(task: Task, status: string, payload: JsonObject) {
+    if (Object.hasOwn(payload, "status")) throw new Error("payload must not include status");
+    if (this.roleFor(task.id, status) !== "terminal") throw new Error(`${status} is not terminal`);
+    this.push({ type: "settle", id: task.id, role: "terminal", state: { ...payload, status } });
   }
-  private roleFor(id: number, status: string): TaskRole { /* task kind from the transaction view; reject unknown status */ }
+  private roleFor(id: Id, status: string): TaskRole {
+    /* kind from transaction view; reject unknown status and reserved orphaned */
+  }
 
   getTask = this.storage.getTask; getTasks = this.storage.getTasks;   // reads: committed state
   getEntry = this.storage.getEntry; getEntries = this.storage.getEntries;
@@ -2155,8 +2443,52 @@ names, so existing handlers keep working; a wrapper that delegates to the origin
 shape. `h.kinds.<name>` is how handles and plugins refer to whatever is currently registered, so
 `c.settings` is the config of the generation kind in use, not of a specific import.
 
-`Harness.open` takes storage, models, tools, additional kinds, replacements and initial root values; it creates
-the root only for empty storage and never creates work on reopen.
+`Harness.open` takes storage, models, tools, additional kinds, replacements, section definitions and
+initial root values. It creates the root only for empty storage and initializes `rootValues` in that
+same commit; on reopen it ignores those initial values and preserves durable configuration. Tool
+registration never implicitly selects tools. The host explicitly supplies model/thinking/selectedTools
+for a fresh root or configures it before generation; missing required configuration reports an error.
+Children inherit only the values selected by their spawn policy; historical forks inherit rewindable
+values at their entry cutoff. Reopen never creates work by inference.
+
+### 9.6 Mutable kind and section registration
+
+Construction accepts initial `kinds: { entry: [...], task: [...] }` and `sections: [...]` collections.
+Built-in section tokens are registered initially; their content is supplied by host hooks. These are
+initial values, not immutable registries:
+
+```ts
+await h.entryKinds.register(noteKind, call);
+await h.entryKinds.replace(noteKindV2, call);
+await h.entryKinds.remove(noteKind.kind, call);
+
+await h.taskKinds.register(reminderKind, call);
+await h.taskKinds.replace(reminderKindV2, call);
+await h.taskKinds.remove(reminderKind.kind, call);
+
+await h.sections.register(policySection, call);
+await h.sections.replace(policySectionV2, call);
+await h.sections.remove(policySection.key, call);
+```
+
+The registry methods retain the supplied kind/section generics. `register` rejects an existing name;
+`replace` requires an existing compatible definition (otherwise migrate); `remove` removes code,
+not stored entries/tasks/section values. All changes serialize on the line. Existing task calls and
+section preparations retain their captured implementation; future ones use current registrations.
+Explicit section-renderer replacement marks that section for recomputation in a later preparation;
+never rewrite old entries or clear a newer replacement's pending work from an older preparation.
+
+Removing a section definition does not remove its instructions. Historical reads and untouched seeded
+sections use stored rendered text without the renderer. Registering it again restores typed editing.
+Only `sections.delete(tokenOrKey)` on the preparation draft requests durable section removal. Stable
+string keys cross restarts; function objects and token identity do not get serialized. The mutable
+draft is a local hook API, not a JSON wire DTO; an eventual remote-plugin adapter must provide an
+explicit contribution/edit protocol rather than serializing token renderers or draft callbacks.
+
+Task-kind removal rejects while live tasks of that kind exist. At open, absent task kinds follow
+§6.4: foreground tasks become terminal `orphaned`; background tasks remain parked until registration
+restores their recovery implementation. Registration does not resurrect orphaned or other terminal
+tasks and does not implicitly attach a drive scope.
 
 ## 10. Validation
 
