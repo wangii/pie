@@ -69,6 +69,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
+	const tools = selectedTools || ["read", "bash", "edit", "write"];
+	// A skill's file can be loaded by `read` or, when `read` is absent, by `bash`.
+	const skillFileReadTool = (["read", "bash"] as const).find((tool) => tools.includes(tool));
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -88,14 +91,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += "</project_context>\n";
 		}
 
-		// Append skills section (only if read tool is available)
-		if (customPromptHasRead && skills.length > 0) {
-			prompt += formatSkillsForPrompt(skills);
+		// Append skills when a tool capable of reading their files is available.
+		if (skillFileReadTool && skills.length > 0) {
+			prompt += formatSkillsForPrompt(skills, skillFileReadTool);
 		}
 
-		// The propose role has no `read`, so the full skills block is not rendered above, but it
-		// still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
-		if (role === "propose" && !customPromptHasRead && skills.length > 0) {
+		// The propose role has no file-reading tool, so the full skills block is not rendered
+		// above, but it still needs a lightweight catalog so it can reference skills by id via
+		// `skillRefs`.
+		if (role === "propose" && !skillFileReadTool && skills.length > 0) {
 			prompt += formatSkillCatalogForPrompt(skills);
 		}
 
@@ -112,7 +116,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
-	const tools = selectedTools || ["read", "bash", "edit", "write"];
 	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
 	const toolsList =
 		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
@@ -204,8 +207,8 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 	}
 
 	// Append project context files (gated as described on `receivesProjectContext`; the skills
-	// block below stays gated on `read` alone, since skills are only useful to a role that can
-	// load them).
+	// block below stays gated on the file-reading tool alone, since skills are only useful to a
+	// role that can load them).
 	if (receivesProjectContext(role, hasRead) && contextFiles.length > 0) {
 		prompt += "\n\n<project_context>\n\n";
 		prompt += "Project-specific instructions and guidelines:\n\n";
@@ -215,14 +218,14 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += "</project_context>\n";
 	}
 
-	// Append skills section (only if read tool is available)
-	if (hasRead && skills.length > 0) {
-		prompt += formatSkillsForPrompt(skills);
+	// Append skills when a tool capable of reading their files is available.
+	if (skillFileReadTool && skills.length > 0) {
+		prompt += formatSkillsForPrompt(skills, skillFileReadTool);
 	}
 
-	// The propose role has no `read`, so the full skills block is not rendered above, but it
-	// still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
-	if (role === "propose" && !hasRead && skills.length > 0) {
+	// The propose role has no file-reading tool, so the full skills block is not rendered above,
+	// but it still needs a lightweight catalog so it can reference skills by id via `skillRefs`.
+	if (role === "propose" && !skillFileReadTool && skills.length > 0) {
 		prompt += formatSkillCatalogForPrompt(skills);
 	}
 

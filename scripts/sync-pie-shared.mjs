@@ -7,6 +7,9 @@
  * packages/pie/src; delete any pie/src file that no longer exists in
  * coding-agent/src (and isn't forked).
  *
+ * Also regenerates packages/pie/.gitignore from FORKED_FILES, so the ignore
+ * whitelist cannot drift from the manifest.
+ *
  * Modes:
  *   node scripts/sync-pie-shared.mjs           # apply changes
  *   node scripts/sync-pie-shared.mjs --list    # print planned changes, no writes
@@ -31,6 +34,7 @@ const repoRoot = resolve(scriptDir, "..");
 const srcDir = join(repoRoot, "packages", "coding-agent", "src");
 const dstDir = join(repoRoot, "packages", "pie", "src");
 const manifestPath = join(repoRoot, "packages", "pie", "FORKED_FILES");
+const gitignorePath = join(repoRoot, "packages", "pie", ".gitignore");
 
 const mode = process.argv.includes("--check") ? "check" : process.argv.includes("--list") ? "list" : "apply";
 
@@ -89,8 +93,40 @@ for (const rel of dst.keys()) {
 toCopy.sort();
 toDelete.sort();
 
+/**
+ * pie/.gitignore whitelists exactly the forked files, so it is derived from the manifest
+ * rather than hand-maintained: `src/**` ignores every synced file, then each parent directory
+ * and file named in FORKED_FILES is re-included. Git cannot re-include a file whose parent
+ * directory is excluded, hence the directory negations.
+ */
+function expectedGitignore() {
+	const dirs = new Set();
+	for (const rel of forked) {
+		const parts = rel.split("/");
+		for (let i = 1; i < parts.length; i++) {
+			dirs.add(parts.slice(0, i).join("/"));
+		}
+	}
+	const lines = [
+		"*.bun-build",
+		"",
+		"# Generated from FORKED_FILES by scripts/sync-pie-shared.mjs — do not edit by hand.",
+		"# Only forked source files are maintained in this package; everything else under src/",
+		"# is synced verbatim from packages/coding-agent/src.",
+		"src/**",
+	];
+	for (const dir of [...dirs].sort()) lines.push(`!src/${dir}/`);
+	for (const rel of [...forked].sort()) lines.push(`!src/${rel}`);
+	return `${lines.join("\n")}\n`;
+}
+
+const nextGitignore = expectedGitignore();
+const currentGitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+const gitignoreStale = currentGitignore !== nextGitignore;
+
 function report() {
-	if (toCopy.length === 0 && toDelete.length === 0) {
+	const changed = toCopy.length + toDelete.length;
+	if (changed === 0 && !gitignoreStale) {
 		console.log("pie/src is in sync with coding-agent/src (outside FORKED_FILES).");
 		return 0;
 	}
@@ -102,7 +138,10 @@ function report() {
 		console.log(`Will delete ${toDelete.length} stale file(s) from pie/src:`);
 		for (const rel of toDelete) console.log(`  - ${rel}`);
 	}
-	return toCopy.length + toDelete.length;
+	if (gitignoreStale) {
+		console.log("Will regenerate pie/.gitignore from FORKED_FILES.");
+	}
+	return changed + (gitignoreStale ? 1 : 0);
 }
 
 if (mode === "list") {
@@ -122,5 +161,10 @@ if (mode === "list") {
 	for (const rel of toDelete) {
 		rmSync(join(dstDir, rel), { force: true });
 	}
-	console.log(`Synced: ${toCopy.length} copied, ${toDelete.length} deleted.`);
+	if (gitignoreStale) {
+		writeFileSync(gitignorePath, nextGitignore);
+	}
+	console.log(
+		`Synced: ${toCopy.length} copied, ${toDelete.length} deleted, pie/.gitignore ${gitignoreStale ? "regenerated" : "unchanged"}.`,
+	);
 }

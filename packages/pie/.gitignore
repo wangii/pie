@@ -1,21 +1,28 @@
 *.bun-build
 
-# Only forked source files are maintained in this package.
+# Generated from FORKED_FILES by scripts/sync-pie-shared.mjs — do not edit by hand.
+# Only forked source files are maintained in this package; everything else under src/
+# is synced verbatim from packages/coding-agent/src.
 src/**
-
-# Keep the files listed in FORKED_FILES visible to Git.
 !src/cli/
+!src/core/
+!src/core/belief-loop/
+!src/core/extensions/
+!src/core/tools/
+!src/modes/
+!src/modes/interactive/
+!src/modes/interactive/components/
+!src/modes/interactive/theme/
+!src/modes/rpc/
+!src/utils/
 !src/cli/args.ts
 !src/cli/startup-ui.ts
 !src/config.ts
-!src/core/
-!src/core/agent-session.ts
 !src/core/agent-session-domain.ts
-!src/core/belief-loop/
-!src/core/belief-loop/message-projection.ts
+!src/core/agent-session.ts
 !src/core/belief-loop/belief-loop-controller.ts
+!src/core/belief-loop/message-projection.ts
 !src/core/belief-set.ts
-!src/core/extensions/
 !src/core/extensions/index.ts
 !src/core/extensions/loader.ts
 !src/core/extensions/runner.ts
@@ -32,22 +39,15 @@ src/**
 !src/core/skills.ts
 !src/core/slash-commands.ts
 !src/core/system-prompt.ts
-!src/core/tools/
 !src/core/tools/conclude.ts
 !src/core/tools/declare-belief.ts
 !src/core/tools/view-beliefs.ts
 !src/index.ts
 !src/main.ts
-!src/modes/
-!src/modes/interactive/
-!src/modes/interactive/components/
 !src/modes/interactive/components/belief-set-panel.ts
 !src/modes/interactive/components/footer.ts
 !src/modes/interactive/interactive-mode.ts
-!src/modes/interactive/theme/
 !src/modes/interactive/theme/theme.ts
 !src/modes/print-mode.ts
-!src/modes/rpc/
 !src/modes/rpc/rpc-mode.ts
-!src/utils/
 !src/utils/changelog.ts

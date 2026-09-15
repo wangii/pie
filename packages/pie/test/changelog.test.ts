@@ -20,9 +20,20 @@ describe("normalizeChangelogLinks", () => {
 		expect(normalizeChangelogLinks(markdown, entry)).toBe(
 			[
 				"[Project Trust](https://github.com/earendil-works/pi/blob/v0.79.0/packages/pie/README.md#project-trust)",
-				"[Extensions](https://github.com/earendil-works/pi/blob/v0.79.0/packages/pie/docs/extensions.md#project_trust)",
-				"[Examples](https://github.com/earendil-works/pi/tree/v0.79.0/packages/pie/examples/extensions/)",
+				"[Extensions](https://github.com/earendil-works/pi/blob/v0.79.0/packages/coding-agent/docs/extensions.md#project_trust)",
+				"[Examples](https://github.com/earendil-works/pi/tree/v0.79.0/packages/coding-agent/examples/extensions/)",
 				"[Root README](https://github.com/earendil-works/pi/blob/v0.79.0/README.md#supply-chain-hardening)",
+			].join("\n"),
+		);
+	});
+
+	test("keeps sibling-package links relative to the repository root", () => {
+		const markdown = ["[TUI](../tui/README.md)", "[Test helper](test/rpc-example.ts)"].join("\n");
+
+		expect(normalizeChangelogLinks(markdown, entry)).toBe(
+			[
+				"[TUI](https://github.com/earendil-works/pi/blob/v0.79.0/packages/tui/README.md)",
+				"[Test helper](https://github.com/earendil-works/pi/blob/v0.79.0/packages/pie/test/rpc-example.ts)",
 			].join("\n"),
 		);
 	});

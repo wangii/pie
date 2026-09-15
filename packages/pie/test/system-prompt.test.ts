@@ -88,6 +88,52 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Use the read tool to load a skill's file");
 		});
 
+		test.each([
+			{ name: "default prompt", customPrompt: undefined },
+			{ name: "custom prompt", customPrompt: "Custom system prompt" },
+		])("bash-only tool set still gets the full skills block in the $name", ({ customPrompt }) => {
+			const prompt = buildSystemPrompt({
+				customPrompt,
+				selectedTools: ["bash"],
+				role: "coding",
+				skills: [
+					{
+						name: "add-llm-provider",
+						description: "Checklist for adding a provider",
+						filePath: "/x/add-llm-provider.md",
+						baseDir: "/x",
+						sourceInfo: createSyntheticSourceInfo("/x/add-llm-provider.md", { source: "project" }),
+						disableModelInvocation: false,
+					},
+				],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("<available_skills>");
+			expect(prompt).toContain("<name>add-llm-provider</name>");
+			expect(prompt).toContain("Use bash to load a skill's file");
+		});
+
+		test("omits skills when neither read nor bash is available", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["write"],
+				role: "coding",
+				skills: [
+					{
+						name: "add-llm-provider",
+						description: "Checklist for adding a provider",
+						filePath: "/x/add-llm-provider.md",
+						baseDir: "/x",
+						sourceInfo: createSyntheticSourceInfo("/x/add-llm-provider.md", { source: "project" }),
+						disableModelInvocation: false,
+					},
+				],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("<available_skills>");
+		});
+
 		test("epistemic role omits the coding-agent preamble, pi docs, and file-path guideline", () => {
 			const prompt = buildSystemPrompt({
 				role: "propose",

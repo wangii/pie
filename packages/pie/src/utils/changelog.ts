@@ -10,6 +10,12 @@ export interface ChangelogEntry {
 
 const GITHUB_REPO = "earendil-works/pi";
 const CHANGELOG_LINK_BASE_PATH = "packages/pie";
+// General documentation and the examples directory are shared with the base coding agent rather
+// than duplicated into this package (see packages/pie/docs/README.md, and note that pie has no
+// examples directory at all). Package-relative `docs/…` and `examples/…` links in the changelog
+// therefore resolve against packages/coding-agent; everything else stays relative to packages/pie.
+const SHARED_LINK_BASE_PATH = "packages/coding-agent";
+const SHARED_LINK_PREFIXES = ["docs/", "examples/"];
 const LEGACY_REPO_RE = /^https:\/\/github\.com\/(?:badlogic|earendil-works)\/pi-mono(?=\/|$)/;
 const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 const INLINE_MARKDOWN_LINK_RE = /(!?\[[^\]\n]+\]\()([^\s)]+)((?:\s+[^)]*)?\))/g;
@@ -46,9 +52,12 @@ function normalizePathPart(value: string): string {
 
 function resolveRepositoryPath(targetPath: string): string | undefined {
 	const normalizedTarget = normalizePathPart(targetPath);
+	const basePath = SHARED_LINK_PREFIXES.some((prefix) => normalizedTarget.startsWith(prefix))
+		? SHARED_LINK_BASE_PATH
+		: CHANGELOG_LINK_BASE_PATH;
 	const joined = normalizedTarget.startsWith("/")
 		? path.posix.normalize(normalizedTarget.replace(/^\/+/, ""))
-		: path.posix.normalize(path.posix.join(CHANGELOG_LINK_BASE_PATH, normalizedTarget));
+		: path.posix.normalize(path.posix.join(basePath, normalizedTarget));
 
 	if (joined === "." || joined.startsWith("../") || joined === "..") {
 		return undefined;
