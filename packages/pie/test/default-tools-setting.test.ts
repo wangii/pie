@@ -67,6 +67,7 @@ describe("defaultTools setting", () => {
 			"bash",
 			"conclude",
 			"declare_belief",
+			"defer_formulation",
 			"edit",
 			"find",
 			"focus_beliefs",
@@ -77,6 +78,7 @@ describe("defaultTools setting", () => {
 			"report_outcome",
 			"route_task",
 			"select_experiment",
+			"set_formulation",
 			"view_beliefs",
 			"write",
 		]);
@@ -87,6 +89,8 @@ describe("defaultTools setting", () => {
 			"declare_belief",
 			"focus_beliefs",
 			"select_experiment",
+			"set_formulation",
+			"defer_formulation",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -135,12 +139,14 @@ describe("defaultTools setting", () => {
 		expect(session.getActiveToolNames().sort()).toEqual([
 			"conclude",
 			"declare_belief",
+			"defer_formulation",
 			"dynamic_tool",
 			"focus_beliefs",
 			"grep",
 			"route_task",
 			"sdk_tool",
 			"select_experiment",
+			"set_formulation",
 			"static_tool",
 			"view_beliefs",
 		]);
@@ -162,6 +168,8 @@ describe("defaultTools setting", () => {
 			"declare_belief",
 			"focus_beliefs",
 			"select_experiment",
+			"set_formulation",
+			"defer_formulation",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -191,6 +199,7 @@ describe("defaultTools setting", () => {
 			"bash",
 			"conclude",
 			"declare_belief",
+			"defer_formulation",
 			"edit",
 			"find",
 			"focus_beliefs",
@@ -201,6 +210,7 @@ describe("defaultTools setting", () => {
 			"report_outcome",
 			"route_task",
 			"select_experiment",
+			"set_formulation",
 			"view_beliefs",
 			"write",
 		]);
@@ -210,6 +220,8 @@ describe("defaultTools setting", () => {
 			"declare_belief",
 			"focus_beliefs",
 			"select_experiment",
+			"set_formulation",
+			"defer_formulation",
 			"view_beliefs",
 			"conclude",
 		]);

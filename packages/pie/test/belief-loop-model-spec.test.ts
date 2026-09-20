@@ -10,7 +10,7 @@ const models = {
 
 function state(role: LoopState["role"], fastPath = false): LoopState {
 	if (role === "execution") {
-		return { role, frameHorizon: 1, leaseReportNudged: false, ...(fastPath ? { fastPath: true } : {}) };
+		return { role, episodeHorizon: 1, leaseReportNudged: false, ...(fastPath ? { fastPath: true } : {}) };
 	}
 	return { role };
 }

@@ -2,14 +2,29 @@ import { randomUUID } from "node:crypto";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { CustomEntry, SessionEntry } from "./session-manager.ts";
 
-export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 1 as const;
+/**
+ * Domain protocol version.
+ *
+ * Each bump so far has been deliberately breaking, and stored events from an older version are
+ * rejected outright rather than aliased or migrated: a log that cannot be read faithfully must
+ * fail explicitly instead of replaying into a history with missing or misread records.
+ *
+ * - **v2** renamed the execution-round vocabulary from `TaskFrame`/`frameId` to
+ *   `ExecutionEpisode`/`episodeId`, because the old name made an execution round look like a
+ *   frame of reference.
+ * - **v3** added the task-level problem formulation: immutable versions, deferrals, and user
+ *   corrections. A `Plan` now names the formulation version its experiment was chosen under
+ *   (`FormulationAdoption`), so a v2 plan carries no such record and cannot be distinguished
+ *   from one whose version was never formed.
+ */
+export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 3 as const;
 export const AGENT_SESSION_DOMAIN_CUSTOM_ENTRY = "pie.agent-session-domain-event";
 
 export type SessionId = string;
 export type TaskId = string;
 export type PromptId = string;
 export type TargetId = string;
-export type FrameId = string;
+export type EpisodeId = string;
 export type RoutingId = string;
 export type BeliefId = string;
 export type BeliefDeltaId = string;
@@ -17,13 +32,15 @@ export type PlanId = string;
 export type ExecutionId = string;
 export type DistillationId = string;
 export type InterventionId = string;
+export type FormulationVersionId = string;
+export type FormulationCorrectionId = string;
 export type DomainEventId = string;
 
 export type DomainIdKind =
 	| "task"
 	| "prompt"
 	| "target"
-	| "frame"
+	| "episode"
 	| "routing"
 	| "belief"
 	| "belief-delta"
@@ -31,6 +48,8 @@ export type DomainIdKind =
 	| "execution"
 	| "distillation"
 	| "intervention"
+	| "formulation"
+	| "formulation-correction"
 	| "event";
 
 export function createDomainId(kind: DomainIdKind): string {
@@ -39,9 +58,9 @@ export function createDomainId(kind: DomainIdKind): string {
 
 export type DomainContent = string | readonly JsonValue[];
 export type TaskStatus = "active" | "completed" | "cancelled" | "failed";
-export type FrameStatus = "active" | "closed";
-export type FrameStage = "routing" | "proposing" | "executing" | "distilling" | "closed";
-export type FrameBodyKind = "belief-loop" | "fast-path";
+export type EpisodeStatus = "active" | "closed";
+export type EpisodeStage = "routing" | "proposing" | "executing" | "distilling" | "closed";
+export type EpisodeBodyKind = "belief-loop" | "fast-path";
 export type BeliefDomain = "product" | "code";
 export type BeliefStatus = "proposed" | "supported" | "refuted" | "inconclusive" | "superseded";
 export type BeliefOperation = "propose" | "support" | "refute" | "refine" | "inconclusive" | "retract";
@@ -115,10 +134,146 @@ export interface Routing {
 	readonly reason: string;
 }
 
+// ============================================================================
+// Problem formulation (the product-facing name is "Frame")
+// ============================================================================
+
+/**
+ * How the agent currently understands the task, in its own provisional first person. This is
+ * not a belief: it carries no evidence verdict and no truth status, and it never substitutes
+ * for one. Where a belief answers "what do I claim about the world", this answers "what do I
+ * currently take the task to be".
+ *
+ * `interpretation`, `focus`, and `implication` are required — a version that cannot say what it
+ * understands, what it is attending to, and what that changes would be a label rather than a
+ * working understanding. `alternative` and `tension` are optional and deliberately so: an
+ * agent with no meaningful rival reading and no articulated tension must be able to publish a
+ * real version rather than invent one to fill the field.
+ */
+export interface FormulationContent {
+	/** How I currently understand this task. */
+	readonly interpretation: string;
+	/** A reading I am not currently prioritizing. Not a refuted conclusion, not necessarily v(n-1). */
+	readonly alternative?: string;
+	/** Which objects, relations, or scales I am attending to under this reading. */
+	readonly focus: string;
+	/** The conflict, gap, or phenomenon I am trying to explain. Absent means "not yet clear". */
+	readonly tension?: string;
+	/** What this reading would change about where the investigation or intervention goes. */
+	readonly implication: string;
+}
+
+/**
+ * A stable reference to what a formulation was formed from. Every kind resolves to a record
+ * that is already durable, so a version can be audited later without re-running anything.
+ *
+ * A belief is always cited together with the delta that recorded its state at the time: a
+ * belief is mutable, and citing it by id alone would read today's state back into a past
+ * decision. Citing an existing record is also a legitimate source on its own — reinterpreting
+ * old evidence is a real reason to reframe, and does not require a fresh tool call.
+ */
+export type FormulationSource =
+	| { readonly kind: "prompt"; readonly promptId: PromptId }
+	| { readonly kind: "intervention"; readonly interventionId: InterventionId }
+	| { readonly kind: "correction"; readonly correctionId: FormulationCorrectionId }
+	| { readonly kind: "execution"; readonly executionId: ExecutionId }
+	| { readonly kind: "distillation"; readonly distillationId: DistillationId }
+	| { readonly kind: "belief"; readonly beliefId: BeliefId; readonly beliefDeltaId: BeliefDeltaId };
+
+/** Only propose publishes a formulation; the field is recorded so the log says so itself. */
+export type FormulationOrigin = "propose";
+
+/**
+ * One immutable revision of the task's problem understanding. Versions are append-only: a
+ * revision is a new version pointing back at its predecessor, never an edit of one. Whether a
+ * change is substantive is propose's judgment — the runtime only refuses to record a version
+ * whose content is byte-identical to the current one, and does not run a model to decide.
+ */
+export interface ProblemFormulationVersion {
+	readonly id: FormulationVersionId;
+	readonly taskId: TaskId;
+	readonly ordinal: number;
+	/** The version this one revises; absent only for the first version of a task. */
+	readonly previousVersionId?: FormulationVersionId;
+	readonly recordedAt: string;
+	readonly origin: FormulationOrigin;
+	readonly content: FormulationContent;
+	/** Short reason this version was formed or revised. */
+	readonly reason: string;
+	readonly sources: readonly FormulationSource[];
+}
+
+/**
+ * Recorded when propose has investigated but cannot yet state a problem understanding. This is
+ * a state in its own right — "not investigated" and "investigated and deferred" are different —
+ * and it is never a blank version: it records what is missing and why, and it does not erase a
+ * version that already exists.
+ */
+export interface FormulationDeferral {
+	readonly missingInformation: string;
+	readonly reason: string;
+	readonly sources: readonly FormulationSource[];
+	readonly deferredAt: string;
+	/**
+	 * The highest episode ordinal whose evidence had been gathered when this deferral was made.
+	 *
+	 * The fold derives it from the task rather than reading it off the event, so it cannot be
+	 * asserted wrong: it records the point in the investigation this deferral actually answered.
+	 * That is what lets later evidence re-open the decision instead of the deferral standing
+	 * forever as an exemption.
+	 */
+	readonly answeredThroughEpisodeOrdinal: number;
+}
+
+/**
+ * A user's correction to the agent's current understanding. Corrections are kept as their own
+ * record rather than written into the version they target, so the published version stays the
+ * agent's own stated position and the correction, with propose's response, stays auditable
+ * beside it.
+ */
+export interface FormulationCorrection {
+	readonly id: FormulationCorrectionId;
+	readonly taskId: TaskId;
+	/** The version the user was looking at. Absent when no version had been formed yet. */
+	readonly targetVersionId?: FormulationVersionId;
+	readonly original: DomainContent;
+	readonly receivedAt: string;
+	readonly status: FormulationCorrectionStatus;
+	/** Propose's response. Required once resolved, absent while pending. */
+	readonly response?: string;
+	/** The version published while answering this correction, when the response was a revision. */
+	readonly recordedVersionId?: FormulationVersionId;
+}
+
+export type FormulationCorrectionStatus = "pending" | "resolved";
+
+/**
+ * The formulation version a decision was made under.
+ *
+ * `unformed` is a recorded fact — no version existed at that moment — not a missing field. It
+ * is what keeps a first investigation honest: the version that a later round publishes cannot
+ * be back-dated onto a selection that was made before it existed.
+ */
+export type FormulationAdoption =
+	| { readonly kind: "version"; readonly versionId: FormulationVersionId }
+	| { readonly kind: "unformed" };
+
+/** The required fields a formulation must state, else it is not a usable understanding. */
+export function formulationContentError(content: FormulationContent): string | undefined {
+	const missing: string[] = [];
+	if (!content.interpretation?.trim()) missing.push("interpretation");
+	if (!content.focus?.trim()) missing.push("focus");
+	if (!content.implication?.trim()) missing.push("implication");
+	if (missing.length === 0) return undefined;
+	return `formulation is missing required content: ${missing.join(", ")}`;
+}
+
 export interface Plan {
 	readonly id: PlanId;
 	readonly selectedToExplore: readonly BeliefId[];
 	readonly intent?: string;
+	/** The formulation version this experiment was chosen under. */
+	readonly formulation: FormulationAdoption;
 }
 
 export interface Execution {
@@ -142,7 +297,7 @@ export interface Distillation {
 
 export interface BeliefDelta {
 	readonly id: BeliefDeltaId;
-	readonly frameId: FrameId;
+	readonly episodeId: EpisodeId;
 	readonly distillationId?: DistillationId;
 	/** Cognitive phase that produced this mutation; never inferred from event order. */
 	readonly producerPhase: BeliefDeltaProducerPhase;
@@ -161,16 +316,16 @@ export interface BeliefDelta {
 export interface Intervention {
 	readonly id: InterventionId;
 	readonly contents: DomainContent;
-	readonly stage: FrameStage;
+	readonly stage: EpisodeStage;
 	readonly afterExecution?: ExecutionId;
 	readonly createdAt: string;
 }
 
-export interface PendingFrame {
+export interface PendingEpisode {
 	readonly kind: "pending";
 }
 
-export interface BeliefLoopFrame {
+export interface BeliefLoopEpisode {
 	readonly kind: "belief-loop";
 	readonly openBeliefsAtStart: readonly BeliefId[];
 	readonly plan?: Plan;
@@ -179,23 +334,38 @@ export interface BeliefLoopFrame {
 	readonly beliefDeltas: readonly BeliefDelta[];
 }
 
-export interface FastPathFrame {
+export interface FastPathEpisode {
 	readonly kind: "fast-path";
 	readonly trajectory: readonly Execution[];
 	readonly distillation?: Distillation;
+	/**
+	 * The formulation version this fast-path dispatch ran under. The fast path has no Plan to
+	 * carry it, so the episode records it directly — and `unformed` is the honest record for a
+	 * first investigation, rather than omitting the field and leaving a reader unable to tell
+	 * "no version existed" from "the version was not recorded".
+	 */
+	readonly formulation: FormulationAdoption;
 }
 
-export type TaskFrameBody = PendingFrame | BeliefLoopFrame | FastPathFrame;
+export type EpisodeBody = PendingEpisode | BeliefLoopEpisode | FastPathEpisode;
 
-export interface TaskFrame {
-	readonly id: FrameId;
+/**
+ * One execution round: a routing decision, one experiment, and the evidence it produced.
+ *
+ * An episode is the unit the belief loop dispatches into — "what was tried, and what came back".
+ * It is not the agent's problem formulation: `Stage`/`Status` here describe where a round is in
+ * the loop, and `EpisodeStage`'s `proposing`/`distilling` name the roles that owned the round,
+ * not an interpretation of the task. The problem formulation is a separate, task-level record.
+ */
+export interface ExecutionEpisode {
+	readonly id: EpisodeId;
 	readonly taskId: TaskId;
 	readonly ordinal: number;
-	readonly status: FrameStatus;
-	readonly stage: FrameStage;
+	readonly status: EpisodeStatus;
+	readonly stage: EpisodeStage;
 	readonly steering: readonly Intervention[];
 	readonly routing?: Routing;
-	readonly body: TaskFrameBody;
+	readonly body: EpisodeBody;
 }
 
 export interface Task {
@@ -206,7 +376,7 @@ export interface Task {
 	readonly status: TaskStatus;
 	readonly inheritedBeliefs: readonly BeliefId[];
 	readonly introducedBeliefs: readonly BeliefId[];
-	readonly frames: readonly TaskFrame[];
+	readonly episodes: readonly ExecutionEpisode[];
 	/**
 	 * The belief ids this task declared it is acting on. Scope, not truth: membership never
 	 * changes a belief's status, and the slice is never inherited from the parent task.
@@ -215,12 +385,28 @@ export interface Task {
 	readonly focus: readonly BeliefId[];
 	readonly focusDeclared: boolean;
 	readonly taskOutcome?: TaskOutcome;
+	/**
+	 * This task's problem-formulation history, oldest first. Append-only and never inherited:
+	 * a new task starts with an empty history because its understanding of its own request is
+	 * its own, even though the beliefs it reasons from carry over. A previous task's version is
+	 * available as context, never as this task's current understanding.
+	 */
+	readonly formulations: readonly ProblemFormulationVersion[];
+	/**
+	 * Set while propose has deferred forming an understanding and has not published since. A
+	 * deferral is cleared by a publication, never by another deferral's absence, and it never
+	 * removes a version from `formulations` — a deferral after a version exists adds a state
+	 * beside the current understanding rather than erasing it.
+	 */
+	readonly formulationDeferral?: FormulationDeferral;
+	/** Corrections the user submitted against this task's understanding, oldest first. */
+	readonly formulationCorrections: readonly FormulationCorrection[];
 }
 
 export interface AgentSessionCursor {
 	readonly taskId: TaskId;
-	readonly frameId: FrameId;
-	readonly stage: FrameStage;
+	readonly episodeId: EpisodeId;
+	readonly stage: EpisodeStage;
 }
 
 export interface AgentSessionSnapshot {
@@ -243,8 +429,8 @@ interface TaskEventBase extends DomainEventBase {
 	readonly taskId: TaskId;
 }
 
-interface FrameEventBase extends TaskEventBase {
-	readonly frameId: FrameId;
+interface EpisodeEventBase extends TaskEventBase {
+	readonly episodeId: EpisodeId;
 }
 
 export type AgentSessionDomainEvent =
@@ -257,32 +443,53 @@ export type AgentSessionDomainEvent =
 	  })
 	| (TaskEventBase & { type: "TaskClosed"; status: Exclude<TaskStatus, "active"> })
 	| (TaskEventBase & { type: "TargetDefined"; target: Target })
-	// Task scope, not frame content: the focus slice the task acts on, and the outcome it
+	// Task scope, not episode content: the focus slice the task acts on, and the outcome it
 	// delivered. The event's presence IS the declaration — `beliefIds: []` is "declared and
 	// empty", distinct from a task that never declared a focus.
 	| (TaskEventBase & { type: "FocusDeclared"; beliefIds: readonly BeliefId[] })
 	| (TaskEventBase & { type: "TaskOutcomeRecorded"; outcome: TaskOutcome })
-	| (TaskEventBase & { type: "FrameOpened"; frameId: FrameId; ordinal: number })
-	| (FrameEventBase & { type: "RoutingDecided"; routing: Routing })
-	| (FrameEventBase & {
-			type: "FrameBodySelected";
-			body: FrameBodyKind;
-			openBeliefsAtStart?: readonly BeliefId[];
+	// Task-level, not episode content: the agent's understanding of its own task is not a
+	// property of any one execution round, so publication, deferral, and corrections hang off
+	// the task and outlive the rounds they were formed in.
+	| (TaskEventBase & { type: "ProblemFormulationRecorded"; version: ProblemFormulationVersion })
+	| (TaskEventBase & {
+			type: "ProblemFormulationDeferred";
+			missingInformation: string;
+			reason: string;
+			sources: readonly FormulationSource[];
+			deferredAt: string;
 	  })
-	| (FrameEventBase & { type: "FrameClosed" })
-	| (FrameEventBase & { type: "CursorChanged"; stage: FrameStage })
-	| (FrameEventBase & { type: "InterventionAdded"; intervention: Intervention })
-	| (FrameEventBase & { type: "BeliefDeltaApplied"; delta: BeliefDelta; activeBeliefs: readonly BeliefId[] })
-	| (FrameEventBase & { type: "PlanProduced"; plan: Plan })
-	| (FrameEventBase & { type: "ExecutionStarted"; execution: Omit<Execution, "output" | "status" | "error"> })
-	| (FrameEventBase & {
+	| (TaskEventBase & { type: "FormulationCorrectionSubmitted"; correction: FormulationCorrection })
+	| (TaskEventBase & {
+			type: "FormulationCorrectionResolved";
+			correctionId: FormulationCorrectionId;
+			response: string;
+			/** The version published while answering, when the response was a revision. */
+			recordedVersionId?: FormulationVersionId;
+	  })
+	| (TaskEventBase & { type: "EpisodeOpened"; episodeId: EpisodeId; ordinal: number })
+	| (EpisodeEventBase & { type: "RoutingDecided"; routing: Routing })
+	| (EpisodeEventBase & {
+			type: "EpisodeBodySelected";
+			body: EpisodeBodyKind;
+			openBeliefsAtStart?: readonly BeliefId[];
+			/** Required when `body` is `fast-path`; ignored for a belief-loop episode, whose plan carries it. */
+			formulation?: FormulationAdoption;
+	  })
+	| (EpisodeEventBase & { type: "EpisodeClosed" })
+	| (EpisodeEventBase & { type: "CursorChanged"; stage: EpisodeStage })
+	| (EpisodeEventBase & { type: "InterventionAdded"; intervention: Intervention })
+	| (EpisodeEventBase & { type: "BeliefDeltaApplied"; delta: BeliefDelta; activeBeliefs: readonly BeliefId[] })
+	| (EpisodeEventBase & { type: "PlanProduced"; plan: Plan })
+	| (EpisodeEventBase & { type: "ExecutionStarted"; execution: Omit<Execution, "output" | "status" | "error"> })
+	| (EpisodeEventBase & {
 			type: "ExecutionCompleted";
 			executionId: ExecutionId;
 			output: DomainContent;
 			status: Exclude<ExecutionStatus, "running">;
 			error?: string;
 	  })
-	| (FrameEventBase & { type: "DistillationProduced"; distillation: Distillation });
+	| (EpisodeEventBase & { type: "DistillationProduced"; distillation: Distillation });
 
 export interface StoredAgentSessionDomainEvent {
 	readonly schemaVersion: typeof AGENT_SESSION_DOMAIN_SCHEMA_VERSION;
@@ -311,11 +518,14 @@ function requireTask(snapshot: AgentSessionSnapshot, event: TaskEventBase): Task
 	return task;
 }
 
-function requireFrame(snapshot: AgentSessionSnapshot, event: FrameEventBase): { task: Task; frame: TaskFrame } {
+function requireEpisode(
+	snapshot: AgentSessionSnapshot,
+	event: EpisodeEventBase,
+): { task: Task; episode: ExecutionEpisode } {
 	const task = requireTask(snapshot, event);
-	const frame = task.frames.find((candidate) => candidate.id === event.frameId);
-	if (!frame) fail(event, `unknown frame ${event.frameId}`);
-	return { task, frame };
+	const episode = task.episodes.find((candidate) => candidate.id === event.episodeId);
+	if (!episode) fail(event, `unknown episode ${event.episodeId}`);
+	return { task, episode };
 }
 
 function replaceTask(snapshot: AgentSessionSnapshot, task: Task): ReadonlyMap<TaskId, Task> {
@@ -324,37 +534,209 @@ function replaceTask(snapshot: AgentSessionSnapshot, task: Task): ReadonlyMap<Ta
 	return tasks;
 }
 
-function replaceFrame(task: Task, frame: TaskFrame): Task {
+function replaceEpisode(task: Task, episode: ExecutionEpisode): Task {
 	return {
 		...task,
-		frames: task.frames.map((candidate) => (candidate.id === frame.id ? frame : candidate)),
+		episodes: task.episodes.map((candidate) => (candidate.id === episode.id ? episode : candidate)),
 	};
 }
 
-function requireActiveFrame(snapshot: AgentSessionSnapshot, event: FrameEventBase): { task: Task; frame: TaskFrame } {
-	const result = requireFrame(snapshot, event);
+function requireActiveEpisode(
+	snapshot: AgentSessionSnapshot,
+	event: EpisodeEventBase,
+): { task: Task; episode: ExecutionEpisode } {
+	const result = requireEpisode(snapshot, event);
 	if (result.task.status !== "active") fail(event, `task ${event.taskId} is ${result.task.status}`);
-	if (result.frame.status !== "active") fail(event, `frame ${event.frameId} is closed`);
+	if (result.episode.status !== "active") fail(event, `episode ${event.episodeId} is closed`);
 	return result;
 }
 
-function requireClassifiedFrame(
+function requireClassifiedEpisode(
 	snapshot: AgentSessionSnapshot,
-	event: FrameEventBase,
-): { task: Task; frame: TaskFrame & { body: BeliefLoopFrame | FastPathFrame } } {
-	const result = requireActiveFrame(snapshot, event);
-	if (result.frame.body.kind === "pending") fail(event, `frame ${event.frameId} has no selected body`);
-	return { task: result.task, frame: result.frame as TaskFrame & { body: BeliefLoopFrame | FastPathFrame } };
+	event: EpisodeEventBase,
+): { task: Task; episode: ExecutionEpisode & { body: BeliefLoopEpisode | FastPathEpisode } } {
+	const result = requireActiveEpisode(snapshot, event);
+	if (result.episode.body.kind === "pending") fail(event, `episode ${event.episodeId} has no selected body`);
+	return {
+		task: result.task,
+		episode: result.episode as ExecutionEpisode & { body: BeliefLoopEpisode | FastPathEpisode },
+	};
 }
 
 function replaceExecution(
-	body: BeliefLoopFrame | FastPathFrame,
+	body: BeliefLoopEpisode | FastPathEpisode,
 	execution: Execution,
-): BeliefLoopFrame | FastPathFrame {
+): BeliefLoopEpisode | FastPathEpisode {
 	return {
 		...body,
 		trajectory: body.trajectory.map((candidate) => (candidate.id === execution.id ? execution : candidate)),
 	};
+}
+
+/** This task's current understanding, or undefined before the first version. */
+export function currentFormulation(task: Task): ProblemFormulationVersion | undefined {
+	return task.formulations[task.formulations.length - 1];
+}
+
+/** Corrections still awaiting propose's response, oldest first. */
+export function pendingFormulationCorrections(task: Task): readonly FormulationCorrection[] {
+	return task.formulationCorrections.filter((correction) => correction.status === "pending");
+}
+
+/**
+ * The highest-numbered episode that had an experiment dispatched in it, or undefined if none has.
+ *
+ * "Dispatched" is read off the durable records rather than tracked in memory: a belief-loop
+ * episode records it in its `Plan`, and a fast-path episode has no plan, so its body selection is
+ * the record. That covers both round shapes and, importantly, covers the moment *during* a round —
+ * a distill turn that concludes still sees the dispatch that produced its evidence, so the
+ * terminal path cannot slip past the decision just because the episode has not closed yet.
+ *
+ * Routing alone does not count. Selecting a body and then waiting to choose an experiment is not
+ * an investigation, and demanding a reading for it would force one before anything was learned.
+ */
+export function latestDispatchedEpisodeOrdinal(task: Task): number | undefined {
+	let latest: number | undefined;
+	for (const episode of task.episodes) {
+		const dispatched =
+			episode.body.kind === "fast-path" || (episode.body.kind === "belief-loop" && episode.body.plan !== undefined);
+		if (dispatched) latest = episode.ordinal;
+	}
+	return latest;
+}
+
+/** The most recent delta on this task that recorded this belief's state, if any. */
+export function latestBeliefDeltaFor(task: Task, beliefId: BeliefId): BeliefDelta | undefined {
+	const deltas = task.episodes.flatMap((episode) =>
+		episode.body.kind === "belief-loop" ? episode.body.beliefDeltas : [],
+	);
+	for (let index = deltas.length - 1; index >= 0; index--) {
+		const delta = deltas[index]!;
+		const carries =
+			delta.resultBeliefId === beliefId ||
+			delta.sourceBeliefId === beliefId ||
+			delta.resultingBeliefs.some((belief) => belief.id === beliefId);
+		if (carries) return delta;
+	}
+	return undefined;
+}
+
+/**
+ * Whether propose owes a formulation decision — either publishing a version or recording a
+ * deferral.
+ *
+ * This is the runtime half of "investigate first, then say what you take the task to be": once an
+ * experiment has been dispatched, the task may not slide on without the agent ever stating what it
+ * made of it. It is deliberately narrow, because it is a gate on the loop:
+ *
+ * - Nothing is owed before the first dispatch: choosing a preliminary probe before having a
+ *   reading is legitimate, and gating it would force an uninformed formulation.
+ * - A published version settles it for good. Later revisions are propose's judgment on substance,
+ *   so accumulating evidence never nags a task into manufacturing a revision.
+ * - A deferral settles it only for the investigation it answered. A later dispatch re-opens the
+ *   question, which is what stops the first deferral from becoming a standing exemption.
+ */
+export function formulationDecisionOwed(task: Task): boolean {
+	const investigated = latestDispatchedEpisodeOrdinal(task);
+	if (investigated === undefined) return false;
+	if (currentFormulation(task)) return false;
+	const deferral = task.formulationDeferral;
+	return deferral === undefined || deferral.answeredThroughEpisodeOrdinal < investigated;
+}
+
+/**
+ * Resolve one formulation source to a record that already exists on this task.
+ *
+ * The point is auditability: a version must be traceable to the evidence it was formed from, and
+ * a citation that names nothing is worse than no citation because it reads as provenance. A
+ * belief is cited through a delta rather than an id alone, so replaying a version later shows the
+ * belief's state at the time instead of its latest one.
+ */
+export function formulationSourceError(task: Task, source: FormulationSource): string | undefined {
+	const episodes = task.episodes;
+	switch (source.kind) {
+		case "prompt":
+			return task.initialPrompt.id === source.promptId ? undefined : `unknown prompt ${source.promptId}`;
+		case "intervention":
+			return episodes.some((episode) => episode.steering.some((item) => item.id === source.interventionId))
+				? undefined
+				: `unknown intervention ${source.interventionId}`;
+		case "correction":
+			return task.formulationCorrections.some((correction) => correction.id === source.correctionId)
+				? undefined
+				: `unknown correction ${source.correctionId}`;
+		case "execution":
+			return episodes.some(
+				(episode) =>
+					episode.body.kind !== "pending" &&
+					episode.body.trajectory.some((execution) => execution.id === source.executionId),
+			)
+				? undefined
+				: `unknown execution ${source.executionId}`;
+		case "distillation":
+			return episodes.some(
+				(episode) => episode.body.kind !== "pending" && episode.body.distillation?.id === source.distillationId,
+			)
+				? undefined
+				: `unknown distillation ${source.distillationId}`;
+		case "belief": {
+			const delta = episodes
+				.flatMap((episode) => (episode.body.kind === "belief-loop" ? episode.body.beliefDeltas : []))
+				.find((candidate) => candidate.id === source.beliefDeltaId);
+			if (!delta) return `unknown belief delta ${source.beliefDeltaId}`;
+			// The delta must actually carry the cited belief. Without this, a version could cite a
+			// delta that says nothing about the belief it claims as its basis.
+			const cites =
+				delta.resultBeliefId === source.beliefId ||
+				delta.sourceBeliefId === source.beliefId ||
+				delta.resultingBeliefs.some((belief) => belief.id === source.beliefId);
+			return cites ? undefined : `belief delta ${delta.id} does not carry belief ${source.beliefId}`;
+		}
+		default:
+			return `unknown formulation source ${JSON.stringify(source)}`;
+	}
+}
+
+function requireFormulationSources(
+	task: Task,
+	event: AgentSessionDomainEvent,
+	sources: readonly FormulationSource[],
+): void {
+	for (const source of sources) {
+		const error = formulationSourceError(task, source);
+		if (error) fail(event, error);
+	}
+}
+
+function formulationContentFailure(event: AgentSessionDomainEvent, content: FormulationContent): void {
+	const error = formulationContentError(content);
+	if (error) fail(event, error);
+	// An optional field that is present must say something: a blank `alternative` or `tension`
+	// is a filled-in field masquerading as content, and the whole point of leaving them optional
+	// is that an agent with nothing to say leaves them out.
+	if (content.alternative !== undefined && !content.alternative.trim()) {
+		fail(event, "formulation alternative is present but empty");
+	}
+	if (content.tension !== undefined && !content.tension.trim()) {
+		fail(event, "formulation tension is present but empty");
+	}
+}
+
+function requireAdoption(event: AgentSessionDomainEvent, task: Task, adoption: FormulationAdoption): void {
+	if (adoption.kind === "version") {
+		if (!task.formulations.some((version) => version.id === adoption.versionId)) {
+			fail(event, `unknown formulation version ${adoption.versionId}`);
+		}
+		return;
+	}
+	// `unformed` is a recorded fact about the moment of the decision, so it cannot be claimed
+	// once a version exists: a selection made after a publication is under that publication, and
+	// marking it "unformed" would let a later version escape being the basis of a decision it
+	// actually governed.
+	if (task.formulations.length > 0) {
+		const current = currentFormulation(task);
+		fail(event, `formulation is ${current?.id} but this record claims no version was formed`);
+	}
 }
 
 export function applyAgentSessionDomainEvent(
@@ -381,11 +763,15 @@ export function applyAgentSessionDomainEvent(
 				status: "active",
 				inheritedBeliefs: [...event.inheritedBeliefs],
 				introducedBeliefs: [],
-				frames: [],
+				episodes: [],
 				// A new task inherits beliefs, never scope: the parent's focus says nothing about
 				// what this task is acting on, so it starts undeclared.
 				focus: [],
 				focusDeclared: false,
+				// Understanding is not inherited either. The previous task's versions stay readable as
+				// context, but this task's current understanding must be formed and owned by this task.
+				formulations: [],
+				formulationCorrections: [],
 			};
 			const tasks = new Map(snapshot.tasks);
 			tasks.set(task.id, task);
@@ -400,7 +786,8 @@ export function applyAgentSessionDomainEvent(
 			const task = requireTask(snapshot, event);
 			if (task.status !== "active") fail(event, `task ${task.id} is already ${task.status}`);
 			if (!task.initialTarget) fail(event, `task ${task.id} has no target`);
-			if (task.frames.some((frame) => frame.status !== "closed")) fail(event, `task ${task.id} has an open frame`);
+			if (task.episodes.some((episode) => episode.status !== "closed"))
+				fail(event, `task ${task.id} has an open episode`);
 			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, status: event.status }) };
 		}
 		case "TargetDefined": {
@@ -415,7 +802,7 @@ export function applyAgentSessionDomainEvent(
 			// Re-declaration replaces, matching FocusSet's replace semantics: a task may restate or
 			// narrow its scope, and the last declaration wins. No belief-existence check: a focus id
 			// can name a belief that has no BeliefDeltaApplied yet (see `onBeliefDelta`'s
-			// no-current-frame early return), which is a legitimate in-flight state.
+			// no-current-episode early return), which is a legitimate in-flight state.
 			return {
 				...snapshot,
 				tasks: replaceTask(snapshot, { ...task, focus: [...event.beliefIds], focusDeclared: true }),
@@ -430,18 +817,144 @@ export function applyAgentSessionDomainEvent(
 			// the model may conclude again with a corrected delivery record.
 			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, taskOutcome: event.outcome }) };
 		}
-		case "FrameOpened": {
+		case "ProblemFormulationRecorded": {
 			const task = requireTask(snapshot, event);
 			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
-			if (task.frames.some((frame) => frame.status === "active"))
-				fail(event, `task ${task.id} already has an open frame`);
-			if (task.frames.some((frame) => frame.id === event.frameId))
-				fail(event, `frame ${event.frameId} already exists`);
-			if (event.ordinal !== task.frames.length + 1) {
-				fail(event, `frame ordinal ${event.ordinal} does not follow ${task.frames.length}`);
+			const version = event.version;
+			if (version.taskId !== task.id) {
+				fail(event, `formulation version ${version.id} names task ${version.taskId}`);
 			}
-			const frame: TaskFrame = {
-				id: event.frameId,
+			if (version.origin !== "propose") fail(event, `formulation version ${version.id} is not published by propose`);
+			formulationContentFailure(event, version.content);
+			if (!version.reason.trim()) fail(event, `formulation version ${version.id} has no reason`);
+			if (!version.recordedAt.trim()) fail(event, `formulation version ${version.id} has no recorded time`);
+			if (task.formulations.some((existing) => existing.id === version.id)) {
+				fail(event, `formulation version ${version.id} already exists`);
+			}
+			const current = currentFormulation(task);
+			if (version.ordinal !== task.formulations.length + 1) {
+				fail(event, `formulation ordinal ${version.ordinal} does not follow ${task.formulations.length}`);
+			}
+			// The chain is what makes the history a history: a revision must name the version it
+			// revises, and a first version must not name one. Together with the append-only store and
+			// the ordinal check, this is what "versions are immutable" means on replay.
+			if (current === undefined) {
+				if (version.previousVersionId !== undefined) {
+					fail(event, `first formulation version ${version.id} names a previous version`);
+				}
+			} else if (version.previousVersionId !== current.id) {
+				fail(event, `formulation version ${version.id} does not follow ${current.id}`);
+			}
+			requireFormulationSources(task, event, version.sources);
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, {
+					...task,
+					formulations: [...task.formulations, version],
+					// Publishing answers the deferral: whatever was missing has been supplied, so the
+					// deferred state stops being current. The deferral record itself is not erased from
+					// the event log, only from the task's current state.
+					formulationDeferral: undefined,
+				}),
+			};
+		}
+		case "ProblemFormulationDeferred": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			if (!event.missingInformation.trim()) fail(event, "formulation deferral has no missing information");
+			if (!event.reason.trim()) fail(event, "formulation deferral has no reason");
+			requireFormulationSources(task, event, event.sources);
+			// Last-wins, like the other task-level states. A later deferral replaces the earlier one
+			// because it was made against the newer evidence; it never removes a version, so a
+			// deferral recorded after a publication leaves the current understanding in place.
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, {
+					...task,
+					formulationDeferral: {
+						missingInformation: event.missingInformation,
+						reason: event.reason,
+						sources: [...event.sources],
+						deferredAt: event.deferredAt,
+						// Derived, not read off the event: the deferral answers the investigation as it
+						// stood at this point in the log, and a later episode re-opens the decision.
+						answeredThroughEpisodeOrdinal: latestDispatchedEpisodeOrdinal(task) ?? 0,
+					},
+				}),
+			};
+		}
+		case "FormulationCorrectionSubmitted": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			const correction = event.correction;
+			if (correction.taskId !== task.id) {
+				fail(event, `correction ${correction.id} names task ${correction.taskId}`);
+			}
+			if (task.formulationCorrections.some((existing) => existing.id === correction.id)) {
+				fail(event, `correction ${correction.id} already exists`);
+			}
+			if (correction.status !== "pending") fail(event, `correction ${correction.id} is not submitted as pending`);
+			if (!correction.receivedAt.trim()) fail(event, `correction ${correction.id} has no received time`);
+			// A correction may target no version — the user can object to the current understanding
+			// before any version exists — but a target it does name must be a real one, so "which
+			// version was the user looking at" is answerable later.
+			if (correction.targetVersionId !== undefined) {
+				if (!task.formulations.some((version) => version.id === correction.targetVersionId)) {
+					fail(event, `correction ${correction.id} targets unknown formulation ${correction.targetVersionId}`);
+				}
+			}
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, {
+					...task,
+					formulationCorrections: [...task.formulationCorrections, correction],
+				}),
+			};
+		}
+		case "FormulationCorrectionResolved": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			const correction = task.formulationCorrections.find((candidate) => candidate.id === event.correctionId);
+			if (!correction) fail(event, `unknown correction ${event.correctionId}`);
+			if (correction.status !== "pending") fail(event, `correction ${correction.id} is already resolved`);
+			// Only a response that says something resolves a correction. An empty one would mark a
+			// correction handled without the user ever learning how it was handled.
+			if (!event.response.trim()) fail(event, `correction ${correction.id} is resolved without a response`);
+			if (event.recordedVersionId !== undefined) {
+				if (!task.formulations.some((version) => version.id === event.recordedVersionId)) {
+					fail(event, `correction ${correction.id} names unknown formulation ${event.recordedVersionId}`);
+				}
+			}
+			// Resolution is addressed to one correction id, so an answer to an older correction can
+			// never be recorded as the answer to a newer one that arrived while it was being handled.
+			const resolved: FormulationCorrection = {
+				...correction,
+				status: "resolved",
+				response: event.response,
+				recordedVersionId: event.recordedVersionId,
+			};
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, {
+					...task,
+					formulationCorrections: task.formulationCorrections.map((candidate) =>
+						candidate.id === resolved.id ? resolved : candidate,
+					),
+				}),
+			};
+		}
+		case "EpisodeOpened": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			if (task.episodes.some((episode) => episode.status === "active"))
+				fail(event, `task ${task.id} already has an open episode`);
+			if (task.episodes.some((episode) => episode.id === event.episodeId))
+				fail(event, `episode ${event.episodeId} already exists`);
+			if (event.ordinal !== task.episodes.length + 1) {
+				fail(event, `episode ordinal ${event.ordinal} does not follow ${task.episodes.length}`);
+			}
+			const episode: ExecutionEpisode = {
+				id: event.episodeId,
 				taskId: task.id,
 				ordinal: event.ordinal,
 				status: "active",
@@ -449,66 +962,85 @@ export function applyAgentSessionDomainEvent(
 				steering: [],
 				body: { kind: "pending" },
 			};
-			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, frames: [...task.frames, frame] }) };
+			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, episodes: [...task.episodes, episode] }) };
 		}
 		case "RoutingDecided": {
-			const { task, frame } = requireActiveFrame(snapshot, event);
-			if (frame.routing) fail(event, `frame ${frame.id} already has routing`);
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, routing: event.routing })) };
-		}
-		case "FrameBodySelected": {
-			const { task, frame } = requireActiveFrame(snapshot, event);
-			if (frame.body.kind !== "pending") fail(event, `frame ${frame.id} body is already ${frame.body.kind}`);
-			if (frame.routing && frame.routing.decision !== event.body) {
-				fail(event, `routing selected ${frame.routing.decision}, not ${event.body}`);
-			}
-			const body: BeliefLoopFrame | FastPathFrame =
-				event.body === "belief-loop"
-					? {
-							kind: "belief-loop",
-							openBeliefsAtStart: [...(event.openBeliefsAtStart ?? [])],
-							trajectory: [],
-							beliefDeltas: [],
-						}
-					: { kind: "fast-path", trajectory: [] };
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };
-		}
-		case "FrameClosed": {
-			const { task, frame } = requireClassifiedFrame(snapshot, event);
-			if (frame.body.trajectory.some((execution) => execution.status === "running")) {
-				fail(event, `frame ${frame.id} has a running execution`);
-			}
-			if (frame.body.kind === "belief-loop" && !frame.body.plan) {
-				fail(event, `belief-loop frame ${frame.id} has no plan`);
-			}
-			const closed = { ...frame, status: "closed" as const, stage: "closed" as const };
+			const { task, episode } = requireActiveEpisode(snapshot, event);
+			if (episode.routing) fail(event, `episode ${episode.id} already has routing`);
 			return {
 				...snapshot,
-				tasks: replaceTask(snapshot, replaceFrame(task, closed)),
-				cursor: snapshot.cursor?.frameId === frame.id ? { ...snapshot.cursor, stage: "closed" } : snapshot.cursor,
+				tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, routing: event.routing })),
+			};
+		}
+		case "EpisodeBodySelected": {
+			const { task, episode } = requireActiveEpisode(snapshot, event);
+			if (episode.body.kind !== "pending") fail(event, `episode ${episode.id} body is already ${episode.body.kind}`);
+			if (episode.routing && episode.routing.decision !== event.body) {
+				fail(event, `routing selected ${episode.routing.decision}, not ${event.body}`);
+			}
+			let body: BeliefLoopEpisode | FastPathEpisode;
+			if (event.body === "belief-loop") {
+				// A belief-loop episode never carries the adoption itself: its Plan does, so the
+				// selection and the dispatch cannot disagree about which version governed them.
+				if (event.formulation !== undefined) {
+					fail(event, `belief-loop episode ${episode.id} records its formulation on the plan, not the body`);
+				}
+				body = {
+					kind: "belief-loop",
+					openBeliefsAtStart: [...(event.openBeliefsAtStart ?? [])],
+					trajectory: [],
+					beliefDeltas: [],
+				};
+			} else {
+				// The fast path has no Plan, so the episode is the only place this can be recorded.
+				// Requiring it here is deliberate: an absent field would be indistinguishable from
+				// "no version had been formed", which is exactly the distinction that matters.
+				if (event.formulation === undefined) {
+					fail(event, `fast-path episode ${episode.id} does not record which formulation it ran under`);
+				}
+				requireAdoption(event, task, event.formulation);
+				body = { kind: "fast-path", trajectory: [], formulation: event.formulation };
+			}
+			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
+		}
+		case "EpisodeClosed": {
+			const { task, episode } = requireClassifiedEpisode(snapshot, event);
+			if (episode.body.trajectory.some((execution) => execution.status === "running")) {
+				fail(event, `episode ${episode.id} has a running execution`);
+			}
+			if (episode.body.kind === "belief-loop" && !episode.body.plan) {
+				fail(event, `belief-loop episode ${episode.id} has no plan`);
+			}
+			const closed = { ...episode, status: "closed" as const, stage: "closed" as const };
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, replaceEpisode(task, closed)),
+				cursor:
+					snapshot.cursor?.episodeId === episode.id ? { ...snapshot.cursor, stage: "closed" } : snapshot.cursor,
 			};
 		}
 		case "CursorChanged": {
-			requireActiveFrame(snapshot, event);
+			requireActiveEpisode(snapshot, event);
 			return {
 				...snapshot,
-				cursor: { taskId: event.taskId, frameId: event.frameId, stage: event.stage },
+				cursor: { taskId: event.taskId, episodeId: event.episodeId, stage: event.stage },
 			};
 		}
 		case "InterventionAdded": {
-			const { task, frame } = requireActiveFrame(snapshot, event);
-			if (frame.steering.some((item) => item.id === event.intervention.id)) {
+			const { task, episode } = requireActiveEpisode(snapshot, event);
+			if (episode.steering.some((item) => item.id === event.intervention.id)) {
 				fail(event, `intervention ${event.intervention.id} already exists`);
 			}
-			const nextFrame = { ...frame, steering: [...frame.steering, event.intervention] };
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, nextFrame)) };
+			const nextEpisode = { ...episode, steering: [...episode.steering, event.intervention] };
+			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, nextEpisode)) };
 		}
 		case "BeliefDeltaApplied": {
-			const { task, frame } = requireClassifiedFrame(snapshot, event);
-			if (frame.body.kind !== "belief-loop") fail(event, `fast-path frame ${frame.id} cannot apply belief deltas`);
-			if (event.delta.frameId !== frame.id)
-				fail(event, `belief delta ${event.delta.id} names frame ${event.delta.frameId}`);
-			if (frame.body.beliefDeltas.some((delta) => delta.id === event.delta.id)) {
+			const { task, episode } = requireClassifiedEpisode(snapshot, event);
+			if (episode.body.kind !== "belief-loop")
+				fail(event, `fast-path episode ${episode.id} cannot apply belief deltas`);
+			if (event.delta.episodeId !== episode.id)
+				fail(event, `belief delta ${event.delta.id} names episode ${event.delta.episodeId}`);
+			if (episode.body.beliefDeltas.some((delta) => delta.id === event.delta.id)) {
 				fail(event, `belief delta ${event.delta.id} already exists`);
 			}
 			if (event.delta.producerPhase !== "propose" && event.delta.producerPhase !== "distill") {
@@ -529,8 +1061,8 @@ export function applyAgentSessionDomainEvent(
 			for (const beliefId of event.activeBeliefs) {
 				if (!beliefs.has(beliefId)) fail(event, `active belief ${beliefId} has no record`);
 			}
-			const body = { ...frame.body, beliefDeltas: [...frame.body.beliefDeltas, event.delta] };
-			const nextTask = replaceFrame({ ...task, introducedBeliefs: introduced }, { ...frame, body });
+			const body = { ...episode.body, beliefDeltas: [...episode.body.beliefDeltas, event.delta] };
+			const nextTask = replaceEpisode({ ...task, introducedBeliefs: introduced }, { ...episode, body });
 			return {
 				...snapshot,
 				beliefs,
@@ -539,33 +1071,37 @@ export function applyAgentSessionDomainEvent(
 			};
 		}
 		case "PlanProduced": {
-			const { task, frame } = requireClassifiedFrame(snapshot, event);
-			if (frame.body.kind !== "belief-loop") fail(event, `fast-path frame ${frame.id} cannot own a plan`);
-			if (frame.body.plan) fail(event, `frame ${frame.id} already has plan ${frame.body.plan.id}`);
+			const { task, episode } = requireClassifiedEpisode(snapshot, event);
+			if (episode.body.kind !== "belief-loop") fail(event, `fast-path episode ${episode.id} cannot own a plan`);
+			if (episode.body.plan) fail(event, `episode ${episode.id} already has plan ${episode.body.plan.id}`);
 			for (const beliefId of event.plan.selectedToExplore) {
 				if (!snapshot.beliefs.has(beliefId)) fail(event, `plan selects unknown belief ${beliefId}`);
 			}
-			const body = { ...frame.body, plan: event.plan };
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };
+			// The selection and the dispatch must agree on which understanding governed them, so the
+			// adoption is validated here as well as at body selection; a plan is the durable record
+			// of "this experiment was chosen because the task looked like this".
+			requireAdoption(event, task, event.plan.formulation);
+			const body = { ...episode.body, plan: event.plan };
+			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
 		}
 		case "ExecutionStarted": {
-			const { task, frame } = requireClassifiedFrame(snapshot, event);
-			if (frame.body.trajectory.some((execution) => execution.id === event.execution.id)) {
+			const { task, episode } = requireClassifiedEpisode(snapshot, event);
+			if (episode.body.trajectory.some((execution) => execution.id === event.execution.id)) {
 				fail(event, `execution ${event.execution.id} already exists`);
 			}
-			if (frame.body.kind === "belief-loop") {
-				if (!frame.body.plan) fail(event, `belief-loop frame ${frame.id} has no plan`);
-				if (event.execution.planId !== frame.body.plan.id) fail(event, `execution does not name frame plan`);
+			if (episode.body.kind === "belief-loop") {
+				if (!episode.body.plan) fail(event, `belief-loop episode ${episode.id} has no plan`);
+				if (event.execution.planId !== episode.body.plan.id) fail(event, `execution does not name episode plan`);
 			} else if (event.execution.planId !== undefined) {
 				fail(event, `fast-path execution must not name a plan`);
 			}
 			const execution: Execution = { ...event.execution, output: [], status: "running" };
-			const body = { ...frame.body, trajectory: [...frame.body.trajectory, execution] };
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };
+			const body = { ...episode.body, trajectory: [...episode.body.trajectory, execution] };
+			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
 		}
 		case "ExecutionCompleted": {
-			const { task, frame } = requireClassifiedFrame(snapshot, event);
-			const execution = frame.body.trajectory.find((candidate) => candidate.id === event.executionId);
+			const { task, episode } = requireClassifiedEpisode(snapshot, event);
+			const execution = episode.body.trajectory.find((candidate) => candidate.id === event.executionId);
 			if (!execution) fail(event, `unknown execution ${event.executionId}`);
 			if (execution.status !== "running")
 				fail(event, `execution ${event.executionId} is already ${execution.status}`);
@@ -577,18 +1113,18 @@ export function applyAgentSessionDomainEvent(
 				status: event.status,
 				error: event.error,
 			};
-			const body = replaceExecution(frame.body, completed);
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };
+			const body = replaceExecution(episode.body, completed);
+			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
 		}
 		case "DistillationProduced": {
-			const { task, frame } = requireClassifiedFrame(snapshot, event);
-			if (frame.body.distillation) fail(event, `frame ${frame.id} already has distillation`);
-			const executionIds = new Set(frame.body.trajectory.map((execution) => execution.id));
+			const { task, episode } = requireClassifiedEpisode(snapshot, event);
+			if (episode.body.distillation) fail(event, `episode ${episode.id} already has distillation`);
+			const executionIds = new Set(episode.body.trajectory.map((execution) => execution.id));
 			for (const input of event.distillation.inputs) {
-				if (!executionIds.has(input)) fail(event, `distillation input ${input} is not in frame ${frame.id}`);
+				if (!executionIds.has(input)) fail(event, `distillation input ${input} is not in episode ${episode.id}`);
 			}
-			if (frame.body.kind === "belief-loop") {
-				const expectedOutputs = frame.body.beliefDeltas
+			if (episode.body.kind === "belief-loop") {
+				const expectedOutputs = episode.body.beliefDeltas
 					.filter((delta) => delta.producerPhase === "distill")
 					.map((delta) => delta.id);
 				if (
@@ -600,8 +1136,8 @@ export function applyAgentSessionDomainEvent(
 			} else if (event.distillation.outputs.length > 0) {
 				fail(event, `fast-path distillation cannot produce belief deltas`);
 			}
-			const body = { ...frame.body, distillation: event.distillation };
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceFrame(task, { ...frame, body })) };
+			const body = { ...episode.body, distillation: event.distillation };
+			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
 		}
 		default:
 			// An unrecognized type means a log written by a newer runtime is being replayed by an
@@ -639,6 +1175,19 @@ export function domainEventsFromSessionEntries(entries: readonly SessionEntry[])
 		if (entry.type !== "custom" || entry.customType !== AGENT_SESSION_DOMAIN_CUSTOM_ENTRY) continue;
 		const stored = (entry as CustomEntry).data;
 		if (!isStoredAgentSessionDomainEvent(stored)) {
+			// A log from an older protocol version is the expected way to land here. Name that case
+			// explicitly — the alternative is an operator seeing "invalid event" and
+			// suspecting corruption rather than a protocol version they cannot load.
+			const version = (stored as { schemaVersion?: unknown } | null | undefined)?.schemaVersion;
+			if (typeof version === "number" && version !== AGENT_SESSION_DOMAIN_SCHEMA_VERSION) {
+				throw new DomainReplayError(
+					`Session entry ${entry.id} was written with agent-session domain schema v${version}, ` +
+						`but this runtime requires v${AGENT_SESSION_DOMAIN_SCHEMA_VERSION}. Every version bump ` +
+						`so far has been a breaking change with no migration path (v2 renamed TaskFrame to ` +
+						`ExecutionEpisode; v3 added problem-formulation records), so a v${version} session is ` +
+						`rejected rather than replayed with missing or misread records.`,
+				);
+			}
 			throw new DomainReplayError(`Invalid agent-session domain event in session entry ${entry.id}`);
 		}
 		events.push(stored.event);

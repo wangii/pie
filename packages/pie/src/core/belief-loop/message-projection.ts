@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai/compat";
-import { type LoopRole, ROLE_SPECS } from "../role-specs.ts";
+import { BELIEF_SURFACE_TOOLS, type LoopRole, ROLE_SPECS } from "../role-specs.ts";
 
 /**
  * Per-role transcript projection. Each belief-loop role sees a different projection of the
@@ -19,18 +19,24 @@ import { type LoopRole, ROLE_SPECS } from "../role-specs.ts";
  * read or mutated here, so they are independently testable.
  */
 
-/** A probe (execution) tool is anything outside the belief surface: `declare_belief` /
- *  `view_beliefs` / `conclude` mark the belief-side (epistemic) roles; anything else
- *  (read/bash/grep/…) marks the probe role. */
+/**
+ * The control-only belief surface, shared with the role specs.
+ *
+ * Everything on it is bookkeeping an epistemic role operates on rather than an observation about
+ * the world, which is why the projection has to know the whole set: a tool that is missing from
+ * it is misread as a probe (masking the turn that used it and treating its result as raw
+ * evidence), and the execution role would be offered a surface it must not imitate.
+ */
+const BELIEF_SURFACE = new Set<string>(BELIEF_SURFACE_TOOLS);
+
+/** The mutating half of the surface: everything except the read-only `view_beliefs`, which the
+ *  execution role legitimately shares. */
+const BELIEF_MUTATIONS = new Set<string>(BELIEF_SURFACE_TOOLS.filter((name) => name !== "view_beliefs"));
+
+/** A probe (execution) tool is anything outside the belief surface: the belief-side tools mark
+ *  the epistemic roles; anything else (read/bash/grep/…) marks the probe role. */
 export function isProbeTool(name: string): boolean {
-	return (
-		name !== "route_task" &&
-		name !== "declare_belief" &&
-		name !== "focus_beliefs" &&
-		name !== "select_experiment" &&
-		name !== "view_beliefs" &&
-		name !== "conclude"
-	);
+	return !BELIEF_SURFACE.has(name);
 }
 
 /** Whether an assistant turn belongs to the probe role, i.e. it invoked a non-belief tool. */
@@ -38,20 +44,10 @@ function isProbeAssistant(message: AssistantMessage): boolean {
 	return message.content.some((block) => block.type === "toolCall" && isProbeTool(block.name));
 }
 
-/** Whether an assistant turn carries a belief *mutation* tool call (`declare_belief` /
- *  `conclude`) — the epistemic role's exclusive surface, which the execution role must not
- *  imitate. `view_beliefs` is deliberately excluded: it is read-only and shared with the
- *  execution role. */
+/** Whether an assistant turn carries a belief *mutation* tool call — the epistemic role's
+ *  exclusive surface, which the execution role must not imitate. */
 function isEpistemicMutation(message: AssistantMessage): boolean {
-	return message.content.some(
-		(block) =>
-			block.type === "toolCall" &&
-			(block.name === "route_task" ||
-				block.name === "declare_belief" ||
-				block.name === "focus_beliefs" ||
-				block.name === "select_experiment" ||
-				block.name === "conclude"),
-	);
+	return message.content.some((block) => block.type === "toolCall" && BELIEF_MUTATIONS.has(block.name));
 }
 
 /** Distill a probe-role assistant turn for the epistemic/finalReport view: drop its
@@ -83,7 +79,7 @@ function maskEpistemicThinking(message: AssistantMessage): AssistantMessage | un
  *  the call (rather than renaming it) is what stops the role from imitating the bookkeeping —
  *  and what keeps the transcript free of tool-call names the provider may reject. The
  *  read-only `view_beliefs` call is kept for the execution role (`keepViewBeliefs`, the
- *  default), which needs it to recall the frame it is probing; finalReport drops it too,
+ *  default), which needs it to recall the episode it is probing; finalReport drops it too,
  *  since it has no tools and its `view_beliefs` result is masked to a note. */
 function maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = true): AssistantMessage | undefined {
 	const content: AssistantMessage["content"] = [];
@@ -92,14 +88,8 @@ function maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = tru
 			continue;
 		}
 		if (block.type === "toolCall") {
-			const isMutation =
-				block.name === "route_task" ||
-				block.name === "declare_belief" ||
-				block.name === "focus_beliefs" ||
-				block.name === "select_experiment" ||
-				block.name === "conclude";
 			const isReadOnly = block.name === "view_beliefs";
-			if (isMutation || (isReadOnly && !keepViewBeliefs)) {
+			if (BELIEF_MUTATIONS.has(block.name) || (isReadOnly && !keepViewBeliefs)) {
 				continue;
 			}
 		}
@@ -114,15 +104,7 @@ function maskEpistemicAssistant(message: AssistantMessage, keepViewBeliefs = tru
  *  as facts. `conclude` is included so its "Investigation concluded." result does not orphan
  *  once `maskEpistemicAssistant` elides the call. */
 function maskBeliefEchoes(message: AgentMessage): AgentMessage | undefined {
-	if (
-		message.role === "toolResult" &&
-		(message.toolName === "route_task" ||
-			message.toolName === "declare_belief" ||
-			message.toolName === "focus_beliefs" ||
-			message.toolName === "select_experiment" ||
-			message.toolName === "view_beliefs" ||
-			message.toolName === "conclude")
-	) {
+	if (message.role === "toolResult" && BELIEF_SURFACE.has(message.toolName)) {
 		return {
 			role: "user",
 			content: [{ type: "text", text: "[belief bookkeeping omitted]" }],

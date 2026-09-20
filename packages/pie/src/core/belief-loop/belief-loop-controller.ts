@@ -9,13 +9,29 @@ import {
 	appendAgentSessionDomainEvent,
 	applyAgentSessionDomainEvent,
 	createDomainId,
+	currentFormulation as currentFormulationOf,
 	type Belief as DomainBelief,
 	type BeliefDelta as DomainBeliefDelta,
 	type DomainContent,
 	type Routing as DomainRouting,
-	type FrameBodyKind,
-	type FrameStage,
+	type EpisodeBodyKind,
+	type EpisodeStage,
+	type ExecutionEpisode,
+	type FormulationAdoption,
+	type FormulationContent,
+	type FormulationCorrection,
+	type FormulationCorrectionId,
+	type FormulationDeferral,
+	type FormulationSource,
+	type FormulationVersionId,
+	formulationContentError,
+	formulationDecisionOwed,
+	formulationSourceError,
+	latestBeliefDeltaFor,
+	type ProblemFormulationVersion,
+	pendingFormulationCorrections as pendingCorrectionsOf,
 	replayAgentSessionDomainEntries,
+	type Task,
 } from "../agent-session-domain.ts";
 import {
 	type Belief,
@@ -34,17 +50,18 @@ import type { ContextUsage } from "../extensions/index.ts";
 import { resolveCliModel } from "../model-resolver.ts";
 import { ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
 import { buildSystemPrompt } from "../system-prompt.ts";
+import type { FormulationCitation } from "../tools/formulation.ts";
 import { projectContextMessages, projectMessagesFor } from "./message-projection.ts";
 
 // ============================================================================
 // Types and constants (moved from agent-session.ts)
 // ============================================================================
 
-/** One cognitive phase of the belief loop. Execution carries its frame-scoped lease fields. */
+/** One cognitive phase of the belief loop. Execution carries its episode-scoped lease fields. */
 export type LoopState =
 	| { role: "propose" }
 	| { role: "distill" }
-	| { role: "execution"; frameHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
+	| { role: "execution"; episodeHorizon: number; leaseReportNudged: boolean; fastPath?: boolean }
 	| { role: "finalReport" };
 
 /** One belief-loop status slot: the model the role runs on and the cache hit rate of its most
@@ -61,7 +78,7 @@ export interface RoleStatus {
 	execution: RoleStatusSlot;
 }
 
-const FRAME_HORIZON_HEADROOM = 1.3;
+const EPISODE_HORIZON_HEADROOM = 1.3;
 
 /** Whether two id lists name the same set, ignoring order and duplicates. Used to tell a real
  *  focus change from a re-declaration of the current slice. */
@@ -79,6 +96,31 @@ function sameBeliefIds(a: readonly string[], b: readonly string[]): boolean {
  *  conclusion from re-emitting an event that would not change the folded task record. */
 function sameTaskOutcome(a: TaskOutcome, b: TaskOutcome): boolean {
 	return a.result === b.result && a.evidence === b.evidence && (a.blockers ?? "") === (b.blockers ?? "");
+}
+
+/** What a formulation write did. `unchanged` is the duplicate-submission no-op: the runtime
+ *  emitted no event because the submission added nothing to what is already recorded. */
+export type FormulationWriteResult<T> =
+	| { readonly outcome: "recorded"; readonly value: T }
+	| { readonly outcome: "unchanged"; readonly value: T }
+	| { readonly outcome: "rejected"; readonly reason: string };
+
+/** A blank optional field is an absent one: the whole point of leaving `alternative`/`tension`
+ *  optional is that an agent with nothing to say leaves them out rather than filling them in. */
+function blankToUndefined(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+/** Whether two formulation contents say the same thing, for the resubmission no-op. */
+function sameFormulationContent(a: FormulationContent, b: FormulationContent): boolean {
+	return (
+		a.interpretation === b.interpretation &&
+		(a.alternative ?? "") === (b.alternative ?? "") &&
+		a.focus === b.focus &&
+		(a.tension ?? "") === (b.tension ?? "") &&
+		a.implication === b.implication
+	);
 }
 
 export function selectRoleThinkingLevel(
@@ -156,7 +198,7 @@ export class BeliefLoopController {
 	/** The belief loop's current phase; see `LoopState`. */
 	loopState: LoopState = { role: "propose" };
 	/** The belief ids already dispatched to execution. */
-	dispatchedFrameIds: Set<string> = new Set();
+	dispatchedBeliefIds: Set<string> = new Set();
 	/** Routing decisions already evaluated for the current task. */
 	consumedRouteIds: Set<string> = new Set();
 	/** True once the cheap pre-conclusion adversarial check has fired for the current task. */
@@ -185,10 +227,10 @@ export class BeliefLoopController {
 	// Domain state
 	domainSnapshot: AgentSessionSnapshot;
 	currentTaskId: string | undefined;
-	currentFrameId: string | undefined;
+	currentEpisodeId: string | undefined;
 	currentPlanId: string | undefined;
-	currentFrameExecutionIds: string[] = [];
-	currentFrameDistillationDeltaIds: string[] = [];
+	currentEpisodeExecutionIds: string[] = [];
+	currentEpisodeDistillationDeltaIds: string[] = [];
 	pendingDomainBeliefDeltas: Array<{ delta: DomainBeliefDelta; activeBeliefs: string[] }> = [];
 	pendingDomainTaskPrompt:
 		| {
@@ -212,13 +254,13 @@ export class BeliefLoopController {
 			.map((taskId) => this.domainSnapshot.tasks.get(taskId))
 			.find((task) => task?.status === "active");
 		this.currentTaskId = currentTask?.id;
-		const currentFrame = currentTask?.frames.find((frame) => frame.status === "active");
-		this.currentFrameId = currentFrame?.id;
-		this.currentPlanId = currentFrame?.body.kind === "belief-loop" ? currentFrame.body.plan?.id : undefined;
-		this.currentFrameExecutionIds =
-			currentFrame?.body.kind === "pending"
+		const currentEpisode = currentTask?.episodes.find((episode) => episode.status === "active");
+		this.currentEpisodeId = currentEpisode?.id;
+		this.currentPlanId = currentEpisode?.body.kind === "belief-loop" ? currentEpisode.body.plan?.id : undefined;
+		this.currentEpisodeExecutionIds =
+			currentEpisode?.body.kind === "pending"
 				? []
-				: (currentFrame?.body.trajectory.map((execution) => execution.id) ?? []);
+				: (currentEpisode?.body.trajectory.map((execution) => execution.id) ?? []);
 	}
 
 	/** The current role — the phase discriminator of `loopState`. */
@@ -347,6 +389,269 @@ export class BeliefLoopController {
 		return this.beliefSet.unresolved().filter((belief) => this.focusSet.has(belief.id));
 	}
 
+	// =========================================================================
+	// Problem formulation (the product-facing name is "Frame")
+	// =========================================================================
+
+	/**
+	 * This task's current problem understanding, or undefined before the first version. Read
+	 * straight off the replayed snapshot rather than a mirrored field, so a resumed or
+	 * branch-switched session reports the same understanding the durable log does.
+	 */
+	currentFormulation(): ProblemFormulationVersion | undefined {
+		const task = this.currentTask();
+		return task ? currentFormulationOf(task) : undefined;
+	}
+
+	/** The recorded deferral, while propose has deferred and not published since. */
+	formulationDeferral(): FormulationDeferral | undefined {
+		return this.currentTask()?.formulationDeferral;
+	}
+
+	/** Corrections still awaiting propose's response, oldest first. */
+	pendingCorrections(): readonly FormulationCorrection[] {
+		const task = this.currentTask();
+		return task ? pendingCorrectionsOf(task) : [];
+	}
+
+	/** This task's full formulation history, oldest first. */
+	formulationHistory(): readonly ProblemFormulationVersion[] {
+		return this.currentTask()?.formulations ?? [];
+	}
+
+	private currentTask(): Task | undefined {
+		return this.currentTaskId ? this.domainSnapshot.tasks.get(this.currentTaskId) : undefined;
+	}
+
+	/** Whether propose still owes the task a formulation decision. */
+	formulationDecisionOwed(): boolean {
+		const task = this.currentTask();
+		return task ? formulationDecisionOwed(task) : false;
+	}
+
+	/**
+	 * Turn the citations a propose turn can actually make into durable source references.
+	 *
+	 * The model knows belief ids and correction ids, not the ids of the executions it never saw,
+	 * so a belief is bound here to the delta that recorded its state — which is the whole point of
+	 * citing a belief through a delta rather than by id: reading the version back later must not
+	 * substitute the belief's later state.
+	 */
+	resolveFormulationCitations(
+		citations: readonly FormulationCitation[],
+	): { readonly sources: readonly FormulationSource[] } | { readonly error: string } {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") return { error: "there is no active task" };
+		const sources: FormulationSource[] = [];
+		for (const citation of citations) {
+			if (citation.kind === "prompt") {
+				sources.push({ kind: "prompt", promptId: task.initialPrompt.id });
+				continue;
+			}
+			if (citation.kind === "correction") {
+				if (!task.formulationCorrections.some((correction) => correction.id === citation.correctionId)) {
+					return { error: `unknown correction ${citation.correctionId}` };
+				}
+				sources.push({ kind: "correction", correctionId: citation.correctionId });
+				continue;
+			}
+			const delta = latestBeliefDeltaFor(task, citation.beliefId);
+			if (!delta) return { error: `belief ${citation.beliefId} has no recorded state on this task` };
+			sources.push({ kind: "belief", beliefId: citation.beliefId, beliefDeltaId: delta.id });
+		}
+		return { sources };
+	}
+
+	/**
+	 * A published version is a new reading, so every experiment chosen under the old one is void:
+	 * the selection is dropped and propose has to choose again, this time bound to the new version.
+	 *
+	 * Only an un-dispatched selection is dropped. An episode that already owns a plan has started
+	 * its experiment, and that record stays immutable — a reframe does not un-run what ran, nor
+	 * clear the observations it produced.
+	 */
+	private invalidatePendingSelection(): void {
+		this.pendingExperiment = undefined;
+		const episode = this.activeEpisode();
+		const planned = episode?.body.kind === "belief-loop" ? episode.body.plan : undefined;
+		if (!planned) this.currentPlanId = undefined;
+	}
+
+	private activeEpisode(): ExecutionEpisode | undefined {
+		const task = this.currentTask();
+		return task?.episodes.find((episode) => episode.id === this.currentEpisodeId);
+	}
+
+	/** The version a selection or dispatch is made under right now. */
+	private currentFormulationAdoption(): FormulationAdoption {
+		const current = this.currentFormulation();
+		return current ? { kind: "version", versionId: current.id } : { kind: "unformed" };
+	}
+
+	/**
+	 * Publish a new immutable version of the task's problem understanding, or revise the current
+	 * one. This is the only way a version enters existence; `origin: "propose"` on the record is
+	 * the log's own statement of who published it.
+	 */
+	publishFormulation(input: {
+		content: FormulationContent;
+		reason: string;
+		sources: readonly FormulationSource[];
+	}): FormulationWriteResult<ProblemFormulationVersion> {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") return { outcome: "rejected", reason: "there is no active task" };
+		// Normalize before validating: an optional field the model left blank is absent, not
+		// content. Trimming here rather than in the fold keeps the stored record clean while the
+		// fold stays a pure reader that never rewrites what it replays.
+		const content: FormulationContent = {
+			interpretation: input.content.interpretation?.trim() ?? "",
+			alternative: blankToUndefined(input.content.alternative),
+			focus: input.content.focus?.trim() ?? "",
+			tension: blankToUndefined(input.content.tension),
+			implication: input.content.implication?.trim() ?? "",
+		};
+		const invalid = formulationContentError(content);
+		if (invalid) return { outcome: "rejected", reason: invalid };
+		const reason = input.reason.trim();
+		if (!reason) return { outcome: "rejected", reason: "a formulation version needs a short reason" };
+		const sourceError = this.formulationSourcesError(task, input.sources);
+		if (sourceError) return { outcome: "rejected", reason: sourceError };
+
+		const current = currentFormulationOf(task);
+		// A resubmission that says exactly the same thing is a no-op: not a new version, not an
+		// error. Deciding whether a paraphrase is substantive would take a second model to compare
+		// semantics, so the runtime keeps the mechanical rule and leaves substance to propose —
+		// which also means more evidence for the same reading does not manufacture a revision.
+		if (current && sameFormulationContent(current.content, content)) {
+			return { outcome: "unchanged", value: current };
+		}
+
+		const version: ProblemFormulationVersion = {
+			id: createDomainId("formulation"),
+			taskId: task.id,
+			ordinal: task.formulations.length + 1,
+			previousVersionId: current?.id,
+			recordedAt: new Date().toISOString(),
+			origin: "propose",
+			content,
+			reason,
+			sources: [...input.sources],
+		};
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "ProblemFormulationRecorded",
+			taskId: task.id,
+			version,
+		});
+		this.invalidatePendingSelection();
+		return { outcome: "recorded", value: version };
+	}
+
+	/**
+	 * Record that propose investigated but cannot yet state an understanding. A deferral says
+	 * what is missing and why; it is never a blank version, and it never removes a version that
+	 * already exists.
+	 */
+	deferFormulation(input: {
+		missingInformation: string;
+		reason: string;
+		sources: readonly FormulationSource[];
+	}): FormulationWriteResult<FormulationDeferral> {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") return { outcome: "rejected", reason: "there is no active task" };
+		const missingInformation = input.missingInformation.trim();
+		if (!missingInformation) {
+			return { outcome: "rejected", reason: "a deferral must say what information is missing" };
+		}
+		const reason = input.reason.trim();
+		if (!reason) return { outcome: "rejected", reason: "a deferral must say why it is deferred" };
+		const sourceError = this.formulationSourcesError(task, input.sources);
+		if (sourceError) return { outcome: "rejected", reason: sourceError };
+
+		const current = task.formulationDeferral;
+		// Same rule as publication: restating the identical deferral is a no-op, and adding a
+		// source to it is more evidence for the same statement, not a new one.
+		if (current && current.missingInformation === missingInformation && current.reason === reason) {
+			return { outcome: "unchanged", value: current };
+		}
+
+		const deferredAt = new Date().toISOString();
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "ProblemFormulationDeferred",
+			taskId: task.id,
+			missingInformation,
+			reason,
+			sources: [...input.sources],
+			deferredAt,
+		});
+		// Read the deferral back rather than rebuilding it here: the fold derives which
+		// investigation it answered, and a caller should see exactly the record the log holds.
+		const recorded = this.currentTask()?.formulationDeferral;
+		return recorded
+			? { outcome: "recorded", value: recorded }
+			: { outcome: "rejected", reason: "the deferral was not recorded" };
+	}
+
+	/**
+	 * Record a user correction against the task's current understanding. The correction is kept
+	 * as its own record with its own target version; it never writes into the version it
+	 * objects to, so the published version stays the agent's own stated position.
+	 */
+	submitFormulationCorrection(
+		original: DomainContent,
+		targetVersionId?: FormulationVersionId,
+	): FormulationCorrection | undefined {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") return undefined;
+		const correction: FormulationCorrection = {
+			id: createDomainId("formulation-correction"),
+			taskId: task.id,
+			targetVersionId,
+			original,
+			receivedAt: new Date().toISOString(),
+			status: "pending",
+		};
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "FormulationCorrectionSubmitted",
+			taskId: task.id,
+			correction,
+		});
+		return correction;
+	}
+
+	/**
+	 * Record propose's response to one pending correction. Resolution is addressed to a specific
+	 * correction id, so a response written for an older correction can never be recorded as the
+	 * answer to one that arrived while it was being handled.
+	 */
+	resolveFormulationCorrection(
+		correctionId: FormulationCorrectionId,
+		response: string,
+		recordedVersionId?: FormulationVersionId,
+	): void {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") return;
+		if (!task.formulationCorrections.some((correction) => correction.id === correctionId)) return;
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "FormulationCorrectionResolved",
+			taskId: task.id,
+			correctionId,
+			response,
+			recordedVersionId,
+		});
+	}
+
+	private formulationSourcesError(task: Task, sources: readonly FormulationSource[]): string | undefined {
+		for (const source of sources) {
+			const error = formulationSourceError(task, source);
+			if (error) return `formulation source does not resolve: ${error}`;
+		}
+		return undefined;
+	}
+
 	/** Whether a belief was created during the current task. `_beliefs` is append-only and
 	 *  `beliefsAtTaskReset` records the length at the boundary, so retained history from earlier
 	 *  tasks sorts before it. */
@@ -371,7 +676,7 @@ export class BeliefLoopController {
 	/** Proposed beliefs that were dispatched for the current experiment and are still unadjudicated.
 	 *  These must be adjudicated before conclusion regardless of later focus changes. */
 	private dispatchedProposed(): Belief[] {
-		return this.beliefSet.proposed().filter((belief) => this.dispatchedFrameIds.has(belief.id));
+		return this.beliefSet.proposed().filter((belief) => this.dispatchedBeliefIds.has(belief.id));
 	}
 
 	/** Everything that must be adjudicated before conclusion can pass. */
@@ -406,7 +711,7 @@ export class BeliefLoopController {
 	resetLoopForNewTask(): void {
 		this.closeDomainTask();
 		this.loopState = { role: "propose" };
-		this.dispatchedFrameIds = new Set();
+		this.dispatchedBeliefIds = new Set();
 		this.consumedRouteIds = new Set();
 		this.routingSet.clear();
 		this.reflected = false;
@@ -459,7 +764,7 @@ export class BeliefLoopController {
 		}
 		this.applyRoleSurface();
 		if (previousRole === "distill" && next.state.role === "propose") {
-			this.openNextDomainFrame();
+			this.openNextDomainEpisode();
 		}
 		this.emitCursorChanged(next.state.role);
 	}
@@ -474,7 +779,7 @@ export class BeliefLoopController {
 						? "closed"
 						: "proposing";
 		if (stage === "closed") {
-			this.closeDomainFrame();
+			this.closeDomainEpisode();
 		} else {
 			this.changeDomainCursor(stage);
 		}
@@ -492,6 +797,15 @@ export class BeliefLoopController {
 		switch (state.role) {
 			case "propose": {
 				const unresolved = this.focusUnresolved();
+				// The formulation decision is checked against the replayed state, not against this
+				// turn's tool calls: a `set_formulation` or `defer_formulation` that succeeded has
+				// already changed the state, and one that was rejected did not — which is exactly
+				// what "a failed tool validation does not satisfy the decision" means. It gates
+				// dispatch and conclusion alike, so the first investigation cannot be followed by
+				// another experiment or an answer without the agent saying what it made of the task.
+				if (this.formulationDecisionOwed()) {
+					return { state, steer: TRANSITION_STEERS.formulationDecision };
+				}
 				const rejected = this.rejectedConclude(turn);
 				if (rejected !== undefined) {
 					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
@@ -514,7 +828,7 @@ export class BeliefLoopController {
 						}
 						return this.dispatchToFastExecution(route);
 					}
-					this.selectDomainFrameBody("belief-loop", route);
+					this.selectDomainEpisodeBody("belief-loop", route);
 				}
 				if (this.pendingExperiment) {
 					const experiment = this.pendingExperiment;
@@ -553,9 +867,15 @@ export class BeliefLoopController {
 					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
 				}
 				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
+					// Distill concluding is a normal handoff straight to finalReport, which would skip
+					// propose entirely. The formulation decision belongs to propose, so an owed decision
+					// diverts here rather than letting the terminal path route around it.
+					if (this.formulationDecisionOwed()) {
+						return { state: { role: "propose" }, steer: TRANSITION_STEERS.formulationDecision };
+					}
 					return this.concludeTransition(state, this.blockingProposed());
 				}
-				const unadjudicated = proposed.filter((belief) => this.dispatchedFrameIds.has(belief.id));
+				const unadjudicated = proposed.filter((belief) => this.dispatchedBeliefIds.has(belief.id));
 				if (unadjudicated.length > 0) {
 					return {
 						state,
@@ -567,19 +887,19 @@ export class BeliefLoopController {
 				return { state: { role: "propose" }, steer: TRANSITION_STEERS.deepenOrConclude };
 			}
 			case "execution": {
-				const frameHorizon = state.frameHorizon - turn.toolResults.length;
+				const episodeHorizon = state.episodeHorizon - turn.toolResults.length;
 				if (state.fastPath) {
 					if (turn.toolResults.some((result) => result.isError)) this.fastPathFailure = true;
-					if (!ranTools || frameHorizon <= 0) {
-						if (ranTools && frameHorizon <= 0 && !state.leaseReportNudged) {
+					if (!ranTools || episodeHorizon <= 0) {
+						if (ranTools && episodeHorizon <= 0 && !state.leaseReportNudged) {
 							return {
-								state: { role: "execution", frameHorizon, leaseReportNudged: true, fastPath: true },
+								state: { role: "execution", episodeHorizon, leaseReportNudged: true, fastPath: true },
 								steer: TRANSITION_STEERS.leaseNudge,
 							};
 						}
 						await this.settleFastPath(turn);
 						if (this.fastPathFailure) {
-							this.openNextDomainFrame();
+							this.openNextDomainEpisode();
 							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
 						}
 						this.resetLoopForNewTask();
@@ -588,13 +908,13 @@ export class BeliefLoopController {
 					return {
 						state: {
 							role: "execution",
-							frameHorizon,
+							episodeHorizon,
 							leaseReportNudged: state.leaseReportNudged,
 							fastPath: true,
 						},
 					};
 				}
-				const budgetExhausted = frameHorizon <= 0;
+				const budgetExhausted = episodeHorizon <= 0;
 				if (!ranTools) {
 					return {
 						state: { role: "distill" },
@@ -603,7 +923,7 @@ export class BeliefLoopController {
 				}
 				if (budgetExhausted && !state.leaseReportNudged) {
 					return {
-						state: { role: "execution", frameHorizon, leaseReportNudged: true },
+						state: { role: "execution", episodeHorizon, leaseReportNudged: true },
 						steer: TRANSITION_STEERS.leaseNudge,
 					};
 				}
@@ -611,7 +931,7 @@ export class BeliefLoopController {
 					return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicateBudgetExhausted };
 				}
 				return {
-					state: { role: "execution", frameHorizon, leaseReportNudged: state.leaseReportNudged },
+					state: { role: "execution", episodeHorizon, leaseReportNudged: state.leaseReportNudged },
 				};
 			}
 			case "finalReport":
@@ -712,14 +1032,14 @@ export class BeliefLoopController {
 		_previousStatus: BeliefStatus | undefined,
 		priorBelief?: Belief,
 	): void {
-		if (!this.currentFrameId) return;
+		if (!this.currentEpisodeId) return;
 		const resultingBeliefs = [belief];
 		if (delta.op === "refine" && priorBelief) {
 			resultingBeliefs.unshift(this.beliefSet.get(priorBelief.id) ?? priorBelief);
 		}
 		const domainDelta: DomainBeliefDelta = {
 			id: createDomainId("belief-delta"),
-			frameId: this.currentFrameId,
+			episodeId: this.currentEpisodeId,
 			producerPhase: this.role === "distill" ? "distill" : "propose",
 			operation: delta.op,
 			beliefId: "beliefId" in delta ? delta.beliefId : undefined,
@@ -730,12 +1050,12 @@ export class BeliefLoopController {
 			resultingBeliefs: resultingBeliefs.map((record) => this.domainBelief(record)),
 		};
 		this.pendingDomainBeliefDeltas.push({ delta: domainDelta, activeBeliefs: this.activeDomainBeliefIds() });
-		const frame = this.currentTaskId
+		const episode = this.currentTaskId
 			? this.domainSnapshot.tasks
 					.get(this.currentTaskId)
-					?.frames.find((candidate) => candidate.id === this.currentFrameId)
+					?.episodes.find((candidate) => candidate.id === this.currentEpisodeId)
 			: undefined;
-		if (frame?.body.kind === "belief-loop") this.flushPendingDomainBeliefDeltas();
+		if (episode?.body.kind === "belief-loop") this.flushPendingDomainBeliefDeltas();
 	}
 
 	private dispatchToExecution(proposed: Belief[], intent?: string): { state: LoopState; steer: string } {
@@ -743,14 +1063,14 @@ export class BeliefLoopController {
 			proposed.map((belief) => belief.id),
 			intent ?? `Probe ${proposed.map((belief) => belief.id).join(", ")}`,
 		);
-		this.dispatchedFrameIds = new Set(proposed.map((b) => b.id));
+		this.dispatchedBeliefIds = new Set(proposed.map((b) => b.id));
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
 		const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
 		return {
 			state: {
 				role: "execution",
-				frameHorizon: Math.ceil(totalRounds * FRAME_HORIZON_HEADROOM),
+				episodeHorizon: Math.ceil(totalRounds * EPISODE_HORIZON_HEADROOM),
 				leaseReportNudged: false,
 			},
 			steer: intent
@@ -760,27 +1080,27 @@ export class BeliefLoopController {
 	}
 
 	private dispatchToFastExecution(route: Routing): { state: LoopState; steer: string } {
-		this.dispatchedFrameIds = new Set();
+		this.dispatchedBeliefIds = new Set();
 		this.fastPathFailure = false;
-		const currentFrame =
+		const currentEpisode =
 			this.currentTaskId === undefined
 				? undefined
 				: this.domainSnapshot.tasks
 						.get(this.currentTaskId)
-						?.frames.find((candidate) => candidate.id === this.currentFrameId);
-		const needsNewFrame =
+						?.episodes.find((candidate) => candidate.id === this.currentEpisodeId);
+		const needsNewEpisode =
 			this.pendingDomainBeliefDeltas.length > 0 ||
-			(currentFrame !== undefined && currentFrame.body.kind !== "pending");
-		if (needsNewFrame) {
+			(currentEpisode !== undefined && currentEpisode.body.kind !== "pending");
+		if (needsNewEpisode) {
 			this.ensureDomainPlan([], "Record pre-routing belief changes");
-			this.openNextDomainFrame();
+			this.openNextDomainEpisode();
 		}
-		this.selectDomainFrameBody("fast-path", route);
+		this.selectDomainEpisodeBody("fast-path", route);
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		return {
 			state: {
 				role: "execution",
-				frameHorizon: Math.max(1, Math.ceil(((route.estimatedSteps ?? 1) + 1) * FRAME_HORIZON_HEADROOM)),
+				episodeHorizon: Math.max(1, Math.ceil(((route.estimatedSteps ?? 1) + 1) * EPISODE_HORIZON_HEADROOM)),
 				leaseReportNudged: false,
 				fastPath: true,
 			},
@@ -1043,7 +1363,56 @@ export class BeliefLoopController {
 				toolSnippets: snippets,
 				promptGuidelines: guidelines,
 			});
-		return base + this.roleInstruction();
+		return base + this.roleInstruction() + this.formulationProjection();
+	}
+
+	/**
+	 * The task's current formulation, projected into every role's system prompt.
+	 *
+	 * It rides in the system prompt rather than the transcript for two reasons. The transcript is
+	 * append-only so it stays cacheable, and a reading that changes once or twice per task does not
+	 * belong in it; and every role must read the *current* reading, not whichever one happened to be
+	 * current when a message was appended. The wording is deliberate: this is the agent's own
+	 * provisional position, not an observation, not evidence, and never support for a belief —
+	 * otherwise a reading would quietly become a fact no experiment ever tested.
+	 *
+	 * Nothing is emitted before a reading exists. Gating the first probe on a formulation would
+	 * force an uninformed one, and the required decision (see `formulationDecisionOwed`) is raised
+	 * by the loop's transition instead.
+	 */
+	private formulationProjection(): string {
+		const task = this.currentTask();
+		if (!task) return "";
+		const current = currentFormulationOf(task);
+		if (current) {
+			const lines = [
+				"",
+				"<current_formulation>",
+				`Your current provisional reading of this task (version ${current.ordinal}, published ${current.recordedAt}). ` +
+					"This is your own working position: not an observation, not evidence, and never support for a belief. " +
+					"Stay open to evidence that contradicts it, and revise it when the evidence supports a different reading.",
+				`Interpretation: ${current.content.interpretation}`,
+				`Focus: ${current.content.focus}`,
+			];
+			if (current.content.tension) lines.push(`Core tension: ${current.content.tension}`);
+			if (current.content.alternative) lines.push(`Not currently prioritizing: ${current.content.alternative}`);
+			lines.push(`What this changes: ${current.content.implication}`, "</current_formulation>", "");
+			return lines.join("\n");
+		}
+		const deferral = task.formulationDeferral;
+		if (deferral) {
+			return [
+				"",
+				"<current_formulation>",
+				"You have not yet stated how you understand this task, and you recorded why.",
+				`Still missing: ${deferral.missingInformation}`,
+				`Reason: ${deferral.reason}`,
+				"Reconsider this as soon as new information arrives; a deferral is not a standing exemption.",
+				"</current_formulation>",
+				"",
+			].join("\n");
+		}
+		return "";
 	}
 
 	beliefLangPrompt(text: string): string {
@@ -1108,7 +1477,7 @@ export class BeliefLoopController {
 			throw new Error(`Cannot open a new task while ${this.currentTaskId} is active.`);
 		}
 		const taskId = createDomainId("task");
-		const frameId = createDomainId("frame");
+		const episodeId = createDomainId("episode");
 		const inheritedBeliefs = this.activeDomainBeliefIds().filter((beliefId) =>
 			this.domainSnapshot.beliefs.has(beliefId),
 		);
@@ -1131,22 +1500,22 @@ export class BeliefLoopController {
 		});
 		this.recordDomainEvent({
 			...this.domainEventBase(),
-			type: "FrameOpened",
+			type: "EpisodeOpened",
 			taskId,
-			frameId,
+			episodeId,
 			ordinal: 1,
 		});
 		this.currentTaskId = taskId;
-		this.currentFrameId = frameId;
+		this.currentEpisodeId = episodeId;
 		this.currentPlanId = undefined;
-		this.currentFrameExecutionIds = [];
-		this.currentFrameDistillationDeltaIds = [];
+		this.currentEpisodeExecutionIds = [];
+		this.currentEpisodeDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "CursorChanged",
 			taskId,
-			frameId,
+			episodeId,
 			stage: "routing",
 		});
 	}
@@ -1190,92 +1559,102 @@ export class BeliefLoopController {
 			.map((belief) => belief.id);
 	}
 
-	selectDomainFrameBody(kind: FrameBodyKind, routing?: Routing): void {
-		if (!this.currentTaskId || !this.currentFrameId) return;
-		const frame = this.domainSnapshot.tasks
+	selectDomainEpisodeBody(kind: EpisodeBodyKind, routing?: Routing): void {
+		if (!this.currentTaskId || !this.currentEpisodeId) return;
+		const episode = this.domainSnapshot.tasks
 			.get(this.currentTaskId)
-			?.frames.find((candidate) => candidate.id === this.currentFrameId);
-		if (!frame || frame.status === "closed") return;
-		if (routing && !frame.routing) {
+			?.episodes.find((candidate) => candidate.id === this.currentEpisodeId);
+		if (!episode || episode.status === "closed") return;
+		if (routing && !episode.routing) {
 			this.recordDomainEvent({
 				...this.domainEventBase(),
 				type: "RoutingDecided",
 				taskId: this.currentTaskId,
-				frameId: this.currentFrameId,
+				episodeId: this.currentEpisodeId,
 				routing: this.domainRouting(routing),
 			});
 		}
-		if (frame.body.kind === "pending") {
+		if (episode.body.kind === "pending") {
 			this.recordDomainEvent({
 				...this.domainEventBase(),
-				type: "FrameBodySelected",
+				type: "EpisodeBodySelected",
 				taskId: this.currentTaskId,
-				frameId: this.currentFrameId,
+				episodeId: this.currentEpisodeId,
 				body: kind,
 				openBeliefsAtStart:
 					kind === "belief-loop" ? this.beliefSet.unresolved().map((belief) => belief.id) : undefined,
+				// A belief-loop episode gets its adoption from the plan it is about to be given; the
+				// fast path has no plan, so the episode itself has to carry it.
+				formulation: kind === "fast-path" ? this.currentFormulationAdoption() : undefined,
 			});
 		}
 		if (kind === "belief-loop") this.flushPendingDomainBeliefDeltas();
 	}
 
 	private flushPendingDomainBeliefDeltas(): void {
-		if (!this.currentTaskId || !this.currentFrameId || this.pendingDomainBeliefDeltas.length === 0) return;
+		if (!this.currentTaskId || !this.currentEpisodeId || this.pendingDomainBeliefDeltas.length === 0) return;
 		for (const pending of this.pendingDomainBeliefDeltas) {
 			this.recordDomainEvent({
 				...this.domainEventBase(),
 				type: "BeliefDeltaApplied",
 				taskId: this.currentTaskId,
-				frameId: this.currentFrameId,
+				episodeId: this.currentEpisodeId,
 				delta: pending.delta,
 				activeBeliefs: pending.activeBeliefs,
 			});
 			if (pending.delta.producerPhase === "distill") {
-				this.currentFrameDistillationDeltaIds.push(pending.delta.id);
+				this.currentEpisodeDistillationDeltaIds.push(pending.delta.id);
 			}
 		}
 		this.pendingDomainBeliefDeltas = [];
 	}
 
 	ensureDomainPlan(selectedToExplore: readonly string[], intent?: string): string | undefined {
-		if (!this.currentTaskId || !this.currentFrameId) return undefined;
-		this.selectDomainFrameBody("belief-loop");
+		if (!this.currentTaskId || !this.currentEpisodeId) return undefined;
+		this.selectDomainEpisodeBody("belief-loop");
 		if (this.currentPlanId) return this.currentPlanId;
 		const planId = createDomainId("plan");
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "PlanProduced",
 			taskId: this.currentTaskId,
-			frameId: this.currentFrameId,
-			plan: { id: planId, selectedToExplore: [...selectedToExplore], intent },
+			episodeId: this.currentEpisodeId,
+			plan: {
+				id: planId,
+				selectedToExplore: [...selectedToExplore],
+				intent,
+				// Which understanding this experiment was chosen under. Before the first publication
+				// there is nothing to name, and that fact is recorded rather than left blank.
+				formulation: this.currentFormulationAdoption(),
+			},
 		});
 		this.currentPlanId = planId;
 		return planId;
 	}
 
-	private changeDomainCursor(stage: FrameStage): void {
-		if (!this.currentTaskId || !this.currentFrameId) return;
-		const frame = this.domainSnapshot.tasks
+	private changeDomainCursor(stage: EpisodeStage): void {
+		if (!this.currentTaskId || !this.currentEpisodeId) return;
+		const episode = this.domainSnapshot.tasks
 			.get(this.currentTaskId)
-			?.frames.find((candidate) => candidate.id === this.currentFrameId);
-		if (!frame || frame.status === "closed") return;
+			?.episodes.find((candidate) => candidate.id === this.currentEpisodeId);
+		if (!episode || episode.status === "closed") return;
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "CursorChanged",
 			taskId: this.currentTaskId,
-			frameId: this.currentFrameId,
+			episodeId: this.currentEpisodeId,
 			stage,
 		});
 	}
 
 	addDomainIntervention(contents: DomainContent): void {
-		if (!this.currentTaskId || !this.currentFrameId) return;
+		if (!this.currentTaskId || !this.currentEpisodeId) return;
 		const stage = this.domainSnapshot.cursor?.stage ?? "proposing";
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "InterventionAdded",
 			taskId: this.currentTaskId,
-			frameId: this.currentFrameId,
+			episodeId: this.currentEpisodeId,
 			intervention: {
 				id: createDomainId("intervention"),
 				contents,
@@ -1285,67 +1664,68 @@ export class BeliefLoopController {
 		});
 	}
 
-	private closeDomainFrame(): void {
-		if (!this.currentTaskId || !this.currentFrameId) return;
-		const frame = this.domainSnapshot.tasks
+	private closeDomainEpisode(): void {
+		if (!this.currentTaskId || !this.currentEpisodeId) return;
+		const episode = this.domainSnapshot.tasks
 			.get(this.currentTaskId)
-			?.frames.find((candidate) => candidate.id === this.currentFrameId);
-		if (!frame || frame.status === "closed") return;
-		if (frame.body.kind === "pending") {
+			?.episodes.find((candidate) => candidate.id === this.currentEpisodeId);
+		if (!episode || episode.status === "closed") return;
+		if (episode.body.kind === "pending") {
 			if (this.beliefSetUsable) {
 				this.ensureDomainPlan([], "Conclude the task from the settled belief set");
 			} else {
-				this.selectDomainFrameBody("fast-path");
+				this.selectDomainEpisodeBody("fast-path");
 			}
-		} else if (frame.body.kind === "belief-loop" && !frame.body.plan) {
+		} else if (episode.body.kind === "belief-loop" && !episode.body.plan) {
 			this.ensureDomainPlan([], "Conclude the task from the settled belief set");
 		}
 		this.recordDomainEvent({
 			...this.domainEventBase(),
-			type: "FrameClosed",
+			type: "EpisodeClosed",
 			taskId: this.currentTaskId,
-			frameId: this.currentFrameId,
+			episodeId: this.currentEpisodeId,
 		});
 	}
 
 	private recordDomainDistillation(contents: string): void {
-		if (!this.currentTaskId || !this.currentFrameId) return;
-		const frame = this.domainSnapshot.tasks
+		if (!this.currentTaskId || !this.currentEpisodeId) return;
+		const episode = this.domainSnapshot.tasks
 			.get(this.currentTaskId)
-			?.frames.find((candidate) => candidate.id === this.currentFrameId);
-		if (!frame || frame.status === "closed" || frame.body.kind === "pending" || frame.body.distillation) return;
+			?.episodes.find((candidate) => candidate.id === this.currentEpisodeId);
+		if (!episode || episode.status === "closed" || episode.body.kind === "pending" || episode.body.distillation)
+			return;
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "DistillationProduced",
 			taskId: this.currentTaskId,
-			frameId: this.currentFrameId,
+			episodeId: this.currentEpisodeId,
 			distillation: {
 				id: createDomainId("distillation"),
-				inputs: [...this.currentFrameExecutionIds],
+				inputs: [...this.currentEpisodeExecutionIds],
 				contents,
-				outputs: [...this.currentFrameDistillationDeltaIds],
+				outputs: [...this.currentEpisodeDistillationDeltaIds],
 			},
 		});
 	}
 
-	private openNextDomainFrame(): void {
+	private openNextDomainEpisode(): void {
 		if (!this.currentTaskId) return;
-		this.closeDomainFrame();
+		this.closeDomainEpisode();
 		const task = this.domainSnapshot.tasks.get(this.currentTaskId);
 		if (!task || task.status !== "active") return;
-		const frameId = createDomainId("frame");
+		const episodeId = createDomainId("episode");
 		this.recordDomainEvent({
 			...this.domainEventBase(),
-			type: "FrameOpened",
+			type: "EpisodeOpened",
 			taskId: task.id,
-			frameId,
-			ordinal: task.frames.length + 1,
+			episodeId,
+			ordinal: task.episodes.length + 1,
 		});
-		this.currentFrameId = frameId;
+		this.currentEpisodeId = episodeId;
 		this.currentPlanId = undefined;
-		this.currentFrameExecutionIds = [];
-		this.currentFrameDistillationDeltaIds = [];
-		this.dispatchedFrameIds = new Set();
+		this.currentEpisodeExecutionIds = [];
+		this.currentEpisodeDistillationDeltaIds = [];
+		this.dispatchedBeliefIds = new Set();
 		this.pendingDomainBeliefDeltas = [];
 	}
 
@@ -1353,7 +1733,7 @@ export class BeliefLoopController {
 		if (!this.currentTaskId) return;
 		const task = this.domainSnapshot.tasks.get(this.currentTaskId);
 		if (!task || task.status !== "active") return;
-		this.closeDomainFrame();
+		this.closeDomainEpisode();
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "TaskClosed",
@@ -1361,10 +1741,10 @@ export class BeliefLoopController {
 			status,
 		});
 		this.currentTaskId = undefined;
-		this.currentFrameId = undefined;
+		this.currentEpisodeId = undefined;
 		this.currentPlanId = undefined;
-		this.currentFrameExecutionIds = [];
-		this.currentFrameDistillationDeltaIds = [];
+		this.currentEpisodeExecutionIds = [];
+		this.currentEpisodeDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
 	}
 

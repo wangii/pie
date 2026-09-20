@@ -9,6 +9,27 @@ export type ModelPolicy = "default" | "execution" | "distillation" | "fastPath";
 
 export type ProjectionKind = "belief" | "distill" | "execution" | "finalReport";
 
+/**
+ * The belief loop's control surface, in one place.
+ *
+ * Membership is the whole point, and it is needed in four places that must not drift: the propose
+ * and distill tool lists, the projection that decides which calls and results are bookkeeping
+ * rather than observations, and the session's list of tools that stay enabled regardless of the
+ * caller's `activeToolNames`. A tool missing from any one of them is misread — masked as a probe,
+ * dropped from a role's surface, or silently disabled — so the set is defined once and derived
+ * from everywhere else.
+ */
+export const BELIEF_SURFACE_TOOLS = [
+	"route_task",
+	"declare_belief",
+	"focus_beliefs",
+	"select_experiment",
+	"set_formulation",
+	"defer_formulation",
+	"view_beliefs",
+	"conclude",
+] as const;
+
 export interface RoleToolContext {
 	readonly fullActiveToolNames: string[];
 }
@@ -26,8 +47,8 @@ const PROPOSE_ROLE_HEADER =
 	"\n\nYou are the propose role of an investigation loop (propose → execution → distill → finalReport). " +
 	"Choose which unresolved uncertainty matters next; execution gathers evidence, distill updates the belief state, " +
 	"and finalReport answers the user. Your tools are route_task, declare_belief, focus_beliefs, select_experiment, " +
-	"view_beliefs, and conclude. " +
-	"Write every belief and its evidence in {beliefLang}.\n\n";
+	"set_formulation, defer_formulation, view_beliefs, and conclude. " +
+	"Write every belief, every formulation, and its evidence in {beliefLang}.\n\n";
 
 const PROPOSE_ROUTING_HEADER =
 	"First use route_task to choose fast-path or belief-loop execution. Routing is control metadata, not a belief. " +
@@ -74,19 +95,30 @@ const PROPOSE_PROTOCOL =
 	"Then use select_experiment with the belief ids (a subset of the focus) and one sentence naming the task decision the " +
 	"experiment could change. Beliefs left out of an experiment keep their status and stay in focus. view_beliefs reports " +
 	"the current focus and any selected experiment, and the listing includes beliefs retained from earlier tasks: those " +
-	"are history, not current scope.";
+	"are history, not current scope.\n" +
+	"9. State how you currently understand the task with set_formulation: your provisional reading, what it attends to, " +
+	"what tension you are trying to explain, and what the reading changes. This is your own working position, not a belief " +
+	"and not evidence — if the reading implies an untested empirical claim that would change what you do, declare that " +
+	"claim as a belief and test it instead. Once you have investigated, this decision is required before you choose " +
+	"another experiment or conclude; if you genuinely cannot state a reading yet, use defer_formulation to say what is " +
+	"missing and why. Publishing a new version voids any experiment you selected but have not dispatched, so select again " +
+	"afterwards. Revise only for a substantive change in what you understand, where you attend, or where the work goes: " +
+	"the same reading with more evidence behind it is not a revision.";
 
 export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	propose: {
 		instruction: PROPOSE_ROLE_HEADER + PROPOSE_ROUTING_HEADER + PROPOSE_PROTOCOL,
 		continuationInstruction: PROPOSE_ROLE_HEADER + PROPOSE_CONTINUATION_HEADER + PROPOSE_PROTOCOL,
-		tools: ["route_task", "declare_belief", "focus_beliefs", "select_experiment", "view_beliefs", "conclude"],
+		// Propose owns the whole control surface: routing, the belief state, scope, the experiment
+		// selection, and the formulation decision are all its call.
+		tools: [...BELIEF_SURFACE_TOOLS],
 		modelPolicy: "default",
 		projection: "belief",
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the propose role does not have. Choose the next uncertainty with ` +
-			`declare_belief, set scope with focus_beliefs, select the experiment with select_experiment, inspect state with ` +
-			`view_beliefs, route epistemically closed work with route_task, or conclude. ` +
+			`declare_belief, set scope with focus_beliefs, select the experiment with select_experiment, state your reading ` +
+			`with set_formulation (or defer_formulation), inspect state with view_beliefs, route epistemically closed work ` +
+			`with route_task, or conclude. ` +
 			`Execution performs the probe.`,
 	},
 	distill: {
@@ -128,7 +160,16 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"Do not support, refute, refine, or propose beliefs; distill interprets the evidence.",
 		tools: ({ fullActiveToolNames }) =>
 			fullActiveToolNames.filter(
-				(name) => name !== "route_task" && name !== "declare_belief" && name !== "conclude",
+				(name) =>
+					name !== "route_task" &&
+					name !== "declare_belief" &&
+					name !== "conclude" &&
+					// Publishing a formulation is propose's alone: execution gathers evidence, and an
+					// agent that could state its own reading mid-experiment would be answering its own
+					// question. It is filtered explicitly rather than by omission, so the exclusion
+					// survives a change to the belief-surface list.
+					name !== "set_formulation" &&
+					name !== "defer_formulation",
 			),
 		modelPolicy: "execution",
 		projection: "execution",
@@ -197,5 +238,11 @@ export const TRANSITION_STEERS = {
 		"Before concluding, perform one cheap adversarial check: is there any obvious unresolved uncertainty that could " +
 		"materially change the answer? Distinguish a new empirical assumption from a conclusion already supported by the " +
 		"evidence. If a material assumption remains, declare it for investigation. Otherwise call conclude again.",
+	formulationDecision:
+		"You have investigated this task and have not yet said how you understand it. Before choosing another experiment " +
+		"or concluding, either call set_formulation to state your current reading (what you take the problem to be, what it " +
+		"attends to, and what it changes), or call defer_formulation to record what is still missing and why. This is a " +
+		"required decision, not a formality: it is the difference between investigating toward a reading and drifting. A " +
+		"rejected call does not count — fix the input and call again.",
 	writeConclusion: "Write the evidence-grounded conclusion.",
 } as const;

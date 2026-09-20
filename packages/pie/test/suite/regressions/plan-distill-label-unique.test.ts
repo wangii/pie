@@ -54,7 +54,18 @@ describe("plan/distillation domain identity", () => {
 					evidenceRounds: 1,
 				}),
 			]),
-			fauxAssistantMessage("The residual eviction uncertainty is material."),
+			// The first round is done, so propose owes its reading before choosing again. Publishing
+			// here also voids nothing: no experiment is selected at this point, and the selection in
+			// the next turn is recorded against this version.
+			fauxAssistantMessage([
+				fauxToolCall("set_formulation", {
+					interpretation: "I read this as a question about how far persistence actually extends",
+					focus: "the conditions under which the cached value survives",
+					tension: "the TTL is bounded but nothing yet says whether eviction preempts it",
+					implication: "the answer must qualify persistence rather than assert it",
+					reason: "the first round settled persistence but raised eviction",
+				}),
+			]),
 			fauxAssistantMessage([
 				fauxToolCall("focus_beliefs", { beliefIds: ["belief-3"] }),
 				fauxToolCall("select_experiment", {
@@ -80,10 +91,10 @@ describe("plan/distillation domain identity", () => {
 		const plans = harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0);
 		expect(plans).toHaveLength(2);
 		expect(new Set(plans.map((event) => event.plan.id)).size).toBe(plans.length);
-		expect(new Set(plans.map((event) => event.frameId)).size).toBe(plans.length);
+		expect(new Set(plans.map((event) => event.episodeId)).size).toBe(plans.length);
 
 		const distillations = harness.eventsOfType("DistillationProduced");
 		expect(new Set(distillations.map((event) => event.distillation.id)).size).toBe(distillations.length);
-		for (const event of distillations) expect(typeof event.frameId).toBe("string");
+		for (const event of distillations) expect(typeof event.episodeId).toBe("string");
 	});
 });

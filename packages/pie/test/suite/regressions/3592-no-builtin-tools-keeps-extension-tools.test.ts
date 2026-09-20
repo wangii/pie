@@ -82,6 +82,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"bash",
 			"conclude",
 			"declare_belief",
+			"defer_formulation",
 			"dynamic_tool",
 			"edit",
 			"find",
@@ -93,6 +94,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"report_outcome",
 			"route_task",
 			"select_experiment",
+			"set_formulation",
 			"view_beliefs",
 			"write",
 		]);

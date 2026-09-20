@@ -52,16 +52,32 @@ user request remains the task target rather than being copied into framing belie
 
 | role | responsibility | tools | model |
 |---|---|---|---|
-| `propose` | choose the next material uncertainty; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `view_beliefs`, `conclude` | default |
+| `propose` | choose the next material uncertainty; state how the task is currently understood; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `set_formulation`, `defer_formulation`, `view_beliefs`, `conclude` | default |
 | `execution` | gather all materially distinct raw observations; perform minimal interventions when needed | active execution tools plus read-only `view_beliefs` (fast path also `report_outcome`) | `pie.executionModel` |
 | `distill` | adjudicate tested beliefs, inspect residual, and refine the world model | `declare_belief`, `view_beliefs`, `conclude` | `pie.distillationModel` |
 | `finalReport` | synthesize the evidence-grounded answer and preserve uncertainty | none | default |
+
+`set_formulation` and `defer_formulation` are propose's alone. Distill may find that the residual
+exposes a reframing, but a suggestion is not the current understanding: only propose publishes,
+and a distill turn cannot state the agent's reading or clear the decision by making it itself.
 
 There is no independent batching planner. Propose selects the beliefs for one coherent execution
 episode and states the decision that episode informs. This removes a model call that produced no
 evidence and optimized belief count rather than task success. The domain `PlanProduced` event
 remains an implementation record of the selection, including the propose-authored `intent`; it is
 not a cognitive role.
+
+Every role reads the current formulation from its system prompt, labeled as the agent's own
+provisional position rather than an observation: the block says explicitly that it is never
+support for a belief, so a reading cannot quietly become a fact no experiment tested. Nothing is
+emitted before a reading exists — the decision is raised by the loop's transition, not by a
+standing prompt.
+
+Once an experiment has been dispatched, propose owes a formulation decision before it can choose
+another experiment or conclude. The gate is checked against the replayed state, so a rejected
+`set_formulation` call leaves the decision outstanding rather than satisfying it. Publishing a
+version voids any experiment selected but not yet dispatched, which is why a propose turn that
+both states a reading and selects an experiment must publish first: tools run in call order.
 
 The decision roles (`propose`, `distill`) receive the `<project_context>` block even though they
 have no `read` tool. That block is normally gated on `read`, but project constraints ("`dist/` is
@@ -122,7 +138,7 @@ any of those is out of scope even when it would be interesting to know.
 
 There is no fixed three-belief limit. One natural experiment may test any coherent number of
 beliefs. Review checks such as internal consistency, summary/body drift, reverse drift, and
-category boundaries are heuristics. Use them when evidence suggests the frame may hide drift or
+category boundaries are heuristics. Use them when evidence suggests the current framing may hide drift or
 missing scope; do not expand scope merely to prove every user category coherent.
 
 ## Names and referents
@@ -150,7 +166,7 @@ Observed:
 The evidence watermark exposes the current execution episode's raw evidence to distill once, then
 masks it from later belief-side turns.
 
-Execution carries a frame-scoped lease (a budget of tool results). When the lease is exhausted the
+Execution carries an episode-scoped lease (a budget of tool results). When the lease is exhausted the
 runtime says only that the budget was spent; it does not infer whether the experiment finished. The
 report prompt and the distill handoff state this as a resource-limit fact, so distill adjudicates
 only the evidence actually gathered and may support, refute, or mark inconclusive on the evidence,
@@ -188,6 +204,14 @@ Before terminal handoff, propose or distill gets one cheap adversarial check:
 This single guard gates every normal final report entry, including the propose path that falls
 through to finalReport when there is no open work — it is not bypassed by omitting an explicit
 `conclude`.
+
+A second guard runs before it: once an experiment has been dispatched, propose owes a formulation
+decision, and neither choosing another experiment nor concluding may happen first. Distill
+concluding is the path that would otherwise reach finalReport without propose ever running again,
+so an owed decision diverts it back to propose instead. The formulation is the agent's reading of
+the task, not evidence, so it never substitutes for a task outcome: a task with a stated reading
+and no delivered result is still unfinished, and a task with a delivered result still has to say
+what it made of the request.
 
 ### Epistemic sufficiency is not task completion
 

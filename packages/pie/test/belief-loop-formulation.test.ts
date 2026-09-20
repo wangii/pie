@@ -1,0 +1,379 @@
+import { describe, expect, it } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
+import type { FormulationContent } from "../src/core/agent-session-domain.ts";
+import { BeliefLoopController } from "../src/core/belief-loop/belief-loop-controller.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+
+const CONTENT: FormulationContent = {
+	interpretation: "I read this as an identity lifecycle problem",
+	alternative: "a local bug in the retry guard",
+	focus: "the PaymentIntent that survives across attempts",
+	tension: "retries outlive the request but the identity does not",
+	implication: "look at where identity is created and retained first",
+};
+
+/**
+ * The controller's formulation API only needs the session manager (to replay and append domain
+ * events) and the event sink, so it is driven here without standing up a whole `AgentSession`
+ * and a faux provider. That keeps these tests about the formulation contract rather than about
+ * the loop's turn machinery, which the suite tests cover.
+ */
+function createController(session = SessionManager.inMemory(process.cwd(), { id: "session-1" })) {
+	const events: string[] = [];
+	const host = {
+		sessionManager: session,
+		_emit: (event: { type: string }) => events.push(event.type),
+		_fullActiveToolNames: [] as string[],
+	} as unknown as AgentSession;
+	const controller = new BeliefLoopController(host);
+	return { controller, session, events, host };
+}
+
+function beginTask(controller: BeliefLoopController): void {
+	controller.beginDomainTask("is the cache persistent?", "is the cache persistent?");
+}
+
+describe("formulation publishing", () => {
+	it("records a first version and numbers revisions from it", () => {
+		const { controller, events } = createController();
+		beginTask(controller);
+
+		const first = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		expect(first.outcome).toBe("recorded");
+		if (first.outcome === "rejected") throw new Error(first.reason);
+		expect(first.value.ordinal).toBe(1);
+		expect(first.value.previousVersionId).toBeUndefined();
+		expect(first.value.origin).toBe("propose");
+		expect(controller.currentFormulation()?.id).toBe(first.value.id);
+
+		const revised = controller.publishFormulation({
+			content: { ...CONTENT, focus: "where identity is retained between attempts" },
+			reason: "the probe moved the focus to retention",
+			sources: [],
+		});
+		expect(revised.outcome).toBe("recorded");
+		if (revised.outcome === "rejected") throw new Error(revised.reason);
+		expect(revised.value.ordinal).toBe(2);
+		expect(revised.value.previousVersionId).toBe(first.value.id);
+		// Every version stays readable; a revision adds to the history rather than replacing it.
+		expect(controller.formulationHistory().map((version) => version.id)).toEqual([first.value.id, revised.value.id]);
+		expect(events.filter((type) => type === "ProblemFormulationRecorded")).toHaveLength(2);
+	});
+
+	it("treats an identical resubmission as a no-op rather than a new version", () => {
+		const { controller, events } = createController();
+		beginTask(controller);
+		const first = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		if (first.outcome === "rejected") throw new Error(first.reason);
+
+		// Same words, a different reason and no new evidence: the reading has not changed, and
+		// deciding whether a paraphrase counts would take a comparison model the runtime refuses
+		// to add. More evidence for an unchanged reading is likewise not a revision.
+		const again = controller.publishFormulation({
+			content: { ...CONTENT },
+			reason: "restating the same reading with more confidence",
+			sources: [],
+		});
+		expect(again.outcome).toBe("unchanged");
+		if (again.outcome === "rejected") throw new Error(again.reason);
+		expect(again.value.id).toBe(first.value.id);
+		expect(controller.formulationHistory()).toHaveLength(1);
+		expect(events.filter((type) => type === "ProblemFormulationRecorded")).toHaveLength(1);
+
+		// Whitespace is normalized away before the comparison, so padding does not look like a change.
+		const padded = controller.publishFormulation({
+			content: { ...CONTENT, interpretation: `  ${CONTENT.interpretation}  ` },
+			reason: "padded",
+			sources: [],
+		});
+		expect(padded.outcome).toBe("unchanged");
+		expect(controller.formulationHistory()).toHaveLength(1);
+	});
+
+	it("refuses to publish without the content a real understanding needs", () => {
+		const { controller, events } = createController();
+		beginTask(controller);
+
+		for (const missing of ["interpretation", "focus", "implication"] as const) {
+			const result = controller.publishFormulation({
+				content: { ...CONTENT, [missing]: "   " },
+				reason: "incomplete",
+				sources: [],
+			});
+			expect(result.outcome).toBe("rejected");
+			if (result.outcome !== "rejected") throw new Error("expected a rejection");
+			expect(result.reason).toContain(missing);
+		}
+		expect(controller.publishFormulation({ content: CONTENT, reason: "  ", sources: [] }).outcome).toBe("rejected");
+		expect(controller.formulationHistory()).toEqual([]);
+		expect(events).not.toContain("ProblemFormulationRecorded");
+	});
+
+	it("publishes a version with no tension or alternative, and drops blank optionals", () => {
+		const { controller } = createController();
+		beginTask(controller);
+
+		const result = controller.publishFormulation({
+			content: {
+				interpretation: "I read this as a latency budget problem",
+				alternative: "   ",
+				focus: "the request path between the gateway and the cache",
+				implication: "measure the segments before changing any of them",
+			},
+			reason: "no rival reading is worth naming yet",
+			sources: [],
+		});
+
+		expect(result.outcome).toBe("recorded");
+		if (result.outcome === "rejected") throw new Error(result.reason);
+		// A blank optional is absent, not an empty string masquerading as content.
+		expect(result.value.content.alternative).toBeUndefined();
+		expect(result.value.content.tension).toBeUndefined();
+	});
+
+	it("rejects a source that does not resolve to a record on this task", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		const task = controller.domainSnapshot.tasks.get(controller.currentTaskId!)!;
+		const promptId = task.initialPrompt.id;
+
+		expect(
+			controller.publishFormulation({
+				content: CONTENT,
+				reason: "quoting the request itself",
+				sources: [{ kind: "prompt", promptId }],
+			}).outcome,
+		).toBe("recorded");
+
+		const dangling = controller.publishFormulation({
+			content: { ...CONTENT, focus: "something else entirely" },
+			reason: "citing a record that does not exist",
+			sources: [{ kind: "execution", executionId: "execution-404" }],
+		});
+		expect(dangling.outcome).toBe("rejected");
+		if (dangling.outcome !== "rejected") throw new Error("expected a rejection");
+		expect(dangling.reason).toContain("does not resolve");
+	});
+});
+
+describe("formulation deferral", () => {
+	it("records what is missing, and a later publication answers it", () => {
+		const { controller, events } = createController();
+		beginTask(controller);
+
+		const deferred = controller.deferFormulation({
+			missingInformation: "whether the duplicate charge is per-attempt or per-request",
+			reason: "one probe cannot separate the two readings",
+			sources: [],
+		});
+		expect(deferred.outcome).toBe("recorded");
+		if (deferred.outcome === "rejected") throw new Error(deferred.reason);
+		expect(controller.formulationDeferral()?.missingInformation).toContain("per-attempt");
+		// Deferring is not publishing: there is still no understanding to show.
+		expect(controller.currentFormulation()).toBeUndefined();
+
+		controller.publishFormulation({ content: CONTENT, reason: "enough evidence now", sources: [] });
+		expect(controller.formulationDeferral()).toBeUndefined();
+		expect(events.filter((type) => type === "ProblemFormulationDeferred")).toHaveLength(1);
+	});
+
+	it("refuses a deferral that does not say what is missing or why", () => {
+		const { controller } = createController();
+		beginTask(controller);
+
+		expect(controller.deferFormulation({ missingInformation: "  ", reason: "why", sources: [] }).outcome).toBe(
+			"rejected",
+		);
+		expect(controller.deferFormulation({ missingInformation: "what", reason: " ", sources: [] }).outcome).toBe(
+			"rejected",
+		);
+		expect(controller.formulationDeferral()).toBeUndefined();
+	});
+
+	it("treats an identical restated deferral as a no-op", () => {
+		const { controller, events } = createController();
+		beginTask(controller);
+		const input = { missingInformation: "the re-arm path", reason: "the probe could not isolate it", sources: [] };
+
+		controller.deferFormulation(input);
+		const again = controller.deferFormulation(input);
+		expect(again.outcome).toBe("unchanged");
+		expect(events.filter((type) => type === "ProblemFormulationDeferred")).toHaveLength(1);
+	});
+});
+
+describe("formulation corrections", () => {
+	it("keeps a correction beside the version it objects to and resolves it by id", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		const published = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		if (published.outcome === "rejected") throw new Error(published.reason);
+
+		const correction = controller.submitFormulationCorrection("the guard is simply not re-armed", published.value.id);
+		expect(correction?.targetVersionId).toBe(published.value.id);
+		expect(controller.pendingCorrections().map((item) => item.id)).toEqual([correction!.id]);
+		// The correction never rewrites the agent's published position.
+		expect(controller.currentFormulation()?.content).toEqual(published.value.content);
+
+		controller.resolveFormulationCorrection(correction!.id, "I will keep the identity reading and test re-arm");
+		expect(controller.pendingCorrections()).toEqual([]);
+		expect(controller.formulationHistory()[0].content).toEqual(published.value.content);
+	});
+
+	it("allows a correction before any version exists", () => {
+		const { controller } = createController();
+		beginTask(controller);
+
+		const correction = controller.submitFormulationCorrection("you are looking at the wrong thing");
+		expect(correction?.targetVersionId).toBeUndefined();
+		expect(controller.pendingCorrections()).toHaveLength(1);
+	});
+});
+
+describe("formulation state restoration", () => {
+	it("restores the current version, the deferral, and pending corrections from the log", () => {
+		const session = SessionManager.inMemory(process.cwd(), { id: "session-1" });
+		const { controller } = createController(session);
+		beginTask(controller);
+
+		const first = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		if (first.outcome === "rejected") throw new Error(first.reason);
+		const second = controller.publishFormulation({
+			content: { ...CONTENT, implication: "check retention before touching the guard" },
+			reason: "the first probe narrowed the direction",
+			sources: [],
+		});
+		if (second.outcome === "rejected") throw new Error(second.reason);
+		controller.deferFormulation({
+			missingInformation: "whether the second charge is per-attempt",
+			reason: "still two readings",
+			sources: [],
+		});
+		const correction = controller.submitFormulationCorrection("the guard is not re-armed");
+
+		// A fresh controller on the same branch is what a resume, a branch switch, or a
+		// post-compaction reload looks like: everything above has to come back from the log.
+		const restored = createController(session).controller;
+		expect(restored.currentFormulation()?.id).toBe(second.value.id);
+		expect(restored.formulationHistory().map((version) => version.ordinal)).toEqual([1, 2]);
+		expect(restored.formulationDeferral()?.missingInformation).toContain("per-attempt");
+		expect(restored.pendingCorrections().map((item) => item.id)).toEqual([correction!.id]);
+
+		// And the restored controller keeps writing to the same history rather than starting over.
+		const third = restored.publishFormulation({
+			content: { ...CONTENT, interpretation: "I read this as a re-arm ordering problem" },
+			reason: "the correction and the evidence agree",
+			sources: [{ kind: "correction", correctionId: correction!.id }],
+		});
+		expect(third.outcome).toBe("recorded");
+		if (third.outcome === "rejected") throw new Error(third.reason);
+		expect(third.value.ordinal).toBe(3);
+		expect(third.value.previousVersionId).toBe(second.value.id);
+	});
+
+	it("does not carry the previous task's understanding into a new task", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+
+		controller.closeDomainTask("completed");
+		beginTask(controller);
+
+		expect(controller.formulationHistory()).toEqual([]);
+		expect(controller.currentFormulation()).toBeUndefined();
+		expect(controller.formulationDeferral()).toBeUndefined();
+		expect(controller.pendingCorrections()).toEqual([]);
+	});
+});
+
+describe("propose ownership of the decision", () => {
+	it("voids an experiment that was selected before the reading it is now under", () => {
+		const { controller } = createController();
+		beginTask(controller);
+
+		const belief = controller.beliefSet.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a post-logout read keeps the value",
+			evidenceRounds: 1,
+		});
+		controller.setFocus([belief.id]);
+		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
+		expect(controller.pendingExperiment).toBeDefined();
+
+		const published = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		expect(published.outcome).toBe("recorded");
+		// The selection belonged to the previous reading, so it is gone rather than silently
+		// re-scoped under the new one.
+		expect(controller.pendingExperiment).toBeUndefined();
+
+		// Choosing again is what re-arms the dispatch, and the new choice is its own record.
+		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
+		expect(controller.pendingExperiment).toEqual({
+			intent: "what the answer must report",
+			beliefIds: [belief.id],
+		});
+	});
+
+	it("binds a cited belief to the delta that recorded its state, not to its later state", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		controller.selectDomainEpisodeBody("belief-loop");
+
+		const belief = controller.beliefSet.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a post-logout read keeps the value",
+			evidenceRounds: 1,
+		});
+		controller.onBeliefDelta(
+			{
+				op: "propose",
+				statement: belief.statement,
+				domain: belief.domain,
+				expectation: belief.expectation,
+				evidenceRounds: 1,
+			},
+			belief,
+			undefined,
+		);
+		const deltas = controller.domainSnapshot.tasks.get(controller.currentTaskId!)!.episodes[0];
+		if (deltas.body.kind !== "belief-loop") throw new Error("expected a belief-loop episode");
+		const delta = deltas.body.beliefDeltas[0];
+
+		const resolved = controller.resolveFormulationCitations([{ kind: "belief", beliefId: belief.id }]);
+		expect(resolved).toEqual({
+			sources: [{ kind: "belief", beliefId: belief.id, beliefDeltaId: delta.id }],
+		});
+
+		// A citation that names nothing is refused rather than stored as provenance.
+		expect(controller.resolveFormulationCitations([{ kind: "belief", beliefId: "belief-404" }])).toEqual({
+			error: "belief belief-404 has no recorded state on this task",
+		});
+		expect(controller.resolveFormulationCitations([{ kind: "correction", correctionId: "correction-404" }])).toEqual({
+			error: "unknown correction correction-404",
+		});
+
+		// The task's own request is always available without the model carrying an id for it.
+		const task = controller.domainSnapshot.tasks.get(controller.currentTaskId!)!;
+		expect(controller.resolveFormulationCitations([{ kind: "prompt" }])).toEqual({
+			sources: [{ kind: "prompt", promptId: task.initialPrompt.id }],
+		});
+	});
+
+	it("does not treat a deferral as a standing exemption", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		expect(controller.formulationDecisionOwed()).toBe(false);
+
+		controller.deferFormulation({
+			missingInformation: "how long the value survives",
+			reason: "unprobed",
+			sources: [],
+		});
+		expect(controller.formulationDecisionOwed()).toBe(false);
+		expect(controller.currentFormulation()).toBeUndefined();
+	});
+});

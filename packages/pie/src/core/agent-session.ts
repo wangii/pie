@@ -108,6 +108,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 
 export type { RoleStatus, RoleStatusSlot } from "./belief-loop/belief-loop-controller.ts";
 
+import { BELIEF_SURFACE_TOOLS } from "./role-specs.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -122,6 +123,11 @@ import {
 	createRouteTaskToolDefinition,
 	createSelectExperimentToolDefinition,
 } from "./tools/declare-belief.ts";
+import {
+	createDeferFormulationToolDefinition,
+	createSetFormulationToolDefinition,
+	formulationContentFromTool,
+} from "./tools/formulation.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { createViewBeliefsToolDefinition } from "./tools/view-beliefs.ts";
@@ -523,12 +529,12 @@ export class AgentSession {
 				}
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
-			if (isProbeTool(toolCall.name) && this._beliefLoop.currentTaskId && this._beliefLoop.currentFrameId) {
+			if (isProbeTool(toolCall.name) && this._beliefLoop.currentTaskId && this._beliefLoop.currentEpisodeId) {
 				const isFastPath =
 					!this._beliefLoop.beliefSetUsable ||
 					(this._beliefLoop.loopState.role === "execution" && this._beliefLoop.loopState.fastPath);
 				if (isFastPath) {
-					this._beliefLoop.selectDomainFrameBody("fast-path");
+					this._beliefLoop.selectDomainEpisodeBody("fast-path");
 				} else {
 					this._beliefLoop.ensureDomainPlan(this._beliefLoop.beliefSet.proposed().map((belief) => belief.id));
 				}
@@ -537,7 +543,7 @@ export class AgentSession {
 					...this._beliefLoop.domainEventBase(),
 					type: "ExecutionStarted",
 					taskId: this._beliefLoop.currentTaskId,
-					frameId: this._beliefLoop.currentFrameId,
+					episodeId: this._beliefLoop.currentEpisodeId,
 					execution: {
 						id: toolCall.id,
 						planId,
@@ -550,13 +556,13 @@ export class AgentSession {
 								: undefined,
 					},
 				});
-				this._beliefLoop.currentFrameExecutionIds.push(toolCall.id);
+				this._beliefLoop.currentEpisodeExecutionIds.push(toolCall.id);
 				if (hookResult?.block) {
 					this._beliefLoop.recordDomainEvent({
 						...this._beliefLoop.domainEventBase(),
 						type: "ExecutionCompleted",
 						taskId: this._beliefLoop.currentTaskId,
-						frameId: this._beliefLoop.currentFrameId,
+						episodeId: this._beliefLoop.currentEpisodeId,
 						executionId: toolCall.id,
 						output: hookResult.reason ?? "Tool execution was blocked",
 						status: "failed",
@@ -587,13 +593,13 @@ export class AgentSession {
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
 			});
-			if (isProbeTool(toolCall.name) && this._beliefLoop.currentTaskId && this._beliefLoop.currentFrameId) {
+			if (isProbeTool(toolCall.name) && this._beliefLoop.currentTaskId && this._beliefLoop.currentEpisodeId) {
 				const effectiveIsError = hookResult?.isError ?? isError;
 				this._beliefLoop.recordDomainEvent({
 					...this._beliefLoop.domainEventBase(),
 					type: "ExecutionCompleted",
 					taskId: this._beliefLoop.currentTaskId,
-					frameId: this._beliefLoop.currentFrameId,
+					episodeId: this._beliefLoop.currentEpisodeId,
 					executionId: toolCall.id,
 					output: JSON.parse(JSON.stringify(normalizedContent)) as JsonValue[],
 					status: effectiveIsError ? "failed" : "succeeded",
@@ -2962,6 +2968,48 @@ export class AgentSession {
 			) as ToolDefinition,
 		);
 		this._baseToolDefinitions.set(
+			"set_formulation",
+			createSetFormulationToolDefinition((input) => {
+				// The tool speaks in citations the model can actually make; the controller resolves
+				// them into durable references and owns whether the submission is a revision at all.
+				const resolved = this._beliefLoop.resolveFormulationCitations(input.citations ?? []);
+				if ("error" in resolved) return { outcome: "rejected", reason: resolved.error };
+				const result = this._beliefLoop.publishFormulation({
+					content: formulationContentFromTool(input),
+					reason: input.reason,
+					sources: resolved.sources,
+				});
+				if (result.outcome === "rejected") return result;
+				return {
+					outcome: result.outcome,
+					text:
+						result.outcome === "unchanged"
+							? `Formulation unchanged (still version ${result.value.ordinal}); no new version was recorded.`
+							: `Recorded formulation version ${result.value.ordinal}: ${result.value.content.interpretation}`,
+				};
+			}) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"defer_formulation",
+			createDeferFormulationToolDefinition((input) => {
+				const resolved = this._beliefLoop.resolveFormulationCitations(input.citations ?? []);
+				if ("error" in resolved) return { outcome: "rejected", reason: resolved.error };
+				const result = this._beliefLoop.deferFormulation({
+					missingInformation: input.missingInformation,
+					reason: input.reason,
+					sources: resolved.sources,
+				});
+				if (result.outcome === "rejected") return result;
+				return {
+					outcome: result.outcome,
+					text:
+						result.outcome === "unchanged"
+							? "The same deferral is already recorded; no new record was made."
+							: `Deferred stating a formulation. Missing: ${result.value.missingInformation}`,
+				};
+			}) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
 			"conclude",
 			createConcludeToolDefinition((outcome) => this._beliefLoop.recordOutcome(outcome)) as ToolDefinition,
 		);
@@ -2992,32 +3040,14 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: [
-					"read",
-					"bash",
-					"edit",
-					"write",
-					"route_task",
-					"declare_belief",
-					"focus_beliefs",
-					"select_experiment",
-					"view_beliefs",
-					"conclude",
-				];
+			: ["read", "bash", "edit", "write", ...BELIEF_SURFACE_TOOLS];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		// The belief set is on by default, so its tools must be active even when the
 		// caller supplied its own `activeToolNames` (the CLI passes a settings default
 		// of `["read", "bash", "edit", "write"]` that would otherwise drop them). An
 		// explicit `--tools` allow-list still wins: `_refreshToolRegistry` filters it
 		// back out via `allowedToolNames`.
-		const beliefToolNames = [
-			"route_task",
-			"declare_belief",
-			"focus_beliefs",
-			"select_experiment",
-			"view_beliefs",
-			"conclude",
-		];
+		const beliefToolNames = [...BELIEF_SURFACE_TOOLS];
 		const activeToolNames =
 			baseActiveToolNames.length > 0 && !baseActiveToolNames.includes("declare_belief")
 				? [...baseActiveToolNames, ...beliefToolNames.filter((name) => !baseActiveToolNames.includes(name))]

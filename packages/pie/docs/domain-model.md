@@ -1,18 +1,23 @@
 # Agent session domain model
 
-> **Status: current runtime contract.** `agent-session-domain.ts` defines this model,
+> **Status: current runtime contract, schema v3.** `agent-session-domain.ts` defines this model,
 > `BeliefLoopController` emits and replays its events, and RPC forwards those events unchanged.
 > GUI projections remain consumers rather than sources of truth.
 
+> **Every schema bump so far has been breaking.** v2 renamed the execution-round vocabulary from
+> `TaskFrame`/`frameId` to `ExecutionEpisode`/`episodeId`; v3 added the task-level problem
+> formulation. Older logs are rejected rather than migrated — see
+> [Protocol versioning and old logs](#protocol-versioning-and-old-logs).
+
 ## Problem and solution
 
-Operational messages alone do not provide durable task, frame, routing, belief, execution, and
-distillation identity. Inferring those objects from adjacent model turns makes phase transitions
-ambiguous and couples consumers to controller implementation details.
+Operational messages alone do not provide durable task, episode, routing, belief, execution,
+distillation, and problem-formulation identity. Inferring those objects from adjacent model turns
+makes phase transitions ambiguous and couples consumers to controller implementation details.
 
 PIE therefore emits one language-neutral domain contract with stable opaque ids and explicit
 lifecycle events. The runtime is authoritative. Consumers replay the events into a read model;
-they do not discover task/frame boundaries or epistemic relationships from message adjacency.
+they do not discover task/episode boundaries or epistemic relationships from message adjacency.
 
 ## Three layers, not one object
 
@@ -37,19 +42,22 @@ as stored; no array-index or display-label remapping is allowed.
 Session
 ├─ active branch -> ordered Task ids
 ├─ Task records
-│  └─ ordered TaskFrame records
+│  ├─ ordered ExecutionEpisode records
+│  └─ ordered ProblemFormulationVersion records
 └─ session-wide Belief registry
 ```
 
 Ownership rules:
 
-- a Belief belongs to the session-wide registry, not to a Task or TaskFrame;
+- a Belief belongs to the session-wide registry, not to a Task or ExecutionEpisode;
 - a Task records which beliefs it inherited and introduced by id;
 - a Plan selects Beliefs by id;
-- a TaskFrame records Belief deltas and provenance, but never owns mutable
+- an ExecutionEpisode records Belief deltas and provenance, but never owns mutable
   Belief pointers;
-- Execution and Distillation occurrences belong to exactly one TaskFrame;
-- Routing belongs to the TaskFrame/Episode whose path it selected;
+- Execution and Distillation occurrences belong to exactly one ExecutionEpisode;
+- Routing belongs to the ExecutionEpisode whose path it selected;
+- a ProblemFormulationVersion belongs to exactly one Task, is append-only, and is
+  never inherited by another Task;
 - Target is the immutable user outcome captured at task start; it remains control context and is not copied into the Belief registry.
 
 Cross-language and persisted records use ids, never `shared_ptr`/`unique_ptr`.
@@ -84,7 +92,7 @@ struct Task {
 
   std::vector<BeliefId> inheritedBeliefs;
   std::vector<BeliefId> introducedBeliefs;
-  std::vector<TaskFrame> frames;
+  std::vector<ExecutionEpisode> episodes;
 
   // Task scope: the beliefs this task is acting on. Never inherited; a new Task
   // starts undeclared.
@@ -92,6 +100,14 @@ struct Task {
   bool focusDeclared;
   // What the task delivered, and how it was verified. Absent until recorded.
   std::optional<TaskOutcome> taskOutcome;
+
+  // The agent's understanding of its own task, oldest first. Append-only, and never
+  // inherited: a new Task starts with an empty history.
+  std::vector<ProblemFormulationVersion> formulations;
+  // Set while propose has deferred and has not published since. Never removes a version.
+  std::optional<FormulationDeferral> formulationDeferral;
+  // User corrections against this task's understanding, oldest first.
+  std::vector<FormulationCorrection> formulationCorrections;
 };
 
 struct TaskOutcome {
@@ -111,21 +127,21 @@ struct Target {
   std::string statement;
 };
 
-struct TaskFrame {
-  FrameId id;
+struct ExecutionEpisode {
+  EpisodeId id;
   TaskId taskId;
   uint64_t ordinal;
-  FrameStatus status;
-  FrameStage stage;
+  EpisodeStatus status;
+  EpisodeStage stage;
 
   std::vector<Intervention> steering;
   std::optional<Routing> routing;
-  std::variant<PendingFrame, BeliefLoopFrame, FastPathFrame> body;
+  std::variant<PendingEpisode, BeliefLoopEpisode, FastPathEpisode> body;
 };
 
-struct PendingFrame {};
+struct PendingEpisode {};
 
-struct BeliefLoopFrame {
+struct BeliefLoopEpisode {
   std::vector<BeliefId> openBeliefsAtStart;
   Plan plan;
   std::vector<Execution> trajectory;
@@ -133,16 +149,199 @@ struct BeliefLoopFrame {
   std::vector<BeliefDelta> beliefDeltas;
 };
 
-struct FastPathFrame {
+struct FastPathEpisode {
   std::vector<Execution> trajectory;
   std::optional<Distillation> distillation;
+  // The fast path has no Plan to carry this, so the episode records it directly.
+  FormulationAdoption formulation;
 };
 ```
 
-`PendingFrame` is legal only while an active frame is waiting for routing/path
-selection. A closed frame must contain either `BeliefLoopFrame` or
-`FastPathFrame`. The tagged union prevents both bodies from being present and
-prevents an unclassified closed frame.
+`PendingEpisode` is legal only while an active episode is waiting for routing/path
+selection. A closed episode must contain either `BeliefLoopEpisode` or
+`FastPathEpisode`. The tagged union prevents both bodies from being present and
+prevents an unclassified closed episode.
+
+### ExecutionEpisode is not the problem formulation
+
+An `ExecutionEpisode` is one round of execution: a routing decision, one experiment, and the
+evidence it produced. It answers "what was tried, and what came back". It is not the agent's
+current understanding of the task.
+
+This vocabulary was renamed from `TaskFrame` precisely because the old name invited the
+conflation. The old `TaskFrame` opened on every distill → propose handoff, so it always meant an
+execution round; the name merely made it look like a frame of reference, and readers — including
+this document — drifted into describing it as one. `EpisodeStage` reflects that: `proposing` and
+`distilling` name the role that owned the round, not an interpretation of the task.
+
+A new episode never implies a revised understanding, and a revised understanding never implies a
+new episode: see [Problem formulation](#problem-formulation) for the other record.
+
+### Problem formulation
+
+The product-facing name for this record is **Frame**. It is the agent's current answer to "what am
+I taking this task to be", stated in its own provisional first person. It is not a Belief: it
+carries no evidence verdict and no truth status, and a formulation may never stand in as support
+for one. If a reading smuggles in an empirical claim that would change what the agent does, that
+claim belongs in the Belief registry where it can be tested.
+
+```cpp
+struct FormulationContent {
+  std::string interpretation;          // how I currently understand this task
+  std::optional<std::string> alternative; // a reading I am not prioritizing
+  std::string focus;                   // which objects, relations, or scales I am attending to
+  std::optional<std::string> tension;  // the conflict I am trying to explain; absent = not yet clear
+  std::string implication;             // what this reading changes about where the work goes
+};
+
+struct ProblemFormulationVersion {
+  FormulationVersionId id;
+  TaskId taskId;
+  uint64_t ordinal;
+  std::optional<FormulationVersionId> previousVersionId; // absent only for ordinal 1
+  Timestamp recordedAt;
+  FormulationOrigin origin;            // always Propose
+  FormulationContent content;
+  std::string reason;                  // short: why this version was formed or revised
+  std::vector<FormulationSource> sources;
+};
+
+struct FormulationDeferral {
+  std::string missingInformation;
+  std::string reason;
+  std::vector<FormulationSource> sources;
+  Timestamp deferredAt;
+};
+
+struct FormulationCorrection {
+  FormulationCorrectionId id;
+  TaskId taskId;
+  std::optional<FormulationVersionId> targetVersionId; // absent when no version existed yet
+  Content original;                    // the user's words, verbatim
+  Timestamp receivedAt;
+  FormulationCorrectionStatus status;  // Pending | Resolved
+  std::optional<std::string> response; // propose's answer; required once resolved
+  std::optional<FormulationVersionId> recordedVersionId; // the revision that answered it, if any
+};
+```
+
+`interpretation`, `focus`, and `implication` are required. A version that cannot say what it
+understands, what it is attending to, and what that changes is a label rather than a working
+understanding. `alternative` and `tension` are optional and must stay genuinely optional: an agent
+with no rival reading and no articulated tension publishes without them rather than inventing
+content to fill a field, and a present-but-blank optional is rejected for the same reason.
+
+#### Sources
+
+A source names what a version was formed from, and every kind resolves to a record that is already
+durable:
+
+```cpp
+std::variant<
+  PromptRef,        // this task's InitialPrompt
+  InterventionRef,  // a steering message delivered to one of this task's episodes
+  CorrectionRef,    // a user correction recorded on this task
+  ExecutionRef,     // one tool execution in one of this task's episodes
+  DistillationRef,  // one distillation in one of this task's episodes
+  BeliefRef         // a BeliefId plus the BeliefDeltaId that recorded its state
+> FormulationSource;
+```
+
+Two rules make citations auditable rather than decorative. A citation that names nothing is
+rejected, because unresolvable provenance reads as provenance. And a belief is cited through a
+delta rather than an id alone, because a belief is mutable: replaying a version later must show the
+belief's state *at the time*, not its latest one. Citing an existing record is by itself a
+legitimate reason to reframe — reinterpreting old evidence is real work and does not require a
+fresh tool call.
+
+#### Versions are immutable
+
+Versions are append-only. A revision is a new version whose `previousVersionId` names its
+predecessor; the fold rejects a version whose ordinal does not follow the history, whose
+predecessor is not the current version, and whose id already exists. Nothing rewrites a version in
+place, so a later correction or reframing leaves the earlier record readable exactly as it was
+published.
+
+Whether a change is *substantive* is propose's judgment, not the runtime's. The only mechanical
+rule is that resubmitting content identical to the current version is a no-op: it emits no event
+and creates no version. Deciding whether a paraphrase is substantive would take a second model to
+compare semantics, and the runtime deliberately does not add one — which also means more evidence
+for an unchanged reading never manufactures a revision.
+
+#### Adoption: which version governed a decision
+
+```cpp
+std::variant<
+  FormulationVersionRef,  // { versionId }
+  Unformed                // no version had been formed at that moment
+> FormulationAdoption;
+```
+
+`Plan` and `FastPathEpisode` each record the adoption for the selection and the dispatch they
+represent. `Unformed` is a recorded fact, not a missing field: it is what keeps a first
+investigation honest, because the version a later round publishes cannot be back-dated onto a
+decision that was made before it existed. The fold therefore refuses `Unformed` once a version
+exists — a decision made after a publication is under that publication.
+
+A belief-loop episode does not carry the adoption itself; its `Plan` does, so the selection and the
+dispatch cannot disagree about which understanding governed them. The fast path has no `Plan`, so
+its episode carries the adoption directly.
+
+#### Deferral
+
+"Not investigated yet" and "investigated and deferred" are different states, and only the second
+is recorded. A deferral states what information is missing and why, and it is never a blank
+version. It does not remove a version that already exists; a deferral recorded after a publication
+adds a state beside the current understanding. A publication answers the deferral, so the deferred
+state stops being current — while the deferral event itself stays in the log.
+
+#### Corrections
+
+A user correction is kept as its own record beside the version it targets, never written into it,
+so the published version stays the agent's own stated position and the objection stays auditable.
+A correction may target no version — a user can object before any version exists. Resolution is
+addressed to a specific correction id and requires a non-empty response, so a response written for
+an older correction can never be recorded as the answer to one that arrived while it was being
+handled.
+
+### Who decides, and when the decision is owed
+
+Only propose publishes. The record states this itself (`origin: Propose`), and the runtime
+enforces it by keeping `set_formulation` and `defer_formulation` off every other role's surface —
+distill may find that the residual exposes a reframing, but a suggestion does not become the
+current understanding until propose states it.
+
+Once an experiment has been dispatched, propose owes a decision before it can choose another
+experiment or conclude. Two properties make that gate a real one rather than a formality:
+
+- **It is read off the replayed records, not off the turn.** A `set_formulation` call that was
+  rejected changed nothing, so the decision remains outstanding; a call that succeeded changed the
+  state the gate reads. "Which episode counts as investigated" is `latestDispatchedEpisodeOrdinal`,
+  derived from the durable records, so the answer survives a reload.
+- **It cannot be routed around.** Distill concluding normally hands straight to finalReport, which
+  would skip propose entirely; an owed decision diverts that path back to propose instead. The gate
+  also applies *during* a round, so nothing depends on the episode having closed first.
+
+The gate is deliberately narrow. Nothing is owed before the first dispatch — a preliminary probe
+chosen before any reading exists is legitimate, and its `Plan` records `Unformed`. A published
+version settles the decision for good, so accumulating evidence never nags a task into
+manufacturing a revision. A deferral settles it only for the investigation it answered: new work
+re-opens it, which is what keeps the first deferral from becoming a standing exemption.
+
+### Publication invalidates an un-dispatched selection
+
+Publishing a version voids any experiment that was selected but not yet dispatched: `Plan` is
+written at dispatch time, so the selection's adoption can only be honest if it names the version
+that was current when it was chosen. Propose must choose again, and the new selection is recorded
+against the new version.
+
+Two consequences follow directly, and both are observable in the event stream:
+
+- Within one turn, tools run in call order. A turn that selects an experiment and then publishes a
+  version ends with no selection; a turn that publishes and then selects ends with a selection
+  bound to the new version.
+- An already-dispatched experiment is untouched. Its `Plan` and its episode's observations stay
+  exactly as recorded — a reframe does not un-run what ran, nor erase the evidence it produced.
 
 ### Belief
 
@@ -224,7 +423,7 @@ struct Routing {
 };
 ```
 
-There is one Routing record on the outer `TaskFrame`. `FastPathFrame` does not
+There is one Routing record on the outer `ExecutionEpisode`. `FastPathEpisode` does not
 repeat it. Routing is written through the control-only `route_task` tool. Fast-path dispatch is
 blocked while an unresolved belief *in the task's focus* remains; a belief outside the focus does
 not block, and an immaterial in-focus proposal must be explicitly retracted.
@@ -236,6 +435,7 @@ struct Plan {
   PlanId id;
   std::vector<BeliefId> selectedToExplore;
   std::optional<std::string> intent;
+  FormulationAdoption formulation; // the version this experiment was chosen under
 };
 ```
 
@@ -246,6 +446,10 @@ intent is model-produced rather than synthesized by the GUI or the harness; it i
 path and the runtime only falls back to a mechanical `Probe <ids>` label when a dispatch did not
 come from an explicit selection. `selectedToExplore` is a subset of the task's declared focus. Plan
 is harness bookkeeping, not a separate cognitive role.
+
+`formulation` is what makes a selection auditable against the understanding it was made under: a
+plan chosen before the first version records `Unformed`, and one chosen afterwards must name the
+version. Executions inherit the adoption through their `planId` rather than repeating it.
 
 ### Execution
 
@@ -271,8 +475,8 @@ other content blocks. A core `command: string`/`result: string` pair would lose
 information. `filePath` is retained only as an optional normalized index for
 file-related tools.
 
-`planId` is required for a `BeliefLoopFrame` execution and absent for a direct
-`FastPathFrame` execution. The runtime emits a minimal Plan occurrence selecting the coherent
+`planId` is required for a `BeliefLoopEpisode` execution and absent for a direct
+`FastPathEpisode` execution. The runtime emits a minimal Plan occurrence selecting the coherent
 belief set proposed for execution; this is harness bookkeeping, not model-generated planner prose.
 
 ### Distillation and belief deltas
@@ -287,7 +491,7 @@ struct Distillation {
 
 struct BeliefDelta {
   BeliefDeltaId id;
-  FrameId frameId;
+  EpisodeId episodeId;
   std::optional<DistillationId> distillationId;
   BeliefDeltaProducerPhase producerPhase; // Propose | Distill
   BeliefOperation operation; // Propose | Support | Refute | Refine | Inconclusive | Retract
@@ -301,7 +505,7 @@ struct BeliefDelta {
 };
 ```
 
-A frame can contain zero or more belief deltas. `producerPhase` records whether
+An execution episode can contain zero or more belief deltas. `producerPhase` records whether
 propose or distill emitted the mutation without relying on event order.
 `sourceBeliefId` and `resultBeliefId` make refinement lineage explicit: the old
 belief is the source and the replacement is the result. `proposal: string` is
@@ -315,14 +519,14 @@ retract several beliefs. Distillation output ids provide an explicit
 struct Intervention {
   InterventionId id;
   Content contents;
-  FrameStage stage;
+  EpisodeStage stage;
   std::optional<ExecutionId> afterExecution;
   Timestamp createdAt;
 };
 ```
 
 Steering is a sequence, not `optional<string>`: several messages can arrive in
-one frame, and their location in the execution/cognitive flow matters.
+one episode, and their location in the execution/cognitive flow matters.
 
 ## Target versus beliefs
 
@@ -359,10 +563,15 @@ TargetDefined
 FocusDeclared          (task scope: the belief ids the task acts on)
 TaskOutcomeRecorded    (what the task delivered, and how it was verified)
 
-FrameOpened
+ProblemFormulationRecorded    (a complete, immutable version)
+ProblemFormulationDeferred    (what is missing, and why)
+FormulationCorrectionSubmitted
+FormulationCorrectionResolved
+
+EpisodeOpened
 RoutingDecided
-FrameBodySelected
-FrameClosed
+EpisodeBodySelected
+EpisodeClosed
 CursorChanged
 InterventionAdded
 
@@ -378,7 +587,7 @@ Required correlation fields:
 - `TaskOpened` carries `taskId`, parent/branch correlation, and the immutable
   original/effective `InitialPrompt`;
 - every other Task event carries `taskId`;
-- every Frame event carries `taskId` and `frameId`;
+- every Episode event carries `taskId` and `episodeId`;
 - Plan, Execution, Distillation, Intervention, Routing, and BeliefDelta carry
   their own stable string id plus their owning/correlation ids;
 - `ExecutionCompleted` carries structured output and terminal status;
@@ -393,8 +602,14 @@ Required correlation fields:
   It is emitted only for a delivery a model recorded through `conclude` /
   `report_outcome`; the fast path's synthesized failure outcome is runtime
   bookkeeping and deliberately stays out of the event stream;
-- `FrameOpened`/`FrameClosed` are emitted by the runtime. `PROPOSING`, a second
-  plan, or a second distillation is never used by the GUI as a frame delimiter.
+- the four formulation events are task-level, not episode-level: an understanding
+  outlives the rounds it was formed in. `ProblemFormulationRecorded` carries the
+  complete version rather than a diff, so a replayed version is exactly what was
+  published. `ProblemFormulationDeferred` carries the missing information and the
+  reason. `FormulationCorrectionResolved` carries the correction id it answers,
+  so resolution is addressed rather than positional;
+- `EpisodeOpened`/`EpisodeClosed` are emitted by the runtime. `PROPOSING`, a second
+  plan, or a second distillation is never used by the GUI as an episode delimiter.
 
 Display labels such as `B42`, `P-3`, or `D-7` are separate from ids and may be
 derived for presentation. They never participate in correlation.
@@ -408,20 +623,74 @@ On resume:
 
 1. select the active session branch;
 2. replay its domain events into `AgentSessionSnapshot`;
-3. restore the runtime's current task/frame/belief state;
+3. restore the runtime's current task/episode/belief state, including the current formulation
+   version, any deferral, pending corrections, and the adoption recorded on each plan or
+   fast-path dispatch;
 4. feed the same events/snapshot to GUI projections.
 
 Compaction may remove messages from model context, but it must not remove domain
-events required to reconstruct the active branch's Task/Frame/Belief state.
+events required to reconstruct the active branch's Task/Episode/Belief/formulation state.
+A reconnecting client that reads the snapshot and then re-subscribes must not replay a revision
+twice or resume a selection the log has already superseded — the state comes from the folded
+snapshot, and the events only extend it.
+
+## Protocol versioning and old logs
+
+`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `3`. Every stored event carries the version
+twice — once on the entry envelope, once on the event — and replay rejects any event whose version
+is not the current one.
+
+| Version | What it introduced | Readable by the current runtime? |
+|---|---|---|
+| v1 | `TaskFrame`/`frameId` execution-round vocabulary | no |
+| v2 | `ExecutionEpisode`/`episodeId` (the rename) | no |
+| v3 | Problem-formulation records; `FormulationAdoption` on `Plan`/`FastPathEpisode` | yes |
+
+Every bump is a rename or an addition, never a migration, and the code is deliberately written
+that way:
+
+- **No alias, no migration.** v1 event names (`FrameOpened`, `FrameBodySelected`, `FrameClosed`)
+  and the v1 `frameId` field are not accepted anywhere. There is no upgrade path from a v1 log.
+- **Explicit failure, not a partial replay.** An entry from an older version makes
+  `domainEventsFromSessionEntries` throw a `DomainReplayError` naming the stored version and the
+  required one. The alternative — skipping unreadable entries — would silently produce a history
+  with missing records and no trace of why.
+- **Old logs are never rewritten or deleted.** The failure happens during replay; the session
+  entries on disk are left exactly as they were, so the user's own history stays intact and a
+  later runtime that can read it still can.
+- **Load failure is not silent.** Because replay runs in the `AgentSession` constructor, an
+  unloadable session fails at load with that error rather than opening with an empty domain model.
+
+A v2 log is rejected by a v3 runtime for a concrete reason rather than for symmetry: v2's `Plan`
+carries no `FormulationAdoption`, so a replayed v2 plan is indistinguishable from one whose version
+was never formed — exactly the distinction `Unformed` exists to preserve. Sessions written by a
+v3 runtime are unaffected.
+
+### Downstream consumers
+
+The protocol reaches every consumer of the domain event stream, and consumers are adapted
+separately from the runtime:
+
+- `gui/src/Model.cpp` and its tests still parse the pre-rename names and `frameId`. The native GUI
+  is **not** compatible with a v2-or-later runtime until it is adapted, and that adaptation is not
+  part of the rename itself.
+- The same applies to the formulation events: no GUI consumer reads
+  `ProblemFormulationRecorded`/`ProblemFormulationDeferred` or the correction events yet.
+- RPC forwards domain events unchanged, so any RPC client pattern-matching on event names needs the
+  same treatment.
 
 ## Runtime and GUI responsibilities
 
 Runtime responsibilities:
 
 - allocate stable ids;
-- decide Task and TaskFrame boundaries;
+- decide Task and ExecutionEpisode boundaries;
 - own the session-wide Belief registry and apply validated deltas;
 - emit explicit plan/execution/distillation/provenance correlations;
+- record each Task's problem-formulation versions, deferrals, and corrections as they are
+  published, and never rewrite or erase one;
+- demand the formulation decision once an experiment has been dispatched, and void a selection
+  that a new version superseded;
 - persist domain events.
 
 GUI responsibilities:
@@ -430,7 +699,8 @@ GUI responsibilities:
 - select one Task for Text/Graph views;
 - derive display-only fields such as normalized file paths, labels, layout,
   filtering, and expansion state;
-- never infer cognition from generic message/tool ordering.
+- never infer cognition from generic message/tool ordering, and never infer a
+  formulation version from adjacent text or role turns — read it from the record.
 
 `GraphTaskState` remains a rendering projection. It is not the shared business
 model and must not become a second source of truth.
@@ -438,18 +708,29 @@ model and must not become a second source of truth.
 ## Invariants
 
 1. Stable ids never change after pruning, reload, compaction, or GUI projection.
-2. A closed TaskFrame is immutable.
-3. A closed TaskFrame has exactly one classified body: belief loop or fast path.
-4. Beliefs are session-wide immutable records; Tasks and Frames reference ids.
+2. A closed ExecutionEpisode is immutable.
+3. A closed ExecutionEpisode has exactly one classified body: belief loop or fast path.
+4. Beliefs are session-wide immutable records; Tasks and Episodes reference ids.
 5. Belief status is derived from provenance.
 6. A Plan selects Belief ids; it does not own Beliefs.
-7. Every Execution belongs to one Frame and, when applicable, one Plan.
+7. Every Execution belongs to one Episode and, when applicable, one Plan.
 8. Every Distillation names its Execution inputs and only its own BeliefDelta outputs.
-9. Routing exists once per routed Frame and is not duplicated in FastPathFrame.
+9. Routing exists once per routed Episode and is not duplicated in FastPathEpisode.
 10. Target is immutable and remains distinct from evidence-revisable world beliefs.
-11. A GUI Task view contains exactly one Task's Frames.
+11. A GUI Task view contains exactly one Task's Episodes.
 12. Session branching is preserved by the event tree; a Task vector is only a
     selected-branch projection.
+13. A ProblemFormulationVersion is immutable once recorded, and its history is append-only and
+    per-Task: a version's `previousVersionId` names the version it revised, and no version is
+    inherited by another Task.
+14. Every formulation source resolves to a record that already exists on the same Task.
+15. A recorded `FormulationAdoption` cannot contradict the history: `Unformed` is only valid while
+    the Task has no version, so a decision made under a version always names it.
+16. A formulation version never carries belief status, and never counts as evidence for a belief.
+17. Publishing a version leaves the focus slice, every belief record, and every already-recorded
+    observation untouched; it invalidates only a selection that has not been dispatched.
+18. A dispatch is traceable to the understanding that governed it: its plan (or, on the fast path,
+    its episode) names the current version, or records that none existed.
 
 ## Current implementation notes
 
@@ -465,5 +746,20 @@ model and must not become a second source of truth.
   message also carries a deterministic tool-operation record (calls and their `ok`/`error`/no-result
   outcomes) so the epistemic side can cross-check what actually ran, independent of the model
   summary.
+- `BeliefLoopController.publishFormulation` / `deferFormulation` /
+  `submitFormulationCorrection` / `resolveFormulationCorrection` are the only writers of the
+  formulation records. `currentFormulation`, `formulationDeferral`, `pendingCorrections`, and
+  `formulationHistory` read them back off the replayed snapshot, so a resumed, branch-switched, or
+  post-compaction session reports the same state the log does without any separate restoration
+  step.
+- The propose-only `set_formulation` / `defer_formulation` tools resolve the citations a model can
+  actually make (the task prompt, a belief, a correction) into durable references, then delegate.
+  Execution and distillation ids are not reachable from the propose transcript, so those source
+  kinds stay protocol-level; confirming an experiment's result as a citation is part of the
+  correction handoff, not of this surface.
+- The belief surface is defined once, in `BELIEF_SURFACE_TOOLS`. The propose tool list, the
+  projection that decides which calls are bookkeeping rather than observations, and the session's
+  force-enabled tool list are all derived from it, because a tool missing from any one of them is
+  misread rather than merely absent.
 - Any GUI or external client must consume stable ids and explicit lifecycle events. It must not
-  recreate frame boundaries from role or message adjacency.
+  recreate episode boundaries from role or message adjacency.

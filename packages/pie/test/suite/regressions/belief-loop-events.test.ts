@@ -10,7 +10,23 @@ describe("belief-loop event family", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("emits task/frame lifecycle, belief deltas, plans, and distillation correlations", async () => {
+	/**
+	 * Propose's statement of how it currently reads the task.
+	 *
+	 * Once a round has completed, propose owes this decision before it can conclude or choose
+	 * another experiment, so every belief-loop script here publishes one. Where it is published
+	 * relative to the first probe is deliberate per test: before the probe, the episode's plan
+	 * records that version; after it, the plan records that no version had been formed yet.
+	 */
+	const formulation = (reason = "reading formed from the evidence so far") =>
+		fauxToolCall("set_formulation", {
+			interpretation: "I read this as a question about how long the cached value survives",
+			focus: "the lifetime of the cached value across a logout",
+			implication: "the answer turns on what the post-logout read returns",
+			reason,
+		});
+
+	it("emits task/episode lifecycle, belief deltas, plans, and distillation correlations", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([
@@ -48,7 +64,14 @@ describe("belief-loop event family", () => {
 					evidence: "memory pressure was not applied",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("declare_belief", { op: "retract", beliefId: "belief-2" })]),
+			// First propose turn after the round: the round is complete, so propose owes its reading
+			// before it can conclude. Publishing here (and not earlier) is what leaves the plan above
+			// recorded as governed by no version — a first investigation is allowed to precede the
+			// reading, and the reading is never back-dated onto it.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", { op: "retract", beliefId: "belief-2" }),
+				formulation("the first round settled the logout question"),
+			]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout"),
@@ -59,26 +82,37 @@ describe("belief-loop event family", () => {
 		const taskOpened = harness.eventsOfType("TaskOpened");
 		expect(taskOpened).toHaveLength(1);
 		expect(harness.eventsOfType("TargetDefined")[0].taskId).toBe(taskOpened[0].taskId);
-		expect(harness.eventsOfType("FrameOpened")[0].taskId).toBe(taskOpened[0].taskId);
+		expect(harness.eventsOfType("EpisodeOpened")[0].taskId).toBe(taskOpened[0].taskId);
 
 		const deltas = harness.eventsOfType("BeliefDeltaApplied");
 		expect(deltas.length).toBeGreaterThan(0);
 		for (const event of deltas) {
-			expect(event.delta.frameId).toBe(event.frameId);
+			expect(event.delta.episodeId).toBe(event.episodeId);
 			expect(event.delta.resultingBeliefs.length).toBeGreaterThan(0);
 			expect(event.delta.resultingBeliefs.some((belief) => belief.id === event.delta.resultBeliefId)).toBe(true);
 		}
 
 		const plans = harness.eventsOfType("PlanProduced");
+		// The experiment was chosen before any reading existed, and its plan records that rather
+		// than leaving the question open. Everything planned after the reading names it, so a
+		// decision can always be traced to the understanding that governed it.
+		const versions = harness.eventsOfType("ProblemFormulationRecorded");
+		expect(versions).toHaveLength(1);
+		expect(plans.length).toBeGreaterThan(0);
+		const selectionPlan = plans.find((event) => event.plan.selectedToExplore.length > 0);
+		expect(selectionPlan?.plan.formulation).toEqual({ kind: "unformed" });
+		for (const event of plans.filter((plan) => plan !== selectionPlan)) {
+			expect(event.plan.formulation).toEqual({ kind: "version", versionId: versions[0].version.id });
+		}
 		expect(plans.some((event) => event.plan.selectedToExplore.length > 0)).toBe(true);
 		const distillations = harness.eventsOfType("DistillationProduced");
 		expect(distillations.length).toBeGreaterThan(0);
-		const firstFrameDeltas = deltas.filter((event) => event.frameId === distillations[0].frameId);
+		const firstEpisodeDeltas = deltas.filter((event) => event.episodeId === distillations[0].episodeId);
 		expect(distillations[0].distillation.outputs).toEqual(
-			firstFrameDeltas.filter((event) => event.delta.producerPhase === "distill").map((event) => event.delta.id),
+			firstEpisodeDeltas.filter((event) => event.delta.producerPhase === "distill").map((event) => event.delta.id),
 		);
 		expect(distillations[0].distillation.outputs).not.toContain(
-			firstFrameDeltas.find((event) => event.delta.producerPhase === "propose")?.delta.id,
+			firstEpisodeDeltas.find((event) => event.delta.producerPhase === "propose")?.delta.id,
 		);
 
 		// Task scope and task delivery are task-level, so both events carry taskId and land inside
@@ -118,6 +152,7 @@ describe("belief-loop event family", () => {
 			]),
 			// Same scope restated: no second event, since the fold's output does not change.
 			fauxAssistantMessage([
+				formulation(),
 				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 				fauxToolCall("select_experiment", { intent: "what the answer must report", beliefIds: ["belief-1"] }),
 			]),
@@ -158,11 +193,25 @@ describe("belief-loop event family", () => {
 			// of the domain stream: it is runtime bookkeeping, not something the model delivered.
 			fauxAssistantMessage([fauxToolCall("read", { file_path: "README.md" })]),
 			fauxAssistantMessage("Done."),
+			// Settling the fast path runs its own summarizer request, which takes the next queued
+			// response. The handoff returns to propose, which now owes its reading before concluding.
+			fauxAssistantMessage("Summary: read the readme without submitting a delivery record."),
+			fauxAssistantMessage([
+				formulation("the fast path could not establish a delivered result"),
+				fauxToolCall("conclude", { result: "delivered", evidence: "observed" }),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("the readme is summarized"),
 		]);
 
 		await harness.session.prompt("summarize the readme");
 
-		expect(harness.eventsOfType("TaskOutcomeRecorded")).toHaveLength(0);
+		// Exactly one outcome is recorded, and it is propose's own conclusion — not the summary the
+		// runtime synthesized when the fast path submitted nothing.
+		const outcomes = harness.eventsOfType("TaskOutcomeRecorded");
+		expect(outcomes).toHaveLength(1);
+		expect(outcomes[0]?.outcome.result).toBe("delivered");
+		expect(outcomes[0]?.outcome.blockers).toBeUndefined();
 	});
 
 	it("records both immutable belief records changed by evidence-supported refine", async () => {
@@ -177,6 +226,7 @@ describe("belief-loop event family", () => {
 					expectation: "the result states the cache behavior",
 					evidenceRounds: 1,
 				}),
+				formulation(),
 				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 				fauxToolCall("select_experiment", {
 					intent: "how long the final answer should say the cache survives",
@@ -209,7 +259,7 @@ describe("belief-loop event family", () => {
 		expect(refine?.delta.resultBeliefId).toBe("belief-2");
 	});
 
-	it("records routing as a frame decision rather than a belief", async () => {
+	it("records routing as a episode decision rather than a belief", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([
@@ -225,6 +275,14 @@ describe("belief-loop event family", () => {
 			]),
 			fauxAssistantMessage("Done."),
 			fauxAssistantMessage("Summary: completed the request."),
+			// Nothing was submitted through report_outcome, so the fast path hands back to the belief
+			// loop rather than closing the task, and propose owes its reading before concluding.
+			fauxAssistantMessage([
+				formulation("the fast path produced no delivered result to answer with"),
+				fauxToolCall("conclude", { result: "delivered", evidence: "observed" }),
+			]),
+			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage("hello"),
 		]);
 
 		await harness.session.prompt("please echo hello");
@@ -233,6 +291,9 @@ describe("belief-loop event family", () => {
 		expect(routing).toHaveLength(1);
 		expect(routing[0].routing.decision).toBe("fast-path");
 		expect(harness.eventsOfType("BeliefDeltaApplied")).toHaveLength(0);
-		expect(harness.eventsOfType("FrameBodySelected")[0].body).toBe("fast-path");
+		expect(harness.eventsOfType("EpisodeBodySelected")[0].body).toBe("fast-path");
+		// The fast path has no plan to carry the adoption, so its dispatch records it directly —
+		// and with no version published yet, "unformed" is the accurate record.
+		expect(harness.eventsOfType("EpisodeBodySelected")[0].formulation).toEqual({ kind: "unformed" });
 	});
 });

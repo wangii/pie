@@ -1,6 +1,6 @@
 # Milestone：Frame 作为 agent 当前的问题理解
 
-状态：产品决策已确认，待实现。日期：2026-09-20。
+状态：M1–M3 已实现，M4–M6 待实现。日期：2026-09-20。M1–M3 完成日期：2026-09-20。
 
 本文件记录 14 个逐项讨论的决定，以及据此安排的实现阶段和验收条件。
 文件中的工具名、事件名和交互入口是实现建议；产品行为以“已确认决策”为准。
@@ -114,14 +114,16 @@ Frame 不能成为未经验证的判断绕过 belief-loop 的通道。如果“�
 
 当前实现见 [domain-model.md](domain-model.md)、[belief-loop-roles.md](belief-loop-roles.md)、
 [belief-loop-controller.ts](../src/core/belief-loop/belief-loop-controller.ts) 和
-[role-specs.ts](../src/core/role-specs.ts)。这些文件目前描述的是改动前的运行时。
+[role-specs.ts](../src/core/role-specs.ts)。domain-model.md 已随 M1–M3 更新；下面几条描述的是尚未接入角色的运行时行为（M4 之前），
+记录本身已由 M2 落地。
 
-- `TaskFrame` 保存 routing、plan、trajectory、distillation 和 belief deltas。
-  distill 返回 propose 时会开启下一个 TaskFrame，因此它表示执行轮次。
+- `ExecutionEpisode`（M1 前名为 `TaskFrame`）保存 routing、plan、trajectory、distillation
+  和 belief deltas。distill 返回 propose 时会开启下一个 episode，因此它表示执行轮次，
+  不表示问题理解。M2 起 Plan 与 fast-path episode 另外记录当时采用的 formulation 版本。
 - `FocusSet` 保存任务关注的 belief ID 集合。Formulation 的 Focus 解释关注重点，
   不能代替该集合，不能因改写一句话而移除未解决的 belief。
 - propose 的消息投影隐藏原始工具结果；distill 可以读取当前执行轮次的原始证据。
-  新的 Frame 状态、修订建议及纠正交接需要显式进入上下文，不能只存事件。
+  新的 Frame 状态与修订建议已由 M3 进入上下文；纠正交接仍需显式进入上下文（M4 尚未接入）。
 - 当前 distill 可以直接 conclude 并进入 finalReport。此路径不能绕过必需的首次
   formulation 决策或尚未处理的用户纠正。
 - 当前 fast-path execution 直接拥有最终回答。新增结束前的 propose 环节需要调整交接，
@@ -330,32 +332,109 @@ What this changes
 
 ### M1：执行轮次改名与协议边界
 
-- [ ] 将旧 TaskFrame 体系统一改为 ExecutionEpisode，保留原有执行和证据关联行为。
-- [ ] 更新类型、controller、SDK/RPC、schema、测试夹具和当前协议文档。
-- [ ] 明确旧日志处理及后续 GUI 消费者适配依赖。
+- [x] 将旧 TaskFrame 体系统一改为 ExecutionEpisode，保留原有执行和证据关联行为。
+- [x] 更新类型、controller、SDK/RPC、schema、测试夹具和当前协议文档。
+- [x] 明确旧日志处理及后续 GUI 消费者适配依赖。
 
 验收：正常循环和 fast path 的 episode 生命周期可回放；新轮次不会被解释为 reframe；
 不支持的旧 schema 明确失败。改名不改变 belief 裁定、outcome 或实验预算语义。
 
+实现说明：
+
+- `AGENT_SESSION_DOMAIN_SCHEMA_VERSION` 提升为 2。v1 事件（`FrameOpened`、
+  `FrameBodySelected`、`FrameClosed`、`frameId`）不提供别名或迁移，replay 直接抛出
+  `DomainReplayError`，明确说明存储版本与所需版本；用户旧日志不被改写或删除。
+  v1 session 在 `AgentSession` 构造时即失败，不会以空 domain model 打开。
+- `FrameBodyKind`/`FrameStage`/`FrameStatus` → `EpisodeBodyKind`/`EpisodeStage`/
+  `EpisodeStatus`，`TaskFrameBody` → `EpisodeBody`，`domainIdKind` 的 `"frame"` → `"episode"`。
+- controller 侧 `currentFrameId`、`currentFrameExecutionIds`、
+  `currentFrameDistillationDeltaIds`、`openNextDomainFrame`、`closeDomainFrame`、
+  `selectDomainFrameBody` 一并改名。execution lease 的 `frameHorizon` →
+  `episodeHorizon`（`FRAME_HORIZON_HEADROOM` → `EPISODE_HORIZON_HEADROOM`）。
+- `dispatchedFrameIds` 存的始终是 belief ID，按实际语义改名为 `dispatchedBeliefIds`。
+- 终端绘制帧、belief 面板旧 `[frame]` 文案、`view_beliefs` 的 `[FRAME]` 标签都不属于本次
+  改名范围，保持原样（面板文案由 M5 处理）。
+- GUI 消费者适配仍未完成：`gui/src/Model.cpp` 及其测试仍按旧事件名和 `frameId` 解析，
+  与 v2 runtime 不兼容。该适配是后续依赖，不属于本 milestone，对外同步前必须完成。
+  `packages/pie/docs/domain-model.md` 的 "Protocol versioning and old logs" 记录了这一点。
+
 ### M2：Formulation 对象与持久化
 
-- [ ] 增加任务级内容、版本、来源、未形成/暂缓和纠正记录。
-- [ ] 增加校验、事件折叠、snapshot/RPC 输出及控制器状态恢复。
-- [ ] 为实验选择和派发记录采用的版本，支持首次调查时无版本。
+- [x] 增加任务级内容、版本、来源、未形成/暂缓和纠正记录。
+- [x] 增加校验、事件折叠、snapshot/RPC 输出及控制器状态恢复。
+- [x] 为实验选择和派发记录采用的版本，支持首次调查时无版本。
 
 验收：版本不可变、来源可追溯、任务与分支隔离；重启或压缩后状态一致；
 缺失必填内容不发布，缺少 Tension 或对照项可以发布，完全重复提交不创建事件。
 
+实现说明：
+
+- `FormulationContent`（`interpretation`/`focus`/`implication` 必填，`alternative`/`tension`
+  可选）、`ProblemFormulationVersion`、`FormulationDeferral`、`FormulationCorrection`、
+  `FormulationSource` 与 `FormulationAdoption` 落在 `agent-session-domain.ts`；
+  Task 增加 `formulations`、`formulationDeferral`、`formulationCorrections`。
+- 四个任务级事件：`ProblemFormulationRecorded`（携带完整版本）、
+  `ProblemFormulationDeferred`、`FormulationCorrectionSubmitted`、
+  `FormulationCorrectionResolved`。折叠逻辑校验版本序号、前一版本链、id 唯一性、必填内容、
+  reason、来源可解析，以及纠正的目标版本与回应。
+- **来源**：`prompt`/`intervention`/`correction`/`execution`/`distillation`/`belief`。
+  belief 必须连同当时的 `beliefDeltaId` 一起引用，折叠时会校验该 delta 确实承载该 belief，
+  避免回看历史时误用 belief 的最新状态；无法解析的引用直接拒绝。
+- **无版本**：`FormulationAdoption` 为 `{kind:"version"}` 或 `{kind:"unformed"}`。
+  `Plan.formulation` 记录"实验选择"采用的版本；fast path 没有 Plan，由
+  `FastPathEpisode.formulation` 记录"派发"采用的版本。`unformed` 是明确记录的事实；
+  已有版本后再声称 `unformed` 会被折叠拒绝，因此事后形成的版本无法回填为已执行操作的依据。
+- **不可变**：版本只追加。`publishFormulation` 对与当前版本内容完全相同的提交返回
+  `unchanged` 且不产生事件（reason/sources 不同也算重复，因为"补充证据"不应制造修订）；
+  是否属于实质变化由 propose 判断，不引入语义比较模型。
+- **暂缓**：记录缺失信息与原因；发布会使暂缓不再是当前状态，但不会删除任何版本；
+  已有理解时暂缓也不会抹掉它。
+- **纠正**：作为独立记录保存，绝不写回被纠正的版本；`targetVersionId` 可为空；
+  处理按 correction ID 定位，必须有非空回应，因此不能把针对旧纠正的回应记到新纠正上。
+- **控制器状态恢复**：`currentFormulation`/`formulationDeferral`/`pendingCorrections`/
+  `formulationHistory` 直接读取 replay 后的 snapshot，没有独立的镜像状态，所以重启、切换分支
+  与压缩后与日志一致。`dispatchedBeliefIds` 等执行期内存状态不在本阶段持久化（见 M3）。
+- **schema 提升为 3**：v2 的 `Plan` 没有 `FormulationAdoption`，replay 后无法区分"当时尚未形成"
+  与"没有记录"，因此 v2 日志与 v1 一样被明确拒绝（`DomainReplayError`），旧日志不改写。
+- 本阶段只落地记录与持久化；谁有权发布、propose 何时必须做决定、发布后如何使待执行实验失效
+  已由 M3 接入，纠正如何打断执行仍属于 M4。
+
 ### M3：Propose 所有权与实验选择
 
-- [ ] propose 专属发布/暂缓操作；distill 输出建议和依据。
-- [ ] 初次调查后强制完成发布或暂缓决定，覆盖 distill 直接 conclude 的交接路径。
-- [ ] 为各角色显式投影当前 Frame，不将其内容当作受支持事实。
-- [ ] 发布新版本时自动使待执行实验失效，要求重新选择。
+- [x] propose 专属发布/暂缓操作；distill 输出建议和依据。
+- [x] 初次调查后强制完成发布或暂缓决定，覆盖 distill 直接 conclude 的交接路径。
+- [x] 为各角色显式投影当前 Frame，不将其内容当作受支持事实。
+- [x] 发布新版本时自动使待执行实验失效，要求重新选择。
 
 验收：只有 propose 可以发布；新 Frame 实际进入下一次决策上下文；
 可主动选择检验反例；选择后更新会阻止旧实验派发，更新后重新选择可以派发；
 新版本不修改 FocusSet、belief 状态或历史操作版本。
+
+实现说明：
+
+- 新增 propose 专属工具 `set_formulation` / `defer_formulation`（`src/core/tools/formulation.ts`）。
+  `execution` 的工具过滤显式排除二者，`distill`/`finalReport` 用固定列表，因此只有 propose 能发布。
+  工具的 `sources` 是模型真正能给出的引用（任务 prompt、belief、纠正）；controller 把 belief
+  引用绑定到当时那条 delta，execution/distillation 引用留给 M4 的纠正交接上下文。
+- **强制决定**：`formulationDecisionOwed` 在 propose 分支与 distill 的 conclude 分支都检查，
+  且读取 replay 后的状态而非本回合的工具调用 —— 校验失败的 `set_formulation` 不改变状态，
+  因此不算完成决定。distill 直接 conclude 会被改道回 propose，不再绕过。
+- **"已调查"的判定**用 `latestDispatchedEpisodeOrdinal`：episode 的 plan 存在（belief loop）
+  或 body 为 fast path。只看"episode 已关闭"会漏掉 distill 在轮次中途 conclude 的路径；
+  只看"有工具执行"又会让没跑工具的一轮蒙混过关。
+- **无效化**：发布新版本时清除 `pendingExperiment`，并在当前 episode 尚无 plan 时清除
+  `currentPlanId`，使下一次 `ensureDomainPlan` 记录新版本。已派发的实验不动：episode 的 plan
+  与观察记录都不变。同一回合内工具按调用顺序执行，所以"先选后发布"会被作废，"先发布后选"
+  会绑定新版本。
+- **投影**：当前版本（或暂缓，或尚未形成时不投影）进入每个角色的 system prompt，明确标注
+  它是 agent 自己的暂定立场、不是观察、不是证据、不能作为 belief 的支持。放在 system prompt
+  而不是 transcript，是为了让 transcript 保持 append-only 可缓存，并让每个角色读到的始终是
+  *当前* 版本。尚未形成时不做任何投影，避免逼出没有依据的 Frame。
+- **反例**：Frame 只投影进上下文，不参与任何过滤。propose 仍可自由选择与当前理解相冲突的
+  belief 去检验（新增测试覆盖"修订不影响 FocusSet/belief 状态"，选择逻辑与 Frame 无关）。
+- 消息投影的 belief 工具清单收敛为 `BELIEF_SURFACE_TOOLS` 单一来源（role-specs），
+  propose 工具表、projection 的判定、session 强制启用的工具表都从它派生，避免新增工具时漏改。
+- 用户纠正的交接（打断已启动工具、交回 propose）仍属于 M4。
 
 ### M4：纠正与 Fast-path 交接
 
@@ -423,4 +502,6 @@ node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run te
 
 不运行 `npm run build`、`npm test` 或直接运行全量 Vitest。
 终端人工验证加载仓库的交互测试说明，覆盖面板、历史、纠正及不同窗口宽度。
-本次仅落地 milestone 文档，不修改运行时代码，不执行上述实现验收，也不提交 commit。
+
+首次落地本文件时只写了文档，未修改运行时代码。M1 已按上述范围实现并单独运行相关测试；
+终端人工验证属于 M5，尚未执行。

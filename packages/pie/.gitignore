@@ -41,6 +41,7 @@ src/**
 !src/core/system-prompt.ts
 !src/core/tools/conclude.ts
 !src/core/tools/declare-belief.ts
+!src/core/tools/formulation.ts
 !src/core/tools/view-beliefs.ts
 !src/index.ts
 !src/main.ts

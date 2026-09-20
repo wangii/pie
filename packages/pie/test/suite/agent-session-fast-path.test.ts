@@ -34,6 +34,19 @@ describe("AgentSession fast path", () => {
 		},
 	};
 
+	/**
+	 * The formulation propose owes once a round has completed. Both handoff paths — a failed fast
+	 * path and the first belief-loop round — return to propose, and propose cannot conclude or
+	 * choose another experiment until it has said what it makes of the task.
+	 */
+	const formulation = () =>
+		fauxToolCall("set_formulation", {
+			interpretation: "I currently read this as a question about which behavior actually holds",
+			focus: "the observations the run produced",
+			implication: "which conclusion the answer must report turns on what the run showed",
+			reason: "reading after the first round",
+		});
+
 	it("stores routing as control metadata and lets fast execution own the terminal response", async () => {
 		const harness = await createHarness(fastHarnessOptions);
 		harnesses.push(harness);
@@ -77,7 +90,7 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([fauxToolCall("boom", {})]),
 			fauxAssistantMessage("I failed."),
 			fauxAssistantMessage("Summary: failed at boom."),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([formulation(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("belief loop took over"),
 		]);
@@ -125,7 +138,7 @@ describe("AgentSession fast path", () => {
 			// The summarizer's prose omits the prior successful probe; the deterministic
 			// operation record appended to the handoff must still surface it.
 			fauxAssistantMessage("Summary: complete the task in the belief loop."),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([formulation(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("belief loop took over"),
 		]);
@@ -149,6 +162,7 @@ describe("AgentSession fast path", () => {
 		harness.setResponses([
 			routeResponse("belief-loop"),
 			fauxAssistantMessage([
+				formulation(),
 				fauxToolCall("declare_belief", {
 					op: "propose",
 					statement: "the cache survives logout",
@@ -251,7 +265,7 @@ describe("AgentSession fast path", () => {
 			]),
 			fauxAssistantMessage("Partially done."),
 			fauxAssistantMessage("Summary: one call site changed, the other not verified."),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([formulation(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("belief loop took over"),
 		]);

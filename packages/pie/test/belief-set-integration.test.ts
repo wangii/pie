@@ -5,7 +5,23 @@ import { afterEach, describe, expect, test } from "vitest";
 import { statusOf } from "../src/core/belief-set.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
+/**
+ * One propose turn's control calls: state how the task is currently read, declare the scope, and
+ * choose the experiment that tests the reading.
+ *
+ * The formulation call comes first on purpose. Publishing is the decision propose owes once a
+ * round has completed, and it voids any experiment selected before it — so a turn that both
+ * states a reading and selects an experiment publishes first, exactly as a real propose turn
+ * must. A second identical publication in a later turn is a no-op, so using this helper for every
+ * selection is safe.
+ */
 const select = (beliefIds: string[], intent = "which action to take") => [
+	fauxToolCall("set_formulation", {
+		interpretation: "I currently read this as a question about which behavior actually holds",
+		focus: "the observations the selected beliefs predict",
+		implication: "which conclusion the answer must report turns on what the probe shows",
+		reason: "initial reading before the first probe",
+	}),
 	fauxToolCall("focus_beliefs", { beliefIds }),
 	fauxToolCall("select_experiment", { intent, beliefIds }),
 ];
@@ -26,6 +42,8 @@ describe("belief-loop integration", () => {
 			"declare_belief",
 			"focus_beliefs",
 			"select_experiment",
+			"set_formulation",
+			"defer_formulation",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -264,6 +282,12 @@ describe("belief-loop integration", () => {
 					expectation: "a post-login read returns the prior value",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the focused belief predicts",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 				fauxToolCall("select_experiment", {
 					intent: "whether to change the adapter",
@@ -351,6 +375,12 @@ describe("belief-loop integration", () => {
 					domain: "code",
 					expectation: "the request observes the cancellation",
 					evidenceRounds: 1,
+				}),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the focused belief predicts",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
 				}),
 				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 			]),
@@ -773,7 +803,7 @@ describe("belief-loop integration", () => {
 				}),
 				...select(["belief-1"]),
 			]),
-			// Two probe calls exhaust the frame horizon (ceil(1 * 1.3) = 2).
+			// Two probe calls exhaust the episode horizon (ceil(1 * 1.3) = 2).
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			// Lease nudge, then a report turn settling to distill.
