@@ -77,6 +77,14 @@ interface ToolCall {
 ### Base Message Types (from pi-ai)
 
 ```typescript
+interface SystemMessage {
+  role: "system";
+  content: string | TextContent[];
+  toolsAdded?: Tool[];
+  toolsRemoved?: Array<{ name: string }>;
+  timestamp: number;  // Unix ms
+}
+
 interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
@@ -109,7 +117,6 @@ interface ToolResultMessage {
   content: (TextContent | ImageContent)[];
   details?: any;      // Tool-specific metadata
   usage?: Usage;      // Nested LLM work performed by the tool
-  addedToolNames?: string[];
   isError: boolean;
   timestamp: number;
 }
@@ -177,6 +184,7 @@ interface CompactionSummaryMessage {
 
 ```typescript
 type AgentMessage =
+  | SystemMessage
   | UserMessage
   | AssistantMessage
   | ToolResultMessage
@@ -217,7 +225,14 @@ For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ pare
 
 ### SessionMessageEntry
 
-A message in the conversation. The `message` field contains an `AgentMessage`.
+A message in the conversation. The `message` field contains an `AgentMessage`. System messages carry the prompt and tool loadout: the first request of a session persists one with every prompt section and tool declaration, and later changes persist as system messages that patch `sections` by name (`null` removes one) and list `toolsAdded`/`toolsRemoved`. Replaying them in order yields the current prompt and tools; there is no separate prompt state entry.
+
+```json
+{"type":"message","id":"a0b1c2d3","parentId":null,"timestamp":"2024-12-03T14:00:00.000Z","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant...","tools":"<tools>\n- read: ...\n</tools>","cwd":"/project"},"toolsAdded":[{"name":"read","description":"...","parameters":{}}],"timestamp":1733234400000}}
+{"type":"message","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:04:00.000Z","message":{"role":"system","content":"","sections":{"skills":"<skills>...</skills>"},"toolsRemoved":[{"name":"write"}],"timestamp":1733234640000}}
+```
+
+Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message, which replays the same way.
 
 ```json
 {"type":"message","id":"a1b2c3d4","parentId":"prev1234","timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1733234401000}}
@@ -241,17 +256,28 @@ Emitted when the user changes the thinking/reasoning level.
 {"type":"thinking_level_change","id":"e5f6g7h8","parentId":"d4e5f6g7","timestamp":"2024-12-03T14:06:00.000Z","thinkingLevel":"high"}
 ```
 
-### CompactionEntry
+### UsageEntry
 
-Created when context is compacted. Stores a summary of earlier messages.
+Records model-attributed usage that is not an assistant message and does not participate in LLM context. `kind` is an arbitrary string identifying the operation; for example, cache warming uses `"cache_warm"`.
 
 ```json
-{"type":"compaction","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:10:00.000Z","summary":"User discussed X, Y, Z...","firstKeptEntryId":"c3d4e5f6","tokensBefore":50000}
+{"type":"usage","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:08:00.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":50000,"cacheWrite":0,"totalTokens":50000,"cost":{"input":0,"output":0,"cacheRead":0.015,"cacheWrite":0,"total":0.015}}}
+```
+
+Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
+
+### CompactionEntry
+
+Created when context is compacted. Stores a summary of earlier messages and a complete system prompt/tool checkpoint.
+
+```json
+{"type":"compaction","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:10:00.000Z","summary":"User discussed X, Y, Z...","firstKeptEntryId":"c3d4e5f6","tokensBefore":50000,"systemMessage":{"role":"system","content":"You are a coding assistant.","toolsAdded":[],"timestamp":1733235000000}}
 ```
 
 `firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older summarized entries with the compaction summary and keeps the range beginning at this entry.
 
 Optional fields:
+- `systemMessage`: The replayed prompt sections and tool declarations at the compaction boundary; it becomes the leading system message of the compacted context, and system messages among the kept entries are dropped in its favor. It is absent on older session entries.
 - `usage`: LLM usage from generating the summary; included in session token and cost totals
 - `details`: Implementation-specific data (e.g., `{ readFiles: string[], modifiedFiles: string[] }` for default, or custom data for extensions)
 - `fromHook`: `true` if generated by an extension, `false`/`undefined` if pi-generated (legacy field name)
@@ -336,7 +362,7 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 1. Collects all entries on the path
 2. If one or more `CompactionEntry` values are on the path, uses the latest one:
    - Includes the compaction entry first
-   - Includes entries from `firstKeptEntryId` up to, but not including, the compaction entry
+   - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
    - Includes entries after the compaction entry
 3. Preserves non-message entries in the selected range so interactive mode can render them
 
@@ -345,12 +371,12 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 1. Extracts current model and thinking level settings from the full path
 2. Converts selected entries to messages:
    - `message` -> stored `AgentMessage`
-   - `compaction` -> `compactionSummary`
+   - `compaction` -> complete system checkpoint followed by `compactionSummary`
    - `branch_summary` -> `branchSummary`
    - `custom_message` -> `CustomMessage`
-   - `custom` -> no context message
+   - `usage` and `custom` -> no context message
 
-The compaction summary replaces entries before `firstKeptEntryId`. The retained entries and all entries after the compaction remain available to the LLM.
+The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the complete checkpoint rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM.
 
 ## Parsing Example
 
@@ -374,6 +400,9 @@ for (const line of lines) {
       break;
     case "branch_summary":
       console.log(`[${entry.id}] Branch from ${entry.fromId}`);
+      break;
+    case "usage":
+      console.log(`[${entry.id}] Usage (${entry.kind}): ${entry.usage.totalTokens} tokens`);
       break;
     case "custom":
       console.log(`[${entry.id}] Custom (${entry.customType}): ${JSON.stringify(entry.data)}`);
@@ -419,6 +448,7 @@ Key methods for working with sessions programmatically.
 - `appendMessage(message)` - Add message
 - `appendThinkingLevelChange(level)` - Record thinking change
 - `appendModelChange(provider, modelId)` - Record model change
+- `appendUsage(kind, provider, model, usage)` - Record model-attributed usage outside the conversation
 - `appendCompaction(summary, firstKeptEntryId, tokensBefore, details?, fromHook?, usage?)` - Add compaction
 - `appendCustomEntry(customType, data?)` - Extension state (not in context)
 - `appendSessionInfo(name)` - Set session display name

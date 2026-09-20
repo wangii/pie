@@ -8,6 +8,7 @@ import type { ModelsDevReasoningOption } from "../scripts/models-dev-reasoning-o
 import { streamSimple } from "../src/api/anthropic-messages.ts";
 import { getSupportedThinkingLevels, hasApi } from "../src/models.ts";
 import type { Api, Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const temporaryRoots: string[] = [];
@@ -40,6 +41,7 @@ function generateFireworksModels(
 			`  const url = String(input);\n` +
 			`  if (url === "https://models.dev/api.json") return Response.json(catalog);\n` +
 			`  if (url === "https://openrouter.ai/api/v1/models" || url === "https://ai-gateway.vercel.sh/v1/models") return Response.json({ data: [] });\n` +
+			`  if (url === "https://radius.pi.dev/v1/config") return Response.json({ baseUrl: "https://radius.pi.dev", models: [{ id: "test", name: "Test", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 4096 }] });\n` +
 			`  throw new Error(\`Unexpected fetch: \${url}\`);\n` +
 			`};\n`,
 	);
@@ -111,18 +113,14 @@ describe("Fireworks model generation", () => {
 		expect(model.compat?.forceAdaptiveThinking).toBe(true);
 		expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "max"]);
 		let payload: Record<string, unknown> | undefined;
-		await streamSimple(
-			model,
-			{ messages: [{ role: "user", content: "test", timestamp: 0 }] },
-			{
-				apiKey: "test-fireworks-key",
-				reasoning: "max",
-				onPayload: (value) => {
-					payload = value as Record<string, unknown>;
-					throw new Error("payload captured");
-				},
+		await streamSimple(model, normalizeContext({ messages: [{ role: "user", content: "test", timestamp: 0 }] }), {
+			apiKey: "test-fireworks-key",
+			reasoning: "max",
+			onPayload: (value) => {
+				payload = value as Record<string, unknown>;
+				throw new Error("payload captured");
 			},
-		).result();
+		}).result();
 		expect(payload?.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload?.output_config).toEqual({ effort: "max" });
 	});
