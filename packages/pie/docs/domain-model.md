@@ -1,13 +1,13 @@
 # Agent session domain model
 
-> **Status: current runtime contract, schema v3.** `agent-session-domain.ts` defines this model,
+> **Status: current runtime contract, schema v4.** `agent-session-domain.ts` defines this model,
 > `BeliefLoopController` emits and replays its events, and RPC forwards those events unchanged.
 > GUI projections remain consumers rather than sources of truth.
 
 > **Every schema bump so far has been breaking.** v2 renamed the execution-round vocabulary from
 > `TaskFrame`/`frameId` to `ExecutionEpisode`/`episodeId`; v3 added the task-level problem
-> formulation. Older logs are rejected rather than migrated — see
-> [Protocol versioning and old logs](#protocol-versioning-and-old-logs).
+> formulation; v4 added the experiment selection. Older logs are rejected rather than migrated —
+> see [Protocol versioning and old logs](#protocol-versioning-and-old-logs).
 
 ## Problem and solution
 
@@ -136,7 +136,17 @@ struct ExecutionEpisode {
 
   std::vector<Intervention> steering;
   std::optional<Routing> routing;
+  // The experiment propose has chosen and not yet dispatched. Cleared by the Plan that
+  // commits it, or by an explicit void.
+  std::optional<ExperimentSelectionRecord> experimentSelection;
   std::variant<PendingEpisode, BeliefLoopEpisode, FastPathEpisode> body;
+};
+
+struct ExperimentSelectionRecord {
+  std::string intent;
+  std::vector<BeliefId> beliefIds;
+  // The understanding this choice was made under; Unformed before the first version.
+  FormulationAdoption formulation;
 };
 
 struct PendingEpisode {};
@@ -571,6 +581,8 @@ FormulationCorrectionResolved
 EpisodeOpened
 RoutingDecided
 EpisodeBodySelected
+ExperimentSelected             (the choice: beliefs, intent, and the version it was made under)
+ExperimentSelectionVoided      (a revision or scope change took the choice back)
 EpisodeClosed
 CursorChanged
 InterventionAdded
@@ -608,6 +620,13 @@ Required correlation fields:
   published. `ProblemFormulationDeferred` carries the missing information and the
   reason. `FormulationCorrectionResolved` carries the correction id it answers,
   so resolution is addressed rather than positional;
+- `ExperimentSelected` carries the choice — the belief ids, the decision they
+  inform, and the `FormulationAdoption` in force when it was made — on the episode
+  it belongs to. `PlanProduced` on the same episode commits that choice and clears
+  it: the plan is the commitment, the selection is the choice, and the log keeps
+  both so "chose E1, published v2, chose E2" replays as the sequence it was.
+  `ExperimentSelectionVoided` carries the reason and is the only other way a
+  selection leaves the episode state;
 - `EpisodeOpened`/`EpisodeClosed` are emitted by the runtime. `PROPOSING`, a second
   plan, or a second distillation is never used by the GUI as an episode delimiter.
 
@@ -624,19 +643,26 @@ On resume:
 1. select the active session branch;
 2. replay its domain events into `AgentSessionSnapshot`;
 3. restore the runtime's current task/episode/belief state, including the current formulation
-   version, any deferral, pending corrections, and the adoption recorded on each plan or
-   fast-path dispatch;
+   version, any deferral, pending corrections, the adoption recorded on each plan or
+   fast-path dispatch, and the experiment choice an open episode is still holding;
 4. feed the same events/snapshot to GUI projections.
 
 Compaction may remove messages from model context, but it must not remove domain
 events required to reconstruct the active branch's Task/Episode/Belief/formulation state.
 A reconnecting client that reads the snapshot and then re-subscribes must not replay a revision
 twice or resume a selection the log has already superseded — the state comes from the folded
-snapshot, and the events only extend it.
+snapshot, and the events only extend it. Tree navigation inside one session file is the same
+operation: the runtime replays the branch the leaf moved to before it reports any of this state,
+so a client is never told the agent holds an understanding from a branch it just left.
+
+`get_state` answers the same question for clients that want only the current reading: it carries
+the active task's `FormulationState` (current version, deferral, pending corrections, and whether
+the decision is still owed), and `get_domain_snapshot` returns the whole replayed snapshot — the
+tasks, their beliefs, and the cursor — in a JSON-serializable shape.
 
 ## Protocol versioning and old logs
 
-`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `3`. Every stored event carries the version
+`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `4`. Every stored event carries the version
 twice — once on the entry envelope, once on the event — and replay rejects any event whose version
 is not the current one.
 
@@ -644,7 +670,8 @@ is not the current one.
 |---|---|---|
 | v1 | `TaskFrame`/`frameId` execution-round vocabulary | no |
 | v2 | `ExecutionEpisode`/`episodeId` (the rename) | no |
-| v3 | Problem-formulation records; `FormulationAdoption` on `Plan`/`FastPathEpisode` | yes |
+| v3 | Problem-formulation records; `FormulationAdoption` on `Plan`/`FastPathEpisode` | no |
+| v4 | Experiment-selection records (`ExperimentSelected`/`ExperimentSelectionVoided`) | yes |
 
 Every bump is a rename or an addition, never a migration, and the code is deliberately written
 that way:
@@ -661,10 +688,12 @@ that way:
 - **Load failure is not silent.** Because replay runs in the `AgentSession` constructor, an
   unloadable session fails at load with that error rather than opening with an empty domain model.
 
-A v2 log is rejected by a v3 runtime for a concrete reason rather than for symmetry: v2's `Plan`
+A v2 log is rejected by a v4 runtime for a concrete reason rather than for symmetry: v2's `Plan`
 carries no `FormulationAdoption`, so a replayed v2 plan is indistinguishable from one whose version
-was never formed — exactly the distinction `Unformed` exists to preserve. Sessions written by a
-v3 runtime are unaffected.
+was never formed — exactly the distinction `Unformed` exists to preserve. A v3 log is rejected for
+the same kind of reason: an episode in it has no way to say whether an experiment was chosen and
+not yet dispatched, so replaying one would silently drop a choice the runtime was holding or
+invent one it never made. Sessions written by a v4 runtime are unaffected.
 
 ### Downstream consumers
 
@@ -674,10 +703,12 @@ separately from the runtime:
 - `gui/src/Model.cpp` and its tests still parse the pre-rename names and `frameId`. The native GUI
   is **not** compatible with a v2-or-later runtime until it is adapted, and that adaptation is not
   part of the rename itself.
-- The same applies to the formulation events: no GUI consumer reads
-  `ProblemFormulationRecorded`/`ProblemFormulationDeferred` or the correction events yet.
+- The same applies to the formulation events and the experiment-selection events: no GUI consumer
+  reads `ProblemFormulationRecorded`/`ProblemFormulationDeferred`, the correction events, or
+  `ExperimentSelected`/`ExperimentSelectionVoided` yet.
 - RPC forwards domain events unchanged, so any RPC client pattern-matching on event names needs the
-  same treatment.
+  same treatment. `get_state`'s `formulation` field and the `get_domain_snapshot` command are the
+  two additions a client can read without parsing the log.
 
 ## Runtime and GUI responsibilities
 
@@ -690,7 +721,8 @@ Runtime responsibilities:
 - record each Task's problem-formulation versions, deferrals, and corrections as they are
   published, and never rewrite or erase one;
 - demand the formulation decision once an experiment has been dispatched, and void a selection
-  that a new version superseded;
+  that a new version superseded — recording the choice, the void, and the re-choice rather than
+  only clearing a field;
 - persist domain events.
 
 GUI responsibilities:

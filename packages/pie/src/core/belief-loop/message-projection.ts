@@ -158,43 +158,39 @@ function maskOperationalDetail(
 }
 
 /**
- * Redact the belief *mutation* surface (declare_belief / conclude) from one message, for the
- * execution role. The execution role probes and reports; belief updates and concluding happen
- * in the epistemic role, so exposing the mutation echo — both its "Applied propose/support/
- * refute" results and its tool-call blocks on the epistemic role's assistant turns — only
- * invites the probe role to step out of its lane instead of reporting a plain observation.
- * The read-only `view_beliefs` result is left intact — the execution role needs it to recall
- * the belief it is testing.
+ * Redact the belief *mutation* surface (declare_belief / conclude / set_formulation / …) from one
+ * message, for the execution role. The execution role probes and reports; belief updates,
+ * formulation publication, and concluding happen in the epistemic role, so exposing the mutation
+ * echo — both its "Applied propose/support/refute" results and its tool-call blocks on the
+ * epistemic role's assistant turns — only invites the probe role to step out of its lane instead
+ * of reporting a plain observation.
+ *
+ * The results are keyed off `BELIEF_MUTATIONS` rather than a hand-written list because the two
+ * halves have to agree: `maskEpistemicAssistant` elides *every* mutation call, so a result left
+ * behind for one it dropped is an orphaned `tool` message with no surviving call — which strict
+ * providers reject outright ("tool must be a response to tool_calls"). Deriving both from the one
+ * set is what makes a newly added mutation tool safe by default.
+ *
+ * The read-only `view_beliefs` result is left intact — the execution role needs it to recall the
+ * belief it is testing.
  */
 function maskBeliefBookkeeping(message: AgentMessage): AgentMessage | undefined {
 	switch (message.role) {
-		case "toolResult":
-			if (
-				message.toolName === "route_task" ||
-				message.toolName === "focus_beliefs" ||
-				message.toolName === "select_experiment"
-			) {
-				return {
-					role: "user",
-					content: [{ type: "text", text: "[routing decision omitted]" }],
-					timestamp: message.timestamp,
-				};
-			}
-			if (message.toolName === "declare_belief") {
-				return {
-					role: "user",
-					content: [{ type: "text", text: "[belief update omitted]" }],
-					timestamp: message.timestamp,
-				};
-			}
-			if (message.toolName === "conclude") {
-				return {
-					role: "user",
-					content: [{ type: "text", text: "[investigation concluded]" }],
-					timestamp: message.timestamp,
-				};
-			}
-			return message;
+		case "toolResult": {
+			if (!BELIEF_MUTATIONS.has(message.toolName)) return message;
+			const placeholders: Record<string, string> = {
+				route_task: "[routing decision omitted]",
+				focus_beliefs: "[focus declaration omitted]",
+				select_experiment: "[experiment selection omitted]",
+				declare_belief: "[belief update omitted]",
+				conclude: "[investigation concluded]",
+			};
+			return {
+				role: "user",
+				content: [{ type: "text", text: placeholders[message.toolName] ?? "[belief bookkeeping omitted]" }],
+				timestamp: message.timestamp,
+			};
+		}
 		case "assistant":
 			return isEpistemicMutation(message) ? maskEpistemicAssistant(message) : message;
 		default:

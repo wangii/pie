@@ -40,5 +40,7 @@ modes/interactive/components/footer.ts
 modes/interactive/interactive-mode.ts
 modes/interactive/theme/theme.ts
 modes/print-mode.ts
+modes/rpc/rpc-client.ts
 modes/rpc/rpc-mode.ts
+modes/rpc/rpc-types.ts
 utils/changelog.ts

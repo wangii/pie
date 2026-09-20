@@ -844,6 +844,79 @@ describe("problem formulation", () => {
 		).toThrow(/unknown formulation version/);
 	});
 
+	it("records the experiment choice as its own step, committed by the dispatch it becomes", () => {
+		const selection = (formulation: FormulationAdoption, eventId = "selection-event-1"): AgentSessionDomainEvent => ({
+			...base,
+			type: "ExperimentSelected",
+			eventId,
+			taskId: "task-1",
+			episodeId: "episode-1",
+			selection: { intent: "what the answer must report", beliefIds: ["belief-1"], formulation },
+		});
+		const voidSelection = (eventId: string): AgentSessionDomainEvent => ({
+			...base,
+			type: "ExperimentSelectionVoided",
+			eventId,
+			taskId: "task-1",
+			episodeId: "episode-1",
+			reason: "a new formulation version was published",
+		});
+		const plan = (): AgentSessionDomainEvent => ({
+			...base,
+			type: "PlanProduced",
+			eventId: "plan-event-selection",
+			taskId: "task-1",
+			episodeId: "episode-1",
+			plan: { id: "plan-1", selectedToExplore: ["belief-1"], formulation: UNFORMED },
+		});
+
+		// Chosen before anything ran, and bound to the reading that governed the choice.
+		const chosen = replayAgentSessionDomainEvents("session-1", [
+			...beliefLoopEvents().slice(0, 6),
+			selection(UNFORMED),
+		]).tasks.get("task-1");
+		expect(chosen?.episodes[0].experimentSelection).toEqual({
+			intent: "what the answer must report",
+			beliefIds: ["belief-1"],
+			formulation: UNFORMED,
+		});
+
+		// Dispatching commits the choice: what remains is the plan, which records the same beliefs
+		// as the decision that was actually made.
+		const dispatched = replayAgentSessionDomainEvents("session-1", [
+			...beliefLoopEvents().slice(0, 6),
+			selection(UNFORMED),
+			plan(),
+		]).tasks.get("task-1");
+		expect(dispatched?.episodes[0].experimentSelection).toBeUndefined();
+
+		// A revision voids the choice explicitly, so the log shows choice → void → choice again
+		// rather than a selection that merely disappeared.
+		const revised = replayAgentSessionDomainEvents("session-1", [
+			...beliefLoopEvents().slice(0, 6),
+			selection(UNFORMED),
+			versionEvent({ eventId: "v1" }),
+			voidSelection("void-event-1"),
+			selection({ kind: "version", versionId: "formulation-v1" }, "selection-event-2"),
+		]).tasks.get("task-1");
+		expect(revised?.episodes[0].experimentSelection?.formulation).toEqual({
+			kind: "version",
+			versionId: "formulation-v1",
+		});
+
+		// An adoption that names nothing is refused here exactly as it is for a plan, and voiding a
+		// choice that does not exist would claim a transition that never happened.
+		expect(() =>
+			replayAgentSessionDomainEvents("session-1", [
+				...beliefLoopEvents().slice(0, 6),
+				selection({ kind: "version", versionId: "formulation-404" }),
+			]),
+		).toThrow(/unknown formulation version/);
+		expect(() =>
+			replayAgentSessionDomainEvents("session-1", [...beliefLoopEvents().slice(0, 6), voidSelection("void-404")]),
+		).toThrow(/has no experiment selection to void/);
+	});
+
 	it("starts a new task with no understanding of its own and no reach into the previous one", () => {
 		const secondTask: AgentSessionDomainEvent = {
 			...base,

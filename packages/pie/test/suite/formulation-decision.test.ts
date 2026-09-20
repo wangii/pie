@@ -163,6 +163,33 @@ describe("formulation decision", () => {
 		expect(selectionPlans[0].plan.formulation).toEqual({ kind: "version", versionId: versions[0].version.id });
 	});
 
+	it("settles a probed belief before the decision handoff can re-open the episode", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(firstProbe),
+			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
+			// Distill concludes without adjudicating the belief it just probed. Concluding normally
+			// hands straight to finalReport; the owed formulation decision diverts back to propose
+			// instead — and that handoff opens the next episode, which clears the dispatched set. If
+			// the debt were not settled here, the belief would stop blocking conclusion the moment
+			// the loop handed back, and the task could finish having never adjudicated it.
+			fauxAssistantMessage([conclude()]),
+			fauxAssistantMessage([support]),
+			fauxAssistantMessage([reading("persistence across logout is the question")]),
+			fauxAssistantMessage([conclude()]),
+			fauxAssistantMessage([conclude()]),
+			fauxAssistantMessage("the cache survives logout"),
+		]);
+
+		await harness.session.prompt("is the cache persistent?");
+
+		// The probe's evidence was adjudicated rather than abandoned at the handoff.
+		expect(userText(harness)).toContain("remain unadjudicated");
+		expect(harness.session.beliefs.map(statusOf)).toEqual(["supported"]);
+		expect(harness.eventsOfType("ProblemFormulationRecorded")).toHaveLength(1);
+	});
+
 	it("does not let a revision touch the focus slice or the belief records", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);

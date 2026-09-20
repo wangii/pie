@@ -50,5 +50,7 @@ src/**
 !src/modes/interactive/interactive-mode.ts
 !src/modes/interactive/theme/theme.ts
 !src/modes/print-mode.ts
+!src/modes/rpc/rpc-client.ts
 !src/modes/rpc/rpc-mode.ts
+!src/modes/rpc/rpc-types.ts
 !src/utils/changelog.ts

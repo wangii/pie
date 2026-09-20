@@ -45,6 +45,7 @@ export {
 	type Execution,
 	type ExecutionEpisode,
 	type ExecutionId,
+	type ExperimentSelectionRecord,
 	type FastPathEpisode,
 	type FormulationAdoption,
 	type FormulationContent,
@@ -54,6 +55,7 @@ export {
 	type FormulationDeferral,
 	type FormulationOrigin,
 	type FormulationSource,
+	type FormulationState,
 	type FormulationVersionId,
 	formulationContentError,
 	formulationSourceError,
@@ -461,6 +463,9 @@ export {
 	Theme,
 	type ThemeColor,
 } from "./modes/interactive/theme/theme.ts";
+// Pie-only RPC surface: `rpc-types.ts` is forked here, so its domain-state additions are named
+// alongside the rest of the public API rather than through the synced `modes/index.ts`.
+export type { RpcDomainSnapshot } from "./modes/rpc/rpc-types.ts";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.ts";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.ts";

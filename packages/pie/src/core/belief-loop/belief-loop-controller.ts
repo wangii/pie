@@ -28,6 +28,7 @@ import {
 	formulationDecisionOwed,
 	formulationSourceError,
 	latestBeliefDeltaFor,
+	latestDispatchedEpisodeOrdinal,
 	type ProblemFormulationVersion,
 	pendingFormulationCorrections as pendingCorrectionsOf,
 	replayAgentSessionDomainEntries,
@@ -249,6 +250,19 @@ export class BeliefLoopController {
 			this.host.sessionManager.getSessionId(),
 			this.host.sessionManager.getBranch(),
 		);
+		this.adoptReplayedDomainState();
+	}
+
+	/**
+	 * Point the controller at whatever the replayed snapshot currently holds: the active task, its
+	 * open episode, the plan that episode is running, the executions it has recorded, and the
+	 * experiment choice it is holding un-dispatched.
+	 *
+	 * Read off the snapshot rather than kept in a mirror, so construction and branch navigation
+	 * cannot drift apart: a session reloaded from disk and a session whose leaf just moved to
+	 * another branch are the same operation, and both must end up with the state the log says.
+	 */
+	private adoptReplayedDomainState(): void {
 		const currentTask = [...this.domainSnapshot.activeBranchTasks]
 			.reverse()
 			.map((taskId) => this.domainSnapshot.tasks.get(taskId))
@@ -261,6 +275,41 @@ export class BeliefLoopController {
 			currentEpisode?.body.kind === "pending"
 				? []
 				: (currentEpisode?.body.trajectory.map((execution) => execution.id) ?? []);
+		const selection = currentEpisode?.experimentSelection;
+		this.pendingExperiment = selection
+			? { intent: selection.intent, beliefIds: [...selection.beliefIds] }
+			: undefined;
+	}
+
+	/**
+	 * Follow the session to whatever branch it now sits on.
+	 *
+	 * Tree navigation moves the leaf inside the same session file and rebuilds the message list,
+	 * but nothing about the domain follows on its own — the replayed task, its current
+	 * understanding, and its experiment choice would all keep describing the branch that was just
+	 * left. Replaying the new branch and re-deriving the pointer state is what keeps "what the
+	 * agent currently takes this task to be" branch-isolated, the same way a session reload is.
+	 *
+	 * Per-branch bookkeeping that only exists in memory is dropped rather than carried across: it
+	 * belongs to the round that was abandoned, and the belief set it refers to is not replayed.
+	 */
+	rehydrateFromBranch(): void {
+		this.domainSnapshot = replayAgentSessionDomainEntries(
+			this.host.sessionManager.getSessionId(),
+			this.host.sessionManager.getBranch(),
+		);
+		this.currentEpisodeDistillationDeltaIds = [];
+		this.pendingDomainBeliefDeltas = [];
+		this.dispatchedBeliefIds = new Set();
+		this.consumedRouteIds = new Set();
+		this.reflected = false;
+		this.fastPathFailure = false;
+		this.taskOutcome = undefined;
+		// The watermark indexes the message list that just changed, so it cannot carry over: what
+		// counted as the current episode's raw evidence on the old branch says nothing about this
+		// one. Masking by default is the safe direction — the next dispatch sets a fresh watermark.
+		this.evidenceWatermark = this.host.agent.state.messages.length;
+		this.adoptReplayedDomainState();
 	}
 
 	/** The current role — the phase discriminator of `loopState`. */
@@ -328,9 +377,26 @@ export class BeliefLoopController {
 	 * Record an explicit experiment selection: the beliefs to probe and the task decision the
 	 * experiment informs. Does not touch the focus slice; the selection must lie inside the
 	 * focus declared through `focus_beliefs`.
+	 *
+	 * The choice is written to the log rather than left in the field alone, so a resume or a
+	 * branch switch comes back holding the same experiment, and so the audit trail shows the
+	 * choice, the revision that voided it, and the choice made in its place.
 	 */
 	selectExperiment(selection: ExperimentSelection): void {
 		this.pendingExperiment = selection;
+		const episode = this.activeEpisode();
+		if (!episode || episode.status === "closed") return;
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "ExperimentSelected",
+			taskId: episode.taskId,
+			episodeId: episode.id,
+			selection: {
+				intent: selection.intent,
+				beliefIds: [...selection.beliefIds],
+				formulation: this.currentFormulationAdoption(),
+			},
+		});
 	}
 
 	/** Declare the task focus slice. Membership never changes a belief's truth status. A focus
@@ -343,7 +409,7 @@ export class BeliefLoopController {
 		const declaredBefore = this.focusSet.declared;
 		this.focusSet.select(beliefIds);
 		if (changed) {
-			this.pendingExperiment = undefined;
+			this.invalidatePendingSelection("the task focus changed");
 		}
 		// Emit when the fold's output would change: the first declaration, and any later change.
 		// Restating the same scope is a no-op the model may repeat each turn, and a session entry
@@ -469,10 +535,25 @@ export class BeliefLoopController {
 	 * Only an un-dispatched selection is dropped. An episode that already owns a plan has started
 	 * its experiment, and that record stays immutable — a reframe does not un-run what ran, nor
 	 * clear the observations it produced.
+	 *
+	 * The void is recorded, not just forgotten: "selected E1, published v2, selected E2" is the
+	 * sequence that shows a revision actually reached the next choice, and a reader of the log
+	 * cannot reconstruct it from a selection that merely disappeared.
 	 */
-	private invalidatePendingSelection(): void {
+	private invalidatePendingSelection(reason: string): void {
+		const hadSelection = this.pendingExperiment !== undefined;
 		this.pendingExperiment = undefined;
 		const episode = this.activeEpisode();
+		const open = episode !== undefined && episode.status !== "closed";
+		if (hadSelection && open && episode.experimentSelection) {
+			this.recordDomainEvent({
+				...this.domainEventBase(),
+				type: "ExperimentSelectionVoided",
+				taskId: episode.taskId,
+				episodeId: episode.id,
+				reason,
+			});
+		}
 		const planned = episode?.body.kind === "belief-loop" ? episode.body.plan : undefined;
 		if (!planned) this.currentPlanId = undefined;
 	}
@@ -543,7 +624,7 @@ export class BeliefLoopController {
 			taskId: task.id,
 			version,
 		});
-		this.invalidatePendingSelection();
+		this.invalidatePendingSelection("a new formulation version was published");
 		return { outcome: "recorded", value: version };
 	}
 
@@ -571,7 +652,19 @@ export class BeliefLoopController {
 		const current = task.formulationDeferral;
 		// Same rule as publication: restating the identical deferral is a no-op, and adding a
 		// source to it is more evidence for the same statement, not a new one.
-		if (current && current.missingInformation === missingInformation && current.reason === reason) {
+		//
+		// "The same" includes the investigation it answers. A deferral settles the required decision
+		// only for the evidence it was made against, so a second round that is still missing the same
+		// information has to record *that* answer: folding it into the earlier record would leave the
+		// stored deferral pointing at an older round, and the decision would keep reading as settled
+		// by a statement made before the new evidence existed.
+		const answeredThrough = latestDispatchedEpisodeOrdinal(task) ?? 0;
+		if (
+			current &&
+			current.answeredThroughEpisodeOrdinal === answeredThrough &&
+			current.missingInformation === missingInformation &&
+			current.reason === reason
+		) {
 			return { outcome: "unchanged", value: current };
 		}
 
@@ -832,7 +925,6 @@ export class BeliefLoopController {
 				}
 				if (this.pendingExperiment) {
 					const experiment = this.pendingExperiment;
-					this.pendingExperiment = undefined;
 					const selected = experiment.beliefIds
 						.map((id) => this.beliefSet.get(id))
 						.filter((belief): belief is Belief => {
@@ -841,8 +933,13 @@ export class BeliefLoopController {
 							return status === "proposed" || status === "inconclusive";
 						});
 					if (selected.length > 0) {
+						this.pendingExperiment = undefined;
 						return this.dispatchToExecution(selected, experiment.intent);
 					}
+					// Every selected belief has since been settled or retracted, so there is nothing
+					// left to probe. Voiding records why the choice went away instead of leaving the
+					// log holding a selection no future round could ever dispatch.
+					this.invalidatePendingSelection("the selected beliefs are no longer unresolved");
 				}
 				const scoped = this.scopedUnresolved();
 				if (scoped.length > 0) {
@@ -870,6 +967,20 @@ export class BeliefLoopController {
 					// Distill concluding is a normal handoff straight to finalReport, which would skip
 					// propose entirely. The formulation decision belongs to propose, so an owed decision
 					// diverts here rather than letting the terminal path route around it.
+					//
+					// The divert is checked second because it re-opens the episode on the way back, and
+					// that clears the dispatched set. A belief this round probed and never adjudicated
+					// would stop blocking conclusion the instant the loop handed back, so the debt is
+					// settled here, while the round it belongs to is still the current one.
+					const unadjudicated = proposed.filter((belief) => this.dispatchedBeliefIds.has(belief.id));
+					if (unadjudicated.length > 0) {
+						return {
+							state,
+							steer: TRANSITION_STEERS.openBeliefs(
+								unadjudicated.map((belief) => `"${belief.statement}"`).join(", "),
+							),
+						};
+					}
 					if (this.formulationDecisionOwed()) {
 						return { state: { role: "propose" }, steer: TRANSITION_STEERS.formulationDecision };
 					}
@@ -1726,6 +1837,9 @@ export class BeliefLoopController {
 		this.currentEpisodeExecutionIds = [];
 		this.currentEpisodeDistillationDeltaIds = [];
 		this.dispatchedBeliefIds = new Set();
+		// A new round starts with no choice made: the selection lived on the episode that just
+		// closed, so the field follows the record instead of outliving it.
+		this.pendingExperiment = undefined;
 		this.pendingDomainBeliefDeltas = [];
 	}
 
@@ -1745,6 +1859,7 @@ export class BeliefLoopController {
 		this.currentPlanId = undefined;
 		this.currentEpisodeExecutionIds = [];
 		this.currentEpisodeDistillationDeltaIds = [];
+		this.pendingExperiment = undefined;
 		this.pendingDomainBeliefDeltas = [];
 	}
 

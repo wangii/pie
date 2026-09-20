@@ -394,8 +394,12 @@ What this changes
 - **控制器状态恢复**：`currentFormulation`/`formulationDeferral`/`pendingCorrections`/
   `formulationHistory` 直接读取 replay 后的 snapshot，没有独立的镜像状态，所以重启、切换分支
   与压缩后与日志一致。`dispatchedBeliefIds` 等执行期内存状态不在本阶段持久化（见 M3）。
-- **schema 提升为 3**：v2 的 `Plan` 没有 `FormulationAdoption`，replay 后无法区分"当时尚未形成"
-  与"没有记录"，因此 v2 日志与 v1 一样被明确拒绝（`DomainReplayError`），旧日志不改写。
+- **schema 提升为 3（后随 M3 提升为 4）**：v2 的 `Plan` 没有 `FormulationAdoption`，replay 后
+  无法区分"当时尚未形成"与"没有记录"，因此 v2 日志与 v1 一样被明确拒绝（`DomainReplayError`），
+  旧日志不改写。
+- **RPC 状态快照**：`get_state` 增加 `formulation`（当前版本、暂缓、待处理纠正、是否仍欠决定），
+  新增 `get_domain_snapshot` 返回 replay 后的 snapshot（tasks、beliefs、cursor）。实时事件已经
+  转发，但重连的客户端需要一次读取就能拿到"现在是什么状态"，否则只能重放它错过的日志。
 - 本阶段只落地记录与持久化；谁有权发布、propose 何时必须做决定、发布后如何使待执行实验失效
   已由 M3 接入，纠正如何打断执行仍属于 M4。
 
@@ -426,10 +430,29 @@ What this changes
   `currentPlanId`，使下一次 `ensureDomainPlan` 记录新版本。已派发的实验不动：episode 的 plan
   与观察记录都不变。同一回合内工具按调用顺序执行，所以"先选后发布"会被作废，"先发布后选"
   会绑定新版本。
+- **选择可回放**：`select_experiment` 现在写 `ExperimentSelected`（携带 belief ids、intent 与
+  当时的 `FormulationAdoption`），`ExperimentSelectionVoided` 记录失效原因，`PlanProduced`
+  在派发时清除它。这是 schema 提升为 4 的原因：v3 的 episode 只把选择放在内存里，replay 后
+  无法区分"当时没有选择"与"选择没有落盘"，"选择 → 失效 → 重新选择"因此无法还原。控制器
+  不再只在字段里持有选择：`adoptReplayedDomainState` 从 snapshot 读回，重启、切换分支与压缩
+  后选择一致。
+- **失效与结论的先后**：distill 的 `conclude` 若发现本回合派发过的 belief 仍未裁定，先要求
+  裁定再考虑交接。该交接会开启下一个 episode 并清空 `dispatchedBeliefIds`，所以未裁定的责任
+  必须在交接前结清，否则清理 focus 之后任务可以在 belief 未经任何裁定的情况下完成。
+- **暂缓的去重**：重复暂缓只在"回应同一轮调查"时算无副作用。去重条件包含
+  `answeredThroughEpisodeOrdinal`，所以新证据之后仍缺同一信息时必须重新记录，门槛不会被
+  旧的暂缓记录继续挡住。
+- **分支隔离**：`navigateTree` 切换 leaf 后调用 `BeliefLoopController.rehydrateFromBranch()`，
+  重新 replay 新分支并重建 task/episode/plan 指针与选择。否则离开的分支上发布的版本会继续
+  被当作当前理解。
 - **投影**：当前版本（或暂缓，或尚未形成时不投影）进入每个角色的 system prompt，明确标注
   它是 agent 自己的暂定立场、不是观察、不是证据、不能作为 belief 的支持。放在 system prompt
   而不是 transcript，是为了让 transcript 保持 append-only 可缓存，并让每个角色读到的始终是
   *当前* 版本。尚未形成时不做任何投影，避免逼出没有依据的 Frame。
+- **投影不产生孤立工具结果**：execution 角色的投影按 `BELIEF_MUTATIONS` 统一屏蔽 belief
+  工具（含 `set_formulation`/`defer_formulation`）的结果，与 `maskEpistemicAssistant` 丢弃
+  调用的范围同源。只屏蔽调用会留下没有对应 `tool_calls` 的 `tool` 消息，严格校验的 provider
+  会直接拒绝整个请求。
 - **反例**：Frame 只投影进上下文，不参与任何过滤。propose 仍可自由选择与当前理解相冲突的
   belief 去检验（新增测试覆盖"修订不影响 FocusSet/belief 状态"，选择逻辑与 Frame 无关）。
 - 消息投影的 belief 工具清单收敛为 `BELIEF_SURFACE_TOOLS` 单一来源（role-specs），

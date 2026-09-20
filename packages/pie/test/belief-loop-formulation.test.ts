@@ -200,6 +200,32 @@ describe("formulation deferral", () => {
 		expect(again.outcome).toBe("unchanged");
 		expect(events.filter((type) => type === "ProblemFormulationDeferred")).toHaveLength(1);
 	});
+
+	it("answers each investigation round, even when the same information is still missing", () => {
+		const { controller, events } = createController();
+		beginTask(controller);
+		const input = { missingInformation: "the re-arm path", reason: "the probe could not isolate it", sources: [] };
+
+		const first = controller.deferFormulation(input);
+		expect(first.outcome).toBe("recorded");
+		if (first.outcome === "rejected") throw new Error(first.reason);
+		// Nothing has run yet, so the deferral answers the investigation as it stands: none.
+		expect(first.value.answeredThroughEpisodeOrdinal).toBe(0);
+
+		// A round runs and the same information is still missing. The stored deferral has to name
+		// *this* round: folding it into the earlier record would leave the required decision reading
+		// as settled by a statement made before the new evidence existed.
+		controller.ensureDomainPlan([], "probe the re-arm path");
+		const second = controller.deferFormulation(input);
+		expect(second.outcome).toBe("recorded");
+		if (second.outcome === "rejected") throw new Error(second.reason);
+		expect(second.value.answeredThroughEpisodeOrdinal).toBe(1);
+		expect(controller.formulationDecisionOwed()).toBe(false);
+
+		// Restating it again for the same round is still the no-op it always was.
+		expect(controller.deferFormulation(input).outcome).toBe("unchanged");
+		expect(events.filter((type) => type === "ProblemFormulationDeferred")).toHaveLength(2);
+	});
 });
 
 describe("formulation corrections", () => {
@@ -316,11 +342,81 @@ describe("propose ownership of the decision", () => {
 		});
 	});
 
+	it("replays the choice, the void, and the choice made in its place", () => {
+		const session = SessionManager.inMemory(process.cwd(), { id: "session-1" });
+		const { controller, events } = createController(session);
+		beginTask(controller);
+
+		const belief = controller.beliefSet.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a post-logout read keeps the value",
+			evidenceRounds: 1,
+		});
+		controller.setFocus([belief.id]);
+		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
+		const published = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		if (published.outcome === "rejected") throw new Error(published.reason);
+		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
+
+		// The sequence lives in the log, not only in the field: a reader sees the choice, the
+		// revision that voided it, and the choice made under the version that replaced it.
+		const task = controller.domainSnapshot.tasks.get(controller.currentTaskId!)!;
+		expect(task.episodes[0].experimentSelection).toEqual({
+			intent: "what the answer must report",
+			beliefIds: [belief.id],
+			formulation: { kind: "version", versionId: published.value.id },
+		});
+		expect(events.filter((type) => type === "ExperimentSelected")).toHaveLength(2);
+		expect(events.filter((type) => type === "ExperimentSelectionVoided")).toHaveLength(1);
+
+		// A controller rebuilt on the same branch — a resume, or a branch switch — comes back
+		// holding the same choice rather than an empty one.
+		const restored = createController(session).controller;
+		expect(restored.pendingExperiment).toEqual({
+			intent: "what the answer must report",
+			beliefIds: [belief.id],
+		});
+	});
+
+	it("commits the choice to the plan at dispatch, leaving no selection pending", () => {
+		const { controller } = createController();
+		beginTask(controller);
+
+		const belief = controller.beliefSet.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a post-logout read keeps the value",
+			evidenceRounds: 1,
+		});
+		controller.onBeliefDelta(
+			{
+				op: "propose",
+				statement: belief.statement,
+				domain: belief.domain,
+				expectation: belief.expectation,
+				evidenceRounds: 1,
+			},
+			belief,
+			undefined,
+		);
+		controller.setFocus([belief.id]);
+		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
+		controller.ensureDomainPlan([belief.id], "probe the retention path");
+
+		const episode = controller.domainSnapshot.tasks.get(controller.currentTaskId!)!.episodes[0];
+		// Dispatching does not leave the choice dangling: what remains is the plan, which records
+		// the same beliefs as the decision that was actually made.
+		expect(episode.experimentSelection).toBeUndefined();
+		expect(episode.body.kind === "belief-loop" && episode.body.plan?.selectedToExplore).toEqual([belief.id]);
+	});
+
 	it("binds a cited belief to the delta that recorded its state, not to its later state", () => {
 		const { controller } = createController();
 		beginTask(controller);
 		controller.selectDomainEpisodeBody("belief-loop");
-
 		const belief = controller.beliefSet.apply({
 			op: "propose",
 			statement: "the cache survives logout",

@@ -16,8 +16,12 @@ import type { CustomEntry, SessionEntry } from "./session-manager.ts";
  *   corrections. A `Plan` now names the formulation version its experiment was chosen under
  *   (`FormulationAdoption`), so a v2 plan carries no such record and cannot be distinguished
  *   from one whose version was never formed.
+ * - **v4** added the experiment selection as a durable record (`ExperimentSelected` /
+ *   `ExperimentSelectionVoided`). A v3 episode only ever held the selection in memory, so
+ *   replaying one cannot tell "nothing was selected" from "a selection was never written down",
+ *   and a v3 log would silently lose the choice→void→re-choice sequence.
  */
-export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 3 as const;
+export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 4 as const;
 export const AGENT_SESSION_DOMAIN_CUSTOM_ENTRY = "pie.agent-session-domain-event";
 
 export type SessionId = string;
@@ -268,11 +272,50 @@ export function formulationContentError(content: FormulationContent): string | u
 	return `formulation is missing required content: ${missing.join(", ")}`;
 }
 
+/**
+ * The active task's problem-understanding state in one object: what the agent currently takes the
+ * task to be, what it said was missing when it deferred, what corrections are still unanswered,
+ * and whether the required decision is still outstanding.
+ *
+ * This is a view, not a stored record — every field is read off the replayed task, so a client
+ * that reads it (a reconnecting RPC consumer, say) sees the same state the log holds rather than
+ * a second copy that could drift. The full version history lives on the task itself.
+ */
+export interface FormulationState {
+	/** The current version, or `null` before the first one. */
+	readonly current: ProblemFormulationVersion | null;
+	/** The recorded deferral while one is current, or `null`. */
+	readonly deferral: FormulationDeferral | null;
+	/** Corrections still awaiting propose's response, oldest first. */
+	readonly pendingCorrections: readonly FormulationCorrection[];
+	/** Whether propose still owes this task the publish-or-defer decision. */
+	readonly decisionOwed: boolean;
+}
+
 export interface Plan {
 	readonly id: PlanId;
 	readonly selectedToExplore: readonly BeliefId[];
 	readonly intent?: string;
 	/** The formulation version this experiment was chosen under. */
+	readonly formulation: FormulationAdoption;
+}
+
+/**
+ * The experiment propose has chosen but not yet dispatched: which beliefs the next round probes,
+ * the task decision the probe informs, and the understanding it was chosen under.
+ *
+ * It is a separate record from the `Plan` it becomes, because the two answer different questions.
+ * The selection is a *choice* — it can be voided by a revision or a scope change before anything
+ * runs, and that void is itself a fact worth replaying ("chose E1 under v1, v2 voided it, chose E2
+ * under v2"). The plan is a *commitment*: it is written at dispatch, carries the outcome's
+ * provenance, and is never revised.
+ */
+export interface ExperimentSelectionRecord {
+	/** Which task decision, action, or conclusion this experiment's outcome could change. */
+	readonly intent: string;
+	/** The belief ids forming one coherent experiment. */
+	readonly beliefIds: readonly BeliefId[];
+	/** The formulation version this selection was made under; `unformed` before the first one. */
 	readonly formulation: FormulationAdoption;
 }
 
@@ -365,6 +408,11 @@ export interface ExecutionEpisode {
 	readonly stage: EpisodeStage;
 	readonly steering: readonly Intervention[];
 	readonly routing?: Routing;
+	/**
+	 * The choice propose has made for this round and not yet dispatched. Cleared when a plan
+	 * commits it, and by an explicit void when a revision or a scope change takes it back.
+	 */
+	readonly experimentSelection?: ExperimentSelectionRecord;
 	readonly body: EpisodeBody;
 }
 
@@ -479,6 +527,11 @@ export type AgentSessionDomainEvent =
 	| (EpisodeEventBase & { type: "EpisodeClosed" })
 	| (EpisodeEventBase & { type: "CursorChanged"; stage: EpisodeStage })
 	| (EpisodeEventBase & { type: "InterventionAdded"; intervention: Intervention })
+	// The experiment choice, before anything runs. Recorded rather than kept in memory because a
+	// resumed or branch-switched session has to come back with the same choice, and because
+	// "chose, had it voided, chose again" is exactly the sequence a reader needs to audit.
+	| (EpisodeEventBase & { type: "ExperimentSelected"; selection: ExperimentSelectionRecord })
+	| (EpisodeEventBase & { type: "ExperimentSelectionVoided"; reason: string })
 	| (EpisodeEventBase & { type: "BeliefDeltaApplied"; delta: BeliefDelta; activeBeliefs: readonly BeliefId[] })
 	| (EpisodeEventBase & { type: "PlanProduced"; plan: Plan })
 	| (EpisodeEventBase & { type: "ExecutionStarted"; execution: Omit<Execution, "output" | "status" | "error"> })
@@ -1034,6 +1087,36 @@ export function applyAgentSessionDomainEvent(
 			const nextEpisode = { ...episode, steering: [...episode.steering, event.intervention] };
 			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, nextEpisode)) };
 		}
+		case "ExperimentSelected": {
+			const { task, episode } = requireActiveEpisode(snapshot, event);
+			// The ids are deliberately not checked against the belief registry. A selection is a
+			// choice, not a commitment: the tool that made it validated against the live belief set,
+			// and it is `PlanProduced` — the dispatch — that enforces existence. Rejecting a choice
+			// on replay would fail a log over a belief that never became anything.
+			if (event.selection.beliefIds.length === 0) fail(event, "experiment selection has no beliefs");
+			if (!event.selection.intent.trim()) fail(event, "experiment selection has no intent");
+			requireAdoption(event, task, event.selection.formulation);
+			const selection: ExperimentSelectionRecord = {
+				intent: event.selection.intent,
+				beliefIds: [...event.selection.beliefIds],
+				formulation: event.selection.formulation,
+			};
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, experimentSelection: selection })),
+			};
+		}
+		case "ExperimentSelectionVoided": {
+			const { task, episode } = requireActiveEpisode(snapshot, event);
+			if (!event.reason.trim()) fail(event, "a voided experiment selection needs a reason");
+			if (!episode.experimentSelection) {
+				fail(event, `episode ${episode.id} has no experiment selection to void`);
+			}
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, experimentSelection: undefined })),
+			};
+		}
 		case "BeliefDeltaApplied": {
 			const { task, episode } = requireClassifiedEpisode(snapshot, event);
 			if (episode.body.kind !== "belief-loop")
@@ -1082,7 +1165,12 @@ export function applyAgentSessionDomainEvent(
 			// of "this experiment was chosen because the task looked like this".
 			requireAdoption(event, task, event.plan.formulation);
 			const body = { ...episode.body, plan: event.plan };
-			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
+			// Dispatching commits the choice, so the selection stops being pending: what remains is
+			// the plan, which records the same beliefs as the decision that was actually made.
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, experimentSelection: undefined, body })),
+			};
 		}
 		case "ExecutionStarted": {
 			const { task, episode } = requireClassifiedEpisode(snapshot, event);
@@ -1184,8 +1272,9 @@ export function domainEventsFromSessionEntries(entries: readonly SessionEntry[])
 					`Session entry ${entry.id} was written with agent-session domain schema v${version}, ` +
 						`but this runtime requires v${AGENT_SESSION_DOMAIN_SCHEMA_VERSION}. Every version bump ` +
 						`so far has been a breaking change with no migration path (v2 renamed TaskFrame to ` +
-						`ExecutionEpisode; v3 added problem-formulation records), so a v${version} session is ` +
-						`rejected rather than replayed with missing or misread records.`,
+						`ExecutionEpisode; v3 added problem-formulation records; v4 added the experiment ` +
+						`selection), so a v${version} session is rejected rather than replayed with missing ` +
+						`or misread records.`,
 				);
 			}
 			throw new DomainReplayError(`Invalid agent-session domain event in session entry ${entry.id}`);

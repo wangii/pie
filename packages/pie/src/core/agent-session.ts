@@ -50,7 +50,7 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
-import type { AgentSessionDomainEvent, AgentSessionSnapshot } from "./agent-session-domain.ts";
+import type { AgentSessionDomainEvent, AgentSessionSnapshot, FormulationState } from "./agent-session-domain.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { BeliefLoopController, type RoleStatus } from "./belief-loop/belief-loop-controller.ts";
@@ -652,6 +652,21 @@ export class AgentSession {
 	/** Replayed, immutable domain projection for the active session branch. */
 	get domainSnapshot(): AgentSessionSnapshot {
 		return this._beliefLoop.domainSnapshot;
+	}
+
+	/**
+	 * The active task's formulation state, for clients that need "what does the agent currently
+	 * take this task to be" without replaying the log themselves. Undefined when no task is open —
+	 * a task that has ended has no current understanding, and a new one forms its own.
+	 */
+	getFormulationState(): FormulationState | undefined {
+		if (!this._beliefLoop.currentTaskId) return undefined;
+		return {
+			current: this._beliefLoop.currentFormulation() ?? null,
+			deferral: this._beliefLoop.formulationDeferral() ?? null,
+			pendingCorrections: [...this._beliefLoop.pendingCorrections()],
+			decisionOwed: this._beliefLoop.formulationDecisionOwed(),
+		};
 	}
 
 	// =========================================================================
@@ -3532,6 +3547,12 @@ export class AgentSession {
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
+
+			// The domain projection has to follow the leaf. Without this the replayed task and its
+			// current understanding keep describing the branch the session just left — a navigated
+			// client would still be told the agent holds a reading that was published after the
+			// point it navigated to.
+			this._beliefLoop.rehydrateFromBranch();
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({

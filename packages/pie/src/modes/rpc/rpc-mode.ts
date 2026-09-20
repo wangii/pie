@@ -42,6 +42,7 @@ import type {
 // Re-export types for consumers
 export type {
 	RpcCommand,
+	RpcDomainSnapshot,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -487,8 +488,23 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					formulation: session.getFormulationState() ?? null,
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "get_domain_snapshot": {
+				// Read straight off the runtime's replayed snapshot: a reconnecting client gets the
+				// state the live events are already being applied to, not a parallel reconstruction.
+				const snapshot = session.domainSnapshot;
+				return success(id, "get_domain_snapshot", {
+					sessionId: snapshot.id,
+					activeBranchTasks: [...snapshot.activeBranchTasks],
+					tasks: [...snapshot.tasks.values()],
+					beliefs: [...snapshot.beliefs.values()],
+					activeBeliefs: [...snapshot.activeBeliefs],
+					cursor: snapshot.cursor,
+				});
 			}
 
 			// =================================================================
