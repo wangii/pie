@@ -26,7 +26,7 @@ import type {
 	ToolCall,
 	Usage,
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type JsonObject } from "@earendil-works/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -68,7 +68,7 @@ export interface FauxResponse {
 	/** Text content blocks. String shorthand becomes a single text block. */
 	text?: string;
 	/** Tool calls to include in the response. */
-	toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown> }>;
+	toolCalls?: Array<{ id?: string; name: string; args: JsonObject }>;
 	/** Thinking content. */
 	thinking?: string;
 	/** Stop reason. Defaults to "stop", or "toolUse" if toolCalls are present, or "error" if error is set. */

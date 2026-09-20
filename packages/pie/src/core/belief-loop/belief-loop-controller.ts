@@ -1766,16 +1766,34 @@ export class BeliefLoopController {
 		return this.beliefLangPrompt(spec.instruction);
 	}
 
+	/**
+	 * Project a role's system prompt onto the transcript.
+	 *
+	 * The agent's system prompt is a view of the transcript's leading system message, so
+	 * switching the role instruction means rewriting that message's content. Assigning to
+	 * `agent.state.systemPrompt` is no longer possible: it is read-only and derived from the
+	 * messages, and the request the provider sees is built from those messages alone.
+	 */
+	private writeSystemPromptToTranscript(prompt: string): void {
+		const messages = this.host.agent.state.messages;
+		const head = messages[0];
+		if (head?.role === "system") {
+			messages[0] = { ...head, content: prompt };
+			return;
+		}
+		messages.unshift({ role: "system", content: prompt, timestamp: Date.now() });
+	}
+
 	applyRoleSurface(): void {
 		if (!this.beliefSetUsable) {
-			this.host.agent.state.systemPrompt = this.host._systemPromptOverride ?? this.host._baseSystemPrompt;
+			this.writeSystemPromptToTranscript(this.host._systemPromptOverride ?? this.host._baseSystemPrompt);
 			return;
 		}
 		const toolNames = this.roleToolNames();
 		this.host.agent.state.tools = toolNames
 			.map((name) => this.host._toolRegistry.get(name))
 			.filter((tool): tool is import("@earendil-works/pi-agent-core").AgentTool => tool !== undefined);
-		this.host.agent.state.systemPrompt = this.roleSystemPrompt();
+		this.writeSystemPromptToTranscript(this.roleSystemPrompt());
 	}
 
 	// =========================================================================

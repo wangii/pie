@@ -11,6 +11,7 @@ import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import {
 	type Api,
 	type AssistantMessage,
@@ -289,7 +290,11 @@ async function main(): Promise<void> {
 		context: Context,
 		options?: SimpleStreamOptions,
 	): AssistantMessageEventStream =>
-		streamSimpleOpenAICodexResponses(registryModel as Model<"openai-codex-responses">, context, options);
+		streamSimpleOpenAICodexResponses(
+			registryModel as Model<"openai-codex-responses">,
+			normalizeContext(context),
+			options,
+		);
 	modelRegistry.registerProvider("openai-codex", {
 		api: "openai-codex-responses",
 		baseUrl: baseModel.baseUrl,

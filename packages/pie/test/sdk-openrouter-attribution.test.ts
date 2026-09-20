@@ -6,6 +6,7 @@ import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	type Model,
+	normalizeContext,
 	type ProviderHeaders,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
@@ -127,14 +128,10 @@ describe("createAgentSession provider attribution headers", () => {
 		});
 
 		try {
-			const stream = await session.agent.streamFunction(
-				model,
-				{ messages: [] },
-				{
-					sessionId: session.sessionId,
-					...(options.requestHeaders ? { headers: options.requestHeaders } : {}),
-				},
-			);
+			const stream = await session.agent.streamFunction(model, normalizeContext({ messages: [] }), {
+				sessionId: session.sessionId,
+				...(options.requestHeaders ? { headers: options.requestHeaders } : {}),
+			});
 			await stream.result();
 			return capturedOptions?.headers;
 		} finally {

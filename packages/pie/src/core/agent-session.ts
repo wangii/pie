@@ -64,6 +64,7 @@ import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { BeliefLoopController, type RoleStatus } from "./belief-loop/belief-loop-controller.ts";
 import { isProbeTool } from "./belief-loop/message-projection.ts";
 import type { Belief } from "./belief-set.ts";
+import { generateBugReportSummary } from "./bug-report.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -964,7 +965,6 @@ export class AgentSession {
 				message: event.message as AssistantMessage,
 				toolResults: event.toolResults,
 				context: {
-					systemPrompt: this.agent.state.systemPrompt,
 					messages: this.agent.state.messages,
 					tools: this.agent.state.tools,
 				},
@@ -3819,6 +3819,31 @@ export class AgentSession {
 			outputPath,
 			themeName,
 			toolRenderer,
+		});
+	}
+
+	/**
+	 * Ask the current model to describe what went wrong in this session for a bug report.
+	 * Used when the user declines to share the transcript itself.
+	 */
+	async summarizeForBugReport(options: { hint?: string; signal: AbortSignal }): Promise<string> {
+		const model = this.model;
+		if (!model) {
+			throw new Error("No model selected");
+		}
+		const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+		return generateBugReportSummary({
+			messages: this.messages,
+			hint: options.hint,
+			model: requestModel,
+			apiKey,
+			headers,
+			env,
+			signal: options.signal,
+			thinkingLevel: this.thinkingLevel,
+			streamFn: this.agent.streamFunction,
+			retry: this.settingsManager.getRetrySettings(),
+			sessionId: this.sessionId,
 		});
 	}
 

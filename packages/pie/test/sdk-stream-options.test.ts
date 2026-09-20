@@ -6,6 +6,7 @@ import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	type Model,
+	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -114,7 +115,7 @@ describe("createAgentSession stream options", () => {
 		});
 
 		try {
-			const stream = await session.agent.streamFunction(model, { messages: [] }, requestOptions);
+			const stream = await session.agent.streamFunction(model, normalizeContext({ messages: [] }), requestOptions);
 			await stream.result();
 			return capturedOptions;
 		} finally {

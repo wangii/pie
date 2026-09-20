@@ -1,8 +1,21 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	getCurrentSystemPrompt,
+	getCurrentTools,
+	type TranscriptContext,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness } from "../harness.ts";
+
+/** Tools the provider request currently declares, read off the transcript's system message. */
+function getProviderToolNames(context: TranscriptContext): string[] {
+	return getCurrentTools(context.messages)
+		.map((tool) => tool.name)
+		.sort();
+}
 
 describe("extension active tools next-turn refresh", () => {
 	it("applies pi.setActiveTools before the next provider request in the same run", async () => {
@@ -46,11 +59,11 @@ describe("extension active tools next-turn refresh", () => {
 			const providerToolNames: string[][] = [];
 			harness.setResponses([
 				(context) => {
-					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
+					providerToolNames.push(getProviderToolNames(context));
 					return fauxAssistantMessage(fauxToolCall("switch_tools", {}), { stopReason: "toolUse" });
 				},
 				(context) => {
-					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
+					providerToolNames.push(getProviderToolNames(context));
 					return fauxAssistantMessage("done");
 				},
 			]);
@@ -101,14 +114,14 @@ describe("extension active tools next-turn refresh", () => {
 			harness.session.setActiveToolsByName(["load_more_tools"]);
 
 			const addedToolNames: string[][] = [];
+			let toolsBeforeLoad: string[] = [];
 			harness.setResponses([
-				() => fauxAssistantMessage(fauxToolCall("load_more_tools", {}), { stopReason: "toolUse" }),
 				(context) => {
-					addedToolNames.push(
-						context.messages
-							.filter((message) => message.role === "toolResult")
-							.flatMap((message) => message.addedToolNames ?? []),
-					);
+					toolsBeforeLoad = getProviderToolNames(context);
+					return fauxAssistantMessage(fauxToolCall("load_more_tools", {}), { stopReason: "toolUse" });
+				},
+				(context) => {
+					addedToolNames.push(getProviderToolNames(context).filter((name) => !toolsBeforeLoad.includes(name)));
 					return fauxAssistantMessage("done");
 				},
 			]);
@@ -168,13 +181,13 @@ describe("extension active tools next-turn refresh", () => {
 			const providerToolNames: string[][] = [];
 			harness.setResponses([
 				(context) => {
-					providerSystemPrompts.push(context.systemPrompt ?? "");
-					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
+					providerSystemPrompts.push(getCurrentSystemPrompt(context.messages));
+					providerToolNames.push(getProviderToolNames(context));
 					return fauxAssistantMessage(fauxToolCall("switch_tools", {}), { stopReason: "toolUse" });
 				},
 				(context) => {
-					providerSystemPrompts.push(context.systemPrompt ?? "");
-					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
+					providerSystemPrompts.push(getCurrentSystemPrompt(context.messages));
+					providerToolNames.push(getProviderToolNames(context));
 					return fauxAssistantMessage("done");
 				},
 			]);

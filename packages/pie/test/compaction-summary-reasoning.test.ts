@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
+import { type AssistantMessage, type Context, type Model, normalizeContext } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CompactionPreparation,
@@ -116,11 +116,11 @@ describe("generateSummary reasoning options", () => {
 	});
 
 	it("honors a caller-supplied routing session without prompt caching", async () => {
-		await completeSummarization(
-			createModel(false),
-			{ systemPrompt: "Summarize", messages: [] },
-			{ sessionId: "current-routing-session", cacheRetention: "long", toolChoice: "auto" },
-		);
+		await completeSummarization(createModel(false), normalizeContext({ systemPrompt: "Summarize", messages: [] }), {
+			sessionId: "current-routing-session",
+			cacheRetention: "long",
+			toolChoice: "auto",
+		});
 
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
 			sessionId: "current-routing-session",
