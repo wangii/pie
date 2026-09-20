@@ -123,7 +123,7 @@ describe("domain state across session tree navigation", () => {
 		expect(state).toBeDefined();
 		expect(state?.current).toBeNull();
 		expect(state?.deferral).toBeNull();
-		expect(state?.pendingCorrections).toEqual([]);
+		expect(state?.corrections).toEqual([]);
 		expect(state?.decisionOwed).toBe(false);
 	});
 });

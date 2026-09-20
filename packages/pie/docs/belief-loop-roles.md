@@ -52,14 +52,17 @@ user request remains the task target rather than being copied into framing belie
 
 | role | responsibility | tools | model |
 |---|---|---|---|
-| `propose` | choose the next material uncertainty; state how the task is currently understood; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `set_formulation`, `defer_formulation`, `view_beliefs`, `conclude` | default |
+| `propose` | choose the next material uncertainty; state how the task is currently understood; answer the user's corrections; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `set_formulation`, `defer_formulation`, `answer_correction`, `view_beliefs`, `conclude` | default |
 | `execution` | gather all materially distinct raw observations; perform minimal interventions when needed | active execution tools plus read-only `view_beliefs` (fast path also `report_outcome`) | `pie.executionModel` |
 | `distill` | adjudicate tested beliefs, inspect residual, and refine the world model | `declare_belief`, `view_beliefs`, `conclude` | `pie.distillationModel` |
 | `finalReport` | synthesize the evidence-grounded answer and preserve uncertainty | none | default |
 
-`set_formulation` and `defer_formulation` are propose's alone. Distill may find that the residual
-exposes a reframing, but a suggestion is not the current understanding: only propose publishes,
-and a distill turn cannot state the agent's reading or clear the decision by making it itself.
+`set_formulation`, `defer_formulation`, and `answer_correction` are propose's alone. Distill may
+find that the residual exposes a reframing, but a suggestion is not the current understanding: only
+propose publishes, and a distill turn cannot state the agent's reading or clear the decision by
+making it itself. Answering a user correction is propose's for the same reason — the user objected
+to how the task is understood, and "I keep my reading, because…" is a statement about the agent's
+position, not evidence about the world.
 
 There is no independent batching planner. Propose selects the beliefs for one coherent execution
 episode and states the decision that episode informs. This removes a model call that produced no
@@ -78,6 +81,15 @@ another experiment or conclude. The gate is checked against the replayed state, 
 `set_formulation` call leaves the decision outstanding rather than satisfying it. Publishing a
 version voids any experiment selected but not yet dispatched, which is why a propose turn that
 both states a reading and selects an experiment must publish first: tools run in call order.
+
+A user correction travels the same gate as the decision, and takes priority over it. It is
+recorded immediately and blocks execution probes at the tool boundary: calls already in flight
+come back with their results, and the ones behind them do not start — blocked with a result that
+names the correction, so every tool call in the batch is still answered. The next decision is
+propose's, and until each pending correction has an answer with `answer_correction`, propose can
+neither dispatch another experiment nor conclude. The round's plan and the evidence it gathered
+stay in the log: the beliefs it dispatched keep blocking conclusion until distill adjudicates them,
+because closing a round is not adjudication.
 
 The decision roles (`propose`, `distill`) receive the `<project_context>` block even though they
 have no `read` tool. That block is normally gated on `read`, but project constraints ("`dist/` is

@@ -29,6 +29,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "name", description: "Set session display name" },
 	{ name: "session", description: "Show session info and stats" },
 	{ name: "bs", description: "Show the current belief set" },
+	{
+		name: "frame",
+		description: "Show how the agent currently reads this task, its history, and corrections",
+		argumentHint: "[correct <text>]",
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },

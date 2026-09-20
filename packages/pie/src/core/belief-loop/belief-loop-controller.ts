@@ -29,6 +29,7 @@ import {
 	formulationSourceError,
 	latestBeliefDeltaFor,
 	latestDispatchedEpisodeOrdinal,
+	latestFormulationAdoption as latestFormulationAdoptionOf,
 	type ProblemFormulationVersion,
 	pendingFormulationCorrections as pendingCorrectionsOf,
 	replayAgentSessionDomainEntries,
@@ -52,7 +53,7 @@ import { resolveCliModel } from "../model-resolver.ts";
 import { ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
 import { buildSystemPrompt } from "../system-prompt.ts";
 import type { FormulationCitation } from "../tools/formulation.ts";
-import { projectContextMessages, projectMessagesFor } from "./message-projection.ts";
+import { isProbeTool, projectContextMessages, projectMessagesFor } from "./message-projection.ts";
 
 // ============================================================================
 // Types and constants (moved from agent-session.ts)
@@ -80,6 +81,28 @@ export interface RoleStatus {
 }
 
 const EPISODE_HORIZON_HEADROOM = 1.3;
+
+/** How much of one tool result the correction handoff shows propose, and how many operations. */
+const MAX_HANDOFF_RESULT_CHARS = 400;
+const MAX_HANDOFF_OPERATIONS = 12;
+
+/** Collapse a tool result to one bounded line: newlines become separators, overlong text is cut. */
+function summarizeOperation(text: string, limit: number): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length <= limit ? flat : `${flat.slice(0, limit)}…`;
+}
+
+/** The plain text of a recorded domain content value — a string, or text blocks with images. */
+function domainContentText(content: DomainContent): string {
+	if (typeof content === "string") return content;
+	return content
+		.map((part) => {
+			const block = part as { type?: unknown; text?: unknown };
+			return block.type === "text" && typeof block.text === "string" ? block.text : "";
+		})
+		.filter((text) => text.length > 0)
+		.join("\n");
+}
 
 /** Whether two id lists name the same set, ignoring order and duplicates. Used to tell a real
  *  focus change from a re-declaration of the current slice. */
@@ -198,8 +221,6 @@ export class BeliefLoopController {
 	readonly routingSet = new RoutingSet();
 	/** The belief loop's current phase; see `LoopState`. */
 	loopState: LoopState = { role: "propose" };
-	/** The belief ids already dispatched to execution. */
-	dispatchedBeliefIds: Set<string> = new Set();
 	/** Routing decisions already evaluated for the current task. */
 	consumedRouteIds: Set<string> = new Set();
 	/** True once the cheap pre-conclusion adversarial check has fired for the current task. */
@@ -300,7 +321,6 @@ export class BeliefLoopController {
 		);
 		this.currentEpisodeDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
-		this.dispatchedBeliefIds = new Set();
 		this.consumedRouteIds = new Set();
 		this.reflected = false;
 		this.fastPathFailure = false;
@@ -480,9 +500,20 @@ export class BeliefLoopController {
 		return task ? pendingCorrectionsOf(task) : [];
 	}
 
+	/** Every correction on this task, oldest first, pending and answered alike. */
+	formulationCorrections(): readonly FormulationCorrection[] {
+		return this.currentTask()?.formulationCorrections ?? [];
+	}
+
 	/** This task's full formulation history, oldest first. */
 	formulationHistory(): readonly ProblemFormulationVersion[] {
 		return this.currentTask()?.formulations ?? [];
+	}
+
+	/** The understanding the most recent dispatched round was chosen under, if one has run. */
+	latestFormulationAdoption(): FormulationAdoption | undefined {
+		const task = this.currentTask();
+		return task ? latestFormulationAdoptionOf(task) : undefined;
 	}
 
 	private currentTask(): Task | undefined {
@@ -737,6 +768,131 @@ export class BeliefLoopController {
 		});
 	}
 
+	/**
+	 * Answer one pending correction with what propose is actually doing about it — a revision it
+	 * published, the reason it keeps its reading, or the ambiguity it needs clarified.
+	 *
+	 * Answering is separate from revising on purpose: the user objected to how the task is
+	 * understood, and "I keep my reading, because…" is a legitimate answer that a publication
+	 * could not express. A revision published while answering is linked here when it already
+	 * exists; the version's own citations record the association either way.
+	 */
+	answerFormulationCorrection(
+		correctionId: FormulationCorrectionId,
+		response: string,
+	): FormulationWriteResult<FormulationCorrection> {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") return { outcome: "rejected", reason: "there is no active task" };
+		const correction = task.formulationCorrections.find((candidate) => candidate.id === correctionId);
+		if (!correction) return { outcome: "rejected", reason: `unknown correction ${correctionId}` };
+		if (correction.status !== "pending")
+			return { outcome: "rejected", reason: `${correctionId} was already answered` };
+		const text = response.trim();
+		if (!text) return { outcome: "rejected", reason: "an answer must say how you are responding" };
+		this.resolveFormulationCorrection(correctionId, text, this.answeringVersionFor(task, correction));
+		const answered = this.currentTask()?.formulationCorrections.find((candidate) => candidate.id === correctionId);
+		return answered
+			? { outcome: "recorded", value: answered }
+			: { outcome: "rejected", reason: "the answer was not recorded" };
+	}
+
+	/**
+	 * The version published while answering this correction, if any.
+	 *
+	 * A citation is the explicit signal and wins when it is there. The fallback — a version
+	 * recorded after the user objected and before this answer — is deliberate: the link is what
+	 * lets the user see what became of their correction, and dropping it because the model forgot
+	 * a citation would make the record worse than the inference it replaced. Nothing published
+	 * since the correction arrived means the answer was not a revision, and nothing is linked.
+	 */
+	private answeringVersionFor(task: Task, correction: FormulationCorrection): FormulationVersionId | undefined {
+		const published = task.formulations.filter((version) => version.recordedAt >= correction.receivedAt);
+		if (published.length === 0) return undefined;
+		for (let index = published.length - 1; index >= 0; index--) {
+			const version = published[index]!;
+			const cites = version.sources.some(
+				(source) => source.kind === "correction" && source.correctionId === correction.id,
+			);
+			if (cites) return version.id;
+		}
+		return published[published.length - 1]!.id;
+	}
+
+	/**
+	 * Whether a tool call must not start because the user corrected the task mid-round.
+	 *
+	 * A correction hands the next decision back to propose, and the interrupted round keeps only
+	 * what already ran: starting more probes would spend the round on an investigation the user
+	 * just redirected. Blocking the call here — rather than aborting the run — is what keeps the
+	 * transcript whole, because a blocked call still produces a result that answers its tool call.
+	 * Only execution probes are blocked: the belief bookkeeping an epistemic role does is not an
+	 * execution call, and propose is the role that answers the correction in the first place.
+	 */
+	blocksToolCall(toolName: string): boolean {
+		if (this.role !== "execution" || !isProbeTool(toolName)) return false;
+		return this.pendingCorrections().length > 0;
+	}
+
+	/**
+	 * The bounded context propose needs to answer a correction: what the user said, what the
+	 * interrupted round had already produced, and which of its beliefs still await adjudication.
+	 *
+	 * Bounded on purpose. Propose must be able to judge how the correction meets what was actually
+	 * observed — the alternative is answering blind — but opening the raw tool history here would
+	 * hand the truth judgment to a role that never sees evidence, and would cost the append-only
+	 * transcript its cacheability. Each observation is truncated, and the sources are named rather
+	 * than quoted.
+	 */
+	private correctionHandoff(): string {
+		const pending = this.pendingCorrections();
+		const lines: string[] = [TRANSITION_STEERS.answerCorrection(pending.map((item) => item.id).join(", "))];
+		const current = this.currentFormulation();
+		for (const correction of pending) {
+			const text = domainContentText(correction.original);
+			lines.push("", `<user_correction id="${correction.id}">`, text.trim());
+			lines.push(
+				correction.targetVersionId
+					? `Written against version ${correction.targetVersionId}; the current version is ${current?.id ?? "none published yet"}.`
+					: "Written before any version existed.",
+			);
+			lines.push("</user_correction>");
+		}
+		const observations = this.operationRecord();
+		lines.push("", "<interrupted_round>");
+		lines.push("The round stopped at the tool boundary. Completed before it stopped:");
+		lines.push(observations || "(no tool result had been recorded yet)");
+		if (this.role === "execution" && this.loopState.role === "execution" && this.loopState.fastPath) {
+			lines.push("This was a fast-path run; it is not settled and does not count as a completed fast path.");
+		}
+		lines.push("</interrupted_round>");
+		const owed = this.dispatchedProposed();
+		if (owed.length > 0) {
+			lines.push(
+				"",
+				`Still awaiting adjudication by distill: ${owed.map((belief) => `"${belief.statement}"`).join(", ")}. ` +
+					"Propose does not settle them; you cannot conclude until distill has. Selecting them again re-probes them.",
+			);
+		}
+		return lines.join("\n");
+	}
+
+	/**
+	 * Whether the task is trying to end on a fast-path run whose reading propose has not published.
+	 *
+	 * A fast path may run first, but it cannot close the task on its own authority: the agent has
+	 * to say what it made of the run first, and a deferral does not satisfy that — it says the agent
+	 * still cannot state a reading, which means the work continues in the belief loop rather than
+	 * being reported as done. A version published earlier satisfies it, since the reading is then
+	 * already stated and the fast path merely ran under it.
+	 */
+	private fastPathAwaitingReading(): boolean {
+		const task = this.currentTask();
+		if (!task || currentFormulationOf(task)) return false;
+		const ordinal = latestDispatchedEpisodeOrdinal(task);
+		if (ordinal === undefined) return false;
+		return task.episodes.find((episode) => episode.ordinal === ordinal)?.body.kind === "fast-path";
+	}
+
 	private formulationSourcesError(task: Task, sources: readonly FormulationSource[]): string | undefined {
 		for (const source of sources) {
 			const error = formulationSourceError(task, source);
@@ -766,10 +922,30 @@ export class BeliefLoopController {
 		return this.beliefSet.proposed().filter((belief) => this.focusSet.has(belief.id));
 	}
 
-	/** Proposed beliefs that were dispatched for the current experiment and are still unadjudicated.
-	 *  These must be adjudicated before conclusion regardless of later focus changes. */
+	/**
+	 * Every belief id any plan on this task selected to explore, including rounds that have since
+	 * closed.
+	 *
+	 * "What did we test?" is read off the durable plans rather than a field the next round clears.
+	 * A round that ended before distillation — interrupted by a correction, by a reframe, by the
+	 * loop handing back — still owes an adjudication for the evidence it gathered, and closing the
+	 * episode is not adjudication. Reading the plans is what keeps that debt until distill actually
+	 * settles the belief or propose retracts it.
+	 */
+	private plannedBeliefIds(): Set<string> {
+		const ids = new Set<string>();
+		for (const episode of this.currentTask()?.episodes ?? []) {
+			if (episode.body.kind !== "belief-loop" || !episode.body.plan) continue;
+			for (const beliefId of episode.body.plan.selectedToExplore) ids.add(beliefId);
+		}
+		return ids;
+	}
+
+	/** Proposed beliefs that were dispatched in some round and are still unadjudicated. These must
+	 *  be adjudicated before conclusion regardless of later focus changes or episode boundaries. */
 	private dispatchedProposed(): Belief[] {
-		return this.beliefSet.proposed().filter((belief) => this.dispatchedBeliefIds.has(belief.id));
+		const planned = this.plannedBeliefIds();
+		return this.beliefSet.proposed().filter((belief) => planned.has(belief.id));
 	}
 
 	/** Everything that must be adjudicated before conclusion can pass. */
@@ -804,7 +980,6 @@ export class BeliefLoopController {
 	resetLoopForNewTask(): void {
 		this.closeDomainTask();
 		this.loopState = { role: "propose" };
-		this.dispatchedBeliefIds = new Set();
 		this.consumedRouteIds = new Set();
 		this.routingSet.clear();
 		this.reflected = false;
@@ -856,7 +1031,11 @@ export class BeliefLoopController {
 			});
 		}
 		this.applyRoleSurface();
-		if (previousRole === "distill" && next.state.role === "propose") {
+		// A handoff back to propose ends the round that produced it — a distill handoff, a fast path
+		// that finished or failed, a round a correction interrupted. Closing it here rather than at
+		// each handoff keeps the boundary in one place, and means the round's plan is spent before
+		// propose can choose again: a second experiment needs a plan of its own.
+		if (previousRole !== "propose" && next.state.role === "propose") {
 			this.openNextDomainEpisode();
 		}
 		this.emitCursorChanged(next.state.role);
@@ -890,6 +1069,14 @@ export class BeliefLoopController {
 		switch (state.role) {
 			case "propose": {
 				const unresolved = this.focusUnresolved();
+				// An unanswered correction comes before everything else, including the formulation
+				// decision: the user has said how the agent is misreading the task, and answering that
+				// is what the next decision is for. Reading it off the replayed state — not this turn's
+				// calls — is what stops a rejected `answer_correction` from counting as an answer, and
+				// it gates dispatch and conclusion alike, so the redirected round cannot run on.
+				if (this.pendingCorrections().length > 0) {
+					return { state, steer: this.correctionHandoff() };
+				}
 				// The formulation decision is checked against the replayed state, not against this
 				// turn's tool calls: a `set_formulation` or `defer_formulation` that succeeded has
 				// already changed the state, and one that was rejected did not — which is exactly
@@ -958,7 +1145,6 @@ export class BeliefLoopController {
 			}
 			case "distill": {
 				await this.emitDistillationBlock(turn);
-				const proposed = this.beliefSet.proposed();
 				const rejected = this.rejectedConclude(turn);
 				if (rejected !== undefined) {
 					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
@@ -968,11 +1154,10 @@ export class BeliefLoopController {
 					// propose entirely. The formulation decision belongs to propose, so an owed decision
 					// diverts here rather than letting the terminal path route around it.
 					//
-					// The divert is checked second because it re-opens the episode on the way back, and
-					// that clears the dispatched set. A belief this round probed and never adjudicated
-					// would stop blocking conclusion the instant the loop handed back, so the debt is
-					// settled here, while the round it belongs to is still the current one.
-					const unadjudicated = proposed.filter((belief) => this.dispatchedBeliefIds.has(belief.id));
+					// The adjudication debt is checked first, while this round is still the current one:
+					// the divert hands back to propose, and evidence this round gathered must be settled
+					// by the role that can read it rather than carried into a later round.
+					const unadjudicated = this.dispatchedProposed();
 					if (unadjudicated.length > 0) {
 						return {
 							state,
@@ -986,7 +1171,7 @@ export class BeliefLoopController {
 					}
 					return this.concludeTransition(state, this.blockingProposed());
 				}
-				const unadjudicated = proposed.filter((belief) => this.dispatchedBeliefIds.has(belief.id));
+				const unadjudicated = this.dispatchedProposed();
 				if (unadjudicated.length > 0) {
 					return {
 						state,
@@ -999,6 +1184,13 @@ export class BeliefLoopController {
 			}
 			case "execution": {
 				const episodeHorizon = state.episodeHorizon - turn.toolResults.length;
+				// A correction hands the next decision back to propose at the tool boundary, and it
+				// does so for both execution shapes: a fast path that was redirected is not a fast
+				// path that finished, so it is not settled here — propose reads the correction and the
+				// operations that did run, and decides where the task goes next.
+				if (this.pendingCorrections().length > 0) {
+					return { state: { role: "propose" }, steer: this.correctionHandoff() };
+				}
 				if (state.fastPath) {
 					if (turn.toolResults.some((result) => result.isError)) this.fastPathFailure = true;
 					if (!ranTools || episodeHorizon <= 0) {
@@ -1010,11 +1202,13 @@ export class BeliefLoopController {
 						}
 						await this.settleFastPath(turn);
 						if (this.fastPathFailure) {
-							this.openNextDomainEpisode();
 							return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
 						}
-						this.resetLoopForNewTask();
-						return { state: { role: "propose" } };
+						// A fast path that ran cleanly still has to be understood before it may be
+						// reported: propose states or confirms the reading, and only then does the one
+						// final answer follow. Closing the task here is what the gate in
+						// `concludeTransition` refuses.
+						return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathFormulation };
 					}
 					return {
 						state: {
@@ -1061,6 +1255,14 @@ export class BeliefLoopController {
 					`these beliefs remain unadjudicated (${unadjudicated.map((belief) => `"${belief.statement}"`).join(", ")})`,
 				),
 			};
+		}
+		// The terminal path is where a bypass would show: every route into it has to pass here, so
+		// an unanswered correction and an unstated reading are refused once, for all of them.
+		if (this.pendingCorrections().length > 0) {
+			return { state: { role: "propose" }, steer: this.correctionHandoff() };
+		}
+		if (this.fastPathAwaitingReading()) {
+			return { state: { role: "propose" }, steer: TRANSITION_STEERS.fastPathHandoff };
 		}
 		if (!this.reflected) {
 			this.reflected = true;
@@ -1170,11 +1372,21 @@ export class BeliefLoopController {
 	}
 
 	private dispatchToExecution(proposed: Belief[], intent?: string): { state: LoopState; steer: string } {
+		// A round owns one experiment, and its plan is the durable record of which beliefs that
+		// experiment probes. Dispatching into an episode that already ran something — a round that a
+		// correction interrupted, or a fast path that ended in uncertainty — would either leave the
+		// new experiment with no record of what it tested, or put a belief-loop plan on a fast-path
+		// body the fold refuses. So the experiment gets its own round.
+		const episode = this.activeEpisode();
+		const spent =
+			episode !== undefined &&
+			(episode.body.kind === "fast-path" ||
+				(episode.body.kind === "belief-loop" && episode.body.plan !== undefined));
+		if (spent) this.openNextDomainEpisode();
 		this.ensureDomainPlan(
 			proposed.map((belief) => belief.id),
 			intent ?? `Probe ${proposed.map((belief) => belief.id).join(", ")}`,
 		);
-		this.dispatchedBeliefIds = new Set(proposed.map((b) => b.id));
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
 		const statements = proposed.map((b) => `"${b.statement}"`).join(", ");
@@ -1191,7 +1403,6 @@ export class BeliefLoopController {
 	}
 
 	private dispatchToFastExecution(route: Routing): { state: LoopState; steer: string } {
-		this.dispatchedBeliefIds = new Set();
 		this.fastPathFailure = false;
 		const currentEpisode =
 			this.currentTaskId === undefined
@@ -1247,7 +1458,7 @@ export class BeliefLoopController {
 			this.fastPathFailure = true;
 		}
 		const summary = await this.distillFastPath();
-		const operationRecord = this.fastPathOperationRecord();
+		const operationRecord = this.operationRecord();
 		// Attach the deterministic tool-operation record alongside the model summary so the
 		// handoff stays accurate even if the summarizer omits a completed action.
 		const content = operationRecord ? `${summary}\n\nCompleted operations:\n${operationRecord}` : summary;
@@ -1349,7 +1560,16 @@ export class BeliefLoopController {
 	 *  `toolCallId`. Independent of any model summary, so propose always sees which probes ran
 	 *  and their outcome even when the settling turn (or the distilled summary) omits them.
 	 */
-	private fastPathOperationRecord(): string {
+	/**
+	 * Deterministic record of this round's tool calls and their results, keyed by `toolCallId`.
+	 * Independent of any model summary, so a role always sees which probes ran and how they ended
+	 * even when the settling turn (or a distilled summary) leaves them out.
+	 *
+	 * `bounded` truncates each result and the number of operations. The fast path passes it to a
+	 * summarizer that is meant to read the run in full; the correction handoff passes it to
+	 * propose, which needs enough to judge the correction and not the raw history behind it.
+	 */
+	private operationRecord(bounded = false): string {
 		const messages = this.host.agent.state.messages.slice(this.evidenceWatermark);
 		const results = new Map<string, { name: string; isError: boolean; text: string }>();
 		for (const message of messages) {
@@ -1366,15 +1586,19 @@ export class BeliefLoopController {
 			for (const block of message.content) {
 				if (block.type !== "toolCall") continue;
 				const result = results.get(block.id);
-				if (result) {
-					const outcome = result.isError ? "error" : "ok";
-					lines.push(`tool ${result.name}: ${result.text || outcome}`);
-				} else {
+				if (!result) {
 					lines.push(`call ${block.name} (no result)`);
+					continue;
 				}
+				const outcome = result.isError ? "error" : "ok";
+				const text = bounded ? summarizeOperation(result.text, MAX_HANDOFF_RESULT_CHARS) : result.text;
+				lines.push(`tool ${result.name}: ${text || outcome}`);
 			}
 		}
-		return lines.join("\n");
+		if (!bounded || lines.length <= MAX_HANDOFF_OPERATIONS) return lines.join("\n");
+		const shown = lines.slice(0, MAX_HANDOFF_OPERATIONS);
+		shown.push(`… and ${lines.length - MAX_HANDOFF_OPERATIONS} more operation(s) not shown`);
+		return shown.join("\n");
 	}
 
 	private fastPathFragment(): string {
@@ -1388,7 +1612,7 @@ export class BeliefLoopController {
 			const text = this.host._messageText(message);
 			if (text) parts.push(`assistant: ${text}`);
 		}
-		const operations = this.fastPathOperationRecord();
+		const operations = this.operationRecord();
 		if (operations) parts.push(operations);
 		return parts.join("\n");
 	}
@@ -1836,7 +2060,6 @@ export class BeliefLoopController {
 		this.currentPlanId = undefined;
 		this.currentEpisodeExecutionIds = [];
 		this.currentEpisodeDistillationDeltaIds = [];
-		this.dispatchedBeliefIds = new Set();
 		// A new round starts with no choice made: the selection lived on the episode that just
 		// closed, so the field follows the record instead of outliving it.
 		this.pendingExperiment = undefined;

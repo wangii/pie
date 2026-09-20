@@ -26,6 +26,7 @@ export const BELIEF_SURFACE_TOOLS = [
 	"select_experiment",
 	"set_formulation",
 	"defer_formulation",
+	"answer_correction",
 	"view_beliefs",
 	"conclude",
 ] as const;
@@ -47,7 +48,7 @@ const PROPOSE_ROLE_HEADER =
 	"\n\nYou are the propose role of an investigation loop (propose → execution → distill → finalReport). " +
 	"Choose which unresolved uncertainty matters next; execution gathers evidence, distill updates the belief state, " +
 	"and finalReport answers the user. Your tools are route_task, declare_belief, focus_beliefs, select_experiment, " +
-	"set_formulation, defer_formulation, view_beliefs, and conclude. " +
+	"set_formulation, defer_formulation, answer_correction, view_beliefs, and conclude. " +
 	"Write every belief, every formulation, and its evidence in {beliefLang}.\n\n";
 
 const PROPOSE_ROUTING_HEADER =
@@ -103,7 +104,11 @@ const PROPOSE_PROTOCOL =
 	"another experiment or conclude; if you genuinely cannot state a reading yet, use defer_formulation to say what is " +
 	"missing and why. Publishing a new version voids any experiment you selected but have not dispatched, so select again " +
 	"afterwards. Revise only for a substantive change in what you understand, where you attend, or where the work goes: " +
-	"the same reading with more evidence behind it is not a revision.";
+	"the same reading with more evidence behind it is not a revision.\n" +
+	"10. When the user corrects your reading, answer it with answer_correction before anything else: revise the reading " +
+	"(citing the correction in set_formulation), state explicitly that you keep it and why, or say what is ambiguous and " +
+	"ask. A user constraint must be honoured; where it conflicts with the evidence, say so plainly rather than ignoring it. " +
+	"Until every pending correction has an answer, you may not dispatch another experiment or conclude.";
 
 export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 	propose: {
@@ -117,7 +122,8 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the propose role does not have. Choose the next uncertainty with ` +
 			`declare_belief, set scope with focus_beliefs, select the experiment with select_experiment, state your reading ` +
-			`with set_formulation (or defer_formulation), inspect state with view_beliefs, route epistemically closed work ` +
+			`with set_formulation (or defer_formulation), answer a correction with answer_correction, inspect state with ` +
+			`view_beliefs, route epistemically closed work ` +
 			`with route_task, or conclude. ` +
 			`Execution performs the probe.`,
 	},
@@ -195,10 +201,17 @@ export const TRANSITION_STEERS = {
 	dispatch: (statements: string) =>
 		`Run one coherent experiment for these beliefs: ${statements}. Report all materially distinct raw observations with sources or command results.`,
 	fastPathDispatch:
-		"Fast path: the remaining work is epistemically closed. Execute the user's request directly with your tools, then give " +
-		"the complete final answer to the user in your final message. Before finishing, record what you actually delivered, " +
-		"the evidence that it was delivered, and any remaining blocker with report_outcome; a clean tool log is not completion. " +
-		"This execution turn owns the terminal user response.",
+		"Fast path: the remaining work is epistemically closed. Execute the user's request directly with your tools, then " +
+		"record what you actually delivered, the evidence that it was delivered, and any remaining blocker with " +
+		"report_outcome; a clean tool log is not completion. Do not write the user-facing answer yourself: the answer is " +
+		"delivered once the agent has said what it makes of the task, so state your result compactly and stop.",
+	fastPathFormulation:
+		"Fast path finished. State how you now understand this task — or confirm the reading you already published — " +
+		"before the result is reported: call set_formulation. Do not manufacture an experiment to justify the reading; " +
+		"read only the operations that actually ran and the outcome that was recorded. If a deferred reading is all you " +
+		"can honestly give, defer_formulation sends the task back into the belief loop instead of closing it. If the run " +
+		"left uncertainty that could change the answer, declare it, set the focus, select the experiment, and continue in " +
+		"the belief loop.",
 	fastPathHandoff:
 		"Fast path could not complete the task. Continue the same task in the belief loop. Use the execution summary as " +
 		"evidence and do not repeat completed actions.",
@@ -245,4 +258,15 @@ export const TRANSITION_STEERS = {
 		"required decision, not a formality: it is the difference between investigating toward a reading and drifting. A " +
 		"rejected call does not count — fix the input and call again.",
 	writeConclusion: "Write the evidence-grounded conclusion.",
+	answerCorrection: (ids: string) =>
+		`The user corrected your reading of this task (${ids}). The round that was running stopped at the tool boundary: ` +
+		`the calls already in flight came back, and the ones after them were not started. Answer every correction listed ` +
+		`below with answer_correction — saying how you are responding, not just acknowledging it: revise the reading ` +
+		`(citing the correction in set_formulation), state explicitly that you keep it and why, or say what is ambiguous ` +
+		`and ask. A user constraint must be honoured; where it conflicts with the evidence, say so plainly rather than ` +
+		`ignoring it. A revision voids any experiment you selected but have not dispatched, so select again afterwards, ` +
+		`and the actions the interrupted experiment had left are not resumed — you choose what to do next.`,
+	correctionBlocked: (id: string) =>
+		`Blocked: the user corrected the task's reading (${id}) while this round was running, so no new execution call ` +
+		`starts. Report what you already observed; propose answers the correction next.`,
 } as const;

@@ -44,6 +44,7 @@ describe("belief-loop integration", () => {
 			"select_experiment",
 			"set_formulation",
 			"defer_formulation",
+			"answer_correction",
 			"view_beliefs",
 			"conclude",
 		]);

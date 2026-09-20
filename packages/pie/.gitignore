@@ -40,6 +40,7 @@ src/**
 !src/core/slash-commands.ts
 !src/core/system-prompt.ts
 !src/core/tools/conclude.ts
+!src/core/tools/correction.ts
 !src/core/tools/declare-belief.ts
 !src/core/tools/formulation.ts
 !src/core/tools/view-beliefs.ts
@@ -47,6 +48,7 @@ src/**
 !src/main.ts
 !src/modes/interactive/components/belief-set-panel.ts
 !src/modes/interactive/components/footer.ts
+!src/modes/interactive/components/frame-panel.ts
 !src/modes/interactive/interactive-mode.ts
 !src/modes/interactive/theme/theme.ts
 !src/modes/print-mode.ts

@@ -30,6 +30,7 @@ core/skills.ts
 core/slash-commands.ts
 core/system-prompt.ts
 core/tools/conclude.ts
+core/tools/correction.ts
 core/tools/declare-belief.ts
 core/tools/formulation.ts
 core/tools/view-beliefs.ts
@@ -37,6 +38,7 @@ index.ts
 main.ts
 modes/interactive/components/belief-set-panel.ts
 modes/interactive/components/footer.ts
+modes/interactive/components/frame-panel.ts
 modes/interactive/interactive-mode.ts
 modes/interactive/theme/theme.ts
 modes/print-mode.ts

@@ -1,7 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { statusOf } from "../../src/core/belief-set.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 describe("AgentSession fast path", () => {
@@ -47,7 +48,14 @@ describe("AgentSession fast path", () => {
 			reason: "reading after the first round",
 		});
 
-	it("stores routing as control metadata and lets fast execution own the terminal response", async () => {
+	/** Every user-role message, including the steers the loop hands to the next role. */
+	const userText = (harness: Harness) =>
+		harness.session.messages
+			.filter((message) => message.role === "user")
+			.map(getMessageText)
+			.join("\n");
+
+	it("states the reading before the single final answer, instead of the run announcing the end", async () => {
 		const harness = await createHarness(fastHarnessOptions);
 		harnesses.push(harness);
 		harness.setResponses([
@@ -55,23 +63,178 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("report_outcome", { result: "echoed hello", evidence: "the echo tool returned ok" }),
 			]),
-			fauxAssistantMessage("Done."),
+			// The run reports what it delivered and stops. It does not answer the user: a fast path
+			// may not close the task before the agent has said what it made of the run.
+			fauxAssistantMessage("Reported the delivered result."),
 			fauxAssistantMessage("Summary: completed the request."),
+			fauxAssistantMessage([
+				formulation(),
+				fauxToolCall("conclude", { result: "echoed hello", evidence: "the echo tool returned ok" }),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "echoed hello", evidence: "the echo tool returned ok" }),
+			]),
+			fauxAssistantMessage("echoed hello"),
 		]);
 
 		await harness.session.prompt("please echo hello");
 
 		expect(harness.eventsOfType("RoutingDecided")).toHaveLength(1);
 		expect(harness.session.beliefs).toHaveLength(0);
-		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toContain(
-			"Done.",
+		// The reading is published, and it is what lets the task close.
+		expect(harness.eventsOfType("ProblemFormulationRecorded")).toHaveLength(1);
+
+		// Exactly one answer reaches the user, and it comes after the reading — not from the run.
+		const assistantTexts = harness.session.messages
+			.filter((message) => message.role === "assistant")
+			.map(getMessageText);
+		expect(assistantTexts.filter((text) => text === "echoed hello")).toHaveLength(1);
+		expect(assistantTexts.indexOf("Reported the delivered result.")).toBeLessThan(
+			assistantTexts.indexOf("echoed hello"),
 		);
+
 		const summary = harness.session.messages.find(
 			(message) => message.role === "custom" && message.customType === "fast_path_distillation",
 		);
 		expect(summary).toBeDefined();
 		expect((summary as { details?: { outcome?: string } }).details?.outcome).toBe("success");
 	});
+
+	it("sends a deferred fast path into the belief loop instead of closing it", async () => {
+		const harness = await createHarness(fastHarnessOptions);
+		harnesses.push(harness);
+		harness.setResponses([
+			routeResponse("fast-path"),
+			fauxAssistantMessage([
+				fauxToolCall("report_outcome", { result: "echoed hello", evidence: "the echo tool returned ok" }),
+			]),
+			fauxAssistantMessage("Reported the delivered result."),
+			fauxAssistantMessage("Summary: completed the request."),
+			// A deferral answers the decision but not the end condition: the agent still cannot say
+			// what it made of the run, so the task cannot be reported as done.
+			fauxAssistantMessage([
+				fauxToolCall("defer_formulation", {
+					missingInformation: "whether the echo actually reached the caller",
+					reason: "the run reported success without observing the result",
+				}),
+			]),
+			fauxAssistantMessage("Nothing further to add."),
+			// Sent back into the belief loop, where the uncertainty can actually be probed.
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "propose",
+					statement: "the echo reached the caller",
+					domain: "code",
+					expectation: "the caller receives the echoed text",
+					evidenceRounds: 1,
+				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("select_experiment", {
+					intent: "whether the echo reached the caller",
+					beliefIds: ["belief-1"],
+				}),
+			]),
+			fauxAssistantMessage("Observed:\n- the caller received the echoed text."),
+			fauxAssistantMessage([
+				fauxToolCall("declare_belief", {
+					op: "support",
+					beliefId: "belief-1",
+					evidence: "the caller received the echoed text",
+				}),
+			]),
+			fauxAssistantMessage([
+				formulation(),
+				fauxToolCall("conclude", { result: "echoed hello", evidence: "the caller received the echoed text" }),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "echoed hello", evidence: "the caller received the echoed text" }),
+			]),
+			fauxAssistantMessage("echoed hello"),
+		]);
+
+		await harness.session.prompt("please echo hello");
+
+		// The fast path handed back rather than closing, and the belief loop finished the task.
+		expect(userText(harness)).toContain("Fast path could not complete the task");
+		expect(harness.session.beliefs.map(statusOf)).toEqual(["supported"]);
+		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toContain(
+			"echoed hello",
+		);
+		// The deferral stands in the log as the record of why the run was not enough on its own,
+		// and the later reading supersedes the deferral rather than the other way round.
+		expect(harness.eventsOfType("ProblemFormulationDeferred")).toHaveLength(1);
+		expect(harness.eventsOfType("ProblemFormulationRecorded")).toHaveLength(1);
+	});
+
+	it("answers a correction at the tool boundary and gives the next decision back to propose", async () => {
+		// The probe blocks until the test releases it, so the correction provably lands while the
+		// round is in flight rather than racing the turn boundary.
+		let releaseProbe: () => void = () => {};
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo the message",
+			parameters: Type.Object({ message: Type.String() }),
+			execute: async () => {
+				await probeGate;
+				return { content: [{ type: "text", text: "echoed hello" }], details: undefined };
+			},
+		};
+		const harness = await createHarness({ ...fastHarnessOptions, tools: [echoTool] });
+		harnesses.push(harness);
+		harness.setResponses([
+			routeResponse("fast-path"),
+			fauxAssistantMessage([fauxToolCall("echo", { message: "hello" })]),
+		]);
+
+		const run = harness.session.prompt("please echo hello");
+		await vi.waitFor(() => {
+			expect(harness.events.some((event) => event.type === "ExecutionStarted")).toBe(true);
+		});
+		const correction = harness.session.submitFormulationCorrection("you are echoing the wrong thing");
+		expect(correction).toBeDefined();
+		expect(harness.session.getFormulationState()?.corrections.map((item) => item.id)).toEqual([correction!.id]);
+		releaseProbe();
+
+		harness.appendResponses([
+			fauxAssistantMessage([
+				// Publish the revision first, citing the correction, then answer it and say what the
+				// answer was — the documented order, which is what lets the record link the two.
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which target the echo names",
+					focus: "the target the user's correction points at",
+					implication: "which conclusion the answer must report turns on the corrected target",
+					reason: "the correction named a different target",
+					citations: [{ kind: "correction", correctionId: correction!.id }],
+				}),
+				fauxToolCall("answer_correction", {
+					correctionId: correction!.id,
+					response: "revised the reading to the corrected target",
+				}),
+				fauxToolCall("conclude", { result: "echoed hello", evidence: "the echo tool returned ok" }),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "echoed hello", evidence: "the echo tool returned ok" }),
+			]),
+			fauxAssistantMessage("echoed hello"),
+		]);
+		await run;
+
+		// The correction was answered, and propose — not the run — decided what came next.
+		const answered = harness.eventsOfType("FormulationCorrectionResolved");
+		expect(answered).toHaveLength(1);
+		expect(answered[0].response).toContain("revised the reading to the corrected target");
+		// The version published while answering is linked to the correction, so "what did the agent
+		// do about what I said" is answerable from the record rather than inferred from timing.
+		const versions = harness.eventsOfType("ProblemFormulationRecorded");
+		expect(answered[0].recordedVersionId).toBe(versions[0]?.version.id);
+		const task = [...harness.session.domainSnapshot.tasks.values()][0];
+		expect(task?.formulationCorrections.map((item) => item.status)).toEqual(["resolved"]);
+		expect(userText(harness)).toContain("corrected your reading");
+	}, 25000);
 
 	it("hands a failed fast path back to propose without replaying its consumed route", async () => {
 		const boomTool: AgentTool = {
@@ -235,8 +398,16 @@ describe("AgentSession fast path", () => {
 			fauxAssistantMessage([
 				fauxToolCall("report_outcome", { result: "edited the target file", evidence: "the write returned ok" }),
 			]),
-			fauxAssistantMessage("Done."),
+			fauxAssistantMessage("Reported the delivered result."),
 			fauxAssistantMessage("Summary: completed after excluding the irrelevant target."),
+			fauxAssistantMessage([
+				formulation(),
+				fauxToolCall("conclude", { result: "edited the target file", evidence: "the write returned ok" }),
+			]),
+			fauxAssistantMessage([
+				fauxToolCall("conclude", { result: "edited the target file", evidence: "the write returned ok" }),
+			]),
+			fauxAssistantMessage("edited the target file"),
 		]);
 
 		await harness.session.prompt("edit the target file");

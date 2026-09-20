@@ -274,20 +274,23 @@ export function formulationContentError(content: FormulationContent): string | u
 
 /**
  * The active task's problem-understanding state in one object: what the agent currently takes the
- * task to be, what it said was missing when it deferred, what corrections are still unanswered,
- * and whether the required decision is still outstanding.
+ * task to be, what it said was missing when it deferred, the corrections the user submitted and
+ * what propose answered, and whether the required decision is still outstanding.
  *
- * This is a view, not a stored record — every field is read off the replayed task, so a client
- * that reads it (a reconnecting RPC consumer, say) sees the same state the log holds rather than
- * a second copy that could drift. The full version history lives on the task itself.
+ * This is a view, not a stored record — every field is read off the replayed task, so a consumer
+ * that reads it (the terminal's Frame view, a reconnecting RPC client) sees the same state the log
+ * holds rather than a second copy that could drift. The full version history lives on the task.
  */
 export interface FormulationState {
 	/** The current version, or `null` before the first one. */
 	readonly current: ProblemFormulationVersion | null;
 	/** The recorded deferral while one is current, or `null`. */
 	readonly deferral: FormulationDeferral | null;
-	/** Corrections still awaiting propose's response, oldest first. */
-	readonly pendingCorrections: readonly FormulationCorrection[];
+	/**
+	 * Every correction the user submitted against this task, oldest first, pending and answered
+	 * alike — "how did the agent respond to what I said" is a question about the answered ones.
+	 */
+	readonly corrections: readonly FormulationCorrection[];
 	/** Whether propose still owes this task the publish-or-defer decision. */
 	readonly decisionOwed: boolean;
 }
@@ -658,8 +661,29 @@ export function latestDispatchedEpisodeOrdinal(task: Task): number | undefined {
 	return latest;
 }
 
-/** The most recent delta on this task that recorded this belief's state, if any. */
-export function latestBeliefDeltaFor(task: Task, beliefId: BeliefId): BeliefDelta | undefined {
+/**
+ * The understanding the most recent dispatched round was chosen under, or undefined when nothing
+ * has been dispatched yet.
+ *
+ * "Which version governed the work" is the question a reader asks after a reframe, and it is not
+ * the same as "what is the current version": a reading published after the last round was chosen
+ * has not governed anything. A belief-loop round records it on its plan and a fast-path round on
+ * its body, which is why this reads whichever the latest dispatched episode has.
+ */
+export function latestFormulationAdoption(task: Task): FormulationAdoption | undefined {
+	const ordinal = latestDispatchedEpisodeOrdinal(task);
+	if (ordinal === undefined) return undefined;
+	const episode = task.episodes.find((candidate) => candidate.ordinal === ordinal);
+	if (!episode) return undefined;
+	if (episode.body.kind === "belief-loop") return episode.body.plan?.formulation;
+	if (episode.body.kind === "fast-path") return episode.body.formulation;
+	return undefined;
+}
+
+/** The most recent delta on this task that recorded this belief's state, if any. */ export function latestBeliefDeltaFor(
+	task: Task,
+	beliefId: BeliefId,
+): BeliefDelta | undefined {
 	const deltas = task.episodes.flatMap((episode) =>
 		episode.body.kind === "belief-loop" ? episode.body.beliefDeltas : [],
 	);

@@ -723,6 +723,8 @@ Runtime responsibilities:
 - demand the formulation decision once an experiment has been dispatched, and void a selection
   that a new version superseded — recording the choice, the void, and the re-choice rather than
   only clearing a field;
+- stop an execution round at the next tool boundary when the user corrects the task's reading,
+  and hand the decision back to propose;
 - persist domain events.
 
 GUI responsibilities:

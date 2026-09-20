@@ -1,6 +1,6 @@
 # Milestone：Frame 作为 agent 当前的问题理解
 
-状态：M1–M3 已实现，M4–M6 待实现。日期：2026-09-20。M1–M3 完成日期：2026-09-20。
+状态：M1–M5 已实现，M6 部分完成（终端人工验证待做）。日期：2026-09-20。M1–M3 完成日期：2026-09-20；M4–M5 完成日期：2026-09-20。
 
 本文件记录 14 个逐项讨论的决定，以及据此安排的实现阶段和验收条件。
 文件中的工具名、事件名和交互入口是实现建议；产品行为以“已确认决策”为准。
@@ -461,22 +461,59 @@ What this changes
 
 ### M4：纠正与 Fast-path 交接
 
-- [ ] 用户纠正在已启动工具结束后交回 propose，阻止未启动的后续调用。
-- [ ] 保留已取得证据、未裁定责任、纠正来源和显式回应。
-- [ ] 调整 fast-path 终结交接，保证 propose 处理 Frame 后才成功结束。
-- [ ] 保留唯一最终回答，以及现有失败、blocker、outcome 和不重复操作规则。
+- [x] 用户纠正在已启动工具结束后交回 propose，阻止未启动的后续调用。
+- [x] 保留已取得证据、未裁定责任、纠正来源和显式回应。
+- [x] 调整 fast-path 终结交接，保证 propose 处理 Frame 后才成功结束。
+- [x] 保留唯一最终回答，以及现有失败、blocker、outcome 和不重复操作规则。
 
 验收：纠正无需等待整轮实验；串行及并行调用边界均符合约定；恢复后纠正不会丢失或重复处理；
 fast path 有 Frame 后才能成功关闭，发布失败不能假成功，收尾不会重复执行副作用。
 
+实现说明：
+
+- **入口**：`AgentSession.submitFormulationCorrection(text, targetVersionId?)` 记录纠正（目标版本默认
+  为当前版本，无版本时为空）。终端入口见 M5。工具层新增 propose 专属 `answer_correction`。
+- **工具边界**：`beforeToolCall` 在 correction 待处理时阻止 execution 的 probe 调用。选择阻止而不是
+  abort：被阻止的调用仍返回一条结果，assistant 消息里的每个 tool call 都有回答，provider 不会拒收。
+  并行批次在 prepare 阶段串行执行，所以同批次中尚未开始的调用同样被拦下；已开始的调用照常返回。
+- **交回**：`transition` 的 execution 分支在存在待处理纠正时交回 propose（fast path 同样适用，
+  不等整轮结束），`advanceRole` 关闭该轮并开新轮，因此被打断实验的后续行动必须由 propose 重新选择。
+- **有界观察上下文**：`correctionHandoff` 给出纠正原文/目标版本、本轮已完成操作（每条结果截断，
+  最多 12 条）、仍待 distill 裁定的 belief。propose 不因此获得 truth 裁定权，也不打开全部历史原始输出。
+- **未裁定责任**：`dispatchedBeliefIds` 内存集合被删除，改为从各 episode 的 `PlanProduced` 推导
+  （`plannedBeliefIds`）。轮次结束不再清空责任，"清空 focus 后 conclude" 也无法绕过；
+  终结前检查同时覆盖 `concludeTransition`。
+- **终结门槛**：`concludeTransition` 依次检查未裁定 beliefs、待处理纠正、fast path 的 Frame 条件。
+  `fastPathAwaitingReading` 要求最近一次派发的 fast path 已有版本（暂缓不算），否则交回 belief loop。
+- **Fast path 交接（选择"无工具收尾"方案）**：fast-path execution 不再写最终回答，只报告 outcome；
+  结算后交回 propose 发布/沿用 Frame，再由 finalReport 交付唯一最终回答。`fastPathDispatch` 与
+  `fastPathFormulation` 的文案随之调整；已完成的 fast path 测试脚本按新交接改写。
+
 ### M5：终端产品闭环
 
-- [ ] 实现当前 Frame、未形成/暂缓状态、版本历史、修订来源和用户纠正入口。
-- [ ] 展示纠正待处理/已处理状态，支持完整内容查看和终端宽度变化。
-- [ ] 清理 belief 面板中旧 `[frame]` 文案，区分 Frame 与执行轮次。
+- [x] 实现当前 Frame、未形成/暂缓状态、版本历史、修订来源和用户纠正入口。
+- [x] 展示纠正待处理/已处理状态，支持完整内容查看和终端宽度变化。
+- [x] 清理 belief 面板中旧 `[frame]` 文案，区分 Frame 与执行轮次。
 
 验收：用户能够指出一个理解错误，看到 propose 如何处理，以及后续选择依据哪个版本；
 重连或恢复显示同一状态；英文和中文内容均可阅读，交互不依赖不可配置快捷键。
+
+实现说明：
+
+- **面板**：`frame-panel.ts` 的 `FramePanel` 挂在 dock（belief 面板下方），显示当前版本或
+  "not yet formed"/"deferred"、待处理纠正数与"decision owed"标记，并给出 `/frame` 入口。
+  与 belief 面板一样每次渲染重读 replay 后的状态，所以恢复、切换分支与纠正处理后显示一致。
+- **完整视图**：`/frame` 打开 `FrameDetailComponent`（`showSelector` 承载），给出
+  Interpretation/Focus/Core tension/对照项/What this changes、来源、`v1 → v2` 历史与变更原因、
+  逐条纠正的 pending/answered 状态及 propose 的回应，以及"最近一次实验依据哪个版本"
+  （`latestFormulationAdoption`，与"当前版本"不同的问题）。
+- **纠正入口**：`/frame correct <text>` 直接提交；提交后在对话区留下一行，`handleEvent` 的
+  `FormulationCorrectionSubmitted`/`Resolved` 分别显示待处理与 propose 的回应。
+- **快捷键**：`app.frame.toggle`（默认 `shift+ctrl+g`）进入可配置 keybindings，并列入 `/hotkeys`；
+  `/frame` 本身是命令，交互不依赖不可配置快捷键。
+- **面板文案**：belief 面板不再把 proposed beliefs 标成 `[frame]`；`view_beliefs` 的 `[FRAME]`
+  标签按 M1 的范围说明保持原样。
+- **宽度**：所有行经 `truncateToWidth`/`wrapTextWithAnsi`，测试覆盖 24/40/60 列下的中文内容。
 
 ### M6：回归验证与文档收敛
 

@@ -131,6 +131,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
+import { FrameDetailComponent, FramePanel, type FrameView } from "./components/frame-panel.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -550,6 +551,9 @@ export class InteractiveMode {
 	private beliefPanelContainer!: Container;
 	private beliefPanel!: BeliefSetPanel;
 	private beliefPanelVisible = true;
+	private framePanelContainer!: Container;
+	private framePanel!: FramePanel;
+	private framePanelVisible = true;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -619,6 +623,7 @@ export class InteractiveMode {
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.beliefPanelContainer = new Container();
+		this.framePanelContainer = new Container();
 
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
@@ -951,6 +956,8 @@ export class InteractiveMode {
 		});
 		this.beliefPanel = new BeliefSetPanel(() => this.session.beliefs);
 		this.beliefPanelContainer.addChild(this.beliefPanel);
+		this.framePanel = new FramePanel(() => this.getFrameView());
+		this.framePanelContainer.addChild(this.framePanel);
 
 		const dock = new TuiLayouts.VStack([
 			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
@@ -977,6 +984,7 @@ export class InteractiveMode {
 			this.documentContainer,
 			this.pendingMessagesContainer,
 			this.beliefPanelContainer,
+			this.framePanelContainer,
 			this.statusContainer,
 			this.widgetContainerAbove,
 			this.editorContainer,
@@ -2929,6 +2937,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.beliefSet.toggle", () => this.handleBeliefSetCommand());
+		this.defaultEditor.onAction("app.frame.toggle", () => this.handleFrameToggleCommand());
 		this.defaultEditor.onAction("app.editor.external", () => void this.handleOpenExternalEditor());
 		this.defaultEditor.onAction(
 			"app.message.copy",
@@ -3060,6 +3069,11 @@ export class InteractiveMode {
 			}
 			if (text === "/bs") {
 				this.handleBeliefSetCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/frame" || text.startsWith("/frame ")) {
+				this.handleFrameCommand(text.slice("/frame".length));
 				this.editor.setText("");
 				return;
 			}
@@ -3543,6 +3557,26 @@ export class InteractiveMode {
 			case "summarization_retry_finished": {
 				this.clearStatusIndicator("retry");
 				this.ui.requestRender();
+				break;
+			}
+
+			// The Frame panel and view read the replayed state on every render, so a domain event
+			// only has to ask for one. Corrections also get a line in the transcript: "I told it it
+			// misread me" and "what it did about that" are the two things the user must not have to
+			// go looking for.
+			case "ProblemFormulationRecorded":
+			case "ProblemFormulationDeferred": {
+				this.ui.requestRender();
+				break;
+			}
+			case "FormulationCorrectionSubmitted": {
+				this.ui.requestRender();
+				this.showStatus("Frame correction pending");
+				break;
+			}
+			case "FormulationCorrectionResolved": {
+				this.ui.requestRender();
+				this.showStatus(`Frame correction answered: ${event.response}`);
 				break;
 			}
 		}
@@ -6443,6 +6477,84 @@ export class InteractiveMode {
 		this.showStatus(this.beliefPanelVisible ? "Belief panel shown" : "Belief panel hidden");
 	}
 
+	/**
+	 * The terminal's view of the current Frame: what the agent takes the task to be, its version
+	 * history, and the understanding the last experiment was chosen under. Read fresh on every
+	 * render, so a correction answered while the user is looking appears without a redraw command.
+	 */
+	private getFrameView(): FrameView | undefined {
+		const state = this.session.getFormulationState();
+		if (!state) return undefined;
+		return {
+			state,
+			history: this.session.getFormulationHistory(),
+			adopted: this.session.getLatestFormulationAdoption(),
+		};
+	}
+
+	private handleFrameToggleCommand(): void {
+		this.framePanelVisible = !this.framePanelVisible;
+		this.framePanel.setVisible(this.framePanelVisible);
+		this.ui.requestRender();
+		this.showStatus(this.framePanelVisible ? "Frame panel shown" : "Frame panel hidden");
+	}
+
+	/**
+	 * `/frame` — how the agent currently reads this task, with its history and corrections.
+	 *
+	 * `/frame correct <text>` submits a correction instead of opening the view. Both are the user's
+	 * half of the formulation contract: the view is how they see what the agent takes the task to
+	 * be, and the correction is how they say it is wrong.
+	 */
+	private handleFrameCommand(argument: string): void {
+		const text = argument.trim();
+		if (text === "" || text === "show" || text === "history") {
+			this.showFrameView();
+			return;
+		}
+		if (text === "correct" || text.startsWith("correct ")) {
+			this.submitFrameCorrection(text.slice("correct".length).trim());
+			return;
+		}
+		this.showStatus("Usage: /frame, /frame history, or /frame correct <text>");
+	}
+
+	private submitFrameCorrection(text: string): void {
+		if (!text) {
+			this.showStatus("Usage: /frame correct <text> — say how the agent is misreading the task");
+			return;
+		}
+		const correction = this.session.submitFormulationCorrection(text);
+		if (!correction) {
+			this.showStatus("No active task to correct");
+			return;
+		}
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(
+			new Text(
+				theme.fg("accent", `Frame correction recorded: ${text}`) +
+					"\n" +
+					theme.fg("muted", "The running round stops at its next tool boundary; propose answers it next."),
+				1,
+				0,
+			),
+		);
+		this.ui.requestRender();
+	}
+
+	private showFrameView(): void {
+		this.showSelector((done) => {
+			const component = new FrameDetailComponent({
+				getView: () => this.getFrameView(),
+				onClose: () => {
+					done();
+					this.ui.requestRender();
+				},
+			});
+			return { component, focus: component };
+		});
+	}
+
 	private handleChangelogCommand(): void {
 		const changelogPath = getChangelogPath();
 		const allEntries = parseChangelog(changelogPath);
@@ -6516,6 +6628,7 @@ export class InteractiveMode {
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const toggleBeliefSet = this.getAppKeyDisplay("app.beliefSet.toggle");
+		const toggleFrame = this.getAppKeyDisplay("app.frame.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const cycleModelBackward = this.getAppKeyDisplay("app.model.cycleBackward");
 		const copyMessage = this.getAppKeyDisplay("app.message.copy");
@@ -6562,6 +6675,7 @@ export class InteractiveMode {
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${toggleBeliefSet}\` | Toggle belief set panel |
+| \`${toggleFrame}\` | Toggle frame panel (how the agent reads this task) |
 | \`${externalEditor}\` | Edit message in external editor |
 | \`${copyMessage}\` | Copy last assistant message |
 | \`${followUp}\` | Queue follow-up message |

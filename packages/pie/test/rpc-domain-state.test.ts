@@ -218,7 +218,7 @@ describe("RPC domain state", () => {
 			// Nothing was deferred and no correction was submitted, so both answer honestly rather
 			// than being omitted.
 			expect(formulation?.deferral).toBeNull();
-			expect(formulation?.pendingCorrections).toEqual([]);
+			expect(formulation?.corrections).toEqual([]);
 
 			// The snapshot is the state the live events are applied to, so a client that reads it
 			// and then subscribes sees one continuous history rather than two that can disagree.

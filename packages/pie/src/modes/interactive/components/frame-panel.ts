@@ -1,0 +1,292 @@
+import {
+	type Component,
+	Container,
+	getKeybindings,
+	Spacer,
+	Text,
+	truncateToWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
+import type {
+	FormulationAdoption,
+	FormulationCorrection,
+	FormulationState,
+	ProblemFormulationVersion,
+} from "../../../core/agent-session-domain.ts";
+import { theme } from "../theme/theme.ts";
+import { DynamicBorder } from "./dynamic-border.ts";
+import { keyHint } from "./keybinding-hints.ts";
+
+/**
+ * The terminal's view of the agent's current problem understanding — the product-facing "Frame".
+ *
+ * Everything here is a pure function of a `FrameView` snapshot, so what the user reads is exactly
+ * what the replayed log holds, and the layout can be tested without standing up a session. The
+ * panel is live (it re-reads through `getView` on every render) for the same reason the belief
+ * panel is: a correction answered while the user is looking should not need a redraw command.
+ *
+ * Width handling goes through `truncateToWidth` rather than string slicing, because the content is
+ * whatever the agent wrote in the configured belief language and CJK text is double-width.
+ */
+
+export interface FrameView {
+	readonly state: FormulationState;
+	/** This task's versions, oldest first. */
+	readonly history: readonly ProblemFormulationVersion[];
+	/** What the most recent dispatched round was chosen under, if anything has run. */
+	readonly adopted: FormulationAdoption | undefined;
+}
+
+/** How many versions the detail view lists before summarizing the rest. */
+const MAX_HISTORY_LINES = 6;
+
+function pendingCorrections(state: FormulationState): readonly FormulationCorrection[] {
+	return state.corrections.filter((correction) => correction.status === "pending");
+}
+
+/** A one-line reading of the current state: version and time, or what is still missing. */
+function frameHeadline(state: FormulationState): string {
+	if (state.current) {
+		return `v${state.current.ordinal}`;
+	}
+	return state.deferral ? "deferred" : "not yet formed";
+}
+
+/**
+ * The compact dock panel: what the agent currently takes the task to be, in one or two lines.
+ *
+ * It is deliberately a summary. The full reading, its history, and propose's answers to
+ * corrections live behind `/frame`, which the header names — a panel that truncated the content
+ * without saying where the rest is would be worse than showing nothing.
+ */
+export class FramePanel implements Component {
+	private visible = true;
+	private readonly getView: () => FrameView | undefined;
+
+	constructor(getView: () => FrameView | undefined) {
+		this.getView = getView;
+	}
+
+	setVisible(visible: boolean): void {
+		this.visible = visible;
+	}
+
+	render(width: number): string[] {
+		if (!this.visible) return [];
+		const view = this.getView();
+		if (!view) return [];
+		return buildFrameSummaryLines(view, width);
+	}
+
+	invalidate(): void {
+		// No cached state — every render reads the live formulation state.
+	}
+}
+
+export function buildFrameSummaryLines(view: FrameView, width: number): string[] {
+	const { state } = view;
+	const pending = pendingCorrections(state);
+	const markers: string[] = [];
+	if (pending.length > 0) {
+		markers.push(theme.fg("warning", `${pending.length} correction${pending.length === 1 ? "" : "s"} pending`));
+	}
+	if (state.decisionOwed) {
+		markers.push(theme.fg("muted", "decision owed"));
+	}
+	const head = [theme.bold("Frame"), theme.fg("accent", frameHeadline(state)), ...markers].join(" ");
+	const lines = [truncateToWidth(`${head} ${theme.fg("dim", "· /frame")}`, width)];
+	if (state.current) {
+		lines.push(truncateToWidth(`  ${theme.fg("muted", state.current.content.interpretation)}`, width));
+	} else if (state.deferral) {
+		lines.push(
+			truncateToWidth(`  ${theme.fg("muted", `still missing: ${state.deferral.missingInformation}`)}`, width),
+		);
+	} else {
+		lines.push(truncateToWidth(`  ${theme.fg("dim", "the agent has not yet said how it reads this task")}`, width));
+	}
+	return lines;
+}
+
+/**
+ * The full view: the current reading in its own terms, why it changed, which version governed the
+ * last round, and what became of each correction the user submitted.
+ *
+ * It is the answer to "the agent misunderstood me — what happened?", so the correction section
+ * keeps answered corrections beside their response rather than dropping them once handled.
+ */
+export function buildFrameDetailLines(view: FrameView, width: number): string[] {
+	const { state, history, adopted } = view;
+	const lines: string[] = [];
+	const title = state.current ? `HOW I SEE THIS TASK   v${state.current.ordinal}` : "HOW I SEE THIS TASK";
+	lines.push(truncateToWidth(theme.bold(title), width));
+	lines.push("");
+
+	if (state.current) {
+		const version = state.current;
+		lines.push(truncateToWidth(theme.fg("muted", `published ${version.recordedAt} · ${version.reason}`), width));
+		lines.push("");
+		for (const [label, value] of [
+			["Interpretation", version.content.interpretation],
+			["Focus", version.content.focus],
+			["Core tension", version.content.tension],
+			["Not currently prioritizing", version.content.alternative],
+			["What this changes", version.content.implication],
+		] as const) {
+			if (!value) continue;
+			lines.push(truncateToWidth(theme.fg("accent", label), width));
+			lines.push(...wrapTextWithAnsi(`  ${value}`, width));
+			lines.push("");
+		}
+		const sources = describeSources(version);
+		if (sources) {
+			lines.push(truncateToWidth(theme.fg("muted", `Formed from: ${sources}`), width));
+			lines.push("");
+		}
+	} else if (state.deferral) {
+		lines.push(truncateToWidth(theme.fg("warning", "The agent has not stated a reading, and recorded why:"), width));
+		lines.push(...wrapTextWithAnsi(`  Still missing: ${state.deferral.missingInformation}`, width));
+		lines.push(...wrapTextWithAnsi(`  Reason: ${state.deferral.reason}`, width));
+		lines.push(truncateToWidth(theme.fg("muted", `  Deferred at ${state.deferral.deferredAt}`), width));
+		lines.push("");
+	} else {
+		lines.push(
+			truncateToWidth(
+				theme.fg("muted", "Not yet formed: no investigation has settled how to read this task."),
+				width,
+			),
+		);
+		lines.push("");
+	}
+
+	if (adopted) {
+		lines.push(
+			truncateToWidth(
+				theme.fg(
+					"muted",
+					adopted.kind === "version"
+						? `The last experiment ran under ${versionLabel(history, adopted)}.`
+						: "The last experiment was chosen before any version existed.",
+				),
+				width,
+			),
+		);
+		lines.push("");
+	}
+
+	if (state.corrections.length > 0) {
+		lines.push(truncateToWidth(theme.bold("Corrections"), width));
+		for (const correction of state.corrections) {
+			const mark =
+				correction.status === "pending" ? theme.fg("warning", "[pending]") : theme.fg("success", "[answered]");
+			lines.push(truncateToWidth(`${mark} ${correctionText(correction)}`, width));
+			if (correction.targetVersionId) {
+				lines.push(
+					truncateToWidth(
+						theme.fg(
+							"dim",
+							`  about ${versionLabel(history, { kind: "version", versionId: correction.targetVersionId })}`,
+						),
+						width,
+					),
+				);
+			}
+			if (correction.response) {
+				lines.push(...wrapTextWithAnsi(`  ${theme.fg("muted", correction.response)}`, width));
+			}
+		}
+		lines.push("");
+	}
+
+	if (history.length > 1) {
+		lines.push(truncateToWidth(theme.bold("How this reading changed"), width));
+		const shown = history.slice(-MAX_HISTORY_LINES);
+		if (shown.length < history.length) {
+			lines.push(
+				truncateToWidth(theme.fg("dim", `  … and ${history.length - shown.length} earlier version(s)`), width),
+			);
+		}
+		for (const version of shown) {
+			const current = state.current?.id === version.id ? theme.fg("accent", " (current)") : "";
+			lines.push(truncateToWidth(`  v${version.ordinal}${current} ${theme.fg("muted", version.reason)}`, width));
+			lines.push(truncateToWidth(theme.fg("dim", `     ${version.content.interpretation}`), width));
+		}
+	}
+
+	return lines;
+}
+
+function versionLabel(history: readonly ProblemFormulationVersion[], adoption: FormulationAdoption): string {
+	if (adoption.kind === "unformed") return "no version";
+	const version = history.find((candidate) => candidate.id === adoption.versionId);
+	return version ? `v${version.ordinal}` : adoption.versionId;
+}
+
+function describeSources(version: ProblemFormulationVersion): string {
+	const labels: string[] = [];
+	for (const source of version.sources) {
+		if (source.kind === "prompt") labels.push("the request");
+		else if (source.kind === "belief") labels.push(`belief ${source.beliefId}`);
+		else if (source.kind === "correction") labels.push("a correction");
+		else if (source.kind === "distillation") labels.push("a distillation");
+		else if (source.kind === "execution") labels.push("an execution");
+		else labels.push("an intervention");
+	}
+	return labels.join(", ");
+}
+
+function correctionText(correction: FormulationCorrection): string {
+	if (typeof correction.original === "string") return correction.original.trim();
+	return correction.original
+		.map((part) => {
+			const block = part as { type?: unknown; text?: unknown };
+			return block.type === "text" && typeof block.text === "string" ? block.text : "";
+		})
+		.filter((text) => text.length > 0)
+		.join("\n")
+		.trim();
+}
+
+/**
+ * The full view as a modal. It re-reads through `getView` on every render so a correction can be
+ * submitted and answered while the view is open without the user reopening it.
+ */
+export class FrameDetailComponent extends Container {
+	private readonly onCloseCallback: () => void;
+
+	constructor(options: { getView: () => FrameView | undefined; onClose: () => void }) {
+		super();
+		this.onCloseCallback = options.onClose;
+		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+		this.addChild(new FrameDetailBody(options.getView));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(keyHint("tui.select.cancel", "close"), 1, 0));
+		this.addChild(new DynamicBorder());
+	}
+
+	handleInput(keyData: string): void {
+		const kb = getKeybindings();
+		if (kb.matches(keyData, "tui.select.cancel")) {
+			this.onCloseCallback();
+		}
+	}
+}
+
+/** The scrollable-ish body: bounded lines, live from the getter. */
+class FrameDetailBody implements Component {
+	private readonly getView: () => FrameView | undefined;
+
+	constructor(getView: () => FrameView | undefined) {
+		this.getView = getView;
+	}
+
+	render(width: number): string[] {
+		const view = this.getView();
+		if (!view) return [truncateToWidth(theme.fg("muted", "No task is open."), width)];
+		return buildFrameDetailLines(view, Math.max(20, width - 2)).map((line) => ` ${line}`);
+	}
+
+	invalidate(): void {
+		// No cached state — every render reads the live formulation state.
+	}
+}

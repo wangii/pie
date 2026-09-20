@@ -6,6 +6,10 @@ import { theme } from "../theme/theme.ts";
  * A live, read-only panel that renders the current belief set. It re-reads the
  * belief set on every render, so it reflects `declare_belief` mutations in real
  * time without re-invoking a command. Mounted above the status area; `/bs` toggles it.
+ *
+ * Open beliefs used to be tagged `[frame]` here. That label is gone: "Frame" now names the
+ * agent's problem formulation, a different record entirely, and an unadjudicated belief is a
+ * candidate judgment rather than a reading of the task. The status label already says "proposed".
  */
 export class BeliefSetPanel implements Component {
 	private visible = true;
@@ -39,12 +43,8 @@ export class BeliefSetPanel implements Component {
 				inconclusive: theme.fg("warning", "inconclusive"),
 				superseded: theme.fg("dim", "superseded"),
 			}[status];
-			const frameMarker = status === "proposed" ? ` ${theme.fg("accent", "[frame]")}` : "";
 			lines.push(
-				truncateToWidth(
-					`${statusLabel}${frameMarker} ${theme.fg("accent", `[${belief.domain}]`)} ${belief.statement}`,
-					width,
-				),
+				truncateToWidth(`${statusLabel} ${theme.fg("accent", `[${belief.domain}]`)} ${belief.statement}`, width),
 			);
 			if (belief.expectation) {
 				lines.push(truncateToWidth(`  ↳ ${theme.fg("dim", belief.expectation)}`, width));

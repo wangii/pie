@@ -50,7 +50,15 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
-import type { AgentSessionDomainEvent, AgentSessionSnapshot, FormulationState } from "./agent-session-domain.ts";
+import type {
+	AgentSessionDomainEvent,
+	AgentSessionSnapshot,
+	FormulationAdoption,
+	FormulationCorrection,
+	FormulationState,
+	FormulationVersionId,
+	ProblemFormulationVersion,
+} from "./agent-session-domain.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { BeliefLoopController, type RoleStatus } from "./belief-loop/belief-loop-controller.ts";
@@ -108,7 +116,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 
 export type { RoleStatus, RoleStatusSlot } from "./belief-loop/belief-loop-controller.ts";
 
-import { BELIEF_SURFACE_TOOLS } from "./role-specs.ts";
+import { BELIEF_SURFACE_TOOLS, TRANSITION_STEERS } from "./role-specs.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -117,6 +125,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createConcludeToolDefinition, createReportOutcomeToolDefinition } from "./tools/conclude.ts";
+import { createAnswerCorrectionToolDefinition } from "./tools/correction.ts";
 import {
 	createDeclareBeliefToolDefinition,
 	createFocusBeliefsToolDefinition,
@@ -512,6 +521,18 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			// A user correction stops the round at this boundary. Calls already in flight have
+			// returned; the ones queued behind them must not start, or the round would keep spending
+			// itself on an investigation the user just redirected. Blocking here rather than aborting
+			// the run is deliberate: a blocked call still yields a tool result, so every call in the
+			// assistant message is answered and the transcript stays one a provider will accept.
+			if (this._beliefLoop.blocksToolCall(toolCall.name)) {
+				const correction = this._beliefLoop.pendingCorrections()[0];
+				return {
+					block: true,
+					reason: TRANSITION_STEERS.correctionBlocked(correction?.id ?? "an unanswered correction"),
+				};
+			}
 			const runner = this._extensionRunner;
 			let hookResult: ToolCallEventResult | undefined;
 			try {
@@ -664,9 +685,48 @@ export class AgentSession {
 		return {
 			current: this._beliefLoop.currentFormulation() ?? null,
 			deferral: this._beliefLoop.formulationDeferral() ?? null,
-			pendingCorrections: [...this._beliefLoop.pendingCorrections()],
+			corrections: [...this._beliefLoop.formulationCorrections()],
 			decisionOwed: this._beliefLoop.formulationDecisionOwed(),
 		};
+	}
+
+	/** The active task's formulation history, oldest first. Compact summaries for the version view. */
+	getFormulationHistory(): readonly ProblemFormulationVersion[] {
+		return this._beliefLoop.formulationHistory();
+	}
+
+	/**
+	 * The understanding the most recent dispatched round was chosen under, if one has run. This is
+	 * what answers "which version governed the work" — which is not the same as "what is the
+	 * current version", since a reading published afterwards governed nothing.
+	 */
+	getLatestFormulationAdoption(): FormulationAdoption | undefined {
+		return this._beliefLoop.latestFormulationAdoption();
+	}
+
+	/**
+	 * Record a user's correction to how the agent understands the current task.
+	 *
+	 * This is the user's half of the formulation contract: they point at the reading that is wrong,
+	 * and propose answers it. Recording is immediate, and the round that is running stops at its
+	 * next tool boundary — calls already in flight come back, calls behind them do not start — so
+	 * the next decision is propose's. Nothing is overwritten here: the correction sits beside the
+	 * version it objects to, carrying its target and later propose's answer, so the published
+	 * version stays the agent's own stated position.
+	 *
+	 * `targetVersionId` defaults to the current version, which is what the user was looking at.
+	 * Returns undefined when there is no active task, or when the text is blank.
+	 */
+	submitFormulationCorrection(
+		text: string,
+		targetVersionId?: FormulationVersionId,
+	): FormulationCorrection | undefined {
+		const trimmed = text.trim();
+		if (!trimmed) return undefined;
+		return this._beliefLoop.submitFormulationCorrection(
+			trimmed,
+			targetVersionId ?? this._beliefLoop.currentFormulation()?.id,
+		);
 	}
 
 	// =========================================================================
@@ -3021,6 +3081,17 @@ export class AgentSession {
 						result.outcome === "unchanged"
 							? "The same deferral is already recorded; no new record was made."
 							: `Deferred stating a formulation. Missing: ${result.value.missingInformation}`,
+				};
+			}) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"answer_correction",
+			createAnswerCorrectionToolDefinition((input) => {
+				const result = this._beliefLoop.answerFormulationCorrection(input.correctionId, input.response);
+				if (result.outcome === "rejected") return result;
+				return {
+					outcome: "recorded",
+					text: `Answered ${input.correctionId}: ${result.value.response}`,
 				};
 			}) as ToolDefinition,
 		);
