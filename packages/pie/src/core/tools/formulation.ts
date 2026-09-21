@@ -51,15 +51,15 @@ export type FormulationCitation = Static<typeof citationSchema>;
 const setFormulationSchema = Type.Object({
 	interpretation: Type.String({
 		description:
-			"How you currently understand this task, in the first person and provisional: the reading you hold this task's beliefs under — how they relate and which distinctions matter, not a summary of their statuses. The grouping may overlap or leave a belief unplaced, and a reading is expected even while the task still holds few beliefs. Not a belief, and not a claim you are asserting is true.",
+			"How you currently understand this task, in the first person and provisional: your judgment about what kind of problem this is, and the reading you hold this task's beliefs under — how they relate and which distinctions matter, not a summary of their statuses. The grouping may overlap or leave a belief unplaced, and a reading is expected even while the task still holds few beliefs. Not a belief, and not a claim you are asserting is true.",
 	}),
 	focus: Type.String({
 		description:
-			"Which objects, relations, or scales you are attending to under this reading, and why they matter to this task. Prose, not a list of belief ids — the task's scope is declared separately with focus_beliefs.",
+			"Which objects, relations, or scales you are attending to under this reading, and why they matter to this task — what this reading makes worth checking. Prose, not a list of belief ids or file names; the task's scope is declared separately with focus_beliefs.",
 	}),
 	implication: Type.String({
 		description:
-			"What this reading changes about where the investigation or intervention goes next. Not a plan and not a list of steps.",
+			"What this reading changes about where the investigation or intervention goes next: what you would check first, what can wait, or which standard the decision turns on. Not a plan, not a list of steps, and 'investigate further' states no difference.",
 	}),
 	alternative: Type.Optional(
 		Type.String({
@@ -140,7 +140,7 @@ export type ReviewApplicabilityInput = Static<typeof reviewApplicabilitySchema>;
 const recheckFormulationSchema = Type.Object({
 	reason: Type.String({
 		description:
-			"Why the current reading still organizes this task after what the round found, stated in terms of the evidence.",
+			"What the round found that bears on the current reading, and why the reading still organizes this task under it — name the finding rather than the fact that a round happened. Say what result would have forced the reading to change only when you can name a real possibility; do not invent one.",
 	}),
 });
 
@@ -167,8 +167,8 @@ export function createSetFormulationToolDefinition(
 		promptSnippet: "Publish your current understanding of the task",
 		promptGuidelines: [
 			"State a provisional first-person reading, not a settled claim; the formulation is never evidence for a belief",
-			"Make the interpretation an organizing reading of the beliefs this task holds: how they relate and which distinctions matter — not a restatement of the goal and not a summary of belief statuses",
-			"A statement that would hold unchanged under a different task says nothing about this one; say what this reading rules in or out for the next choice",
+			"Make the interpretation a judgment about what kind of problem this is: an organizing reading of the beliefs this task holds — how they relate and which distinctions matter — not a restatement of the goal and not a summary of belief statuses",
+			"A statement that would hold unchanged under a different task says nothing about this one, so say what this reading rules in or out for the next choice: in focus why these objects matter, in implication what you would check first, what can wait, or which standard shifts",
 			"State a reading even when the task holds few beliefs or none yet, and let the distinctions overlap or leave something unplaced — an organizing reading is not an exhaustive classification",
 			"If a reading implies an untested empirical claim that would change what you do, record that claim as a belief and test it instead of asserting it here",
 			"Revise only for a substantive change in what you understand, where you are attending, or where the work goes; more evidence for the same reading is not a revision",
@@ -264,7 +264,7 @@ export function createRecheckFormulationToolDefinition(
 		promptSnippet: "Record that you reconsidered your current reading and it still holds",
 		promptGuidelines: [
 			"Use set_formulation instead when the reading itself changed, and defer_formulation when no reading can be stated right now",
-			"State why the reading still organizes the task in light of what the round found; 'no change' is not a reason",
+			"Name the finding this round produced that bears on the reading and why the reading survives it; 'no change' is not a reason, and state what would have forced a change only when you can name a real possibility",
 			"Write the reason in {beliefLang}",
 		],
 		parameters: recheckFormulationSchema,

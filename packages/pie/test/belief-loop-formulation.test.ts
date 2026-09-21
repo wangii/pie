@@ -3,7 +3,10 @@ import type { AgentSession } from "../src/core/agent-session.ts";
 import type { FormulationContent } from "../src/core/agent-session-domain.ts";
 import { BeliefLoopController } from "../src/core/belief-loop/belief-loop-controller.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { createSetFormulationToolDefinition } from "../src/core/tools/formulation.ts";
+import {
+	createRecheckFormulationToolDefinition,
+	createSetFormulationToolDefinition,
+} from "../src/core/tools/formulation.ts";
 
 const CONTENT: FormulationContent = {
 	interpretation: "I read this as an identity lifecycle problem",
@@ -503,5 +506,37 @@ describe("formulation prompt contract", () => {
 		expect(schema).toContain("few beliefs");
 		expect(guidelines).toContain("few beliefs or none yet");
 		expect(guidelines).toContain("overlap or leave something unplaced");
+	});
+
+	it("asks focus and implication for why it matters and which choice changes, not scope or a plan", () => {
+		const tool = createSetFormulationToolDefinition(() => ({ outcome: "recorded", text: "recorded" }));
+		const guidelines = (tool.promptGuidelines ?? []).join(" ");
+		const schema = JSON.stringify(tool.parameters);
+
+		// Both fields carry the reading's consequences: the reason these objects matter and the choice
+		// that differs, not a file list and not steps. The tests the runtime cannot make live here.
+		expect(schema).toContain("what this reading makes worth checking");
+		expect(schema).toContain("a list of belief ids or file names");
+		expect(schema).toContain("what you would check first, what can wait, or which standard the decision turns on");
+		expect(schema).toContain("states no difference");
+		expect(guidelines).toContain("in focus why these objects matter");
+
+		// The boundaries the consolidation must not erase: a rival reading is optional, and an untested
+		// empirical claim is a belief rather than formulation prose.
+		expect(schema).toContain("Omit it when there is no real rival reading");
+		expect(guidelines).toContain("record that claim as a belief");
+	});
+
+	it("asks recheck to name the round's finding and keeps the counterfactual on demand", () => {
+		const tool = createRecheckFormulationToolDefinition(() => ({ verdict: "maintained" }));
+		const guidelines = (tool.promptGuidelines ?? []).join(" ");
+		const schema = JSON.stringify(tool.parameters);
+
+		// A round is answered by what it found, not by the fact that a round ran; the counterfactual is
+		// owed only when a real possibility exists, so an invented one is never required.
+		expect(guidelines).toContain("Name the finding this round produced");
+		expect(guidelines).toContain("only when you can name a real possibility");
+		expect(schema).toContain("name the finding rather than the fact that a round happened");
+		expect(schema).toContain("do not invent one");
 	});
 });

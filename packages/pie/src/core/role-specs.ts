@@ -122,6 +122,7 @@ const PROPOSE_PROTOCOL =
 	"the problem. This feedback is evidence → reading → focus → experiment; preserve counterexample probes. " +
 	"Every distillation owes you a result before you choose another experiment or conclude, including a round that " +
 	"changed no belief and left no residual: use recheck_formulation to record that the reading still holds and why, " +
+	"naming the finding this round produced that bears on it, " +
 	"set_formulation when it changed, or defer_formulation when none can be stated. This is a check on the reading, " +
 	"not on the beliefs — it neither settles an unadjudicated belief nor questions a settled one, and residual is not " +
 	"evidence for it. " +
