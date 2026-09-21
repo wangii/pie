@@ -184,6 +184,7 @@ function maskBeliefBookkeeping(message: AgentMessage): AgentMessage | undefined 
 				review_applicability: "[applicability review omitted]",
 				select_experiment: "[experiment selection omitted]",
 				declare_belief: "[belief update omitted]",
+				recheck_formulation: "[reading recheck omitted]",
 				conclude: "[investigation concluded]",
 			};
 			return {

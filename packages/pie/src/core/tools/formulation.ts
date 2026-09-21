@@ -1,5 +1,5 @@
 import { type Static, Type } from "typebox";
-import type { FormulationContent } from "../agent-session-domain.ts";
+import type { FormulationContent, FormulationRecheckVerdict } from "../agent-session-domain.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 /**
@@ -131,6 +131,21 @@ const reviewApplicabilitySchema = Type.Object({
 
 export type ReviewApplicabilityInput = Static<typeof reviewApplicabilitySchema>;
 
+/**
+ * Reconsidering the current reading after a distillation and finding it still holds. The tool has
+ * one outcome on purpose: "the reading changed" is a publication (`set_formulation`) and "no
+ * reading can be stated" is a deferral (`defer_formulation`), so this is the answer that
+ * previously had nowhere to go — the one that used to be indistinguishable from not looking.
+ */
+const recheckFormulationSchema = Type.Object({
+	reason: Type.String({
+		description:
+			"Why the current reading still organizes this task after what the round found, stated in terms of the evidence.",
+	}),
+});
+
+export type RecheckFormulationInput = Static<typeof recheckFormulationSchema>;
+
 export type SetFormulationInput = Static<typeof setFormulationSchema>;
 export type DeferFormulationInput = Static<typeof deferFormulationSchema>;
 
@@ -230,6 +245,45 @@ export function createReviewApplicabilityToolDefinition(
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new Error(`Applicability review rejected: ${message}`);
+			}
+		},
+	};
+}
+
+export function createRecheckFormulationToolDefinition(
+	onRecheck: (input: RecheckFormulationInput) => { verdict: FormulationRecheckVerdict },
+): ToolDefinition<typeof recheckFormulationSchema, undefined> {
+	return {
+		name: "recheck_formulation",
+		label: "recheck formulation",
+		description:
+			"Reconsider how you currently understand this task after a round of evidence, and record that the reading still holds. Every distillation owes this result before you choose another experiment or conclude: an unchanged belief set is not a reason to skip it, because new evidence can bear on the reading without changing any belief's status. This records a position, not evidence — it neither settles an unadjudicated belief nor questions a settled one.",
+		promptSnippet: "Record that you reconsidered your current reading and it still holds",
+		promptGuidelines: [
+			"Use set_formulation instead when the reading itself changed, and defer_formulation when no reading can be stated right now",
+			"State why the reading still organizes the task in light of what the round found; 'no change' is not a reason",
+			"Write the reason in {beliefLang}",
+		],
+		parameters: recheckFormulationSchema,
+		executionMode: "sequential",
+		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
+			try {
+				const result = onRecheck({ reason: input.reason.trim() });
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								result.verdict === "maintained"
+									? "Reconsidered the current reading: it still holds."
+									: `Reconsidered the current reading: ${result.verdict}.`,
+						},
+					],
+					details: undefined,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`Recheck rejected: ${message}`);
 			}
 		},
 	};

@@ -81,7 +81,13 @@ describe("plan/distillation domain identity", () => {
 					evidence: "memory pressure evicted the value after 4s",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			// The second round distilled too, so propose owes a result for it before concluding.
+			fauxAssistantMessage([
+				fauxToolCall("recheck_formulation", {
+					reason: "the reading still qualifies persistence rather than asserting it",
+				}),
+				fauxToolCall("conclude", { result: "delivered", evidence: "observed" }),
+			]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache has bounded and pressure-sensitive persistence"),
 		]);

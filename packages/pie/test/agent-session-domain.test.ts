@@ -12,9 +12,13 @@ import {
 	type FormulationAdoption,
 	type FormulationApplicabilityEntry,
 	type FormulationContent,
+	type FormulationRecheck,
 	type FormulationSource,
+	firstFormulationDecisionOwed,
 	formulationDecisionOwed,
+	formulationRecheckOwed,
 	latestDispatchedEpisodeOrdinal,
+	latestDistilledEpisode,
 	pendingFormulationCorrections,
 	replayAgentSessionDomainEntries,
 	replayAgentSessionDomainEvents,
@@ -1060,6 +1064,21 @@ describe("formulation decision gate", () => {
 		},
 	});
 
+	/** The routine step, recorded: propose reconsidered the round and kept the reading. */
+	const recheck = (eventId: string, overrides: Partial<FormulationRecheck> = {}): AgentSessionDomainEvent => ({
+		...base,
+		type: "FormulationRecheckRecorded",
+		eventId,
+		taskId: "task-1",
+		recheck: {
+			episodeId: "episode-1",
+			verdict: "maintained",
+			reason: "the reading still organizes what the round found",
+			recordedAt: base.timestamp,
+			...overrides,
+		},
+	});
+
 	it("is not owed before an experiment has been dispatched", () => {
 		// Routing and choosing a body is not investigating; only a dispatched experiment is.
 		expect(formulationDecisionOwed(taskAfter(beliefLoopEvents().slice(0, 5)))).toBe(false);
@@ -1068,10 +1087,72 @@ describe("formulation decision gate", () => {
 		expect(formulationDecisionOwed(taskAfter(beliefLoopEvents().slice(0, 7)))).toBe(true);
 	});
 
-	it("is settled for good by a published version", () => {
+	it("settles the first reading without settling the rounds that follow it", () => {
+		// The fixture reaches the dispatch but has not distilled yet, so the publication answers the
+		// first decision and leaves nothing else owed: there is no round to reconsider.
 		const task = taskAfter([...beliefLoopEvents().slice(0, 7), reading("v1")]);
 		expect(currentFormulation(task)).toBeDefined();
+		expect(firstFormulationDecisionOwed(task)).toBe(false);
+		expect(latestDistilledEpisode(task)).toBeUndefined();
+		expect(formulationRecheckOwed(task)).toBe(false);
 		expect(formulationDecisionOwed(task)).toBe(false);
+	});
+
+	it("owes a reconsideration for every distilled round, including one a version answered", () => {
+		// A round that reached distill is a round to answer for, whether or not it changed a belief.
+		const distilled = taskAfter([...beliefLoopEvents().slice(0, 10), reading("v1")]);
+		expect(latestDistilledEpisode(distilled)?.id).toBe("episode-1");
+		expect(formulationRecheckOwed(distilled)).toBe(true);
+		expect(formulationDecisionOwed(distilled)).toBe(true);
+		// Publishing the reading is what answered the first decision; it is not what answers this.
+		expect(firstFormulationDecisionOwed(distilled)).toBe(false);
+
+		// A record naming that round settles it, and a fast-path round never makes it owed: it has
+		// no distill role, so there is nothing it could have left un-reconsidered.
+		const settled = taskAfter([
+			...beliefLoopEvents().slice(0, 10),
+			reading("v1"),
+			recheck("recheck-1", { episodeId: "episode-1" }),
+		]);
+		expect(formulationRecheckOwed(settled)).toBe(false);
+		expect(formulationDecisionOwed(settled)).toBe(false);
+	});
+
+	it("refuses a recheck that answers nothing, or that names a version nobody published", () => {
+		const dispatched = [...beliefLoopEvents().slice(0, 7), reading("v1")];
+		// No distillation in this episode: the round never reached the role that would be answered.
+		expect(() => taskAfter([...dispatched, recheck("recheck-1", { episodeId: "episode-1" })])).toThrow(
+			DomainReplayError,
+		);
+		// A revised verdict has to name the version it published, and that version has to exist.
+		expect(() =>
+			taskAfter([...beliefLoopEvents().slice(0, 10), reading("v1"), recheck("recheck-1", { verdict: "revised" })]),
+		).toThrow(DomainReplayError);
+		expect(() =>
+			taskAfter([
+				...beliefLoopEvents().slice(0, 10),
+				reading("v1"),
+				recheck("recheck-1", { verdict: "revised", versionId: "formulation-9" }),
+			]),
+		).toThrow(DomainReplayError);
+		// A maintained verdict publishes nothing, so naming a version contradicts it.
+		expect(() =>
+			taskAfter([
+				...beliefLoopEvents().slice(0, 10),
+				reading("v1"),
+				recheck("recheck-1", { versionId: "formulation-1" }),
+			]),
+		).toThrow(DomainReplayError);
+		// And recording twice for the same round is legal, because a turn can say the reading holds
+		// and then publish a revision of it: the later record is the one that stands.
+		const twice = taskAfter([
+			...beliefLoopEvents().slice(0, 10),
+			reading("v1"),
+			recheck("recheck-1"),
+			recheck("recheck-2", { verdict: "revised", versionId: "formulation-1" }),
+		]);
+		expect(twice.formulationRecheck?.verdict).toBe("revised");
+		expect(twice.formulationRecheck?.versionId).toBe("formulation-1");
 	});
 
 	it("re-opens after a deferral once another experiment is dispatched", () => {

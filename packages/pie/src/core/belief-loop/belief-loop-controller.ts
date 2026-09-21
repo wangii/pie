@@ -25,13 +25,16 @@ import {
 	type FormulationCorrection,
 	type FormulationCorrectionId,
 	type FormulationDeferral,
+	type FormulationRecheck,
 	type FormulationSource,
 	type FormulationVersionId,
 	formulationContentError,
 	formulationDecisionOwed,
+	formulationRecheckOwed,
 	formulationSourceError,
 	latestBeliefDeltaFor,
 	latestDispatchedEpisodeOrdinal,
+	latestDistilledEpisode,
 	latestFormulationAdoption as latestFormulationAdoptionOf,
 	type ProblemFormulationVersion,
 	pendingApplicabilityBeliefs,
@@ -140,6 +143,23 @@ export type FormulationWriteResult<T> =
 	| { readonly outcome: "recorded"; readonly value: T }
 	| { readonly outcome: "unchanged"; readonly value: T }
 	| { readonly outcome: "rejected"; readonly reason: string };
+
+/**
+ * How a recorded reconsideration reads to the roles that consume the formulation block.
+ *
+ * Phrased as what the agent said about its own reading — kept it, changed it, or could not state
+ * one — because the block's whole job is to keep a reading from being mistaken for a finding.
+ */
+function recheckOutcomeText(recheck: FormulationRecheck): string {
+	switch (recheck.verdict) {
+		case "maintained":
+			return "kept it";
+		case "revised":
+			return "changed it, and the version published with that answer carries the change";
+		default:
+			return "recorded that no reading could be stated right now";
+	}
+}
 
 /** A blank optional field is an absent one: the whole point of leaving `alternative`/`tension`
  *  optional is that an agent with nothing to say leaves them out rather than filling them in. */
@@ -264,7 +284,6 @@ export class BeliefLoopController {
 	currentEpisodeId: string | undefined;
 	currentPlanId: string | undefined;
 	currentEpisodeExecutionIds: string[] = [];
-	currentEpisodeDistillationDeltaIds: string[] = [];
 	pendingDomainBeliefDeltas: Array<{ delta: DomainBeliefDelta; activeBeliefs: string[] }> = [];
 	pendingDomainTaskPrompt:
 		| {
@@ -345,7 +364,6 @@ export class BeliefLoopController {
 			this.host.sessionManager.getSessionId(),
 			this.host.sessionManager.getBranch(),
 		);
-		this.currentEpisodeDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
 		this.consumedRouteIds = new Set();
 		this.reflected = false;
@@ -528,6 +546,10 @@ export class BeliefLoopController {
 		return this.currentTask()?.formulationReview;
 	}
 
+	formulationRecheck() {
+		return this.currentTask()?.formulationRecheck;
+	}
+
 	awaitingFormulationResponse(): boolean {
 		const review = this.formulationReview();
 		return review !== undefined && review.responseCorrectionId === undefined;
@@ -666,6 +688,61 @@ export class BeliefLoopController {
 		return task ? formulationDecisionOwed(task) : false;
 	}
 
+	/** Whether the obligation is the per-round one, which has its own steer. */
+	formulationRecheckOwed(): boolean {
+		const task = this.currentTask();
+		return task ? formulationRecheckOwed(task) : false;
+	}
+
+	/**
+	 * The steer for an owed formulation decision. One gate carries two obligations, and the model
+	 * has to be told which one it is: "state a reading for the first time" and "say what the
+	 * current reading means after this round" take different answers, and only one of them is
+	 * satisfied by `recheck_formulation`.
+	 */
+	private formulationDecisionSteer(): string {
+		return this.formulationRecheckOwed()
+			? TRANSITION_STEERS.formulationRecheck
+			: TRANSITION_STEERS.formulationDecision;
+	}
+
+	/**
+	 * Record propose's answer for the round that just distilled: the reading still holds.
+	 *
+	 * Refused when nothing is waiting, for the same reason `recordApplicability` refuses a review
+	 * with no revision behind it — a record that names nothing reads as a check that happened.
+	 */
+	recordRecheck(reason: string): FormulationRecheck {
+		const task = this.currentTask();
+		if (!task) throw new Error("no active task to reconsider");
+		if (this.awaitingFormulationResponse()) throw new Error(TRANSITION_STEERS.awaitFormulationResponse);
+		const distilled = latestDistilledEpisode(task);
+		if (!distilled) throw new Error("no distillation is waiting for a reconsideration");
+		if (!this.formulationRecheckOwed()) {
+			// Two refusals, two causes, and they need different answers: one is "you already answered
+			// this round", the other is "there is no reading yet to reconsider". Reporting either as
+			// the other sends the model looking for something it cannot find.
+			throw new Error(
+				task.formulationRecheck?.episodeId === distilled.id
+					? "this round has already been reconsidered; the next distillation is what owes a result"
+					: "there is no current reading to reconsider yet; state one with set_formulation, or say what is missing with defer_formulation",
+			);
+		}
+		const recheck: FormulationRecheck = {
+			episodeId: distilled.id,
+			verdict: "maintained",
+			reason: reason.trim(),
+			recordedAt: new Date().toISOString(),
+		};
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "FormulationRecheckRecorded",
+			taskId: task.id,
+			recheck,
+		});
+		return recheck;
+	}
+
 	/**
 	 * Turn the citations a propose turn can actually make into durable source references.
 	 *
@@ -783,6 +860,10 @@ export class BeliefLoopController {
 		if (this.awaitingFormulationResponse()) {
 			return { outcome: "rejected", reason: TRANSITION_STEERS.awaitFormulationResponse };
 		}
+		// Publishing while a round is waiting on a reconsideration *is* that reconsideration: a
+		// revision that changed the reading answers the round as substantively as "it still holds"
+		// does. Read before the version is recorded, since the publication is what settles it.
+		const recheckEpisode = this.publishedRecheckEpisode();
 		const version: ProblemFormulationVersion = {
 			id: createDomainId("formulation"),
 			taskId: task.id,
@@ -800,9 +881,56 @@ export class BeliefLoopController {
 			taskId: task.id,
 			version,
 		});
+		if (recheckEpisode) {
+			this.recordDomainEvent({
+				...this.domainEventBase(),
+				type: "FormulationRecheckRecorded",
+				taskId: task.id,
+				recheck: {
+					episodeId: recheckEpisode.id,
+					verdict: "revised",
+					reason,
+					versionId: version.id,
+					recordedAt: new Date().toISOString(),
+				},
+			});
+		}
 		this.invalidatePendingSelection("a new formulation version was published");
 		this.reflected = false;
 		return { outcome: "recorded", value: version };
+	}
+
+	/**
+	 * The distilled round a publication answers, or undefined when there is none.
+	 *
+	 * Publishing answers a round even before the first version exists — stating the reading *is*
+	 * that round's reconsideration, and leaving it unrecorded would put the task straight back into
+	 * debt for the round it just answered. It also supersedes an earlier "it still holds" for the
+	 * same round: the reading did change, and a record saying otherwise would contradict the version
+	 * published beside it. Read before the version is recorded, since the publication settles it.
+	 */
+	private publishedRecheckEpisode(): ExecutionEpisode | undefined {
+		const task = this.currentTask();
+		if (!task) return undefined;
+		const distilled = latestDistilledEpisode(task);
+		if (!distilled) return undefined;
+		const recorded = task.formulationRecheck;
+		if (recorded?.episodeId === distilled.id && recorded.verdict === "revised") return undefined;
+		return distilled;
+	}
+
+	/**
+	 * The distilled round with no reconsideration result at all, or undefined when there is none.
+	 *
+	 * Read before the answering call is recorded: the answer itself is what settles the round, so
+	 * asking afterwards would always find nothing owed.
+	 */
+	private unansweredRecheckEpisode(): ExecutionEpisode | undefined {
+		const task = this.currentTask();
+		if (!task) return undefined;
+		const distilled = latestDistilledEpisode(task);
+		if (!distilled) return undefined;
+		return task.formulationRecheck?.episodeId === distilled.id ? undefined : distilled;
 	}
 
 	/**
@@ -846,6 +974,13 @@ export class BeliefLoopController {
 		}
 
 		const deferredAt = new Date().toISOString();
+		// Deferring while a round is owed a recheck answers that round with "no reading can be
+		// stated right now", which is a result rather than a skipped check. Read before recording,
+		// since this deferral is what settles it; the current version, if any, survives it.
+		//
+		// Without a version there is nothing to reconsider yet — that round's answer is the
+		// first-decision deferral itself, which the decision gate tracks on its own.
+		const recheckEpisode = this.formulationRecheckOwed() ? this.unansweredRecheckEpisode() : undefined;
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "ProblemFormulationDeferred",
@@ -855,6 +990,19 @@ export class BeliefLoopController {
 			sources: [...input.sources],
 			deferredAt,
 		});
+		if (recheckEpisode) {
+			this.recordDomainEvent({
+				...this.domainEventBase(),
+				type: "FormulationRecheckRecorded",
+				taskId: task.id,
+				recheck: {
+					episodeId: recheckEpisode.id,
+					verdict: "deferred",
+					reason,
+					recordedAt: deferredAt,
+				},
+			});
+		}
 		// Read the deferral back rather than rebuilding it here: the fold derives which
 		// investigation it answered, and a caller should see exactly the record the log holds.
 		const recorded = this.currentTask()?.formulationDeferral;
@@ -1168,6 +1316,13 @@ export class BeliefLoopController {
 			return;
 		}
 		if (this.awaitingFormulationResponse()) {
+			// A revision published from the distill turn pauses the run before `transition` runs, so
+			// the round's distillation would never be recorded — and a round with no record cannot be
+			// asked for a reconsideration later. The round did reach distillation, which is all the
+			// recheck gate reads, so it is recorded here for the same reason the transition records it.
+			if (this.loopState.role === "distill") {
+				this.recordDomainDistillation(this.distillationEchoLines(turn).join("\n"));
+			}
 			this.loopState = { role: "propose" };
 			this.applyRoleSurface();
 			this.emitCursorChanged("propose");
@@ -1249,7 +1404,7 @@ export class BeliefLoopController {
 				// dispatch and conclusion alike, so the first investigation cannot be followed by
 				// another experiment or an answer without the agent saying what it made of the task.
 				if (this.formulationDecisionOwed()) {
-					return { state, steer: TRANSITION_STEERS.formulationDecision };
+					return { state, steer: this.formulationDecisionSteer() };
 				}
 				const revisionBlocked = this.revisionGate();
 				if (revisionBlocked) return { state, steer: revisionBlocked };
@@ -1311,33 +1466,18 @@ export class BeliefLoopController {
 				return !ranTools ? this.concludeTransition(state, this.blockingProposed()) : { state };
 			}
 			case "distill": {
-				await this.emitDistillationBlock(turn);
+				// The echo reaches the user turn by turn; the round's record is written once, when the
+				// round is done with distill (below), so that it covers the whole round rather than
+				// whichever turn happened to be first.
+				await this.emitDistillationEcho(turn);
 				const rejected = this.rejectedConclude(turn);
 				if (rejected !== undefined) {
 					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
 				}
-				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
-					// Distill concluding is a normal handoff straight to finalReport, which would skip
-					// propose entirely. The formulation decision belongs to propose, so an owed decision
-					// diverts here rather than letting the terminal path route around it.
-					//
-					// The adjudication debt is checked first, while this round is still the current one:
-					// the divert hands back to propose, and evidence this round gathered must be settled
-					// by the role that can read it rather than carried into a later round.
-					const unadjudicated = this.dispatchedProposed();
-					if (unadjudicated.length > 0) {
-						return {
-							state,
-							steer: TRANSITION_STEERS.openBeliefs(
-								unadjudicated.map((belief) => `"${belief.statement}"`).join(", "),
-							),
-						};
-					}
-					if (this.formulationDecisionOwed()) {
-						return { state: { role: "propose" }, steer: TRANSITION_STEERS.formulationDecision };
-					}
-					return this.concludeTransition(state, this.blockingProposed());
-				}
+				// The adjudication debt is checked while this round is still the current one: the steer
+				// keeps the role here, so evidence this round gathered is settled by the role that can
+				// read it rather than carried into a later round. It also means a round with unsettled
+				// adjudication is not yet a finished distillation, so nothing is recorded for it.
 				const unadjudicated = this.dispatchedProposed();
 				if (unadjudicated.length > 0) {
 					return {
@@ -1347,7 +1487,27 @@ export class BeliefLoopController {
 						),
 					};
 				}
-				return { state: { role: "propose" }, steer: TRANSITION_STEERS.deepenOrConclude };
+				// Distill is done with this round, so the round is recorded now. The gate below reads
+				// the replayed log, so the round has to be in it before it can be asked whether that
+				// round has been reconsidered — and every round that reached distill is recorded, not
+				// only the ones that echoed an adjudication, because a round that changed no belief is
+				// still a round the agent has to answer for.
+				this.recordDomainDistillation(this.distillationEchoLines(turn).join("\n"));
+				if (turn.toolResults.some((result) => result.toolName === "conclude")) {
+					// Distill concluding is a normal handoff straight to finalReport, which would skip
+					// propose entirely. The formulation decision belongs to propose, so an owed decision
+					// diverts here rather than letting the terminal path route around it.
+					if (this.formulationDecisionOwed()) {
+						return { state: { role: "propose" }, steer: this.formulationDecisionSteer() };
+					}
+					return this.concludeTransition(state, this.blockingProposed());
+				}
+				return {
+					state: { role: "propose" },
+					steer: this.formulationDecisionOwed()
+						? this.formulationDecisionSteer()
+						: TRANSITION_STEERS.deepenOrConclude,
+				};
 			}
 			case "execution": {
 				const episodeHorizon = state.episodeHorizon - turn.toolResults.length;
@@ -1633,7 +1793,13 @@ export class BeliefLoopController {
 		};
 	}
 
-	private async emitDistillationBlock(turn: PrepareNextTurnContext): Promise<void> {
+	/**
+	 * The adjudication text one distill turn echoed, one line per successful `declare_belief`.
+	 *
+	 * Only successful mutations echo: a rejected call is the model's mistake, not a finding, and
+	 * persisting it as the round's distillation would report a change that never happened.
+	 */
+	private distillationEchoLines(turn: PrepareNextTurnContext): string[] {
 		const lines: string[] = [];
 		for (const result of turn.toolResults) {
 			if (result.toolName !== "declare_belief" || result.isError) continue;
@@ -1643,6 +1809,18 @@ export class BeliefLoopController {
 				}
 			}
 		}
+		return lines;
+	}
+
+	/**
+	 * Show the round's adjudication as it happens.
+	 *
+	 * The visible block stays per turn — the user sees the echo attached to the turn that produced
+	 * it — while the domain record is written once at the end of the round. Keeping them separate is
+	 * what lets the record cover the whole round without moving what the user sees.
+	 */
+	private async emitDistillationEcho(turn: PrepareNextTurnContext): Promise<void> {
+		const lines = this.distillationEchoLines(turn);
 		if (lines.length === 0) return;
 		await this.host.sendCustomMessage(
 			{
@@ -1653,7 +1831,6 @@ export class BeliefLoopController {
 			},
 			{ triggerTurn: false },
 		);
-		this.recordDomainDistillation(lines.join("\n"));
 	}
 
 	private async settleFastPath(turn: PrepareNextTurnContext): Promise<void> {
@@ -1935,6 +2112,23 @@ export class BeliefLoopController {
 			if (current.content.tension) lines.push(`Core tension: ${current.content.tension}`);
 			if (current.content.alternative) lines.push(`Not currently prioritizing: ${current.content.alternative}`);
 			lines.push(`What this changes: ${current.content.implication}`);
+			// The routine step, made visible where the reading itself is projected: what you last made
+			// of this reading, and — while it is still owed — the round nobody has answered for. Both
+			// belong inside this block because both are your own position rather than observations.
+			const recheck = task.formulationRecheck;
+			if (recheck) {
+				lines.push(
+					`After round ${recheck.episodeId} you reconsidered this reading and ${recheckOutcomeText(recheck)}. ` +
+						`Your stated basis, which is a position and not evidence: ${recheck.reason}`,
+				);
+			}
+			if (this.role === "propose" && this.formulationRecheckOwed()) {
+				lines.push(
+					"Distillation has reported on the round you dispatched and you have not yet said what it means for this " +
+						"reading: recheck_formulation to keep it, set_formulation to change it, or defer_formulation to record " +
+						"what is missing.",
+				);
+			}
 			const gate = this.revisionGate();
 			if (gate) lines.push(gate);
 			for (const correction of this.pendingCorrections()) {
@@ -2086,7 +2280,6 @@ export class BeliefLoopController {
 		this.currentEpisodeId = episodeId;
 		this.currentPlanId = undefined;
 		this.currentEpisodeExecutionIds = [];
-		this.currentEpisodeDistillationDeltaIds = [];
 		this.pendingDomainBeliefDeltas = [];
 		this.recordDomainEvent({
 			...this.domainEventBase(),
@@ -2179,9 +2372,6 @@ export class BeliefLoopController {
 				delta: pending.delta,
 				activeBeliefs: pending.activeBeliefs,
 			});
-			if (pending.delta.producerPhase === "distill") {
-				this.currentEpisodeDistillationDeltaIds.push(pending.delta.id);
-			}
 		}
 		this.pendingDomainBeliefDeltas = [];
 	}
@@ -2271,6 +2461,15 @@ export class BeliefLoopController {
 			?.episodes.find((candidate) => candidate.id === this.currentEpisodeId);
 		if (!episode || episode.status === "closed" || episode.body.kind === "pending" || episode.body.distillation)
 			return;
+		// Read the distill deltas off the replayed episode rather than off the in-memory
+		// accumulator. The fold recomputes exactly this expression when it validates the record, so
+		// deriving both sides the same way is what keeps them equal: the accumulator is cleared when
+		// a branch is re-adopted, which would otherwise emit an empty `outputs` for an episode that
+		// already carries distill deltas — and replay would reject the log it just wrote.
+		const outputs =
+			episode.body.kind === "belief-loop"
+				? episode.body.beliefDeltas.filter((delta) => delta.producerPhase === "distill").map((delta) => delta.id)
+				: [];
 		this.recordDomainEvent({
 			...this.domainEventBase(),
 			type: "DistillationProduced",
@@ -2280,7 +2479,7 @@ export class BeliefLoopController {
 				id: createDomainId("distillation"),
 				inputs: [...this.currentEpisodeExecutionIds],
 				contents,
-				outputs: [...this.currentEpisodeDistillationDeltaIds],
+				outputs,
 			},
 		});
 	}
@@ -2301,7 +2500,6 @@ export class BeliefLoopController {
 		this.currentEpisodeId = episodeId;
 		this.currentPlanId = undefined;
 		this.currentEpisodeExecutionIds = [];
-		this.currentEpisodeDistillationDeltaIds = [];
 		// A new round starts with no choice made: the selection lived on the episode that just
 		// closed, so the field follows the record instead of outliving it.
 		this.pendingExperiment = undefined;
@@ -2323,7 +2521,6 @@ export class BeliefLoopController {
 		this.currentEpisodeId = undefined;
 		this.currentPlanId = undefined;
 		this.currentEpisodeExecutionIds = [];
-		this.currentEpisodeDistillationDeltaIds = [];
 		this.pendingExperiment = undefined;
 		this.pendingDomainBeliefDeltas = [];
 	}

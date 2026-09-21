@@ -26,6 +26,15 @@ const select = (beliefIds: string[], intent = "which action to take") => [
 	fauxToolCall("select_experiment", { intent, beliefIds }),
 ];
 
+/**
+ * The result every distillation owes propose: it reconsidered the current reading and kept it.
+ *
+ * A round that reached distill cannot be skipped past — not by concluding, and not by choosing the
+ * next experiment — so a script that moves on after adjudication has to answer with one of these,
+ * a `set_formulation`, or a `defer_formulation`.
+ */
+const recheck = () => fauxToolCall("recheck_formulation", { reason: "the round's evidence fits the current reading" });
+
 describe("belief-loop integration", () => {
 	const harnesses: Harness[] = [];
 
@@ -44,7 +53,9 @@ describe("belief-loop integration", () => {
 			"select_experiment",
 			"set_formulation",
 			"defer_formulation",
+			"recheck_formulation",
 			"answer_correction",
+			"review_applicability",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -93,7 +104,7 @@ describe("belief-loop integration", () => {
 					evidence: "the request used a new session id as predicted",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache survives logout while the session is replaced."),
 		]);
@@ -145,7 +156,7 @@ describe("belief-loop integration", () => {
 					evidence: "foo.ts:42 returns X while README claims Y",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The implementation and README disagree."),
 		]);
@@ -190,7 +201,7 @@ describe("belief-loop integration", () => {
 				}),
 			]),
 			fauxAssistantMessage("This residual uncertainty is material; probe it."),
-			fauxAssistantMessage([...select(["belief-3"])]),
+			fauxAssistantMessage([recheck(), ...select(["belief-3"])]),
 			fauxAssistantMessage(
 				"Observed:\n- OAuth, session, and API-token handlers all check the shared revocation store.",
 			),
@@ -201,7 +212,7 @@ describe("belief-loop integration", () => {
 					evidence: "all three handlers check the shared revocation store",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("Authentication has three mechanisms with shared revocation."),
 		]);
@@ -238,7 +249,7 @@ describe("belief-loop integration", () => {
 					evidence: "the endpoint was unavailable before cache behavior could be observed",
 				}),
 			]),
-			fauxAssistantMessage([...select(["belief-1"])]),
+			fauxAssistantMessage([recheck(), ...select(["belief-1"])]),
 			fauxAssistantMessage("Observed:\n- the local cache configuration preserves entries across logout."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -247,7 +258,7 @@ describe("belief-loop integration", () => {
 					evidence: "the local cache configuration preserves entries across logout",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The configured cache persists across logout."),
 		]);
@@ -304,6 +315,7 @@ describe("belief-loop integration", () => {
 				}),
 			]),
 			fauxAssistantMessage([
+				recheck(),
 				fauxToolCall("conclude", { result: "changed the adapter", evidence: "the test passed" }),
 			]),
 			fauxAssistantMessage([
@@ -349,7 +361,7 @@ describe("belief-loop integration", () => {
 					evidence: "the request observed the cancellation",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("Cancellation propagates."),
 		]);
@@ -402,7 +414,7 @@ describe("belief-loop integration", () => {
 					evidence: "the request observed the cancellation",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("Cancellation propagates."),
 		]);
@@ -437,7 +449,7 @@ describe("belief-loop integration", () => {
 					evidence: "the request observed the cancellation",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("Cancellation propagates."),
 		]);
@@ -496,7 +508,10 @@ describe("belief-loop integration", () => {
 					evidence: "the request observed the cancellation",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "fixed cancellation", evidence: "test passed" })]),
+			fauxAssistantMessage([
+				recheck(),
+				fauxToolCall("conclude", { result: "fixed cancellation", evidence: "test passed" }),
+			]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "fixed cancellation", evidence: "test passed" })]),
 			fauxAssistantMessage("Cancellation propagates."),
 		]);
@@ -596,6 +611,7 @@ describe("belief-loop integration", () => {
 				}),
 			]),
 			fauxAssistantMessage([
+				recheck(),
 				fauxToolCall("conclude", {
 					result: "changed the adapter to forward the cancellation signal",
 					evidence: "the cancel propagation test passed",
@@ -684,7 +700,7 @@ describe("belief-loop integration", () => {
 					evidence: "the observed read hit the cache",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache is warm."),
 		]);
@@ -740,7 +756,7 @@ describe("belief-loop integration", () => {
 					evidence: "the endpoint was unavailable before cache behavior could be observed",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache could not be observed; the outcome is open."),
 		]);
@@ -816,7 +832,7 @@ describe("belief-loop integration", () => {
 					evidence: "the observed value confirms the cache persists",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("The cache persists."),
 		]);

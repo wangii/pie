@@ -64,6 +64,7 @@ describe("defaultTools setting", () => {
 				.map((tool) => tool.name)
 				.sort(),
 		).toEqual([
+			"answer_correction",
 			"bash",
 			"conclude",
 			"declare_belief",
@@ -75,7 +76,9 @@ describe("defaultTools setting", () => {
 			"ls",
 			"powershell",
 			"read",
+			"recheck_formulation",
 			"report_outcome",
+			"review_applicability",
 			"route_task",
 			"select_experiment",
 			"set_formulation",
@@ -91,6 +94,9 @@ describe("defaultTools setting", () => {
 			"select_experiment",
 			"set_formulation",
 			"defer_formulation",
+			"recheck_formulation",
+			"answer_correction",
+			"review_applicability",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -137,12 +143,15 @@ describe("defaultTools setting", () => {
 		await session.bindExtensions({});
 
 		expect(session.getActiveToolNames().sort()).toEqual([
+			"answer_correction",
 			"conclude",
 			"declare_belief",
 			"defer_formulation",
 			"dynamic_tool",
 			"focus_beliefs",
 			"grep",
+			"recheck_formulation",
+			"review_applicability",
 			"route_task",
 			"sdk_tool",
 			"select_experiment",
@@ -170,6 +179,9 @@ describe("defaultTools setting", () => {
 			"select_experiment",
 			"set_formulation",
 			"defer_formulation",
+			"recheck_formulation",
+			"answer_correction",
+			"review_applicability",
 			"view_beliefs",
 			"conclude",
 		]);
@@ -196,6 +208,7 @@ describe("defaultTools setting", () => {
 				.map((tool) => tool.name)
 				.sort(),
 		).toEqual([
+			"answer_correction",
 			"bash",
 			"conclude",
 			"declare_belief",
@@ -207,7 +220,9 @@ describe("defaultTools setting", () => {
 			"ls",
 			"powershell",
 			"read",
+			"recheck_formulation",
 			"report_outcome",
+			"review_applicability",
 			"route_task",
 			"select_experiment",
 			"set_formulation",
@@ -222,6 +237,9 @@ describe("defaultTools setting", () => {
 			"select_experiment",
 			"set_formulation",
 			"defer_formulation",
+			"recheck_formulation",
+			"answer_correction",
+			"review_applicability",
 			"view_beliefs",
 			"conclude",
 		]);

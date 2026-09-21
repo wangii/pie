@@ -1,12 +1,13 @@
 # Agent session domain model
 
-> **Status: current runtime contract, schema v5.** `agent-session-domain.ts` defines this model,
+> **Status: current runtime contract, schema v6.** `agent-session-domain.ts` defines this model,
 > `BeliefLoopController` emits and replays its events, and RPC forwards those events unchanged.
 > GUI projections remain consumers rather than sources of truth.
 
 > **Every schema bump so far has been breaking.** v2 renamed the execution-round vocabulary from
 > `TaskFrame`/`frameId` to `ExecutionEpisode`/`episodeId`; v3 added the task-level problem
-> formulation; v4 added the experiment selection; v5 added revision response and focus review.
+> formulation; v4 added the experiment selection; v5 added revision response and focus review;
+> v6 added the per-round formulation recheck.
 > Older logs are rejected rather than migrated —
 > see [Protocol versioning and old logs](#protocol-versioning-and-old-logs).
 
@@ -110,6 +111,16 @@ struct Task {
   std::optional<FormulationDeferral> formulationDeferral;
   // User corrections against this task's understanding, oldest first.
   std::vector<FormulationCorrection> formulationCorrections;
+  // The most recent round's reconsideration result. Absent until one is recorded.
+  std::optional<FormulationRecheck> formulationRecheck;
+};
+
+struct FormulationRecheck {
+  EpisodeId episodeId;              // the distilled round it answers
+  FormulationRecheckVerdict verdict; // maintained | revised | deferred
+  std::string reason;                // propose's own one-line basis
+  std::optional<FormulationVersionId> versionId; // present exactly when revised
+  std::string recordedAt;
 };
 
 struct TaskOutcome {
@@ -300,7 +311,10 @@ version. These states are replayed with the active branch, including its beliefs
 
 The terminal shows the wait and the review obligation. Reply normally to continue the paused task.
 `/frame correct` records a correction; when idle, a subsequent prompt starts its processing.
-RPC exposes the same review through `get_state.formulation.review` and the domain snapshot.
+RPC exposes the same review through `get_state.formulation.review` and the domain snapshot, and the
+same reconsideration state through `get_state.formulation.recheck` / `.recheckOwed`: the panel and
+the snapshot therefore agree on whether the last round was looked at, because both read the replayed
+task rather than a counter the runtime keeps beside it.
 Native GUI rendering and terminal manual smoke validation are separate from this core contract.
 
 #### Adoption: which version governed a decision
@@ -357,11 +371,40 @@ experiment or conclude. Two properties make that gate a real one rather than a f
   would skip propose entirely; an owed decision diverts that path back to propose instead. The gate
   also applies *during* a round, so nothing depends on the episode having closed first.
 
-The gate is deliberately narrow. Nothing is owed before the first dispatch — a preliminary probe
-chosen before any reading exists is legitimate, and its `Plan` records `Unformed`. A published
-version settles the decision for good, so accumulating evidence never nags a task into
-manufacturing a revision. A deferral settles it only for the investigation it answered: new work
-re-opens it, which is what keeps the first deferral from becoming a standing exemption.
+One gate carries two obligations, and they are mutually exclusive because the first requires that no
+version exists and the second requires that one does:
+
+- **Before the first reading**, publishing or deferring is owed once an experiment has been
+  dispatched. A preliminary probe chosen before any reading exists is legitimate, and its `Plan`
+  records `Unformed`. Nothing is owed before the first dispatch.
+- **After every distillation**, a *recheck* result is owed for the round that just reported:
+  `maintained`, `revised`, or `deferred`. This is the routine step made visible. Only a *changed*
+  reading used to leave a record, so "I reconsidered and kept the reading" and "I never
+  reconsidered" were the same absence; the record is what separates them, and it is read off the
+  log rather than off loop state, so it survives a reload and a branch switch the same way the
+  reading does.
+
+The recheck answers a *round*, not the task: `FormulationRecheckRecorded` names the distilled
+episode, and the next round owes its own result. A round is in scope once it has reached
+distillation — a round whose experiment was interrupted before distill never produced evidence to
+reconsider, and the correction gate owns that state instead. The fast path is out of scope for the
+same reason: it settles through a distillation record of its own, but it has no distill role and no
+adjudication to reconsider.
+
+Three things settle a recheck, and all three are explicit answers rather than skipped steps:
+`recheck_formulation` records that the reading still holds; publishing a version records `revised`
+with the version that carried the change, including when it is the *first* version, since stating a
+reading is itself the round's reconsideration; and deferring records `deferred`, which never erases
+a version that already exists. A recheck settles only the round it answers — it does not clear an
+unadjudicated belief's debt, does not stand in for the applicability review, and carries no residual.
+
+The gate cannot be satisfied without looking at the round, but it also cannot force the look to be
+honest: the reason is prose, and nothing checks that it names what the round found. That is the
+accepted cost of keeping residual out of the recorded state — see
+[Two outputs, one step apart](belief-loop-roles.md).
+
+A deferral settles the first obligation only for the investigation it answered: new work re-opens
+it, which is what keeps the first deferral from becoming a standing exemption.
 
 ### Publication invalidates an un-dispatched selection
 
@@ -600,6 +643,7 @@ TaskOutcomeRecorded    (what the task delivered, and how it was verified)
 
 ProblemFormulationRecorded    (a complete, immutable version)
 ProblemFormulationDeferred    (what is missing, and why)
+FormulationRecheckRecorded    (the round's reconsideration result)
 FormulationCorrectionSubmitted
 FormulationCorrectionResolved
 
@@ -629,7 +673,12 @@ Required correlation fields:
   their own stable string id plus their owning/correlation ids;
 - `ExecutionCompleted` carries structured output and terminal status;
 - `DistillationProduced` carries explicit execution input ids and only the ids
-  of deltas whose `producerPhase` is `Distill`;
+  of deltas whose `producerPhase` is `Distill`. It is written for every round that
+  reaches distill, including one that changed no belief and echoed nothing, because
+  a round with no record could not be asked for a reconsideration. `contents` is the
+  adjudication echo of the turn that wrote it and is empty when there was none; what
+  the belief set still cannot explain stays in the distill turn's text and is not
+  recorded;
 - `BeliefDeltaApplied` carries the producer phase, source/result Belief ids, and
   resulting immutable record/provenance;
 - `FocusDeclared` carries the task-scoped belief-id slice verbatim, replacing any
@@ -639,12 +688,16 @@ Required correlation fields:
   It is emitted only for a delivery a model recorded through `conclude` /
   `report_outcome`; the fast path's synthesized failure outcome is runtime
   bookkeeping and deliberately stays out of the event stream;
-- the four formulation events are task-level, not episode-level: an understanding
+- the formulation events are task-level, not episode-level: an understanding
   outlives the rounds it was formed in. `ProblemFormulationRecorded` carries the
   complete version rather than a diff, so a replayed version is exactly what was
   published. `ProblemFormulationDeferred` carries the missing information and the
   reason. `FormulationCorrectionResolved` carries the correction id it answers,
-  so resolution is addressed rather than positional;
+  so resolution is addressed rather than positional. `FormulationRecheckRecorded`
+  carries the round it answers, the verdict, propose's one-line reason, and the
+  version when the verdict is `revised` — the round is named rather than implied so
+  that "this round was reconsidered" and "no round was" are different records
+  rather than the same absence;
 - `ExperimentSelected` carries the choice — the belief ids, the decision they
   inform, and the `FormulationAdoption` in force when it was made — on the episode
   it belongs to. `PlanProduced` on the same episode commits that choice and clears
@@ -687,7 +740,7 @@ tasks, their beliefs, and the cursor — in a JSON-serializable shape.
 
 ## Protocol versioning and old logs
 
-`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `5`. Every stored event carries the version
+`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `6`. Every stored event carries the version
 twice — once on the entry envelope, once on the event — and replay rejects any event whose version
 is not the current one.
 
@@ -697,7 +750,8 @@ is not the current one.
 | v2 | `ExecutionEpisode`/`episodeId` (the rename) | no |
 | v3 | Problem-formulation records; `FormulationAdoption` on `Plan`/`FastPathEpisode` | no |
 | v4 | Experiment-selection records (`ExperimentSelected`/`ExperimentSelectionVoided`) | no |
-| v5 | Version-bound user response and focus review | yes |
+| v5 | Version-bound user response and focus review | no |
+| v6 | The per-round formulation recheck | yes |
 
 Every bump is a rename or an addition, never a migration, and the code is deliberately written
 that way:
@@ -720,7 +774,11 @@ was never formed — exactly the distinction `Unformed` exists to preserve. A v3
 the same kind of reason: an episode in it has no way to say whether an experiment was chosen and
 not yet dispatched, so replaying one would silently drop a choice the runtime was holding or
 invent one it never made. A v4 log cannot attest that a revision received a user response followed
-by focus review, so it is rejected by v5 rather than silently treating old scope as reviewed.
+by focus review, so it is rejected by v5 rather than silently treating old scope as reviewed. A v5
+log cannot attest a per-round recheck either: it records a distillation only when the round echoed
+an adjudication, so a round that changed no belief is invisible in it, and nothing in it separates
+"reconsidered and kept the reading" from "never reconsidered". Replaying one would read as a task
+that owes a result for every round it ever ran.
 
 ### Downstream consumers
 
@@ -731,8 +789,11 @@ separately from the runtime:
   is **not** compatible with a v2-or-later runtime until it is adapted, and that adaptation is not
   part of the rename itself.
 - The same applies to the formulation events and the experiment-selection events: no GUI consumer
-  reads `ProblemFormulationRecorded`/`ProblemFormulationDeferred`, the correction events, or
-  `ExperimentSelected`/`ExperimentSelectionVoided` yet.
+  reads `ProblemFormulationRecorded`/`ProblemFormulationDeferred`, the correction events,
+  `FormulationRecheckRecorded`, or `ExperimentSelected`/`ExperimentSelectionVoided` yet. A GUI that
+  keys on `frameId` also never sees a live `DistillationProduced`, because the protocol renamed it to
+  `episodeId` in v2 — and once adapted, an empty `contents` now renders as a distillation that
+  changed nothing rather than as a round that was never recorded.
 - RPC forwards domain events unchanged, so any RPC client pattern-matching on event names needs the
   same treatment. `get_state`'s `formulation` field and the `get_domain_snapshot` command are the
   two additions a client can read without parsing the log.
@@ -791,7 +852,11 @@ model and must not become a second source of truth.
 17. Publishing a version leaves the focus slice, every belief record, and every already-recorded
     observation untouched; it invalidates a selection that has not been dispatched. A revision also
     requires a user response followed by explicit focus review, without forcing different belief ids.
-18. A dispatch is traceable to the understanding that governed it: its plan (or, on the fast path,
+18. Every belief-loop round that reached distillation carries a reconsideration result before
+    propose chooses another experiment or concludes, and a result that keeps the reading creates no
+    version. Recording one neither settles an unadjudicated belief nor answers the applicability
+    review, and it never makes residual evidence for a belief.
+19. A dispatch is traceable to the understanding that governed it: its plan (or, on the fast path,
     its episode) names the current version, or records that none existed.
 
 ## Current implementation notes

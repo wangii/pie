@@ -51,16 +51,16 @@ async function pausedHarness(): Promise<Harness> {
 }
 
 describe("revision response and focus review", () => {
-	it("rejects v4 logs explicitly without rewriting them", () => {
-		expect(AGENT_SESSION_DOMAIN_SCHEMA_VERSION).toBe(5);
+	it("rejects v5 logs explicitly without rewriting them", () => {
+		expect(AGENT_SESSION_DOMAIN_SCHEMA_VERSION).toBe(6);
 		const legacy = SessionManager.inMemory();
 		legacy.appendCustomEntry("pie.agent-session-domain-event", {
-			schemaVersion: 4,
-			event: { type: "TaskOpened", schemaVersion: 4, eventId: "event-old", timestamp: "2026-09-20T00:00:00Z" },
+			schemaVersion: 5,
+			event: { type: "TaskOpened", schemaVersion: 5, eventId: "event-old", timestamp: "2026-09-20T00:00:00Z" },
 		});
 		const before = JSON.stringify(legacy.getBranch());
 		expect(() => replayAgentSessionDomainEntries(legacy.getSessionId(), legacy.getBranch())).toThrow(
-			"schema v4, but this runtime requires v5",
+			"schema v5, but this runtime requires v6",
 		);
 		expect(JSON.stringify(legacy.getBranch())).toBe(before);
 	});
@@ -153,7 +153,12 @@ describe("revision response and focus review", () => {
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", { op: "support", beliefId: "belief-1", evidence: "same identity observed" }),
 			]),
-			fauxAssistantMessage([conclude()]),
+			// The round distilled under the revised reading, so propose owes it a reconsideration
+			// before the task can close.
+			fauxAssistantMessage([
+				fauxToolCall("recheck_formulation", { reason: "the revised reading still organizes the round's evidence" }),
+				conclude(),
+			]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("reviewed"),
 		]);

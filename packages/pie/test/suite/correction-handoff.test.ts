@@ -195,7 +195,13 @@ describe("correction handoff", () => {
 					evidence: "the probe observed the post-logout read",
 				}),
 			]),
-			fauxAssistantMessage([conclude()]),
+			// That round distilled, so propose owes it a result before concluding.
+			fauxAssistantMessage([
+				fauxToolCall("recheck_formulation", {
+					reason: "the corrected reading still organizes the round's evidence",
+				}),
+				conclude(),
+			]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);

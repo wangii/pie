@@ -27,6 +27,9 @@ describe("formulation decision", () => {
 
 	const conclude = () => fauxToolCall("conclude", { result: "delivered", evidence: "observed" });
 
+	/** Every distillation owes propose a result; this is the one that keeps the reading. */
+	const recheck = () => fauxToolCall("recheck_formulation", { reason: "the round's evidence fits the reading" });
+
 	const firstProbe = [
 		fauxToolCall("declare_belief", {
 			op: "propose",
@@ -143,7 +146,8 @@ describe("formulation decision", () => {
 			]),
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([support]),
-			fauxAssistantMessage([conclude()]),
+			// The round distilled, so propose owes it a reconsideration before concluding.
+			fauxAssistantMessage([recheck(), conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);
@@ -224,8 +228,9 @@ describe("formulation decision", () => {
 	it("publishes from the propose surface only", () => {
 		// Publishing is propose's alone: neither the role that gathers evidence nor the one that
 		// adjudicates it can state the agent's reading, so no other role can route around the
-		// decision by making it themselves.
-		const formulationTools = ["set_formulation", "defer_formulation"];
+		// decision by making it themselves. Reconsidering that reading is the same judgment, one
+		// step later, and belongs to the same role for the same reason.
+		const formulationTools = ["set_formulation", "defer_formulation", "recheck_formulation"];
 		for (const tool of formulationTools) {
 			expect(BELIEF_SURFACE_TOOLS).toContain(tool);
 			for (const role of ["distill", "execution", "finalReport"] as const) {

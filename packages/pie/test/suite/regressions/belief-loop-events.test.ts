@@ -26,6 +26,10 @@ describe("belief-loop event family", () => {
 			reason,
 		});
 
+	/** Every distillation owes propose a result; this is the one that keeps the reading. */
+	const recheck = () =>
+		fauxToolCall("recheck_formulation", { reason: "the round's evidence fits the current reading" });
+
 	it("emits task/episode lifecycle, belief deltas, plans, and distillation correlations", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -164,7 +168,7 @@ describe("belief-loop event family", () => {
 					evidence: "logout kept the value as predicted",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);
@@ -244,7 +248,7 @@ describe("belief-loop event family", () => {
 					evidenceRounds: 1,
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			fauxAssistantMessage([recheck(), fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout for 30s"),
 		]);

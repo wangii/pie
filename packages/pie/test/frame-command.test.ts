@@ -64,6 +64,8 @@ function frameView(): FrameView {
 		deferral: null,
 		corrections: [],
 		decisionOwed: false,
+		recheckOwed: false,
+		recheck: null,
 		pendingApplicability: [],
 		unrevalidated: [],
 	};

@@ -61,6 +61,8 @@ function longView(ordinal = 3): FrameView {
 		deferral: null,
 		corrections: [1, 2, 3, 4, 5, 6].map(correction),
 		decisionOwed: false,
+		recheckOwed: false,
+		recheck: null,
 		pendingApplicability: [],
 		unrevalidated: [],
 	};

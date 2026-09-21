@@ -105,6 +105,10 @@ another experiment or conclude. The gate is checked against the replayed state, 
 version voids any experiment selected but not yet dispatched, which is why a propose turn that
 both states a reading and selects an experiment must publish first: tools run in call order.
 
+> Implemented (M7.3): the same gate is the per-round recheck. After *every* distillation propose owes
+> a reconsideration result — "reconsidered and kept the reading" is a result, not a skipped step — so
+> a publication no longer settles the decision for good. See *Two outputs, one step apart* below.
+
 A user correction travels the same gate as the decision, and takes priority over it. It is
 recorded immediately and blocks execution probes at the tool boundary: calls already in flight
 come back with their results, and the ones behind them do not start — blocked with a result that
@@ -298,12 +302,25 @@ version happens only when the reading itself changes. Neither branch substitutes
 reconsidering does not settle an unadjudicated belief, and adjudicating does not stand in for
 looking at what the beliefs now mean for the task.
 
-The runtime does not yet carry the residual branch as a record. It does record a version-bound
-review after a revision (`formulationReview`: the user response plus the focus review), and a
-published version settles the formulation decision for good — so nothing records that a given round
-reconsidered the reading and kept it. That increment is planned in
-[milestone-formulation-recheck.md](milestone-formulation-recheck.md); until then this section states
-the design, not an implemented gate.
+The residual branch is carried as *prose, not as a record*. Distill writes what the belief set still
+cannot explain into its turn, with one residual holding several sourced observations rather than one
+entry per observation; there is no residual event, field, or snapshot entry, so residual is not
+replayed and not branch-isolated. That is a chosen limit, not an oversight: what the runtime records
+instead is the *recheck*. Every distillation owes propose a reconsideration result, and
+"reconsidered and kept the reading" is distinguishable from "not reconsidered" — a task-level record,
+replayable and branch-isolated, with propose's own one-line reason, shown in the terminal and the RPC
+snapshot. Because the recheck is per round, an anomaly that cannot yet change any belief's status
+still cannot be skipped past: it is the round it appeared in that must be answered, whether or not
+the reading changes. Residual never becomes support for a belief through this path, and the recheck
+is not the applicability review (`FormulationApplicabilityRecorded`), which answers what a *revised*
+reading means for the conclusions the previous one reached.
+
+The result is projected with the reading itself: the `<current_formulation>` block carries what
+propose last made of the reading, labeled as the agent's own position and never as evidence, and it
+names the round still unanswered while one is. The terminal reads the same replayed state — the dock
+panel marks the last round *recheck owed* or *rechecked · kept the reading*, and `/frame` gives the
+verdict with the agent's stated basis. What it deliberately does not give is a list of unexplained
+observations: residual is prose, so no such list exists to show.
 
 ## Conclusion, task outcome, and reflection
 

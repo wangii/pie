@@ -1,14 +1,17 @@
-# Milestone：distillation 的两路反馈与 Frame 重审（规划中）
+# Milestone：distillation 的两路反馈与 Frame 重审（M7.1–M7.5 已实现，终端人工验证待做）
 
-状态：设计说明已写入 [belief-loop-roles.md](belief-loop-roles.md) 与
-[epistemic-view-skeleton.md](epistemic-view-skeleton.md)；运行时增量 M7 尚未实现。
+状态：M7.1–M7.5 的代码与文档工作已完成（M7.3 落地门槛、任务级重审记录与协议 v6；M7.4 落地
+投影与终端呈现；M7.5 完成场景 1–8 的确定性回归与协议/GUI 记录）。**唯一未完成项是终端人工
+验证**，见 M7.5 末尾——实现方不能代为勾选。决策 1–7 已确认，选定的契约已回写
+[belief-loop-roles.md](belief-loop-roles.md)、[epistemic-view-skeleton.md](epistemic-view-skeleton.md)
+与 [milestone-problem-formulation.md](milestone-problem-formulation.md)。
 日期：2026-09-21。
 
 本文件承接 [milestone-problem-formulation.md](milestone-problem-formulation.md) 的 M1–M6
 （M1–M5 已实现，M6 部分完成），只补充一个增量：distillation 之后走两条独立的反馈路，
 而不是把 Frame 当作 belief set 的下一站。
 
-同 M1–M6 的约定，文件中的工具名、事件名和交互入口是实现建议；产品行为以“待确认决策”
+同 M1–M6 的约定，文件中的工具名、事件名和交互入口是实现建议；产品行为以“已确认决策”
 与“已确认边界”为准。
 
 ## 问题
@@ -36,6 +39,11 @@
    是否得到用户回应与 focus 重审”，不是“这一轮蒸馏后是否重审过当前理解、结论是什么”。因此
    没有记录能区分“本轮重审后维持不变”与“本轮根本没有重审”。
 
+本次确认把这两条分开处理：第 1 条按决策 1 选 B 接受为已知限制（residual 仍只以会话文本承载，
+不可回放、不可分支隔离），第 2 条由决策 3、4、5 都选 A 修掉。决策 4 选 A 也补上了第 1 条真正
+影响行为的那一半：residual 不落记录，但它所在的那一轮必然被 propose 重审——跳过检查没有出口，
+只是检查的依据读不回结构化的异常清单。
+
 ## 设计
 
 两条路各自独立，都从 distillation 出来，又在 propose 汇合：
@@ -59,9 +67,10 @@ observation --> distill
 | 重审 | 当前理解是否仍成立、什么观察会迫使它改变 | propose |
 | 发布版本 | 理解、关注重点或调查方向有实质变化 | propose（`set_formulation`） |
 
-表中的“异常记录”是设计要求（异常必须作为独立于 belief 裁定的信息进入 propose），不是已选定的
-机制：它是否要成为可回放的记录、以什么粒度、用什么形式，仍由待确认决策 1、2、7 决定。本文件
-不预设必然是新增事件。
+表中的“异常记录”是设计要求（异常必须作为独立于 belief 裁定的信息进入 propose）。决策 1 选 B：
+它以 distill 散文承载，不新增事件；决策 2 选 A 规定其呈现单位是“一条 residual 含多个观察，
+每个观察附来源”。所以“异常进入 propose”靠的是 distill 轮次的文本进入 propose 上下文，而不是
+一条可回放的记录——这是明确接受的代价（决策 1），不是仍待补的缺口。
 
 要点：
 
@@ -76,37 +85,40 @@ observation --> distill
   与结论门槛按现有规则保留。
 - **用户纠正优先于重审。** 待处理纠正仍按现有规则打断执行并交回 propose；重审不改变该顺序。
 
-### 不因待确认选项削弱的要求
+### 不因选项取舍而削弱的要求
 
-下列三件事是本次讨论确定的需求，不由决策 1–7 的任何一种选法取消：
+下列三件事是本次讨论确定的需求，不由决策 1–7 的任何一种选法取消；已确认的选择满足它们：
 
 - **检查必须发生，且独立于裁定。** 每次 distillation 之后都要检查当前理解是否仍然成立，
   包括没有 belief 变更、没有已识别异常、结论为“维持不变”的轮次；检查不能只在发现异常时才发生。
 - **检查与记录是两件事。** 决策 3、4 决定的是这次检查是否留下可回放的结果、以什么条件要求
-  留痕，不是“是否需要检查”。若选择不区分「已重审/未重审」，必须承认代价：运行时无法验证
+  留痕，不是“是否需要检查”。两者都选 A，因此每轮检查都留下可回放的结果，“未重审”与
+  “已重审、维持不变”在运行时与界面上都可区分；若改选 B，必须承认代价：运行时无法验证
   检查发生过。
 - **发布仍是稀有动作。** 检查发生得多不代表版本多；只有实质变化才创建版本（沿用决策 6）。
 
-对应的验收场景见下节 1、2、4、8。若某个选项使这几条无法成立，该选项应被判为不合格，而不是
-修改这些场景。
+对应的验收场景见下节 1、2、4、8。
 
-## 待确认决策
+## 已确认决策
 
-| # | 问题 | 选项 | 影响的契约 |
+| # | 问题 | 选择 | 确定的行为 |
 |---|---|---|---|
-| 1 | residual 是否需要结构化记录 | A 需要任务级记录（可回放、可分支隔离） / B 继续只靠 distill 散文 | 决定 M7.2 是否要新增事件与折叠逻辑 |
-| 2 | residual 的粒度 | A 一条 residual 可含多个未被解释的观察，附来源 / B 每条观察单独记录 | 决定回放与 UI 的展示单位 |
-| 3 | 重审结果如何记录 | A 记录“已重审、维持不变”与“未重审”两种状态 / B 只记录发生变化的版本（运行时无法验证检查是否发生） | 只影响可验证性，不影响“每次蒸馏后都要检查”的要求 |
-| 4 | 何时要求留下重审结果 | A 每次 distillation 之后都必须出现一次记录 / B 仅在 residual 非空或存在待处理纠正时才要求记录（检查本身仍每轮发生） | 决定记录频率；选 B 时需在 M7.3 验收中显式列出未覆盖的情形 |
-| 5 | 重审是否复用现有 formulation 决定 | A 复用 `formulationDecisionOwed` 并把它的语义扩展到“必须给出重审结果” / B 新增独立的 propose 动作 | 决定是否新增 propose 工具与事件 |
-| 6 | 终端与 RPC 如何呈现 | A 显示“本版本已重审、维持不变”与最近一次重审依据 / B 只在有修订时显示 | 决定用户能否看出 agent 没有跳过重审 |
-| 7 | 旧的 schema 兼容 | A 提升领域协议版本并明确拒绝旧日志（沿用 M1–M4 做法） / B 复用现有事件字段 | 决定是否再次破坏性升级 |
+| 1 | residual 是否需要结构化记录 | B | 继续只靠 distill 散文：不新增事件、不折叠、不进 snapshot/RPC。代价是 residual 不可回放、不可分支隔离，恢复与压缩后只能靠会话文本。 |
+| 2 | residual 的粒度 | A | 呈现单位是“一条 residual 含多个观察”，每个观察保留自己的来源；不按观察逐条记录。决策 1 选 B 时它约束的是 propose 的重审上下文与终端呈现，不是存储单位。 |
+| 3 | 重审结果如何记录 | A | 任务级重审记录同时表达“已重审”（附结论：维持／修订／暂缓）与“未重审”，可回放、可分支隔离。它不是 `FormulationApplicabilityRecorded`，也不与它互相替代。 |
+| 4 | 何时要求留下重审结果 | A | 每次 distillation 之后都必须出现一次重审记录：没有 belief 变更、没有被标记的异常、结论为“维持不变”的轮次同样要求。没有 distillation 的路径（fast path）不受此门槛约束。 |
+| 5 | 重审是否复用现有 formulation 决定 | A | 复用 `formulationDecisionOwed`，把语义从“欠一次发布或暂缓决定”扩展为“本轮 distillation 必须给出一次重审结果”。发布一次即永久结清的旧语义被取代；欠重审时 propose 不能选下一个实验或结案，distill 直接 conclude 同样被改道回 propose。propose 另需一个不创建版本的“维持不变”出口（新增工具或扩展现有工具，属 M7.3 实现细节）。 |
+| 6 | 终端与 RPC 如何呈现 | A | 显示“本版本已重审、维持不变”与最近一次重审依据（propose 写在重审记录里的一行理由）。不得把“未重审”显示成“已重审”，也不得暗示存在一份结构化的异常清单；重连后一致。 |
+| 7 | 旧的 schema 兼容 | A | 提升领域协议版本并明确拒绝旧日志，沿用 M1–M4 做法：不迁移、不提供别名、不改写或删除用户旧日志。旧日志里没有重审这个概念，新运行时无法把它与“未重审”区分。 |
 
 ## 已确认边界
 
 - **不重复已有的适用性审查。** `FormulationApplicabilityRecorded` 表达的是「修订后的理解下，
   旧结论还算不算数」，且只在有 `formulationReview` 待结清时可用；它不能表示「本轮蒸馏后决定
-  保留当前理解」。M7 不重复这一机制，也不把它当作逐轮重审结果。
+  保留当前理解」。M7 不重复这一机制，也不把它当作逐轮重审结果；重审记录与它并存。
+- **重审记录不承载 residual。** 决策 1 选 B，residual 仍只是 distill 文本：重审记录写的是
+  「这一轮是否重审过、结论和理由是什么」，不是「这一轮哪些观察未被解释」。两者不能互相推断，
+  界面也不得把重审依据显示成一份异常清单。
 - 不恢复 framing belief，不引入完成义务、覆盖检查或 framing-discharge 协议
   （见 [framing-belief.md](framing-belief.md)）。
 - 不新增平行的 Frame 对象：Frame 仍是任务级 `ProblemFormulation` 版本历史，发布权仍只在
@@ -123,69 +135,183 @@ observation --> distill
 ### M7.1：文档与术语收敛
 
 - [x] 在 `belief-loop-roles.md` 与 `epistemic-view-skeleton.md` 写明 distillation 的两个输出。
-- [x] 建立本文件，记录待确认决策、边界与验收场景。
-- [ ] 待决策 1–7 确认后，把选定的契约写回上述两份文档，并写入
+- [x] 建立本文件，记录决策项、边界与验收场景。
+- [x] 决策 1–7 确认后，把选定的契约写回上述两份文档，并写入
       `milestone-problem-formulation.md` 的后续增量段。
 
-### M7.2：异常进入 propose 的承载（依赖决策 1、2、7）
+### M7.2：异常进入 propose 的承载（决策 1 选 B、决策 2 选 A）
 
-本阶段的交付物依决策 1 而异，两种选法都不能以“把异常写成 belief”为唯一出口：
+决策 1 选 B，因此本阶段不新增事件、字段、折叠或快照逻辑；“异常进入 propose”靠 distill 轮次的
+文本进入 propose 上下文，交付物是这条路径能成立以及代价被写下来。
 
-- 若选 A（结构化记录）：选定承载形式并实现记录、折叠、快照与恢复。
-- 若选 B（继续只靠 distill 文本）：明确接受的代价（不可回放、不可分支隔离、无法在 UI 区分
-  “未重审”与“重审无异常”），并把这部分从验收中除去；此时不需要新增事件。
+- [x] distill 必须能表达未被解释的观察而不必先造出一条 belief：不新增事件、不新增字段。
+- [x] 一轮 residual 以整块进入 propose 的 transcript，不拆成逐条条目（逐轮重审上下文本身属
+      M7.3，它消费的是同一份文本）。
+- [x] 记录已知限制：residual 不可回放、不可分支隔离，恢复与压缩后只能靠会话文本；相应验收项
+      从本阶段除去。
 
-- [ ] 无论选哪种，distill 都必须能表达未被解释的观察而不必先造出一条 belief。
-- [ ] 回放后异常及其与当前版本、纠正、未裁定责任的相对顺序保持一致（选 A 时验证；选 B 时
-      记录为已知限制）。
+实现说明：
 
-验收：未被解释的观察可以在不新增 belief 的情况下进入 propose 的上下文；选 A 时还需在分支
-切换与压缩后不丢失、不串分支。
+- **无需改动运行时。** 投影层对非 probe 的 assistant turn 只剥 thinking
+  （`maskEpistemicThinking`，`src/core/belief-loop/message-projection.ts:72-75`），distill 的
+  自由文本因此原样进入 propose 的 transcript；distill 分支只要不调用 `conclude` 就必定交回
+  propose（`belief-loop-controller.ts` 的 `case "distill"`），该轮一个工具都不调用也一样。
+- **覆盖测试** `test/belief-loop-residual.test.ts`：两个场景都断言 propose 实际收到的
+  transcript（用 faux provider 的 response factory 读 `context.messages`，也就是 provider
+  真正收到的投影结果）。第一个是同一轮“先裁定、后写 residual”，residual 与其单条观察逐行可见、
+  并作为一整块出现；第二个是一轮 belief 零变更、也没有为异常新建 belief——residual 仍然到达
+  propose。两个用例都做过变异验证（让投影丢弃 assistant 文本即双双失败），不是恒真断言。
+- **已知限制**（本阶段确认接受，已从验收中除去）：零 belief 变更的轮次不发出
+  `DistillationProduced`（`emitDistillationBlock` 的 `lines.length === 0` 早退），所以该轮的
+  residual 在领域记录里没有条目，不参与回放与分支隔离，恢复与压缩后只能靠会话文本。测试把这条
+  限制也钉住了：它会在 M7.3 补上“本轮蒸馏过”的可回放标记时被有意更新——变的是那个标记，
+  “residual 文本本身不落记录”不变。
 
-### M7.3：propose 重审动作（依赖决策 3、4、5）
+验收：未被解释的观察可以在不新增 belief 的情况下进入 propose 的上下文（已验证）。residual
+本身不在分支切换与压缩后保持可回放（已知限制，不作为验收项）。
 
-- [ ] 重审结果可表达“维持当前理解”，且该结果不创建版本、不触发修订通知。
-- [ ] 区分“已重审”与“未重审”；未重审时 propose 不能选下一个实验或结案（若决策 4 选 A）
-      或仅在有 residual/纠正时受限（若选 B）。
-- [ ] 异常隐含可检验断言时，必须转成 belief 检验，并保留“Frame 不是证据”的约束。
+### M7.3：propose 重审动作（决策 3、4、5 都选 A）
 
-验收（以决策 4 选 A 为前提；若选 B，则只要求在有异常或待处理纠正时出现重审结果）：
-不存在“belief 集合未变所以没有重审”的路径；也不存在“重新表述就跳过未裁定 belief”的路径。
+- [x] 重审结果可表达“维持当前理解”，且该结果不创建版本、不触发修订通知。
+- [x] 任务级重审记录同时表达“已重审（维持／修订／暂缓）”与“未重审”，可回放、可分支隔离，
+      并与 `FormulationApplicabilityRecorded` 并存，不合并、不互相替代。
+- [x] 把 `formulationDecisionOwed` 的语义扩展为“本轮 distillation 必须给出重审结果”：未重审时
+      propose 不能选择下一个实验或结案，distill 的 conclude 同样被改道回 propose。“发布一次即
+      永久结清”的旧语义随之作废，`docs/domain-model.md` 的 “The gate is deliberately narrow”
+      已按新语义重写。
+- [x] 门槛需要“本轮蒸馏过”在回放后可判定：`DistillationProduced` 现在每轮都发出（见下）。
+- [x] fast path 没有 distillation，不受重审门槛约束。
+- [x] 异常隐含可检验断言时，必须转成 belief 检验，并保留“Frame 不是证据”的约束。
 
-### M7.4：投影与呈现（依赖决策 1、3、6）
+实现说明：
 
-- [ ] propose 与 distill 能读到最近一次被标记的异常与最近一次重审结果（后者依决策 1、3；
-      若这些选项选 B，则只要求投影能在上下文中区分“已检查过”与“未检查”），且明确标注为
-      立场或待解释项，不是受支持事实。
-- [ ] 终端与 RPC 快照能显示“已重审、维持不变”与重审依据（需决策 3 选 A）；选 B 时至少
-      不得把“未检查”显示成“已重审”。重连后一致。
+- **记录**：`FormulationRecheck { episodeId, verdict, reason, versionId?, recordedAt }` 落在
+  `agent-session-domain.ts`，事件 `FormulationRecheckRecorded` 是任务级的，`Task.formulationRecheck`
+  保存最新一条。折叠校验：该 episode 存在且已有 distillation（裁定未结束的轮次不算完成的蒸馏）、
+  `reason` 非空、`versionId` 当且仅当 verdict 为 `revised` 且能在 `task.formulations` 里解析、
+  轮次序号不倒退。同一轮允许记录两次（先“维持”后“发布”），后写的一条生效。
+- **“本轮是否蒸馏过”的可回放标记**：`emitDistillationBlock` 拆成两件事——`emitDistillationEcho`
+  仍按轮显示裁定回声（用户看到的行为不变），`recordDomainDistillation` 在本轮 distill
+  无事可裁定时写一次记录，因此**零 belief 变更的轮次也有记录**，门槛可在回放后判定。
+  `outputs` 改为从回放的 episode 推导（`episode.body.beliefDeltas` 中 `producerPhase === "distill"`），
+  与折叠重算的表达式逐字一致：原先读内存累加器，而该累加器在 `rehydrateFromBranch` 被清空却没在
+  `adoptReplayedDomainState` 重建，分支切换后写出的记录会与折叠期望不符并抛重放错误。累加器随之删除。
+- **门槛**：`formulationDecisionOwed = firstFormulationDecisionOwed || formulationRecheckOwed`。
+  两者互斥（前者要求尚无版本，后者要求已有版本），所以 steer 可以按哪一条成立来选；新增
+  `TRANSITION_STEERS.formulationRecheck`。未重审时 propose 不能派发下一个实验，也不能结案；
+  distill 的 conclude 同样被改道回 propose。裁定债务先于门槛检查，所以有未裁定 belief 的轮次
+  根本不算完成的蒸馏，也就不会被要求重审。
+- **结清**：新增 propose 专属工具 `recheck_formulation({ reason })`（记 `maintained`）；在欠重审的
+  轮次里调用 `set_formulation` 记 `revised`（含**首次**版本——说出理解本身就是那一轮的重审）、
+  `defer_formulation` 记 `deferred`。工具在无事可做时拒绝，并且区分两种无事可做：本轮已重审过，
+  或尚无当前理解可重审。`set_formulation`/`defer_formulation` 的 `unchanged` 结果文案改为指向
+  `recheck_formulation`，避免模型反复重提交同一份内容。
+- **修订暂停的洞**：`advanceRole` 在 `awaitingFormulationResponse()` 时直接返回而不调用
+  `transition`，因此“在 distill 轮里发布修订”的那一轮原本不会留下 distill 记录；该分支现在补记一次。
+- **协议**：v5 → v6，重放报错里的版本变更说明同步更新；`index.ts`/`core/index.ts` 导出
+  `FormulationRecheck` 与 `FormulationRecheckVerdict`；`FormulationState` 增加 `recheckOwed` 与
+  `recheck`（呈现属 M7.4）。
+- **覆盖测试**：`test/suite/formulation-recheck.test.ts`（7 个场景：拦住下一个实验、发布/暂缓各自结清、
+  两种拒绝文案、分支与下一任务、fast path 豁免、未裁定轮次不算完成的蒸馏），
+  加上 `test/agent-session-domain.test.ts` 的折叠与谓词用例。既有 suite 中蒸馏后直接 conclude
+  的脚本逐个补上重审调用。
+- **已知限制**（记录为限制，不作为验收项）：进程在 distill 中途中断或恢复时，那一轮不会留下
+  distill 记录，因此不会被要求重审——该轮未裁定的 belief 仍由既有未裁定门槛拦住，任务不会因此
+  静默完成。
 
-验收（依决策 3 的选法）：选 A 时用户能看出 agent 是否重审过当前理解，以及依据是哪些观察；
-选 B 时界面不得暗示一个没有被记录过的检查发生过。显示不依赖不可配置快捷键。
+验收：不存在“belief 集合未变所以没有重审”的路径；也不存在“重新表述就跳过未裁定 belief”的路径。
+
+### M7.4：投影与呈现（决策 1 选 B、决策 3 与 6 选 A）
+
+- [x] propose 能读到本轮 residual 的散文（作为 distill 轮次的文本，而不是一条领域记录），以及
+      最近一次重审结果；两者都明确标注为立场或待解释项，不是受支持事实。
+- [x] 终端与 RPC 快照显示“已重审、维持不变”与最近一次重审依据（propose 写在重审记录里的
+      一行理由）；不得把“未重审”显示成“已重审”；重连后一致。
+- [x] 因为 residual 不落记录，“依据是哪些观察”只能来自那行理由与 distill 文本，界面不得暗示
+      存在一份结构化的异常清单。
+
+实现说明：
+
+- **投影**：`formulationProjection()` 在 `<current_formulation>` 块内补两行——最近一次重审的结果
+  （“you reconsidered this reading and kept it / changed it… / recorded that no reading could be
+  stated”）与 propose 自己写下的依据，措辞明确标注为立场（“Your stated basis, which is a position
+  and not evidence”）；欠重审时只对 propose 追加一行义务说明并点名三个工具，避免向没有这些工具的
+  角色（尤其是 execution）点名工具。residual 仍只以 distill 轮次的文本进入上下文（M7.2 已验证），
+  不新增字段。
+- **紧凑面板**：`FramePanel` 的重审标记只描述**最后一轮**——欠重审显示 `recheck owed`，已重审显示
+  `rechecked · kept the reading | reading revised | deferred`，两者互斥，避免同一轮看起来有两个答案；
+  首次理解的欠账仍显示 `decision owed`。
+- **`/frame` 详情**：新增 “Reconsidered” 段：维持／修订（点名版本）／暂缓，随后是 “The agent's
+  stated basis:”，不列任何“未解释的观察”——residual 没有可回放的条目，界面不得暗示有。
+- **RPC**：`FormulationState` 的 `recheck` 与 `recheckOwed` 在 M7.3 已暴露，快照与面板读同一份
+  回放状态，因此重连后一致。`interactive-mode` 的领域事件 switch 增加
+  `FormulationRecheckRecorded` 以触发重绘（此前新事件类型会被静默忽略）。
+- **覆盖测试**：`test/frame-panel.test.ts` 的“tells a reconsidered reading apart from one nobody has
+  looked at yet”（三种 verdict + 欠重审，含 24/40/60 列宽度），以及
+  `test/suite/formulation-recheck.test.ts` 中捕获 propose 实际收到的 system prompt 两处断言。
+
+验收：用户能看出 agent 是否重审过当前理解，以及它给出的理由；界面不暗示一个没有被记录过的
+检查发生过，也不暗示 residual 有可回放的条目。显示不依赖不可配置快捷键。
 
 ### M7.5：回归验证
 
-- [ ] 用 faux provider 的确定性场景覆盖下节验收场景 1–8。
-- [ ] 随实现更新文档状态，区分已实现契约与尚未完成的阶段。
-- [ ] 全部代码检查通过，记录协议变更；不做终端人工验证不算完成。
+- [x] 用 faux provider 的确定性场景覆盖下节验收场景 1–8。
+- [x] 协议版本提升（v5 → v6）并明确拒绝旧日志；记录 GUI 消费者适配仍待做。
+- [x] 随实现更新文档状态，区分已实现契约与尚未完成的阶段。
+- [x] 全部代码检查通过，记录协议变更。
+- [ ] 终端人工验证（见下）——不由实现方代为勾选。
+
+实现说明：
+
+- **场景 → 测试**（全部使用 faux provider，不调用真实 provider）：
+
+  | 场景 | 覆盖 |
+  |---|---|
+  | 1 异常不足以改变 belief 但触发重审 | `test/belief-loop-residual.test.ts`（同轮先裁定后写 residual；零变更轮的 prose residual）；`test/suite/formulation-recheck.test.ts` 用例 1、2 |
+  | 2 重审结论为维持不变 | `formulation-recheck.test.ts` 用例 1（不创建版本、无修订通知、依据可查）；`test/frame-panel.test.ts`（界面显示 `rechecked · kept the reading` 与依据） |
+  | 3 异常必须可检验 | `formulation-recheck.test.ts` 的“keeps residual out of the belief record”：residual 不成为 belief、不进任何 belief 的证据、只存在于那一轮的文本 |
+  | 4 两路不互相替代 | `formulation-recheck.test.ts` 用例 1（两轮都重审、版本仍只有一个）；`belief-loop-residual.test.ts` 用例 2 |
+  | 5 未裁定责任保留 | `formulation-recheck.test.ts` 末例（未裁定轮次不算完成的蒸馏）；`test/suite/formulation-decision.test.ts` 用例 4 |
+  | 6 纠正优先 | `formulation-recheck.test.ts` 的“answers a user correction before the round it interrupted is reconsidered”：纠正到达且模型跳过时，循环先交回纠正，`FormulationCorrectionResolved` 早于 `FormulationRecheckRecorded` |
+  | 7 恢复与分支 | `formulation-recheck.test.ts` 用例 5（分支切换后该轮的欠账仍在、新任务不继承）与压缩用例（压缩前后一致）；residual 本身不可回放是已知限制，不在本场景范围内 |
+  | 8 没有异常也必须检查 | `belief-loop-residual.test.ts` 用例 2（零 belief 变更轮次仍有 distillation 记录与重审）；`formulation-recheck.test.ts` 用例 1 |
+
+- **协议变更**：领域协议 v5 → v6（新事件 `FormulationRecheckRecorded`、新字段
+  `Task.formulationRecheck`）；v5 日志被明确拒绝（`DomainReplayError`），不迁移、不提供别名、
+  不改写用户旧日志，理由见 [domain-model.md](domain-model.md) 的 “Protocol versioning and old
+  logs”。同一处补上了 `DistillationProduced` 现在每轮都发出（零变更轮次在 v5 里不可见）。
+- **GUI 消费者适配仍待做**：`gui/src/Model.cpp` 仍按 v1 事件名与 `frameId` 解析，既不识别
+  `FormulationRecheckRecorded` 也不识别 v2 起的 `episodeId`；本次的呈现实现在终端侧
+  （`FramePanel`/`FrameDetailPanel`），原生 GUI 不共享。适配完成前原生 GUI 与 v6 运行时不兼容
+  ——这与 M1–M6 的既有结论一致，不是本次新增的依赖。
+- **文档状态**：`milestone-problem-formulation.md` 的后续增量段、`belief-loop-roles.md` 与
+  `epistemic-view-skeleton.md` 的相关段落已改为描述已实现的契约；`docs/README.md` 的索引
+  标注从 “planned” 改为 “M7.1–M7.4 implemented”。
+- **仍未完成的终端人工验证**：需要按仓库的交互测试说明在真实终端确认——(a) 一轮蒸馏后 dock
+  面板出现 `recheck owed`，模型回答后变为 `rechecked · kept the reading`；(b) `/frame` 里能看到
+  verdict 与 propose 写下的依据，且没有任何“未解释的观察”清单；(c) 欠重审时模型既不能派发下一个
+  实验也不能结案；(d) RPC 重连与分支切换后显示一致；(e) 24/40/60 列下中英文内容都可读。这些在
+  自动化测试里已覆盖到渲染与状态层（`test/frame-panel.test.ts`、`formulation-recheck.test.ts`），
+  但 TUI 的实际接线（键盘、重绘、重连）只有人工能确认，因此该复选框保持未勾选。
 
 ## 关键验收场景
 
 1. **异常不足以改变 belief 但触发重审**：实验后 residual 指出未被解释的现象；distill 裁定
    tested beliefs 后记录该现象；propose 在没有任何 belief 新增或改判的情况下重审并说明结论。
-2. **重审结论为维持不变**：propose 明确维持当前理解；不创建版本、不通知修订。（若决策 3 选 A：
-   “已重审”状态可在界面与快照中查到。）随后仍可正常选择下一个实验。
+2. **重审结论为维持不变**：propose 明确维持当前理解；不创建版本、不通知修订。“已重审”状态
+   可在界面与快照中查到，重连后一致，依据是 propose 写下的那行理由。随后仍可正常选择下一个实验。
 3. **异常必须可检验**：residual 隐含会影响行动的未验证断言时，它被转成 belief 并检验，而不是
    直接充当 Frame 的依据。
 4. **两路不互相替代**：没有 belief 变化的一轮仍然出现重审；有 belief 变化但不影响理解的
    一轮不产生新版本。
 5. **未裁定责任保留**：重审、维持或修订都不清除未裁定 belief 的责任，结论门槛不被绕过。
 6. **纠正优先**：重审期间收到用户纠正时，仍按现有规则在工具边界交回 propose 并逐条回应。
-7. **恢复与分支**：residual 记录、重审结果与版本历史在恢复、压缩与分支切换后一致；新任务
-   不继承上一任务的当前理解，也不继承其 residual。
+7. **恢复与分支**：重审结果与版本历史在恢复、压缩与分支切换后一致；新任务不继承上一任务的
+   当前理解。决策 1 选 B，residual 本身不落记录，因此它的恢复一致性明确不在本场景范围内。
 8. **没有异常也必须检查**：一轮 distillation 没有产生任何 belief 变更、也没有被标记的异常时，
    仍然发生一次对当前理解的检查（结论可以是维持不变）；不得以“没有异常”作为跳过检查的理由。
-   这一场景不因决策 1、3、4 的任何选法而取消，只决定它是否留下可回放的痕迹。
+   决策 3、4 都选 A，因此这一轮同样留下可回放的重审记录——包括那些连 `DistillationProduced`
+   都没有发出的零变更轮次。
 
 ## 验证方式与范围
 
@@ -226,6 +352,8 @@ packages/pie 根目录执行；每个新建或修改的测试文件单独运行�
 - residual 没有独立记录：`grep -rn -i "residual|anomal" src` 只命中提示与描述文本
   （`src/core/role-specs.ts:115,152,153,157,265,266,271`、`src/core/tools/declare-belief.ts:330`），
   领域事件类型中没有 residual/anomaly 事件，也没有对应字段或折叠逻辑；异常只留在会话消息里。
+  M7.2 确认这条路径本身成立（散文 residual 能到达 propose），因此它不再是待补的缺口，而是
+  决策 1 选 B 接受的限制。
 - 没有“本轮是否重审过”的状态：`formulationReview` 只在发布新版本后存在，结清的是“用户回应 +
   focus 重审 + 新理解下既有 beliefs 的分类”；`formulationDecisionOwed` 只鉴别“是否做过一次
   发布或暂缓决定”，且发布一次即永久结清（`docs/domain-model.md` 的 “The gate is deliberately

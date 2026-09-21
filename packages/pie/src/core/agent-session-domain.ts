@@ -22,7 +22,9 @@ import type { CustomEntry, SessionEntry } from "./session-manager.ts";
  *   and a v3 log would silently lose the choice→void→re-choice sequence.
  */
 // v5 adds the revision response/focus-review gate; older logs cannot attest to it.
-export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 5 as const;
+// v6 adds the per-round formulation recheck: every distillation owes propose a result, so a v5 log
+// cannot tell "reconsidered and kept the reading" from "this round was never reconsidered".
+export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 6 as const;
 export const AGENT_SESSION_DOMAIN_CUSTOM_ENTRY = "pie.agent-session-domain-event";
 
 export type SessionId = string;
@@ -329,6 +331,38 @@ export interface FormulationReview {
 	readonly applicability: readonly FormulationApplicabilityEntry[];
 }
 
+/**
+ * What propose concluded when it reconsidered the current reading after a distillation.
+ *
+ * - `maintained`: the reading still organizes the task as it is; no version is published.
+ * - `revised`: the reading changed, and the version published while answering carries the change.
+ * - `deferred`: no reading can be stated right now; the missing information is recorded with the
+ *   deferral, and an existing version survives it rather than being erased.
+ */
+export type FormulationRecheckVerdict = "maintained" | "revised" | "deferred";
+
+/**
+ * The result of one round's reconsideration — the routine step, made visible.
+ *
+ * Without it, "I reconsidered and kept the reading" and "I never reconsidered" are the same
+ * absence: a published version only ever records that the reading *changed*, so a task that
+ * accumulated evidence under a stable reading looks identical to one that stopped checking.
+ *
+ * It answers a round rather than a version: `episodeId` names the distilled round, and a later
+ * round records its own. It is not `FormulationApplicabilityRecorded`, which asks what the
+ * previous reading's conclusions mean under a revised one, and it never carries residual — what
+ * the belief set still cannot explain stays in the distill turn's text.
+ */
+export interface FormulationRecheck {
+	readonly episodeId: EpisodeId;
+	readonly verdict: FormulationRecheckVerdict;
+	/** propose's own one-line basis, shown as the reason the reading was kept or changed. */
+	readonly reason: string;
+	/** The version published while answering, present exactly when the verdict is `revised`. */
+	readonly versionId?: FormulationVersionId;
+	readonly recordedAt: string;
+}
+
 export interface FormulationState {
 	readonly review?: FormulationReview;
 	/** The current version, or `null` before the first one. */
@@ -340,8 +374,20 @@ export interface FormulationState {
 	 * alike — "how did the agent respond to what I said" is a question about the answered ones.
 	 */
 	readonly corrections: readonly FormulationCorrection[];
-	/** Whether propose still owes this task the publish-or-defer decision. */
+	/**
+	 * Whether propose owes this task a formulation decision of *either* kind. A client that only
+	 * needs "is something owed" can read this; one that has to say *what* is owed reads
+	 * `recheckOwed` to tell the first reading from a per-round reconsideration.
+	 */
 	readonly decisionOwed: boolean;
+	/**
+	 * Whether the obligation is the per-round one: the latest distilled round has no result yet.
+	 * Distinct from `decisionOwed` in what settles it, not in who owes it — the first decision is
+	 * settled by stating a reading, this one by saying what the current reading means now.
+	 */
+	readonly recheckOwed: boolean;
+	/** The most recent round's reconsideration result, or `null` when none has been recorded. */
+	readonly recheck: FormulationRecheck | null;
 	/** Beliefs the current reading's review still has to classify. */
 	readonly pendingApplicability: readonly BeliefId[];
 	/** Classified `needs-revalidation` and not yet probed again under this reading. */
@@ -506,6 +552,12 @@ export interface Task {
 	readonly formulationDeferral?: FormulationDeferral;
 	/** Corrections the user submitted against this task's understanding, oldest first. */
 	readonly formulationCorrections: readonly FormulationCorrection[];
+	/**
+	 * The most recent round's reconsideration result. Task-scoped like the reading it answers: a
+	 * round leaves either this record — maintained, revised, or deferred — or the state "not
+	 * reconsidered yet", which is what makes a kept reading distinguishable from a skipped check.
+	 */
+	readonly formulationRecheck?: FormulationRecheck;
 }
 
 export interface AgentSessionCursor {
@@ -580,6 +632,10 @@ export type AgentSessionDomainEvent =
 			versionId: FormulationVersionId;
 			entries: readonly FormulationApplicabilityEntry[];
 	  })
+	// The routine step, recorded rather than inferred: a distillation owes propose a result even
+	// when the reading does not change, so "kept the reading" and "never reconsidered" must not be
+	// the same absence in the log.
+	| (TaskEventBase & { type: "FormulationRecheckRecorded"; recheck: FormulationRecheck })
 	| (TaskEventBase & { type: "EpisodeOpened"; episodeId: EpisodeId; ordinal: number })
 	| (EpisodeEventBase & { type: "RoutingDecided"; routing: Routing })
 	| (EpisodeEventBase & {
@@ -849,12 +905,66 @@ function deltaAnswersBelief(delta: BeliefDelta, beliefId: BeliefId, beliefs: Rea
 	return false;
 }
 
-export function formulationDecisionOwed(task: Task): boolean {
+/**
+ * The most recent belief-loop episode that completed a distillation, or undefined if none has.
+ *
+ * Distillation is the marker rather than dispatch: a round whose experiment was interrupted before
+ * distill — by a user correction, say — never produced evidence to reconsider, so it must not
+ * create recheck debt. The record is written when the distill role first runs for the round, which
+ * is what makes this readable from the log instead of from what the loop happens to remember.
+ *
+ * The body kind is part of the test on purpose. A fast path settles through a distillation record
+ * of its own, but it has no distill role and no adjudication to reconsider, so its round must not
+ * be pulled under the per-round gate.
+ */
+export function latestDistilledEpisode(task: Task): ExecutionEpisode | undefined {
+	let latest: ExecutionEpisode | undefined;
+	for (const episode of task.episodes) {
+		if (episode.body.kind === "belief-loop" && episode.body.distillation !== undefined) latest = episode;
+	}
+	return latest;
+}
+
+/**
+ * Whether the latest distilled round has not been reconsidered yet.
+ *
+ * This is the per-round half of the formulation gate: a round that changed no belief still owes a
+ * result, so there is no "the belief set did not change, therefore nothing to reconsider" path. It
+ * does not settle unadjudicated belief debt and it does not stand in for the applicability review.
+ *
+ * Before the first version there is nothing to reconsider — stating a reading for the first time is
+ * already a reconsideration of the task — so that state stays with `firstFormulationDecisionOwed`.
+ */
+export function formulationRecheckOwed(task: Task): boolean {
+	const distilled = latestDistilledEpisode(task);
+	if (!distilled) return false;
+	if (!currentFormulation(task)) return false;
+	return task.formulationRecheck?.episodeId !== distilled.id;
+}
+
+/**
+ * The decision the first investigation owes: state a reading, or defer naming what is missing.
+ * Settled by publishing a version, or by a deferral that answers the round it was made in, so a
+ * first deferral never becomes a standing exemption while a later investigation re-opens it.
+ */
+export function firstFormulationDecisionOwed(task: Task): boolean {
 	const investigated = latestDispatchedEpisodeOrdinal(task);
 	if (investigated === undefined) return false;
 	if (currentFormulation(task)) return false;
 	const deferral = task.formulationDeferral;
 	return deferral === undefined || deferral.answeredThroughEpisodeOrdinal < investigated;
+}
+
+/**
+ * Whether propose owes the task a formulation decision of either kind.
+ *
+ * One gate with two obligations, checked in the same places so neither can be routed around:
+ * before the first version, publish or defer; once a reading exists, give every distilled round a
+ * result. They are mutually exclusive — the first requires no current version, the second requires
+ * one — which is why the caller can pick its steer from which one fired.
+ */
+export function formulationDecisionOwed(task: Task): boolean {
+	return firstFormulationDecisionOwed(task) || formulationRecheckOwed(task);
 }
 
 /**
@@ -1248,6 +1358,41 @@ export function applyAgentSessionDomainEvent(
 				}),
 			};
 		}
+		case "FormulationRecheckRecorded": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			const recheck = event.recheck;
+			const episode = task.episodes.find((candidate) => candidate.id === recheck.episodeId);
+			if (!episode) fail(event, `unknown episode ${recheck.episodeId}`);
+			// A recheck answers a round that actually reached distillation. A round whose experiment
+			// was interrupted before distill never distilled, and answering a correction owns that
+			// state instead — so a recheck naming it would claim a check that never happened.
+			if (episode.body.kind !== "belief-loop" || episode.body.distillation === undefined) {
+				fail(event, `episode ${recheck.episodeId} has no recorded distillation to reconsider`);
+			}
+			if (!recheck.reason.trim()) fail(event, `a recheck of episode ${recheck.episodeId} needs a reason`);
+			if (recheck.verdict === "revised") {
+				if (recheck.versionId === undefined) {
+					fail(event, `a revised recheck of episode ${recheck.episodeId} must name the version it published`);
+				}
+				if (!task.formulations.some((version) => version.id === recheck.versionId)) {
+					fail(event, `recheck names version ${recheck.versionId}, which this task never published`);
+				}
+			} else if (recheck.versionId !== undefined) {
+				fail(event, `a ${recheck.verdict} recheck publishes no version`);
+			}
+			// The recorded result is the latest one, so going backwards would re-open a settled round
+			// and lose the answer that settled it. Recording twice for the same round stays legal
+			// because a turn can say the reading holds and then publish a revision of it: the
+			// publication answers the same round again and supersedes the earlier verdict, which is
+			// the only order in which the two can coexist — the reverse order is refused at the tool.
+			const previous = task.formulationRecheck;
+			const previousOrdinal = task.episodes.find((candidate) => candidate.id === previous?.episodeId)?.ordinal;
+			if (previousOrdinal !== undefined && episode.ordinal < previousOrdinal) {
+				fail(event, `recheck of episode ${recheck.episodeId} precedes the recorded ${previous?.episodeId}`);
+			}
+			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, formulationRecheck: recheck }) };
+		}
 		case "EpisodeOpened": {
 			const task = requireTask(snapshot, event);
 			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
@@ -1546,7 +1691,8 @@ export function domainEventsFromSessionEntries(entries: readonly SessionEntry[])
 						`but this runtime requires v${AGENT_SESSION_DOMAIN_SCHEMA_VERSION}. Every version bump ` +
 						`so far has been a breaking change with no migration path (v2 renamed TaskFrame to ` +
 						`ExecutionEpisode; v3 added problem-formulation records; v4 added the experiment ` +
-						`selection; v5 added revision response and focus review), so a v${version} session is rejected rather than replayed with missing ` +
+						`selection; v5 added revision response and focus review; v6 added the per-round ` +
+						`formulation recheck), so a v${version} session is rejected rather than replayed with missing ` +
 						`or misread records.`,
 				);
 			}

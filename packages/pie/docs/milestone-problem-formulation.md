@@ -24,10 +24,20 @@
 验证使用 faux provider 定向回归；终端人工交互验证仍未执行。
 当前运行时细节见 [domain-model.md](domain-model.md) 与 [belief-loop-roles.md](belief-loop-roles.md)。
 
-另一个规划中的增量——distillation 的两路反馈与每轮 Frame 重审，包括 residual 记录、
-“已重审/维持不变”的可区分状态和对应验收场景——见
-[milestone-formulation-recheck.md](milestone-formulation-recheck.md)。它尚未实现；本文件下文
-描述的循环与门槛仍以当前实现为准。
+另一个增量——distillation 的两路反馈与每轮 Frame 重审——见
+[milestone-formulation-recheck.md](milestone-formulation-recheck.md)。决策 1–7 已确认，M7.1–M7.3
+（文档回写、residual 承载、门槛与重审记录、协议 v6）已实现，M7.4–M7.5（投影、终端呈现与回归）
+尚未实现。该文件已确认的契约是：
+
+- residual 仍只以 distill 散文承载，不新增事件、字段、折叠或快照；呈现单位是一条 residual
+  含多个观察，每个观察附来源。因此“每轮把异常送进重审”靠的是重审本身，而不是一条异常记录。
+- 每次 distillation 之后 propose 都必须给出一次重审结果，“已重审（维持／修订／暂缓）”与
+  “未重审”都可回放、可分支隔离；无 distillation 的 fast path 不受此门槛约束。
+- 复用 `formulationDecisionOwed` 并把语义扩展为“本轮 distillation 必须给出重审结果”：欠重审时
+  propose 不能选下一个实验或结案，distill 直接 conclude 也被改道回 propose。现有“发布一次即
+  永久结清”的语义随之作废，[domain-model.md](domain-model.md) 的 “The gate is deliberately
+  narrow” 已按新语义重写。
+- 终端与 RPC 显示“已重审、维持不变”与重审依据（M7.4）。领域协议再次破坏性升级并明确拒绝旧日志。
 
 ## 产品目标
 
@@ -132,8 +142,10 @@ distillation
 
 为什么不是串行的一步接一步：异常（residual）不需要先变成 belief 才能影响理解，而 belief
 集合没有变化也仍然可能需要重审。两路不可互相替代：重审不能结清未裁定的 belief，裁定也
-不能代替“这些 beliefs 对当前任务意味着什么”的判断。本节的循环描述现有设计；其中
-“每轮重审必须留下结果”与“residual 需要记录”属尚未实现的增量，不是当前运行时已保证的行为。
+不能代替“这些 beliefs 对当前任务意味着什么”的判断。本节的循环描述现有设计；“每轮重审必须
+留下可回放的结果”已由 M7.3 实现（门槛与任务级重审记录，协议 v6），其呈现仍待 M7.4；而
+“residual 需要记录”已确认不做（决策 1 选 B，见
+[milestone-formulation-recheck.md](milestone-formulation-recheck.md)）。
 
 - Beliefs 改变，Frame 不变：新的证据进一步支持身份生命周期这一理解，调查继续沿用原 Frame。
 - Frame 改变，beliefs 不变：用户纠正任务重点，或 agent 对已有证据形成新的解释。

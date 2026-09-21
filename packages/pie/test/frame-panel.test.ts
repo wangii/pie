@@ -61,6 +61,8 @@ function state(overrides: Partial<FormulationState> = {}): FormulationState {
 		deferral: null,
 		corrections: [],
 		decisionOwed: false,
+		recheckOwed: false,
+		recheck: null,
 		pendingApplicability: [],
 		unrevalidated: [],
 		...overrides,
@@ -113,6 +115,100 @@ describe("frame panel", () => {
 		const lines = plain(buildFrameSummaryLines(view(), 80));
 		expect(lines[0]).toContain("not yet formed");
 		expect(lines.join("\n")).toContain("has not yet said how it reads this task");
+	});
+
+	it("tells a reconsidered reading apart from one nobody has looked at yet", () => {
+		// The distinction the record exists for: "kept the reading" must not look like "no check".
+		const owed = view({ state: state({ current: version(1), decisionOwed: true, recheckOwed: true }) });
+		expect(plain(buildFrameSummaryLines(owed, 80)).join("\n")).toContain("recheck owed");
+		expect(plain(buildFrameDetailLines(owed, 80)).join("\n")).toContain("Not yet: distillation has reported");
+
+		const kept = view({
+			state: state({
+				current: version(1),
+				recheck: {
+					episodeId: "episode-2",
+					verdict: "maintained",
+					reason: "the round's evidence fits the reading",
+					recordedAt: "2026-09-20T10:06:00.000Z",
+				},
+			}),
+		});
+		const summary = plain(buildFrameSummaryLines(kept, 80)).join("\n");
+		expect(summary).toContain("rechecked · kept the reading");
+		expect(summary).not.toContain("recheck owed");
+		const detail = plain(buildFrameDetailLines(kept, 80)).join("\n");
+		expect(detail).toContain("Kept the reading after the last round");
+		expect(detail).toContain("the round's evidence fits the reading");
+		// The reason is the agent's own basis, not a list of observations: residual is not recorded.
+		expect(detail).toContain("The agent's stated basis");
+
+		// A revision names the version that carried it; a deferral says so in its own word.
+		const revised = view({
+			state: state({
+				current: version(2),
+				recheck: {
+					episodeId: "episode-2",
+					verdict: "revised",
+					reason: "the evidence moved the question to the lifetime",
+					versionId: "formulation-2",
+					recordedAt: "2026-09-20T10:06:00.000Z",
+				},
+			}),
+			history: [version(1), version(2)],
+		});
+		expect(plain(buildFrameDetailLines(revised, 80)).join("\n")).toContain("Changed the reading; v2 carries it");
+		const deferred = view({
+			state: state({
+				current: version(1),
+				recheck: {
+					episodeId: "episode-2",
+					verdict: "deferred",
+					reason: "the round could not separate the two",
+					recordedAt: "2026-09-20T10:06:00.000Z",
+				},
+			}),
+		});
+		expect(plain(buildFrameSummaryLines(deferred, 80)).join("\n")).toContain("rechecked · deferred");
+		expect(plain(buildFrameDetailLines(deferred, 80)).join("\n")).toContain("No reading could be stated");
+
+		for (const width of [24, 40, 60]) {
+			for (const item of [owed, kept, revised, deferred]) {
+				for (const line of [...buildFrameSummaryLines(item, width), ...buildFrameDetailLines(item, width)]) {
+					expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				}
+			}
+		}
+	});
+
+	it("keeps a stale reconsideration from reading as the last round's result", () => {
+		// The state a two-round run passes through: the second round has distilled and nobody has
+		// answered for it yet, while the record still belongs to the first round.
+		const stale = view({
+			state: state({
+				current: version(1),
+				decisionOwed: true,
+				recheckOwed: true,
+				recheck: {
+					episodeId: "episode-1",
+					verdict: "maintained",
+					reason: "the first round's evidence fit the reading",
+					recordedAt: "2026-09-20T10:06:00.000Z",
+				},
+			}),
+		});
+		expect(plain(buildFrameSummaryLines(stale, 80)).join("\n")).toContain("recheck owed");
+		const detail = plain(buildFrameDetailLines(stale, 80)).join("\n");
+		expect(detail).toContain("Not yet: distillation has reported");
+		// The older basis is kept, but never as the answer to the round that is still owed.
+		expect(detail).not.toContain("after the last round");
+		expect(detail).toContain("an earlier round");
+		expect(detail).toContain("the first round's evidence fit the reading");
+		for (const width of [24, 40, 60]) {
+			for (const line of [...buildFrameSummaryLines(stale, width), ...buildFrameDetailLines(stale, width)]) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		}
 	});
 
 	it("shows the current version, what is missing when deferred, and pending corrections", () => {

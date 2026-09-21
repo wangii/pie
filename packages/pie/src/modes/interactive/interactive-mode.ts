@@ -3624,7 +3624,8 @@ export class InteractiveMode {
 			// misread me" and "what it did about that" are the two things the user must not have to
 			// go looking for.
 			case "ProblemFormulationRecorded":
-			case "ProblemFormulationDeferred": {
+			case "ProblemFormulationDeferred":
+			case "FormulationRecheckRecorded": {
 				this.ui.requestRender();
 				break;
 			}

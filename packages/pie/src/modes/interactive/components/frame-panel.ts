@@ -2,6 +2,7 @@ import { type Component, truncateToWidth, wrapTextWithAnsi } from "@earendil-wor
 import type {
 	FormulationAdoption,
 	FormulationCorrection,
+	FormulationRecheck,
 	FormulationState,
 	ProblemFormulationVersion,
 } from "../../../core/agent-session-domain.ts";
@@ -85,7 +86,14 @@ export function buildFrameSummaryLines(view: FrameView, width: number): string[]
 	} else if (state.review && !state.review.focusReviewed) {
 		markers.push(theme.fg("warning", "focus review owed"));
 	}
-	if (state.decisionOwed) {
+	// One marker, describing the last round: either nobody has said what it means for the reading
+	// yet, or somebody has and this is what they said. Showing a past "rechecked" beside an owed
+	// one would read as two answers about the same round.
+	if (state.recheckOwed) {
+		markers.push(theme.fg("muted", "recheck owed"));
+	} else if (state.recheck) {
+		markers.push(theme.fg("muted", `rechecked · ${recheckVerdictText(state.recheck)}`));
+	} else if (state.decisionOwed) {
 		markers.push(theme.fg("muted", "decision owed"));
 	}
 	const head = [theme.bold("Frame"), theme.fg("accent", frameHeadline(state)), ...markers].join(" ");
@@ -186,6 +194,8 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 		lines.push("");
 	}
 
+	lines.push(...recheckLines(state, history, width));
+
 	if (state.corrections.length > 0) {
 		lines.push(truncateToWidth(theme.bold("Corrections"), width));
 		for (const correction of state.corrections) {
@@ -226,6 +236,77 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 	}
 
 	return lines;
+}
+
+/** The compact marker's word for a reconsideration: short, because it shares a line with the
+ *  version and the panel's other markers. The reason lives in the detail view. */
+function recheckVerdictText(recheck: FormulationRecheck): string {
+	switch (recheck.verdict) {
+		case "maintained":
+			return "kept the reading";
+		case "revised":
+			return "reading revised";
+		default:
+			return "deferred";
+	}
+}
+
+/**
+ * The detail view's account of the last reconsideration, or the fact that there has not been one.
+ *
+ * It states the verdict and the agent's own reason, and nothing else: residual is not recorded, so
+ * a list of "unexplained observations" here would be an artifact of the panel rather than a fact
+ * from the log.
+ *
+ * The owed state comes first because a record can outlive the round it answered: once a new round
+ * has distilled, the stored verdict belongs to an earlier one, and presenting it as the answer to
+ * this round would report a check nobody has made. Such a record is still shown, but as what it
+ * is — an earlier round's answer.
+ */
+function recheckLines(state: FormulationState, history: readonly ProblemFormulationVersion[], width: number): string[] {
+	const recheck = state.recheck;
+	if (state.recheckOwed) {
+		return [
+			truncateToWidth(theme.bold("Reconsidered"), width),
+			...wrapTextWithAnsi(
+				"  Not yet: distillation has reported on the last round, and the agent has not said what it means for this reading.",
+				width,
+			),
+			...(recheck
+				? [
+						...wrapTextWithAnsi(
+							`  This record answers an earlier round: ${recheckOutcome(recheck, history)}. The basis stated then:`,
+							width,
+						),
+						...wrapTextWithAnsi(`    ${recheck.reason}`, width),
+					]
+				: []),
+			"",
+		];
+	}
+	if (!recheck) return [];
+	return [
+		truncateToWidth(theme.bold("Reconsidered"), width),
+		...wrapTextWithAnsi(
+			`  ${recheckOutcome(recheck, history)} after the last round. The agent's stated basis:`,
+			width,
+		),
+		...wrapTextWithAnsi(`    ${recheck.reason}`, width),
+		"",
+	];
+}
+
+/** The verdict phrased as what the agent did with the reading, without naming the round it happened in. */
+function recheckOutcome(recheck: FormulationRecheck, history: readonly ProblemFormulationVersion[]): string {
+	if (recheck.verdict === "maintained") return "Kept the reading";
+	if (recheck.verdict === "revised") {
+		return `Changed the reading; ${
+			recheck.versionId
+				? versionLabel(history, { kind: "version", versionId: recheck.versionId })
+				: "a published version"
+		} carries it`;
+	}
+	return "No reading could be stated";
 }
 
 function versionLabel(history: readonly ProblemFormulationVersion[], adoption: FormulationAdoption): string {

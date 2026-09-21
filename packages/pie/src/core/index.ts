@@ -42,6 +42,8 @@ export {
 	type FormulationCorrectionStatus,
 	type FormulationDeferral,
 	type FormulationOrigin,
+	type FormulationRecheck,
+	type FormulationRecheckVerdict,
 	type FormulationSource,
 	type FormulationVersionId,
 	formulationContentError,

@@ -58,7 +58,16 @@ distill records only evidence material to the judgment.
   user's intent, and the belief state: the same beliefs under a different task give a different
   reading, so it is neither a belief nor an aggregate of beliefs. It conditions which hypotheses and
   experiments come next and is never evidence for a belief.
-- The task objective is the domain `Target` derived from the user request.
+- The **task objective** is the domain `Target` derived from the user request.
+- The **recheck** is the task-level result of propose reconsidering the current reading after a
+  distillation: "reconsidered and kept it", "revised" (which is the published version), or "not
+  reconsidered yet". It is what makes the routine step visible — a published version only records
+  that the reading changed, never that a round looked and kept it. Residual is not part of it: what
+  the belief set still does not explain stays in the distill turn's prose and is written at the
+  granularity of one residual holding several sourced observations, so nothing here should be read
+  as a structured list of unexplained observations. The recheck is also not
+  `FormulationApplicabilityRecorded`, which answers what a *revised* reading means for the
+  conclusions the previous one reached.
 - Fast-path selection is `RoutingSet` control metadata written by `route_task`.
 - The **task focus** (`FocusSet`) is the control-only slice of belief ids the current task acts on,
   written by `focus_beliefs`. It is scope, not truth: membership never changes a belief's status, so
@@ -97,6 +106,16 @@ belief. The two branches are not substitutes — an unchanged belief set can sti
 reconsideration, and reconsideration never settles an unadjudicated belief. Propose then
 chooses which unresolved uncertainty matters next relative to task value, cost, risk, side effects,
 and evidence dependencies — and which task decision that choice could change.
+
+Only the recheck branch is recorded, and it is recorded every round: a distillation leaves either a
+reconsideration result (maintained, revised, or deferred) or the state "not reconsidered yet", so
+"looked and kept it" is never indistinguishable from "never looked". An anomaly therefore cannot be
+skipped past even though it is not itself a record — the round it appeared in owes a result. The
+record, the gate, and the projection of the result into the reading's own block are implemented
+(M7.3–M7.4), and the terminal shows the same two states — `recheck owed` or `rechecked`, with the
+agent's stated basis in `/frame` — because it reads the replayed task rather than a counter kept
+beside it. Residual stays outside all of this: the panel shows the basis propose wrote, never a
+list of unexplained observations, because no such list is recorded.
 
 The Frame sits above this flow. Adjudicated beliefs are read into a formulation, the formulation
 orders which uncertainty propose considers next, and evidence that does not fit the reading forces a

@@ -135,6 +135,7 @@ import {
 } from "./tools/declare-belief.ts";
 import {
 	createDeferFormulationToolDefinition,
+	createRecheckFormulationToolDefinition,
 	createReviewApplicabilityToolDefinition,
 	createSetFormulationToolDefinition,
 	formulationContentFromTool,
@@ -705,6 +706,8 @@ export class AgentSession {
 			deferral: this._beliefLoop.formulationDeferral() ?? null,
 			corrections: [...this._beliefLoop.formulationCorrections()],
 			decisionOwed: this._beliefLoop.formulationDecisionOwed(),
+			recheckOwed: this._beliefLoop.formulationRecheckOwed(),
+			recheck: this._beliefLoop.formulationRecheck() ?? null,
 			review: this._beliefLoop.formulationReview(),
 			pendingApplicability: [...this._beliefLoop.pendingApplicability()],
 			unrevalidated: this._beliefLoop.unrevalidatedApplicability().map((entry) => entry.beliefId),
@@ -3094,7 +3097,8 @@ export class AgentSession {
 					outcome: result.outcome,
 					text:
 						result.outcome === "unchanged"
-							? `Formulation unchanged (still version ${result.value.ordinal}); no new version was recorded.`
+							? `Formulation unchanged (still version ${result.value.ordinal}); no new version was recorded. ` +
+								`If the reading still holds, record that with recheck_formulation instead of resubmitting it.`
 							: `Recorded formulation version ${result.value.ordinal}: ${result.value.content.interpretation}`,
 				};
 			}) as ToolDefinition,
@@ -3114,7 +3118,8 @@ export class AgentSession {
 					outcome: result.outcome,
 					text:
 						result.outcome === "unchanged"
-							? "The same deferral is already recorded; no new record was made."
+							? "The same deferral is already recorded; no new record was made. If the current reading still holds, " +
+								"record that with recheck_formulation instead of deferring again."
 							: `Deferred stating a formulation. Missing: ${result.value.missingInformation}`,
 				};
 			}) as ToolDefinition,
@@ -3124,6 +3129,12 @@ export class AgentSession {
 			createReviewApplicabilityToolDefinition((input) =>
 				this._beliefLoop.recordApplicability(input.entries),
 			) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
+			"recheck_formulation",
+			createRecheckFormulationToolDefinition((input) => ({
+				verdict: this._beliefLoop.recordRecheck(input.reason).verdict,
+			})) as ToolDefinition,
 		);
 		this._baseToolDefinitions.set(
 			"answer_correction",

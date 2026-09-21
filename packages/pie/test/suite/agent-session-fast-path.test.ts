@@ -347,7 +347,11 @@ describe("AgentSession fast path", () => {
 					evidence: "the post-logout value persisted as predicted",
 				}),
 			]),
-			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
+			// The round distilled under the reading, so it owes a reconsideration before concluding.
+			fauxAssistantMessage([
+				fauxToolCall("recheck_formulation", { reason: "the reading still organizes the round's evidence" }),
+				fauxToolCall("conclude", { result: "delivered", evidence: "observed" }),
+			]),
 			fauxAssistantMessage([fauxToolCall("conclude", { result: "delivered", evidence: "observed" })]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);

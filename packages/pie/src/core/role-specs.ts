@@ -26,6 +26,7 @@ export const BELIEF_SURFACE_TOOLS = [
 	"select_experiment",
 	"set_formulation",
 	"defer_formulation",
+	"recheck_formulation",
 	"answer_correction",
 	"review_applicability",
 	"view_beliefs",
@@ -49,7 +50,7 @@ const PROPOSE_ROLE_HEADER =
 	"\n\nYou are the propose role of an investigation loop (propose → execution → distill → finalReport). " +
 	"Choose which unresolved uncertainty matters next; execution gathers evidence, distill updates the belief state, " +
 	"and finalReport answers the user. Your tools are route_task, declare_belief, focus_beliefs, select_experiment, " +
-	"set_formulation, defer_formulation, answer_correction, review_applicability, view_beliefs, and conclude. " +
+	"set_formulation, defer_formulation, recheck_formulation, answer_correction, review_applicability, view_beliefs, and conclude. " +
 	"Write every belief, every formulation, and its evidence in {beliefLang}.\n\n";
 
 const PROPOSE_ROUTING_HEADER =
@@ -114,6 +115,11 @@ const PROPOSE_PROTOCOL =
 	"reading. " +
 	"Reconsider the reading when residual evidence conflicts with its assumptions or scope, or a user correction changes " +
 	"the problem. This feedback is evidence → reading → focus → experiment; preserve counterexample probes. " +
+	"Every distillation owes you a result before you choose another experiment or conclude, including a round that " +
+	"changed no belief and left no residual: use recheck_formulation to record that the reading still holds and why, " +
+	"set_formulation when it changed, or defer_formulation when none can be stated. This is a check on the reading, " +
+	"not on the beliefs — it neither settles an unadjudicated belief nor questions a settled one, and residual is not " +
+	"evidence for it. " +
 	"Revise only for a substantive change in what you understand, where you attend, or where the work goes: " +
 	"the same reading with more evidence behind it is not a revision.\n" +
 	"10. When the user corrects your reading, answer it with answer_correction before anything else: revise the reading " +
@@ -133,7 +139,8 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the propose role does not have. Choose the next uncertainty with ` +
 			`declare_belief, set scope with focus_beliefs, select the experiment with select_experiment, state your reading ` +
-			`with set_formulation (or defer_formulation), answer a correction with answer_correction, account for the ` +
+			`with set_formulation (or defer_formulation), record that a distillation left your reading standing with ` +
+			`recheck_formulation, answer a correction with answer_correction, account for the ` +
 			`previous reading's conclusions with review_applicability, inspect state with ` +
 			`view_beliefs, route epistemically closed work ` +
 			`with route_task, or conclude. ` +
@@ -188,6 +195,9 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 					// survives a change to the belief-surface list.
 					name !== "set_formulation" &&
 					name !== "defer_formulation" &&
+					// Saying what the current reading means after a round is that same judgment, taken one
+					// step later; a probing role must not be the one to declare its own question settled.
+					name !== "recheck_formulation" &&
 					// Which conclusions still answer the current reading is propose's judgment for the same
 					// reason: a role that probes cannot also decide what its predecessors' results mean.
 					name !== "review_applicability",
@@ -290,6 +300,13 @@ export const TRANSITION_STEERS = {
 		"attends to, and what it changes), or call defer_formulation to record what is still missing and why. This is a " +
 		"required decision, not a formality: it is the difference between investigating toward a reading and drifting. A " +
 		"rejected call does not count — fix the input and call again.",
+	formulationRecheck:
+		"Distillation has reported on the round you dispatched, so say what it means for how you read this task before " +
+		"choosing another experiment or concluding. Call recheck_formulation if the reading still organizes the task, with " +
+		"the reason it does; call set_formulation if the reading changed; call defer_formulation if no reading can be " +
+		"stated right now. An unchanged belief set is not a reason to skip this — new evidence can matter to the reading " +
+		"without changing any belief's status, and a round that changed nothing still has to be looked at. This decides " +
+		"the reading, not the beliefs: it neither settles an unadjudicated belief nor questions a settled one.",
 	writeConclusion: "Write the evidence-grounded conclusion.",
 	answerCorrection: (ids: string) =>
 		`The user corrected your reading of this task (${ids}). The round that was running stopped at the tool boundary: ` +
