@@ -272,6 +272,12 @@ export class BeliefSet {
 		return this._beliefs;
 	}
 
+	/** Restore the branch's durable records, preserving ids for focus and pending experiments. */
+	restore(beliefs: readonly Belief[]): void {
+		this._beliefs = [...beliefs];
+		this._nextId = Math.max(0, ...beliefs.map((belief) => Number(belief.id.replace("belief-", "")) || 0)) + 1;
+	}
+
 	/** The unadjudicated world beliefs driving the next experiment. */
 	proposed(): Belief[] {
 		return this._beliefs.filter((b) => statusOf(b) === "proposed");

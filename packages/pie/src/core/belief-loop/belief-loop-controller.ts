@@ -289,6 +289,20 @@ export class BeliefLoopController {
 			.map((taskId) => this.domainSnapshot.tasks.get(taskId))
 			.find((task) => task?.status === "active");
 		this.currentTaskId = currentTask?.id;
+		this.beliefSet.restore(
+			[...this.domainSnapshot.beliefs.values()].map((belief) => ({
+				...belief,
+				inconclusiveBy: belief.inconclusiveBy ?? [],
+				supersededBy: belief.withdrawn ? WITHDRAWN : belief.supersededBy,
+			})),
+		);
+		this.focusSet.reset();
+		if (currentTask?.focusDeclared) this.focusSet.select(currentTask.focus);
+		this.beliefsAtTaskReset = currentTask
+			? this.beliefSet.beliefs.filter((belief) => !currentTask.introducedBeliefs.includes(belief.id)).length
+			: this.beliefSet.beliefs.length;
+		this.loopState = { role: "propose" };
+		this.currentTaskRequestText = currentTask ? domainContentText(currentTask.initialPrompt.effective) : "";
 		const currentEpisode = currentTask?.episodes.find((episode) => episode.status === "active");
 		this.currentEpisodeId = currentEpisode?.id;
 		this.currentPlanId = currentEpisode?.body.kind === "belief-loop" ? currentEpisode.body.plan?.id : undefined;
@@ -403,6 +417,8 @@ export class BeliefLoopController {
 	 * choice, the revision that voided it, and the choice made in its place.
 	 */
 	selectExperiment(selection: ExperimentSelection): void {
+		const blocked = this.revisionGate();
+		if (blocked) throw new Error(blocked);
 		this.pendingExperiment = selection;
 		const episode = this.activeEpisode();
 		if (!episode || episode.status === "closed") return;
@@ -425,6 +441,10 @@ export class BeliefLoopController {
 	 *  no-op for the selection: tools run in call order within a turn, so a model that selects
 	 *  before restating the same focus must not lose the selection. */
 	setFocus(beliefIds: readonly string[]): void {
+		if (this.awaitingFormulationResponse() || this.pendingCorrections().length > 0) {
+			throw new Error("Answer the user response before reviewing focus.");
+		}
+		const reviewOwed = this.focusReviewOwed();
 		const changed = !sameBeliefIds(this.focusSet.beliefIds, beliefIds);
 		const declaredBefore = this.focusSet.declared;
 		this.focusSet.select(beliefIds);
@@ -434,7 +454,7 @@ export class BeliefLoopController {
 		// Emit when the fold's output would change: the first declaration, and any later change.
 		// Restating the same scope is a no-op the model may repeat each turn, and a session entry
 		// per restatement would be pure noise.
-		if (!declaredBefore || changed) {
+		if (!declaredBefore || changed || reviewOwed) {
 			this.emitFocusDeclared(beliefIds);
 		}
 	}
@@ -446,11 +466,14 @@ export class BeliefLoopController {
 			type: "FocusDeclared",
 			taskId: this.currentTaskId,
 			beliefIds: [...beliefIds],
+			formulation: this.currentFormulationAdoption(),
 		});
 	}
 
 	/** Record what the task delivered and how it was verified (distinct from belief settlement). */
 	recordOutcome(outcome: TaskOutcome): void {
+		const blocked = this.revisionGate();
+		if (blocked) throw new Error(blocked);
 		const previous = this.taskOutcome;
 		this.taskOutcome = outcome;
 		if (!this.currentTaskId) return;
@@ -487,6 +510,34 @@ export class BeliefLoopController {
 	currentFormulation(): ProblemFormulationVersion | undefined {
 		const task = this.currentTask();
 		return task ? currentFormulationOf(task) : undefined;
+	}
+
+	formulationReview() {
+		return this.currentTask()?.formulationReview;
+	}
+
+	awaitingFormulationResponse(): boolean {
+		const review = this.formulationReview();
+		return review !== undefined && review.responseCorrectionId === undefined;
+	}
+
+	focusReviewOwed(): boolean {
+		return this.formulationReview()?.focusReviewed === false;
+	}
+
+	revisionGate(): string | undefined {
+		if (this.awaitingFormulationResponse()) return TRANSITION_STEERS.awaitFormulationResponse;
+		if (this.formulationReview() && this.pendingCorrections().length > 0) {
+			return "Answer every pending correction before reviewing focus.";
+		}
+		if (this.focusReviewOwed()) return TRANSITION_STEERS.reviewFocus;
+		return undefined;
+	}
+
+	/** Only an actual user input received against this version releases its wait. */
+	receiveFormulationResponse(content: DomainContent): void {
+		if (!this.awaitingFormulationResponse() || !domainContentText(content).trim()) return;
+		this.submitFormulationCorrection(content, this.currentFormulation()?.id);
 	}
 
 	/** The recorded deferral, while propose has deferred and not published since. */
@@ -628,6 +679,8 @@ export class BeliefLoopController {
 		if (!reason) return { outcome: "rejected", reason: "a formulation version needs a short reason" };
 		const sourceError = this.formulationSourcesError(task, input.sources);
 		if (sourceError) return { outcome: "rejected", reason: sourceError };
+		// A revision may pause before dispatch; persist its proposed beliefs before that boundary.
+		if (this.pendingDomainBeliefDeltas.length > 0) this.selectDomainEpisodeBody("belief-loop");
 
 		const current = currentFormulationOf(task);
 		// A resubmission that says exactly the same thing is a no-op: not a new version, not an
@@ -638,6 +691,9 @@ export class BeliefLoopController {
 			return { outcome: "unchanged", value: current };
 		}
 
+		if (this.awaitingFormulationResponse()) {
+			return { outcome: "rejected", reason: TRANSITION_STEERS.awaitFormulationResponse };
+		}
 		const version: ProblemFormulationVersion = {
 			id: createDomainId("formulation"),
 			taskId: task.id,
@@ -656,6 +712,7 @@ export class BeliefLoopController {
 			version,
 		});
 		this.invalidatePendingSelection("a new formulation version was published");
+		this.reflected = false;
 		return { outcome: "recorded", value: version };
 	}
 
@@ -731,7 +788,7 @@ export class BeliefLoopController {
 		const correction: FormulationCorrection = {
 			id: createDomainId("formulation-correction"),
 			taskId: task.id,
-			targetVersionId,
+			targetVersionId: targetVersionId ?? this.currentFormulation()?.id,
 			original,
 			receivedAt: new Date().toISOString(),
 			status: "pending",
@@ -742,6 +799,7 @@ export class BeliefLoopController {
 			taskId: task.id,
 			correction,
 		});
+		this.invalidatePendingSelection("the user responded to the task reading");
 		return correction;
 	}
 
@@ -1020,6 +1078,24 @@ export class BeliefLoopController {
 			this.applyRoleSurface();
 			return;
 		}
+		if (this.awaitingFormulationResponse()) {
+			this.loopState = { role: "propose" };
+			this.applyRoleSurface();
+			this.emitCursorChanged("propose");
+			const revision = this.currentFormulation();
+			if (revision && turn.toolResults.some((result) => result.toolName === "set_formulation" && !result.isError)) {
+				await this.host.sendCustomMessage(
+					{
+						customType: "formulation_wait",
+						content: `Frame v${revision.ordinal}: ${revision.content.interpretation}\nFocus: ${revision.content.focus}\nWhat changed: ${revision.content.implication}\nReason: ${revision.reason}\n${TRANSITION_STEERS.awaitFormulationResponse}`,
+						display: true,
+						details: { versionId: revision.id },
+					},
+					{ triggerTurn: false },
+				);
+			}
+			return;
+		}
 		const previousRole = this.loopState.role;
 		const next = await this.transition(this.loopState, turn);
 		this.loopState = next.state;
@@ -1086,6 +1162,8 @@ export class BeliefLoopController {
 				if (this.formulationDecisionOwed()) {
 					return { state, steer: TRANSITION_STEERS.formulationDecision };
 				}
+				const revisionBlocked = this.revisionGate();
+				if (revisionBlocked) return { state, steer: revisionBlocked };
 				const rejected = this.rejectedConclude(turn);
 				if (rejected !== undefined) {
 					return { state, steer: TRANSITION_STEERS.concludeRejected(rejected) };
@@ -1248,6 +1326,8 @@ export class BeliefLoopController {
 		state: LoopState,
 		unadjudicated: Belief[],
 	): Promise<{ state: LoopState; steer?: string }> {
+		const revisionBlocked = this.revisionGate();
+		if (revisionBlocked) return { state: { role: "propose" }, steer: revisionBlocked };
 		if (unadjudicated.length > 0) {
 			return {
 				state,
@@ -1731,7 +1811,13 @@ export class BeliefLoopController {
 			];
 			if (current.content.tension) lines.push(`Core tension: ${current.content.tension}`);
 			if (current.content.alternative) lines.push(`Not currently prioritizing: ${current.content.alternative}`);
-			lines.push(`What this changes: ${current.content.implication}`, "</current_formulation>", "");
+			lines.push(`What this changes: ${current.content.implication}`);
+			const gate = this.revisionGate();
+			if (gate) lines.push(gate);
+			for (const correction of this.pendingCorrections()) {
+				lines.push(`Pending user response ${correction.id}: ${domainContentText(correction.original)}`);
+			}
+			lines.push("</current_formulation>", "");
 			return lines.join("\n");
 		}
 		const deferral = task.formulationDeferral;

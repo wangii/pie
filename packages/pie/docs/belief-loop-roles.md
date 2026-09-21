@@ -97,6 +97,28 @@ generated output", "never edit the vendored tree") change which action propose s
 distill reads evidence, so withholding them would hide part of the basis for the decision.
 `finalReport` writes rather than decides and stays on the `read` gate.
 
+## Frame feedback and revision pause
+
+Evidence and beliefs inform the Frame; the Frame's objects, relations and scale inform task focus;
+focus guides experiments; distill's residual can prompt a new reading. Scope does not mechanically
+map files to functions, components to data structures, or systems to component definitions: explain
+which distinctions matter for this task. A Frame is never evidence and may guide counterexample probes.
+
+First publication and unformed preliminary investigation remain permitted without a user handshake.
+A substantive revision, however, pauses the run at the tool boundary, keeps the task active, and
+waits for a user response against that version. A normal reply resumes the same task through the
+correction channel; earlier queued input or an automated extension message cannot acknowledge it.
+There is no automatic approval on timeout. The terminal shows the revised reading and why it changed.
+
+Propose answers the response, then explicitly calls `focus_beliefs` before selecting an experiment,
+routing to fast path or concluding. It may keep exactly the same ids. `FocusDeclared.formulation`
+records which version was reviewed; another revision requires another response and review.
+Review changes relevance, never belief truth or the adjudication debt of an interrupted experiment.
+
+Substantive change remains propose's judgment: accumulated confirming evidence or wording edits
+must not manufacture revisions. Residual evidence conflicting with the assumptions or scope should
+trigger reconsideration, not necessarily a new version. An identical submission is a runtime no-op.
+
 ## Task focus and experiment selection
 
 The belief set is history; the focus is scope. Two control-only tools keep them apart:
@@ -129,8 +151,8 @@ instead of reconstructing the slice from the transcript. Neither line is a belie
 
 The slice is published as the task-scoped `FocusDeclared` domain event and folded onto the Task
 record, so a viewer (the native GUI's graph view) renders scope without inferring it. The event is
-emitted on the first declaration and on any change, not on a restatement: the fold would not
-change, and a model may restate its scope every turn.
+emitted on the first declaration, any membership change, or a required version-bound focus review.
+Other restatements do not emit an event.
 
 ## Propose objective
 
@@ -264,12 +286,13 @@ does not block, because the task has declared it is not acting on it.
 Terminal ownership is unique:
 
 ```text
-fast-path execution -> user
+fast-path execution -> propose (publish/retain Frame) -> finalReport -> user
 ```
 
-The execution role writes the terminal response. A hidden `fast_path_distillation` summary preserves
-completed actions and blockers for session continuity, but neither distill nor finalReport writes a
-second user answer. A failed run returns to propose without replaying the consumed route.
+Execution records the outcome; finalReport writes the single terminal response after propose has
+stated its reading. A hidden `fast_path_distillation` summary preserves completed actions and blockers
+for session continuity. A failed run returns to propose without replaying the consumed route.
+Revising an existing Frame here requires the same user response and focus review as a normal loop.
 
 The fast path has no belief loop, so it cannot `conclude`: it submits the same task outcome through
 `report_outcome` instead. A clean tool log is operational evidence, not a completion judgment.

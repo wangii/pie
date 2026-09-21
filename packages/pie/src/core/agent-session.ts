@@ -437,6 +437,9 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._beliefLoop.installAgentNextTurnRefresh();
+		const previousStop = this.agent.shouldStopAfterTurn;
+		this.agent.shouldStopAfterTurn = async (context, signal) =>
+			this._beliefLoop.awaitingFormulationResponse() || (await previousStop?.(context, signal)) === true;
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -522,6 +525,19 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			// Refuse routing at tool time as well as dispatch time: otherwise a route selected
+			// before the focus review survives the gate and overrides the later experiment.
+			if (toolCall.name === "route_task") {
+				const blocked = this._beliefLoop.revisionGate();
+				if (blocked) return { block: true, reason: blocked };
+			}
+			if (
+				this._beliefLoop.awaitingFormulationResponse() &&
+				toolCall.name !== "view_beliefs" &&
+				toolCall.name !== "answer_correction"
+			) {
+				return { block: true, reason: TRANSITION_STEERS.awaitFormulationResponse };
+			}
 			// A user correction stops the round at this boundary. Calls already in flight have
 			// returned; the ones queued behind them must not start, or the round would keep spending
 			// itself on an investigation the user just redirected. Blocking here rather than aborting
@@ -688,6 +704,7 @@ export class AgentSession {
 			deferral: this._beliefLoop.formulationDeferral() ?? null,
 			corrections: [...this._beliefLoop.formulationCorrections()],
 			decisionOwed: this._beliefLoop.formulationDecisionOwed(),
+			review: this._beliefLoop.formulationReview(),
 		};
 	}
 
@@ -1308,6 +1325,9 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (this._beliefLoop.awaitingFormulationResponse()) {
+			throw new Error(TRANSITION_STEERS.awaitFormulationResponse);
+		}
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
@@ -1323,6 +1343,10 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
+		if (this._beliefLoop.awaitingFormulationResponse()) {
+			this._lastAssistantMessage = undefined;
+			return false;
+		}
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
@@ -1431,6 +1455,9 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
+				if (options.source !== "extension") {
+					this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, options?.images));
+				}
 				if (options.streamingBehavior === "followUp") {
 					await this._queueFollowUp(expandedText, currentImages);
 				} else {
@@ -1530,6 +1557,9 @@ export class AgentSession {
 			if (!this._beliefLoop.currentTaskId) {
 				this._beliefLoop.beginDomainTask(text, expandedText, options?.images, currentImages);
 			} else {
+				if (options?.source !== "extension") {
+					this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, options?.images));
+				}
 				this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
 			}
 			this._beliefLoop.applyRoleSurface();
@@ -1624,6 +1654,7 @@ export class AgentSession {
 		let expandedText = this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
+		this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, images));
 		await this._queueSteer(expandedText, images);
 	}
 
@@ -1644,6 +1675,7 @@ export class AgentSession {
 		let expandedText = this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
+		this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, images));
 		await this._queueFollowUp(expandedText, images);
 	}
 

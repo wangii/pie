@@ -91,7 +91,9 @@ const PROPOSE_PROTOCOL =
 	"dispatched in the experiment, including unresolved beliefs carried over from earlier rounds, so estimate the whole " +
 	"experiment once and split that estimate across the dispatched beliefs: keep at least 1 per belief and assign shared " +
 	"work once, so the summed total matches the experiment you intend instead of repeating the shared cost on each belief.\n" +
-	"8. Keep the task focus (which beliefs currently matter) separate from belief truth. Use focus_beliefs to declare the " +
+	"8. Derive focus from the current reading's task scope: name the objects, relations, and scale that matter, " +
+	"and why. A function, data structure, or component boundary is relevant because of the problem, not a fixed " +
+	"file/component/system hierarchy. Keep task focus separate from belief truth. Use focus_beliefs to declare the " +
 	"task's current focus; changing focus never changes a belief's status, and an empty focus means nothing is in scope. " +
 	"Then use select_experiment with the belief ids (a subset of the focus) and one sentence naming the task decision the " +
 	"experiment could change. Beliefs left out of an experiment keep their status and stay in focus. view_beliefs reports " +
@@ -103,7 +105,11 @@ const PROPOSE_PROTOCOL =
 	"claim as a belief and test it instead. Once you have investigated, this decision is required before you choose " +
 	"another experiment or conclude; if you genuinely cannot state a reading yet, use defer_formulation to say what is " +
 	"missing and why. Publishing a new version voids any experiment you selected but have not dispatched, so select again " +
-	"afterwards. Revise only for a substantive change in what you understand, where you attend, or where the work goes: " +
+	"afterwards. A revision (not the first version) pauses execution and conclusion until the user responds to that " +
+	"version. Answer the response, then explicitly review focus with focus_beliefs, even if the same ids remain relevant. " +
+	"Reconsider the reading when residual evidence conflicts with its assumptions or scope, or a user correction changes " +
+	"the problem. This feedback is evidence → reading → focus → experiment; preserve counterexample probes. " +
+	"Revise only for a substantive change in what you understand, where you attend, or where the work goes: " +
 	"the same reading with more evidence behind it is not a revision.\n" +
 	"10. When the user corrects your reading, answer it with answer_correction before anything else: revise the reading " +
 	"(citing the correction in set_formulation), state explicitly that you keep it and why, or say what is ambiguous and " +
@@ -198,6 +204,12 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 };
 
 export const TRANSITION_STEERS = {
+	awaitFormulationResponse:
+		"Execution is paused for your response to the revised Frame. Reply to confirm, correct, or clarify this reading; " +
+		"the agent must answer your response and review focus before continuing.",
+	reviewFocus:
+		"Review the task focus under the current Frame with focus_beliefs before selecting an experiment, routing to " +
+		"fast path, or concluding. The same belief ids are allowed: review relevance, not truth. Keep counterexamples in scope.",
 	dispatch: (statements: string) =>
 		`Run one coherent experiment for these beliefs: ${statements}. Report all materially distinct raw observations with sources or command results.`,
 	fastPathDispatch:

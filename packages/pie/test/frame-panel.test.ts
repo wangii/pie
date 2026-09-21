@@ -65,6 +65,28 @@ function plain(lines: readonly string[]): string[] {
 }
 
 describe("frame panel", () => {
+	it("distinguishes waiting for the user from the subsequent focus review", () => {
+		const waiting = view({
+			state: state({ current: version(2), review: { versionId: "formulation-2", focusReviewed: false } }),
+		});
+		expect(plain(buildFrameSummaryLines(waiting, 80)).join("\n")).toContain("awaiting your response");
+		expect(plain(buildFrameDetailLines(waiting, 80)).join("\n")).toContain("Paused: reply");
+		const reviewing = view({
+			state: state({
+				current: version(2),
+				review: { versionId: "formulation-2", responseCorrectionId: "correction-1", focusReviewed: false },
+			}),
+		});
+		expect(plain(buildFrameSummaryLines(reviewing, 80)).join("\n")).toContain("focus review owed");
+		for (const width of [24, 40, 60]) {
+			for (const item of [waiting, reviewing]) {
+				for (const line of [...buildFrameSummaryLines(item, width), ...buildFrameDetailLines(item, width)]) {
+					expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				}
+			}
+		}
+	});
+
 	it("says a reading has not been formed yet rather than showing nothing", () => {
 		const lines = plain(buildFrameSummaryLines(view(), 80));
 		expect(lines[0]).toContain("not yet formed");

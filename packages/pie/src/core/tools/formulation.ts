@@ -116,7 +116,7 @@ export function createSetFormulationToolDefinition(
 		name: "set_formulation",
 		label: "set formulation",
 		description:
-			"Publish how you currently understand this task: your provisional reading, what it attends to, and what it changes. This is the agent's stated position, not a belief and not evidence. Revising it creates a new version and invalidates any experiment you selected but have not dispatched.",
+			"Publish how you currently understand this task: your provisional reading, what it attends to, and what it changes. This is the agent's stated position, not a belief and not evidence. Revising it creates a new version, invalidates an undispatched experiment, and pauses for the user's response. After answering that response, review focus explicitly, even if its membership stays the same.",
 		promptSnippet: "Publish your current understanding of the task",
 		promptGuidelines: [
 			"State a provisional first-person reading, not a settled claim; the formulation is never evidence for a belief",

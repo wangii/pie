@@ -1,12 +1,13 @@
 # Agent session domain model
 
-> **Status: current runtime contract, schema v4.** `agent-session-domain.ts` defines this model,
+> **Status: current runtime contract, schema v5.** `agent-session-domain.ts` defines this model,
 > `BeliefLoopController` emits and replays its events, and RPC forwards those events unchanged.
 > GUI projections remain consumers rather than sources of truth.
 
 > **Every schema bump so far has been breaking.** v2 renamed the execution-round vocabulary from
 > `TaskFrame`/`frameId` to `ExecutionEpisode`/`episodeId`; v3 added the task-level problem
-> formulation; v4 added the experiment selection. Older logs are rejected rather than migrated —
+> formulation; v4 added the experiment selection; v5 added revision response and focus review.
+> Older logs are rejected rather than migrated —
 > see [Protocol versioning and old logs](#protocol-versioning-and-old-logs).
 
 ## Problem and solution
@@ -98,6 +99,7 @@ struct Task {
   // starts undeclared.
   std::vector<BeliefId> focus;
   bool focusDeclared;
+  std::optional<FormulationReview> formulationReview;
   // What the task delivered, and how it was verified. Absent until recorded.
   std::optional<TaskOutcome> taskOutcome;
 
@@ -278,6 +280,29 @@ and creates no version. Deciding whether a paraphrase is substantive would take 
 compare semantics, and the runtime deliberately does not add one — which also means more evidence
 for an unchanged reading never manufactures a revision.
 
+#### Revision response and focus review
+
+A revision (ordinal > 1) creates task-local `formulationReview`:
+`{ versionId, responseCorrectionId?, focusReviewed: false }`. The first publication does not
+require user interaction, and the first investigation may still run without a Frame.
+
+Until a user response targets that exact version, the run stops after the tool batch and the task
+stays active. Later tools in the batch cannot dispatch, reframe, change focus, or conclude. A normal
+user reply while paused is recorded through the correction channel; an explicit correction can
+name its target version. Earlier queued input, responses targeting older versions, and extension
+messages do not release the wait. There is no timeout approval.
+
+After the response arrives, propose must answer every pending correction and call `focus_beliefs`.
+The resulting `FocusDeclared.formulation` names the reviewed version, even when the belief ids are
+unchanged. Experiment selection, routing and conclusion remain gated until that review. A further
+revision requires another response; answering an earlier correction cannot acknowledge a later
+version. These states are replayed with the active branch, including its beliefs and focus.
+
+The terminal shows the wait and the review obligation. Reply normally to continue the paused task.
+`/frame correct` records a correction; when idle, a subsequent prompt starts its processing.
+RPC exposes the same review through `get_state.formulation.review` and the domain snapshot.
+Native GUI rendering and terminal manual smoke validation are separate from this core contract.
+
 #### Adoption: which version governed a decision
 
 ```cpp
@@ -348,8 +373,8 @@ against the new version.
 Two consequences follow directly, and both are observable in the event stream:
 
 - Within one turn, tools run in call order. A turn that selects an experiment and then publishes a
-  version ends with no selection; a turn that publishes and then selects ends with a selection
-  bound to the new version.
+  version ends with no selection. After a first publication, selecting again binds the new version;
+  after a revision, user response and focus review must precede the new selection.
 - An already-dispatched experiment is untouched. Its `Plan` and its episode's observations stay
   exactly as recorded — a reframe does not un-run what ran, nor erase the evidence it produced.
 
@@ -608,8 +633,8 @@ Required correlation fields:
 - `BeliefDeltaApplied` carries the producer phase, source/result Belief ids, and
   resulting immutable record/provenance;
 - `FocusDeclared` carries the task-scoped belief-id slice verbatim, replacing any
-  earlier declaration. It is emitted on the first declaration and on a change,
-  not on a restatement, since a restatement does not change the folded Task;
+  earlier declaration, together with the current `formulation` adoption. It is emitted on the first
+  declaration, a membership change, or a required version-bound review. Other restatements are no-ops;
 - `TaskOutcomeRecorded` carries the task-scoped `result`/`evidence`/`blockers`.
   It is emitted only for a delivery a model recorded through `conclude` /
   `report_outcome`; the fast path's synthesized failure outcome is runtime
@@ -656,13 +681,13 @@ operation: the runtime replays the branch the leaf moved to before it reports an
 so a client is never told the agent holds an understanding from a branch it just left.
 
 `get_state` answers the same question for clients that want only the current reading: it carries
-the active task's `FormulationState` (current version, deferral, pending corrections, and whether
-the decision is still owed), and `get_domain_snapshot` returns the whole replayed snapshot — the
+the active task's `FormulationState` (current version, deferral, corrections, revision review, and
+whether the decision is still owed), and `get_domain_snapshot` returns the whole replayed snapshot — the
 tasks, their beliefs, and the cursor — in a JSON-serializable shape.
 
 ## Protocol versioning and old logs
 
-`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `4`. Every stored event carries the version
+`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `5`. Every stored event carries the version
 twice — once on the entry envelope, once on the event — and replay rejects any event whose version
 is not the current one.
 
@@ -671,7 +696,8 @@ is not the current one.
 | v1 | `TaskFrame`/`frameId` execution-round vocabulary | no |
 | v2 | `ExecutionEpisode`/`episodeId` (the rename) | no |
 | v3 | Problem-formulation records; `FormulationAdoption` on `Plan`/`FastPathEpisode` | no |
-| v4 | Experiment-selection records (`ExperimentSelected`/`ExperimentSelectionVoided`) | yes |
+| v4 | Experiment-selection records (`ExperimentSelected`/`ExperimentSelectionVoided`) | no |
+| v5 | Version-bound user response and focus review | yes |
 
 Every bump is a rename or an addition, never a migration, and the code is deliberately written
 that way:
@@ -693,7 +719,8 @@ carries no `FormulationAdoption`, so a replayed v2 plan is indistinguishable fro
 was never formed — exactly the distinction `Unformed` exists to preserve. A v3 log is rejected for
 the same kind of reason: an episode in it has no way to say whether an experiment was chosen and
 not yet dispatched, so replaying one would silently drop a choice the runtime was holding or
-invent one it never made. Sessions written by a v4 runtime are unaffected.
+invent one it never made. A v4 log cannot attest that a revision received a user response followed
+by focus review, so it is rejected by v5 rather than silently treating old scope as reviewed.
 
 ### Downstream consumers
 
@@ -762,7 +789,8 @@ model and must not become a second source of truth.
     the Task has no version, so a decision made under a version always names it.
 16. A formulation version never carries belief status, and never counts as evidence for a belief.
 17. Publishing a version leaves the focus slice, every belief record, and every already-recorded
-    observation untouched; it invalidates only a selection that has not been dispatched.
+    observation untouched; it invalidates a selection that has not been dispatched. A revision also
+    requires a user response followed by explicit focus review, without forcing different belief ids.
 18. A dispatch is traceable to the understanding that governed it: its plan (or, on the fast path,
     its episode) names the current version, or records that none existed.
 

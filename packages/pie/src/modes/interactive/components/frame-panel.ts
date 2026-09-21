@@ -90,6 +90,11 @@ export function buildFrameSummaryLines(view: FrameView, width: number): string[]
 	if (pending.length > 0) {
 		markers.push(theme.fg("warning", `${pending.length} correction${pending.length === 1 ? "" : "s"} pending`));
 	}
+	if (state.review && !state.review.responseCorrectionId) {
+		markers.push(theme.fg("warning", "awaiting your response"));
+	} else if (state.review && !state.review.focusReviewed) {
+		markers.push(theme.fg("warning", "focus review owed"));
+	}
 	if (state.decisionOwed) {
 		markers.push(theme.fg("muted", "decision owed"));
 	}
@@ -152,6 +157,24 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 		lines.push(
 			truncateToWidth(
 				theme.fg("muted", "Not yet formed: no investigation has settled how to read this task."),
+				width,
+			),
+		);
+		lines.push("");
+	}
+
+	if (state.review && !state.review.responseCorrectionId) {
+		lines.push(
+			...wrapTextWithAnsi(
+				"Paused: reply to confirm, correct, or clarify this revised Frame. The agent will answer and review focus before continuing.",
+				width,
+			),
+		);
+		lines.push("");
+	} else if (state.review && !state.review.focusReviewed) {
+		lines.push(
+			...wrapTextWithAnsi(
+				"User response received; the agent must answer pending corrections and review focus before continuing.",
 				width,
 			),
 		);

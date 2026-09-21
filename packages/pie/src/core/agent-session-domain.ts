@@ -21,7 +21,8 @@ import type { CustomEntry, SessionEntry } from "./session-manager.ts";
  *   replaying one cannot tell "nothing was selected" from "a selection was never written down",
  *   and a v3 log would silently lose the choice→void→re-choice sequence.
  */
-export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 4 as const;
+// v5 adds the revision response/focus-review gate; older logs cannot attest to it.
+export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 5 as const;
 export const AGENT_SESSION_DOMAIN_CUSTOM_ENTRY = "pie.agent-session-domain-event";
 
 export type SessionId = string;
@@ -281,7 +282,15 @@ export function formulationContentError(content: FormulationContent): string | u
  * that reads it (the terminal's Frame view, a reconnecting RPC client) sees the same state the log
  * holds rather than a second copy that could drift. The full version history lives on the task.
  */
+/** A revision must receive a user response, then an explicit focus review. */
+export interface FormulationReview {
+	readonly versionId: FormulationVersionId;
+	readonly responseCorrectionId?: FormulationCorrectionId;
+	readonly focusReviewed: boolean;
+}
+
 export interface FormulationState {
+	readonly review?: FormulationReview;
 	/** The current version, or `null` before the first one. */
 	readonly current: ProblemFormulationVersion | null;
 	/** The recorded deferral while one is current, or `null`. */
@@ -435,6 +444,7 @@ export interface Task {
 	 */
 	readonly focus: readonly BeliefId[];
 	readonly focusDeclared: boolean;
+	readonly formulationReview?: FormulationReview;
 	readonly taskOutcome?: TaskOutcome;
 	/**
 	 * This task's problem-formulation history, oldest first. Append-only and never inherited:
@@ -497,7 +507,7 @@ export type AgentSessionDomainEvent =
 	// Task scope, not episode content: the focus slice the task acts on, and the outcome it
 	// delivered. The event's presence IS the declaration — `beliefIds: []` is "declared and
 	// empty", distinct from a task that never declared a focus.
-	| (TaskEventBase & { type: "FocusDeclared"; beliefIds: readonly BeliefId[] })
+	| (TaskEventBase & { type: "FocusDeclared"; beliefIds: readonly BeliefId[]; formulation?: FormulationAdoption })
 	| (TaskEventBase & { type: "TaskOutcomeRecorded"; outcome: TaskOutcome })
 	// Task-level, not episode content: the agent's understanding of its own task is not a
 	// property of any one execution round, so publication, deferral, and corrections hang off
@@ -882,7 +892,19 @@ export function applyAgentSessionDomainEvent(
 			// no-current-episode early return), which is a legitimate in-flight state.
 			return {
 				...snapshot,
-				tasks: replaceTask(snapshot, { ...task, focus: [...event.beliefIds], focusDeclared: true }),
+				tasks: replaceTask(snapshot, {
+					...task,
+					focus: [...event.beliefIds],
+					focusDeclared: true,
+					formulationReview:
+						task.formulationReview &&
+						event.formulation?.kind === "version" &&
+						event.formulation.versionId === task.formulationReview.versionId &&
+						task.formulationReview.responseCorrectionId !== undefined &&
+						pendingFormulationCorrections(task).length === 0
+							? { ...task.formulationReview, focusReviewed: true }
+							: task.formulationReview,
+				}),
 			};
 		}
 		case "TaskOutcomeRecorded": {
@@ -928,6 +950,7 @@ export function applyAgentSessionDomainEvent(
 				tasks: replaceTask(snapshot, {
 					...task,
 					formulations: [...task.formulations, version],
+					formulationReview: current ? { versionId: version.id, focusReviewed: false } : undefined,
 					// Publishing answers the deferral: whatever was missing has been supplied, so the
 					// deferred state stops being current. The deferral record itself is not erased from
 					// the event log, only from the task's current state.
@@ -985,6 +1008,16 @@ export function applyAgentSessionDomainEvent(
 				tasks: replaceTask(snapshot, {
 					...task,
 					formulationCorrections: [...task.formulationCorrections, correction],
+					formulationReview: task.formulationReview
+						? {
+								...task.formulationReview,
+								focusReviewed: false,
+								responseCorrectionId:
+									correction.targetVersionId === task.formulationReview.versionId
+										? correction.id
+										: task.formulationReview.responseCorrectionId,
+							}
+						: undefined,
 				}),
 			};
 		}
@@ -1297,7 +1330,7 @@ export function domainEventsFromSessionEntries(entries: readonly SessionEntry[])
 						`but this runtime requires v${AGENT_SESSION_DOMAIN_SCHEMA_VERSION}. Every version bump ` +
 						`so far has been a breaking change with no migration path (v2 renamed TaskFrame to ` +
 						`ExecutionEpisode; v3 added problem-formulation records; v4 added the experiment ` +
-						`selection), so a v${version} session is rejected rather than replayed with missing ` +
+						`selection; v5 added revision response and focus review), so a v${version} session is rejected rather than replayed with missing ` +
 						`or misread records.`,
 				);
 			}
