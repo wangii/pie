@@ -131,7 +131,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
-import { FrameDetailComponent, FramePanel, type FrameView } from "./components/frame-panel.ts";
+import { buildFrameDetailLines, FrameDetailPanel, FramePanel, type FrameView } from "./components/frame-panel.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -554,6 +554,9 @@ export class InteractiveMode {
 	private framePanelContainer!: Container;
 	private framePanel!: FramePanel;
 	private framePanelVisible = true;
+	private frameDetailContainer!: Container;
+	private frameDetail!: FrameDetailPanel;
+	private frameDetailVisible = false;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -624,6 +627,7 @@ export class InteractiveMode {
 		this.widgetContainerBelow = new Container();
 		this.beliefPanelContainer = new Container();
 		this.framePanelContainer = new Container();
+		this.frameDetailContainer = new Container();
 
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
@@ -958,6 +962,8 @@ export class InteractiveMode {
 		this.beliefPanelContainer.addChild(this.beliefPanel);
 		this.framePanel = new FramePanel(() => this.getFrameView());
 		this.framePanelContainer.addChild(this.framePanel);
+		this.frameDetail = new FrameDetailPanel(() => this.getFrameView());
+		this.frameDetailContainer.addChild(this.frameDetail);
 
 		const dock = new TuiLayouts.VStack([
 			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
@@ -966,6 +972,18 @@ export class InteractiveMode {
 				shrink: 1,
 				minSize: 0,
 				visible: () => this.beliefPanelVisible,
+			},
+			{
+				component: this.framePanelContainer,
+				shrink: 1,
+				minSize: 0,
+				visible: () => this.framePanelVisible,
+			},
+			{
+				component: this.frameDetailContainer,
+				shrink: 1,
+				minSize: 0,
+				visible: () => this.frameDetailVisible,
 			},
 			{ component: this.statusContainer, shrink: 1, minSize: 0 },
 			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
@@ -985,6 +1003,7 @@ export class InteractiveMode {
 			this.pendingMessagesContainer,
 			this.beliefPanelContainer,
 			this.framePanelContainer,
+			this.frameDetailContainer,
 			this.statusContainer,
 			this.widgetContainerAbove,
 			this.editorContainer,
@@ -6507,23 +6526,74 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Show the full reading as a dock region. The editor keeps focus and stays mounted, so the user
+	 * can read the reading and answer it in the same breath.
+	 */
+	private showFrameDetail(): void {
+		this.frameDetailVisible = true;
+		this.frameDetail.setVisible(true);
+		this.ui.requestRender();
+		this.showStatus("Frame detail shown — type below to reply, /frame close to hide");
+	}
+
+	/**
+	 * Hide the detail region. This is the only close path: the region never takes focus, so it has no
+	 * cancel key of its own, and Escape stays with the editor.
+	 */
+	private hideFrameDetail(): void {
+		this.frameDetailVisible = false;
+		this.frameDetail.setVisible(false);
+		this.ui.requestRender();
+		this.showStatus("Frame detail hidden");
+	}
+
+	/**
 	 * `/frame` — how the agent currently reads this task, with its history and corrections.
 	 *
-	 * `/frame correct <text>` submits a correction instead of opening the view. Both are the user's
-	 * half of the formulation contract: the view is how they see what the agent takes the task to
-	 * be, and the correction is how they say it is wrong.
+	 * `/frame correct <text>` submits a correction instead of opening the region. Both are the user's
+	 * half of the formulation contract: the region is how they see what the agent takes the task to
+	 * be, and the correction is how they say it is wrong. Opening the region never replaces the
+	 * editor, so a correction can be typed while the reading it corrects is on screen.
 	 */
 	private handleFrameCommand(argument: string): void {
 		const text = argument.trim();
 		if (text === "" || text === "show" || text === "history") {
-			this.showFrameView();
+			this.showFrameDetail();
+			return;
+		}
+		if (text === "close" || text === "hide") {
+			this.hideFrameDetail();
+			return;
+		}
+		if (text === "full") {
+			this.writeFrameDetailToTranscript();
 			return;
 		}
 		if (text === "correct" || text.startsWith("correct ")) {
 			this.submitFrameCorrection(text.slice("correct".length).trim());
 			return;
 		}
-		this.showStatus("Usage: /frame, /frame history, or /frame correct <text>");
+		this.showStatus("Usage: /frame, /frame history, /frame full, /frame correct <text>, or /frame close");
+	}
+
+	/**
+	 * `/frame full` — the parts of the reading the bounded region elides, written to the transcript.
+	 *
+	 * The region above the editor is capped so the input box keeps its lines on a small terminal.
+	 * The transcript is the surface that has room and scrollback, so the rest of the reading goes
+	 * there: same content, no second layout, and the editor is untouched either way.
+	 */
+	private writeFrameDetailToTranscript(): void {
+		const view = this.getFrameView();
+		if (!view) {
+			this.showStatus("No task is open");
+			return;
+		}
+		const width = Math.max(20, this.ui.terminal.columns);
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(buildFrameDetailLines(view, width).join("\n"), 1, 0));
+		this.ui.requestRender();
+		this.showStatus("Frame detail written to the transcript");
 	}
 
 	private submitFrameCorrection(text: string): void {
@@ -6547,19 +6617,6 @@ export class InteractiveMode {
 			),
 		);
 		this.ui.requestRender();
-	}
-
-	private showFrameView(): void {
-		this.showSelector((done) => {
-			const component = new FrameDetailComponent({
-				getView: () => this.getFrameView(),
-				onClose: () => {
-					done();
-					this.ui.requestRender();
-				},
-			});
-			return { component, focus: component };
-		});
 	}
 
 	private handleChangelogCommand(): void {

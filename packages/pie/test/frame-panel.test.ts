@@ -7,7 +7,9 @@ import type {
 } from "../src/core/agent-session-domain.ts";
 import {
 	buildFrameDetailLines,
+	buildFrameDetailRegionLines,
 	buildFrameSummaryLines,
+	FrameDetailPanel,
 	type FrameView,
 } from "../src/modes/interactive/components/frame-panel.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -146,6 +148,77 @@ describe("frame panel", () => {
 });
 
 describe("frame detail", () => {
+	it("stays empty until it is shown, then reads the live view on every render", () => {
+		let current = view({ state: state({ current: version(1) }) });
+		const panel = new FrameDetailPanel(() => current);
+		expect(panel.render(80)).toEqual([]);
+
+		panel.setVisible(true);
+		expect(plain(panel.render(80)).join("\n")).toContain("HOW I SEE THIS TASK   v1");
+
+		// A newer reading shows up without setVisible being called again.
+		current = view({ state: state({ current: version(2) }) });
+		expect(plain(panel.render(80)).join("\n")).toContain("HOW I SEE THIS TASK   v2");
+
+		// No input handler: the region never takes focus, so it cannot swallow editor keys.
+		expect((panel as unknown as { handleInput?: unknown }).handleInput).toBeUndefined();
+
+		panel.setVisible(false);
+		expect(panel.render(80)).toEqual([]);
+	});
+
+	it("caps its lines and names both the way out and where the elided lines went", () => {
+		const long = view({
+			state: state({
+				current: version(3),
+				corrections: [
+					correction({
+						status: "resolved",
+						response: "kept the identity reading",
+						recordedVersionId: "formulation-2",
+					}),
+					correction({ id: "formulation-correction-2" }),
+				],
+			}),
+			history: [version(1), version(2), version(3)],
+			adopted: { kind: "version", versionId: "formulation-3" },
+		});
+		const uncapped = buildFrameDetailLines(long, 80);
+		const capped = plain(buildFrameDetailRegionLines(long, 80));
+
+		expect(uncapped.length).toBeGreaterThan(16);
+		expect(capped.length).toBeLessThanOrEqual(16);
+		// The commands sit on their own line so neither the title's length nor a narrow terminal can
+		// truncate them away; the layout only ever clips whole lines off the bottom.
+		expect(capped[1]).toContain("/frame close to hide");
+		expect(capped[1]).toContain("/frame full");
+		expect(capped[2]).toContain("more line(s)");
+		for (const width of [24, 40, 80]) {
+			for (const line of buildFrameDetailRegionLines(long, width)) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		}
+	});
+
+	it("names the close command at 24 and 40 columns, where the title alone fills the line", () => {
+		const long = view({
+			state: state({ current: version(3), corrections: [correction(), correction({ id: "c-2" })] }),
+			history: [version(1), version(2), version(3)],
+		});
+		for (const width of [40, 24]) {
+			const lines = plain(buildFrameDetailRegionLines(long, width));
+			expect(lines[1]).toContain("/frame close");
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+		expect(plain(buildFrameDetailRegionLines(long, 40))[1]).toContain("/frame full");
+	});
+
+	it("shows a short reading in full, without an elision line", () => {
+		const lines = plain(buildFrameDetailRegionLines(view({ state: state({ current: version(1) }) }), 80));
+		expect(lines.join("\n")).not.toContain("more line(s)");
+		expect(lines[1]).toContain("/frame close to hide");
+	});
+
 	it("shows the version a correction was answered by and the response beside it", () => {
 		const answered = correction({
 			status: "resolved",

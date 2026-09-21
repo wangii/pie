@@ -1,12 +1,4 @@
-import {
-	type Component,
-	Container,
-	getKeybindings,
-	Spacer,
-	Text,
-	truncateToWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type {
 	FormulationAdoption,
 	FormulationCorrection,
@@ -14,8 +6,6 @@ import type {
 	ProblemFormulationVersion,
 } from "../../../core/agent-session-domain.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint } from "./keybinding-hints.ts";
 
 /**
  * The terminal's view of the agent's current problem understanding — the product-facing "Frame".
@@ -56,8 +46,8 @@ function frameHeadline(state: FormulationState): string {
  * The compact dock panel: what the agent currently takes the task to be, in one or two lines.
  *
  * It is deliberately a summary. The full reading, its history, and propose's answers to
- * corrections live behind `/frame`, which the header names — a panel that truncated the content
- * without saying where the rest is would be worse than showing nothing.
+ * corrections live in `FrameDetailPanel`, which the header names — a panel that truncated the
+ * content without saying where the rest is would be worse than showing nothing.
  */
 export class FramePanel implements Component {
 	private visible = true;
@@ -270,46 +260,76 @@ function correctionText(correction: FormulationCorrection): string {
 }
 
 /**
- * The full view as a modal. It re-reads through `getView` on every render so a correction can be
- * submitted and answered while the view is open without the user reopening it.
+ * The full reading as a dock region above the editor.
+ *
+ * It is a region and not a modal: the editor stays mounted and focused underneath, so the user
+ * reads the reading and replies on the same screen, and a correction answered while the region is
+ * open shows up on the next render. Nothing here ever takes focus, so it cannot swallow keys that
+ * belong to the editor. `/frame close` is the way out: the region deliberately does not claim
+ * Escape, which the editor already uses to abort streaming and restore queued messages.
+ *
+ * The region is capped at `MAX_DETAIL_REGION_LINES`, so a long reading keeps the editor on screen;
+ * the lines it elides stay reachable through `/frame full`, which writes them to the transcript.
  */
-export class FrameDetailComponent extends Container {
-	private readonly onCloseCallback: () => void;
-
-	constructor(options: { getView: () => FrameView | undefined; onClose: () => void }) {
-		super();
-		this.onCloseCallback = options.onClose;
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
-		this.addChild(new FrameDetailBody(options.getView));
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(keyHint("tui.select.cancel", "close"), 1, 0));
-		this.addChild(new DynamicBorder());
-	}
-
-	handleInput(keyData: string): void {
-		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.select.cancel")) {
-			this.onCloseCallback();
-		}
-	}
-}
-
-/** The scrollable-ish body: bounded lines, live from the getter. */
-class FrameDetailBody implements Component {
+export class FrameDetailPanel implements Component {
+	private visible = false;
 	private readonly getView: () => FrameView | undefined;
 
 	constructor(getView: () => FrameView | undefined) {
 		this.getView = getView;
 	}
 
+	setVisible(visible: boolean): void {
+		this.visible = visible;
+	}
+
 	render(width: number): string[] {
+		if (!this.visible) return [];
 		const view = this.getView();
-		if (!view) return [truncateToWidth(theme.fg("muted", "No task is open."), width)];
-		return buildFrameDetailLines(view, Math.max(20, width - 2)).map((line) => ` ${line}`);
+		if (!view) {
+			return [
+				truncateToWidth(
+					`${theme.fg("muted", "No task is open.")} ${theme.fg("dim", "· /frame close to hide")}`,
+					width,
+				),
+			];
+		}
+		return buildFrameDetailRegionLines(view, width);
 	}
 
 	invalidate(): void {
 		// No cached state — every render reads the live formulation state.
 	}
+}
+
+/**
+ * How many lines the region may occupy before it elides the rest.
+ *
+ * The region shares the dock with the transcript and the editor, and one reading plus its history
+ * is longer than a small terminal. Bounding the region is what keeps the input box's three lines on
+ * screen, which is the reason to put the detail beside the editor rather than in its place.
+ */
+const MAX_DETAIL_REGION_LINES = 16;
+
+/**
+ * The detail lines, with the commands on their own line.
+ *
+ * Both hints have to survive what the layout does to the region: it clips from the bottom on a short
+ * terminal and truncates every line on a narrow one. So the title keeps line 0, the commands get
+ * line 1 of their own (a hint appended to the title would be cut by the title's own length — at 40
+ * columns `HOW I SEE THIS TASK   v3 · /frame clo…` names neither command), and the elision note
+ * comes directly under that.
+ */
+export function buildFrameDetailRegionLines(
+	view: FrameView,
+	width: number,
+	maxLines: number = MAX_DETAIL_REGION_LINES,
+): string[] {
+	const [title = "", ...rest] = buildFrameDetailLines(view, width);
+	const hint = truncateToWidth(theme.fg("dim", "/frame close to hide · /frame full"), width);
+	const budget = Math.max(1, maxLines - 2);
+	if (rest.length <= budget) return [title, hint, ...rest];
+	const shown = rest.slice(0, Math.max(0, budget - 1));
+	const note = truncateToWidth(theme.fg("dim", `… ${rest.length - shown.length} more line(s)`), width);
+	return [title, hint, note, ...shown];
 }
