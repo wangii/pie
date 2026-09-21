@@ -27,6 +27,7 @@ export const BELIEF_SURFACE_TOOLS = [
 	"set_formulation",
 	"defer_formulation",
 	"answer_correction",
+	"review_applicability",
 	"view_beliefs",
 	"conclude",
 ] as const;
@@ -48,7 +49,7 @@ const PROPOSE_ROLE_HEADER =
 	"\n\nYou are the propose role of an investigation loop (propose → execution → distill → finalReport). " +
 	"Choose which unresolved uncertainty matters next; execution gathers evidence, distill updates the belief state, " +
 	"and finalReport answers the user. Your tools are route_task, declare_belief, focus_beliefs, select_experiment, " +
-	"set_formulation, defer_formulation, answer_correction, view_beliefs, and conclude. " +
+	"set_formulation, defer_formulation, answer_correction, review_applicability, view_beliefs, and conclude. " +
 	"Write every belief, every formulation, and its evidence in {beliefLang}.\n\n";
 
 const PROPOSE_ROUTING_HEADER =
@@ -106,7 +107,11 @@ const PROPOSE_PROTOCOL =
 	"another experiment or conclude; if you genuinely cannot state a reading yet, use defer_formulation to say what is " +
 	"missing and why. Publishing a new version voids any experiment you selected but have not dispatched, so select again " +
 	"afterwards. A revision (not the first version) pauses execution and conclusion until the user responds to that " +
-	"version. Answer the response, then explicitly review focus with focus_beliefs, even if the same ids remain relevant. " +
+	"version. Answer the response, then account for the beliefs already in scope under the new reading with " +
+	"review_applicability — carries-over, not-applicable, or needs-revalidation, with a reason for each, including the " +
+	"beliefs the revised frame leaves out — and then review focus with focus_beliefs, even if the same ids remain " +
+	"relevant. A belief classified needs-revalidation may not be reported until it has been probed again under the new " +
+	"reading. " +
 	"Reconsider the reading when residual evidence conflicts with its assumptions or scope, or a user correction changes " +
 	"the problem. This feedback is evidence → reading → focus → experiment; preserve counterexample probes. " +
 	"Revise only for a substantive change in what you understand, where you attend, or where the work goes: " +
@@ -128,7 +133,8 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the propose role does not have. Choose the next uncertainty with ` +
 			`declare_belief, set scope with focus_beliefs, select the experiment with select_experiment, state your reading ` +
-			`with set_formulation (or defer_formulation), answer a correction with answer_correction, inspect state with ` +
+			`with set_formulation (or defer_formulation), answer a correction with answer_correction, account for the ` +
+			`previous reading's conclusions with review_applicability, inspect state with ` +
 			`view_beliefs, route epistemically closed work ` +
 			`with route_task, or conclude. ` +
 			`Execution performs the probe.`,
@@ -181,7 +187,10 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 					// question. It is filtered explicitly rather than by omission, so the exclusion
 					// survives a change to the belief-surface list.
 					name !== "set_formulation" &&
-					name !== "defer_formulation",
+					name !== "defer_formulation" &&
+					// Which conclusions still answer the current reading is propose's judgment for the same
+					// reason: a role that probes cannot also decide what its predecessors' results mean.
+					name !== "review_applicability",
 			),
 		modelPolicy: "execution",
 		projection: "execution",
@@ -210,6 +219,18 @@ export const TRANSITION_STEERS = {
 	reviewFocus:
 		"Review the task focus under the current Frame with focus_beliefs before selecting an experiment, routing to " +
 		"fast path, or concluding. The same belief ids are allowed: review relevance, not truth. Keep counterexamples in scope.",
+	applicabilityReview: (statements: string) =>
+		`The Frame was revised, so say what each belief already in scope means under the new reading with ` +
+		`review_applicability: ${statements}. carries-over keeps it as a finding, not-applicable records that this task no ` +
+		`longer asks about it, and needs-revalidation says its evidence was gathered under the old reading and must be ` +
+		`probed again before the task may report it. This changes no belief's status, and it is owed for every belief listed ` +
+		`— including any that a narrowed focus leaves out.`,
+	revalidateUnderReading: (statements: string) =>
+		`These beliefs were classified as needing re-examination under the current reading and have not been probed again: ` +
+		`${statements}. Refine each into the claim this reading actually asks about — a refinement carries the evidence ` +
+		`that bears on its successor — or record that the task no longer needs it. The earlier evidence stays exactly as ` +
+		`it was: the task simply may not report it as ` +
+		`settled under a reading that never tested it.`,
 	dispatch: (statements: string) =>
 		`Run one coherent experiment for these beliefs: ${statements}. Report all materially distinct raw observations with sources or command results.`,
 	fastPathDispatch:

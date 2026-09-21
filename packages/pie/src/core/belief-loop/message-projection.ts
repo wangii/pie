@@ -181,6 +181,7 @@ function maskBeliefBookkeeping(message: AgentMessage): AgentMessage | undefined 
 			const placeholders: Record<string, string> = {
 				route_task: "[routing decision omitted]",
 				focus_beliefs: "[focus declaration omitted]",
+				review_applicability: "[applicability review omitted]",
 				select_experiment: "[experiment selection omitted]",
 				declare_belief: "[belief update omitted]",
 				conclude: "[investigation concluded]",

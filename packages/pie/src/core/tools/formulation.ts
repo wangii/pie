@@ -99,6 +99,38 @@ const deferFormulationSchema = Type.Object({
 	),
 });
 
+/**
+ * The beliefs a revision has to account for, and what each still means under the new reading. The
+ * decisions mirror the domain's `FormulationApplicabilityDecision`; the tool only parses, and the
+ * controller decides what is owed and rejects anything that is not.
+ */
+const reviewApplicabilitySchema = Type.Object({
+	entries: Type.Array(
+		Type.Object({
+			beliefId: Type.String({
+				description: "A belief one of the listed ids names.",
+			}),
+			decision: Type.Union(
+				[Type.Literal("carries-over"), Type.Literal("not-applicable"), Type.Literal("needs-revalidation")],
+				{
+					description:
+						"carries-over: still a finding of this task under the new reading. not-applicable: the task no longer asks about " +
+						"it. needs-revalidation: its evidence was gathered under the old reading and it may not be reported until it is probed again.",
+				},
+			),
+			reason: Type.String({
+				description: "Why this decision, stated in terms of the new reading.",
+			}),
+		}),
+		{
+			minItems: 1,
+			description: "One decision per belief the current reading has not accounted for yet.",
+		},
+	),
+});
+
+export type ReviewApplicabilityInput = Static<typeof reviewApplicabilitySchema>;
+
 export type SetFormulationInput = Static<typeof setFormulationSchema>;
 export type DeferFormulationInput = Static<typeof deferFormulationSchema>;
 
@@ -154,6 +186,51 @@ export function createDeferFormulationToolDefinition(
 			const result = onDefer(input);
 			if (result.outcome === "rejected") throw new Error(`Deferral rejected: ${result.reason}`);
 			return { content: [{ type: "text", text: result.text }], details: undefined };
+		},
+	};
+}
+
+export function createReviewApplicabilityToolDefinition(
+	onReview: (input: ReviewApplicabilityInput) => { recorded: number; pending: number },
+): ToolDefinition<typeof reviewApplicabilitySchema, undefined> {
+	return {
+		name: "review_applicability",
+		label: "review applicability",
+		description:
+			"Say what each belief already in scope means under the current reading, after a frame revision. This never changes a belief's evidence or status: it records whether that evidence still answers the question the task now asks. Required for every belief the revision names, including any that a narrowed focus leaves out, and before the task may conclude.",
+		promptSnippet: "Say which of the old conclusions still apply to the revised reading",
+		promptGuidelines: [
+			"carries-over keeps a belief as a finding of this task; not-applicable records that the task no longer asks about it",
+			"needs-revalidation means the evidence was gathered under the old reading: probe it again before reporting it",
+			"Classify every belief the revision lists, even the ones the new focus drops",
+		],
+		parameters: reviewApplicabilitySchema,
+		executionMode: "sequential",
+		async execute(_toolCallId, input, _signal, _onUpdate, _ctx) {
+			try {
+				const result = onReview({
+					entries: input.entries.map((entry) => ({
+						beliefId: entry.beliefId.trim(),
+						decision: entry.decision,
+						reason: entry.reason.trim(),
+					})),
+				});
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								result.pending > 0
+									? `Recorded ${result.recorded} applicability decision(s); ${result.pending} belief(s) are still unaccounted for.`
+									: `Recorded ${result.recorded} applicability decision(s); the reading's scope is fully accounted for.`,
+						},
+					],
+					details: undefined,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`Applicability review rejected: ${message}`);
+			}
 		},
 	};
 }

@@ -61,7 +61,7 @@ import type {
 } from "./agent-session-domain.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { BeliefLoopController, type RoleStatus } from "./belief-loop/belief-loop-controller.ts";
+import { BeliefLoopController, type LoopState, type RoleStatus } from "./belief-loop/belief-loop-controller.ts";
 import { isProbeTool } from "./belief-loop/message-projection.ts";
 import type { Belief } from "./belief-set.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
@@ -115,7 +115,7 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 
-export type { RoleStatus, RoleStatusSlot } from "./belief-loop/belief-loop-controller.ts";
+export type { LoopState, RoleStatus, RoleStatusSlot } from "./belief-loop/belief-loop-controller.ts";
 
 import { BELIEF_SURFACE_TOOLS, TRANSITION_STEERS } from "./role-specs.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
@@ -135,6 +135,7 @@ import {
 } from "./tools/declare-belief.ts";
 import {
 	createDeferFormulationToolDefinition,
+	createReviewApplicabilityToolDefinition,
 	createSetFormulationToolDefinition,
 	formulationContentFromTool,
 } from "./tools/formulation.ts";
@@ -705,6 +706,8 @@ export class AgentSession {
 			corrections: [...this._beliefLoop.formulationCorrections()],
 			decisionOwed: this._beliefLoop.formulationDecisionOwed(),
 			review: this._beliefLoop.formulationReview(),
+			pendingApplicability: [...this._beliefLoop.pendingApplicability()],
+			unrevalidated: this._beliefLoop.unrevalidatedApplicability().map((entry) => entry.beliefId),
 		};
 	}
 
@@ -3117,6 +3120,12 @@ export class AgentSession {
 			}) as ToolDefinition,
 		);
 		this._baseToolDefinitions.set(
+			"review_applicability",
+			createReviewApplicabilityToolDefinition((input) =>
+				this._beliefLoop.recordApplicability(input.entries),
+			) as ToolDefinition,
+		);
+		this._baseToolDefinitions.set(
 			"answer_correction",
 			createAnswerCorrectionToolDefinition((input) => {
 				const result = this._beliefLoop.answerFormulationCorrection(input.correctionId, input.response);
@@ -3774,6 +3783,15 @@ export class AgentSession {
 	 */
 	getRoleStatus(): RoleStatus | undefined {
 		return this._beliefLoop.getRoleStatus();
+	}
+
+	/**
+	 * The belief loop's current phase — the role that owns the running or next turn. The interactive
+	 * working indicator uses it to name the phase instead of a generic label. `finalReport` means the
+	 * loop is concluding, not that it stopped, so callers must not treat it as an idle state.
+	 */
+	getLoopRole(): LoopState["role"] {
+		return this._beliefLoop.role;
 	}
 
 	getRoleContextUsage(): { epistemic: ContextUsage; execution: ContextUsage } | undefined {

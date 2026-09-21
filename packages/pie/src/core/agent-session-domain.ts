@@ -283,10 +283,50 @@ export function formulationContentError(content: FormulationContent): string | u
  * holds rather than a second copy that could drift. The full version history lives on the task.
  */
 /** A revision must receive a user response, then an explicit focus review. */
+/**
+ * What a revision means for one belief that was already in scope. The belief's own evidence and
+ * status are untouched — this says whether that evidence still answers the question the new
+ * reading asks.
+ *
+ * - `carries-over`: still in scope, and its evidence still supports it under this reading.
+ * - `not-applicable`: no longer part of the task under this reading. The record survives as
+ *   history, but it is not a finding of this task, so it must not be reported as one.
+ * - `needs-revalidation`: still in scope, but its evidence was gathered under the previous
+ *   reading. It cannot be treated as settled until it is probed again — in practice by refining
+ *   it into an explicit successor claim and testing that, since a supported belief cannot be
+ *   adjudicated again in place.
+ */
+export type FormulationApplicabilityDecision = "carries-over" | "not-applicable" | "needs-revalidation";
+
+export interface FormulationApplicabilityEntry {
+	readonly beliefId: BeliefId;
+	readonly decision: FormulationApplicabilityDecision;
+	readonly reason: string;
+	/** The delta that re-examined a `needs-revalidation` belief, once one has been recorded. */
+	readonly revalidatedByDeltaId?: BeliefDeltaId;
+	/**
+	 * Set when the belief was declared back into the task's focus after it had been classified
+	 * `not-applicable`: the decision described a scope the task no longer holds, so it stops counting
+	 * as a decision and the belief is owed a new one. Derived by the fold, never recorded by a tool.
+	 */
+	readonly stale?: boolean;
+}
+
 export interface FormulationReview {
 	readonly versionId: FormulationVersionId;
 	readonly responseCorrectionId?: FormulationCorrectionId;
 	readonly focusReviewed: boolean;
+	/**
+	 * The beliefs this revision has to account for: the scope at publication, plus any belief that
+	 * already existed then and is brought back into focus while the review is owed. Beliefs first
+	 * introduced after the revision belong to the new reading and are not asked about — which is
+	 * also what stops a narrowed focus from being a way to skip the review.
+	 */
+	readonly scopedBeliefIds: readonly BeliefId[];
+	/** `task.introducedBeliefs.length` when the version was published; ids after it are new. */
+	readonly introducedAtRevision: number;
+	/** Classifications recorded so far, keyed by belief id. */
+	readonly applicability: readonly FormulationApplicabilityEntry[];
 }
 
 export interface FormulationState {
@@ -302,6 +342,10 @@ export interface FormulationState {
 	readonly corrections: readonly FormulationCorrection[];
 	/** Whether propose still owes this task the publish-or-defer decision. */
 	readonly decisionOwed: boolean;
+	/** Beliefs the current reading's review still has to classify. */
+	readonly pendingApplicability: readonly BeliefId[];
+	/** Classified `needs-revalidation` and not yet probed again under this reading. */
+	readonly unrevalidated: readonly BeliefId[];
 }
 
 export interface Plan {
@@ -528,6 +572,14 @@ export type AgentSessionDomainEvent =
 			/** The version published while answering, when the response was a revision. */
 			recordedVersionId?: FormulationVersionId;
 	  })
+	// What the previous reading's conclusions mean under this one. Recorded rather than inferred,
+	// because "I considered whether the old evidence still applies" is exactly the step a reframe
+	// must not be able to skip by narrowing the focus.
+	| (TaskEventBase & {
+			type: "FormulationApplicabilityRecorded";
+			versionId: FormulationVersionId;
+			entries: readonly FormulationApplicabilityEntry[];
+	  })
 	| (TaskEventBase & { type: "EpisodeOpened"; episodeId: EpisodeId; ordinal: number })
 	| (EpisodeEventBase & { type: "RoutingDecided"; routing: Routing })
 	| (EpisodeEventBase & {
@@ -723,6 +775,80 @@ export function latestFormulationAdoption(task: Task): FormulationAdoption | und
  * - A deferral settles it only for the investigation it answered. A later dispatch re-opens the
  *   question, which is what stops the first deferral from becoming a standing exemption.
  */
+/** The decision that still counts for a belief: a stale one counts for nothing. */
+function liveApplicability(
+	review: FormulationReview | undefined,
+	beliefId: BeliefId,
+): FormulationApplicabilityEntry | undefined {
+	return review?.applicability.find((entry) => entry.beliefId === beliefId && entry.stale !== true);
+}
+
+/** Whether every belief a review has to account for has a decision that still counts. */
+export function applicabilityComplete(review: FormulationReview): boolean {
+	return review.scopedBeliefIds.every((beliefId) => liveApplicability(review, beliefId) !== undefined);
+}
+
+/** The beliefs a review still has to classify, in scope order. */
+export function pendingApplicabilityBeliefs(task: Task): readonly BeliefId[] {
+	const review = task.formulationReview;
+	if (!review) return [];
+	return review.scopedBeliefIds.filter((beliefId) => liveApplicability(review, beliefId) === undefined);
+}
+
+/** The classifications that still owe a probe: still in scope, not yet re-examined. */
+export function unrevalidatedApplicability(task: Task): readonly FormulationApplicabilityEntry[] {
+	return (task.formulationReview?.applicability ?? []).filter(
+		(entry) =>
+			entry.stale !== true && entry.decision === "needs-revalidation" && entry.revalidatedByDeltaId === undefined,
+	);
+}
+
+/** One belief's standing under the current reading, or undefined when it has no live decision. */
+export function applicabilityFor(task: Task, beliefId: BeliefId): FormulationApplicabilityEntry | undefined {
+	return liveApplicability(task.formulationReview, beliefId);
+}
+
+/**
+ * A belief brought back into focus while a review is owed also has to be accounted for, unless it
+ * was first introduced after the revision: the reading that produced it is the one being reviewed,
+ * so a belief it created is not carried-over evidence. Inherited history has no index in this
+ * task's `introducedBeliefs` at all, so it counts as pre-existing and must be classified.
+ */
+function reviewScopeAfterFocus(
+	task: Task,
+	review: FormulationReview,
+	focused: readonly BeliefId[],
+): readonly BeliefId[] {
+	const scoped = [...review.scopedBeliefIds];
+	const known = new Set(scoped);
+	for (const beliefId of focused) {
+		if (known.has(beliefId)) continue;
+		const introduced = task.introducedBeliefs.indexOf(beliefId);
+		if (introduced !== -1 && introduced >= review.introducedAtRevision) continue;
+		known.add(beliefId);
+		scoped.push(beliefId);
+	}
+	return scoped;
+}
+
+/**
+ * Whether a delta is the re-examination a review asked for: it touches the belief itself, or a
+ * belief that now stands in its place after a refinement (or a retraction). The chain is followed
+ * one predecessor at a time, so refining twice still answers the original.
+ */
+function deltaAnswersBelief(delta: BeliefDelta, beliefId: BeliefId, beliefs: ReadonlyMap<BeliefId, Belief>): boolean {
+	const touched = new Set<BeliefId>([delta.resultBeliefId, ...(delta.beliefId !== undefined ? [delta.beliefId] : [])]);
+	if (delta.sourceBeliefId !== undefined) touched.add(delta.sourceBeliefId);
+	const seen = new Set<BeliefId>();
+	let current: BeliefId | undefined = beliefId;
+	while (current !== undefined && !seen.has(current)) {
+		if (touched.has(current)) return true;
+		seen.add(current);
+		current = beliefs.get(current)?.supersededBy;
+	}
+	return false;
+}
+
 export function formulationDecisionOwed(task: Task): boolean {
 	const investigated = latestDispatchedEpisodeOrdinal(task);
 	if (investigated === undefined) return false;
@@ -890,20 +1016,39 @@ export function applyAgentSessionDomainEvent(
 			// narrow its scope, and the last declaration wins. No belief-existence check: a focus id
 			// can name a belief that has no BeliefDeltaApplied yet (see `onBeliefDelta`'s
 			// no-current-episode early return), which is a legitimate in-flight state.
+			const review = task.formulationReview;
+			const sameVersion =
+				review !== undefined &&
+				event.formulation?.kind === "version" &&
+				event.formulation.versionId === review.versionId;
+			let nextReview: FormulationReview | undefined;
+			if (review !== undefined && sameVersion) {
+				const declared = new Set(event.beliefIds);
+				// Putting a belief the review called `not-applicable` back in scope makes that decision a
+				// statement about a scope the task no longer holds: it stops counting, so the belief is owed
+				// a fresh one. Without this, "classify it away, then put it back" would be a way around the
+				// review. The earlier reasoning stays in the log; only the derived state stops honoring it.
+				const applicability = review.applicability.map((entry) =>
+					entry.decision === "not-applicable" && declared.has(entry.beliefId) ? { ...entry, stale: true } : entry,
+				);
+				const scopedBeliefIds = reviewScopeAfterFocus(task, review, event.beliefIds);
+				const candidate = { ...review, scopedBeliefIds, applicability };
+				// The review of the reading is complete only once every belief it has to account for has a
+				// decision that still counts: otherwise a focus declaration would mark the reading reviewed
+				// while the old conclusions were never looked at.
+				const readingReviewed =
+					applicabilityComplete(candidate) &&
+					review.responseCorrectionId !== undefined &&
+					pendingFormulationCorrections(task).length === 0;
+				nextReview = { ...candidate, focusReviewed: review.focusReviewed || readingReviewed };
+			}
 			return {
 				...snapshot,
 				tasks: replaceTask(snapshot, {
 					...task,
 					focus: [...event.beliefIds],
 					focusDeclared: true,
-					formulationReview:
-						task.formulationReview &&
-						event.formulation?.kind === "version" &&
-						event.formulation.versionId === task.formulationReview.versionId &&
-						task.formulationReview.responseCorrectionId !== undefined &&
-						pendingFormulationCorrections(task).length === 0
-							? { ...task.formulationReview, focusReviewed: true }
-							: task.formulationReview,
+					formulationReview: nextReview ?? review,
 				}),
 			};
 		}
@@ -950,7 +1095,15 @@ export function applyAgentSessionDomainEvent(
 				tasks: replaceTask(snapshot, {
 					...task,
 					formulations: [...task.formulations, version],
-					formulationReview: current ? { versionId: version.id, focusReviewed: false } : undefined,
+					formulationReview: current
+						? {
+								versionId: version.id,
+								focusReviewed: false,
+								scopedBeliefIds: [...task.focus],
+								introducedAtRevision: task.introducedBeliefs.length,
+								applicability: [],
+							}
+						: undefined,
 					// Publishing answers the deferral: whatever was missing has been supplied, so the
 					// deferred state stops being current. The deferral record itself is not erased from
 					// the event log, only from the task's current state.
@@ -1050,6 +1203,48 @@ export function applyAgentSessionDomainEvent(
 					formulationCorrections: task.formulationCorrections.map((candidate) =>
 						candidate.id === resolved.id ? resolved : candidate,
 					),
+				}),
+			};
+		}
+		case "FormulationApplicabilityRecorded": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			const review = task.formulationReview;
+			if (!review) fail(event, "there is no formulation review to classify beliefs against");
+			if (event.versionId !== review.versionId) {
+				fail(event, `applicability names version ${event.versionId}, not the reviewed ${review.versionId}`);
+			}
+			if (event.entries.length === 0) fail(event, "an applicability review must classify at least one belief");
+			const classified = new Set<BeliefId>();
+			for (const entry of event.entries) {
+				if (classified.has(entry.beliefId)) {
+					fail(event, `belief ${entry.beliefId} is classified twice in one record`);
+				}
+				classified.add(entry.beliefId);
+				if (!review.scopedBeliefIds.includes(entry.beliefId)) {
+					fail(event, `belief ${entry.beliefId} was not in scope when version ${review.versionId} was published`);
+				}
+				if (!snapshot.beliefs.has(entry.beliefId)) fail(event, `unknown belief ${entry.beliefId}`);
+				if (!entry.reason.trim()) {
+					fail(event, `belief ${entry.beliefId} is classified without a reason`);
+				}
+				if (entry.revalidatedByDeltaId !== undefined) {
+					fail(event, `belief ${entry.beliefId} cannot name its re-examination as it is recorded`);
+				}
+				if (entry.stale === true)
+					fail(event, `belief ${entry.beliefId} is stale by the fold's reckoning, not here`);
+			}
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, {
+					...task,
+					formulationReview: {
+						...review,
+						applicability: [
+							...review.applicability.filter((entry) => !classified.has(entry.beliefId)),
+							...event.entries,
+						],
+					},
 				}),
 			};
 		}
@@ -1202,7 +1397,28 @@ export function applyAgentSessionDomainEvent(
 				if (!beliefs.has(beliefId)) fail(event, `active belief ${beliefId} has no record`);
 			}
 			const body = { ...episode.body, beliefDeltas: [...episode.body.beliefDeltas, event.delta] };
-			const nextTask = replaceEpisode({ ...task, introducedBeliefs: introduced }, { ...episode, body });
+			const withDelta = replaceEpisode({ ...task, introducedBeliefs: introduced }, { ...episode, body });
+			// A belief the revision sent back for re-examination is answered by the delta that
+			// re-states, replaces, or retracts it — following the refinement chain, since refining a
+			// supported belief into a successor claim is how it gets probed again under a new reading.
+			// Deriving this in the fold keeps "has it been re-examined" answerable from the log alone.
+			const review = withDelta.formulationReview;
+			const nextTask =
+				review === undefined || review.applicability.length === 0
+					? withDelta
+					: {
+							...withDelta,
+							formulationReview: {
+								...review,
+								applicability: review.applicability.map((entry) =>
+									entry.decision === "needs-revalidation" &&
+									entry.revalidatedByDeltaId === undefined &&
+									deltaAnswersBelief(event.delta, entry.beliefId, beliefs)
+										? { ...entry, revalidatedByDeltaId: event.delta.id }
+										: entry,
+								),
+							},
+						};
 			return {
 				...snapshot,
 				beliefs,

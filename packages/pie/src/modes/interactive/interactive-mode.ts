@@ -59,7 +59,12 @@ import {
 	getShareViewerUrl,
 	VERSION,
 } from "../../config.ts";
-import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
+import {
+	type AgentSession,
+	type AgentSessionEvent,
+	type LoopState,
+	parseSkillBlock,
+} from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import {
@@ -273,6 +278,24 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 
 function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
 	return providerId in defaultModelPerProvider;
+}
+
+/**
+ * Working-indicator label naming the belief loop's current phase. `finalReport` (and any unknown
+ * phase) keeps the generic label: the loop is concluding, not idle, so the indicator keeps
+ * rendering while it loses only the phase name.
+ */
+export function phaseWorkingMessage(role: LoopState["role"] | undefined): string | undefined {
+	switch (role) {
+		case "propose":
+			return "Proposition working..";
+		case "execution":
+			return "Execution working..";
+		case "distill":
+			return "Distillation working..";
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -2214,6 +2237,15 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Text of the built-in working indicator: an extension's override wins, then the belief-loop
+	 * phase, then the generic label. Read at each creation and refresh so the phase shown is the one
+	 * that is running, not the one that was running when streaming started.
+	 */
+	private resolveWorkingMessage(): string {
+		return this.workingMessage ?? phaseWorkingMessage(this.session.getLoopRole()) ?? this.defaultWorkingMessage;
+	}
+
 	private setWorkingVisible(visible: boolean): void {
 		this.workingVisible = visible;
 		if (!visible) {
@@ -2223,11 +2255,7 @@ export class InteractiveMode {
 		}
 		if (this.session.isStreaming && this.activeStatusIndicator?.kind !== "working") {
 			this.showStatusIndicator(
-				new WorkingStatusIndicator(
-					this.ui,
-					this.workingMessage ?? this.defaultWorkingMessage,
-					this.workingIndicatorOptions,
-				),
+				new WorkingStatusIndicator(this.ui, this.resolveWorkingMessage(), this.workingIndicatorOptions),
 			);
 		}
 		this.ui.requestRender();
@@ -2338,7 +2366,7 @@ export class InteractiveMode {
 		this.setWorkingIndicator();
 		if (this.activeStatusIndicator?.kind === "working") {
 			this.activeStatusIndicator.setMessage(
-				`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`,
+				`${this.resolveWorkingMessage()} (${keyText("app.interrupt")} to interrupt)`,
 			);
 		}
 		this.setHiddenThinkingLabel();
@@ -2503,7 +2531,7 @@ export class InteractiveMode {
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
 				if (this.activeStatusIndicator?.kind === "working") {
-					this.activeStatusIndicator.setMessage(message ?? this.defaultWorkingMessage);
+					this.activeStatusIndicator.setMessage(message ?? this.resolveWorkingMessage());
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -3260,14 +3288,21 @@ export class InteractiveMode {
 				}
 				if (this.workingVisible) {
 					this.showStatusIndicator(
-						new WorkingStatusIndicator(
-							this.ui,
-							this.workingMessage ?? this.defaultWorkingMessage,
-							this.workingIndicatorOptions,
-						),
+						new WorkingStatusIndicator(this.ui, this.resolveWorkingMessage(), this.workingIndicatorOptions),
 					);
 				} else {
 					this.clearStatusIndicator();
+				}
+				this.ui.requestRender();
+				break;
+
+			case "CursorChanged":
+			case "EpisodeClosed":
+				// The belief loop changes phase mid-run, without a new agent_start, so the phase name is
+				// refreshed from the events that record a change: `CursorChanged` for proposing,
+				// executing, and distilling, and `EpisodeClosed` when the loop moves to its final report.
+				if (this.activeStatusIndicator?.kind === "working") {
+					this.activeStatusIndicator.setMessage(this.resolveWorkingMessage());
 				}
 				this.ui.requestRender();
 				break;
@@ -3296,6 +3331,11 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
+				// A role reset that records no cursor event (a queued new task) is picked up here, at the
+				// first turn boundary after the reset, instead of waiting for the next CursorChanged.
+				if (this.activeStatusIndicator?.kind === "working") {
+					this.activeStatusIndicator.setMessage(this.resolveWorkingMessage());
+				}
 				if (event.message.role === "custom") {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();

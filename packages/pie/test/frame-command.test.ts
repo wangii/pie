@@ -59,7 +59,14 @@ function version(): ProblemFormulationVersion {
 }
 
 function frameView(): FrameView {
-	const state: FormulationState = { current: version(), deferral: null, corrections: [], decisionOwed: false };
+	const state: FormulationState = {
+		current: version(),
+		deferral: null,
+		corrections: [],
+		decisionOwed: false,
+		pendingApplicability: [],
+		unrevalidated: [],
+	};
 	return { state, history: [version()], adopted: undefined };
 }
 

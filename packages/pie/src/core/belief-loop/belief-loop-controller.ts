@@ -7,6 +7,7 @@ import {
 	type AgentSessionDomainEvent,
 	type AgentSessionSnapshot,
 	appendAgentSessionDomainEvent,
+	applicabilityFor,
 	applyAgentSessionDomainEvent,
 	createDomainId,
 	currentFormulation as currentFormulationOf,
@@ -18,6 +19,8 @@ import {
 	type EpisodeStage,
 	type ExecutionEpisode,
 	type FormulationAdoption,
+	type FormulationApplicabilityDecision,
+	type FormulationApplicabilityEntry,
 	type FormulationContent,
 	type FormulationCorrection,
 	type FormulationCorrectionId,
@@ -31,9 +34,11 @@ import {
 	latestDispatchedEpisodeOrdinal,
 	latestFormulationAdoption as latestFormulationAdoptionOf,
 	type ProblemFormulationVersion,
+	pendingApplicabilityBeliefs,
 	pendingFormulationCorrections as pendingCorrectionsOf,
 	replayAgentSessionDomainEntries,
 	type Task,
+	unrevalidatedApplicability,
 } from "../agent-session-domain.ts";
 import {
 	type Belief,
@@ -81,6 +86,13 @@ export interface RoleStatus {
 }
 
 const EPISODE_HORIZON_HEADROOM = 1.3;
+
+/** The applicability decisions a belief can be given against a revision. */
+const APPLICABILITY_DECISIONS = new Set<FormulationApplicabilityDecision>([
+	"carries-over",
+	"not-applicable",
+	"needs-revalidation",
+]);
 
 /** How much of one tool result the correction handoff shows propose, and how many operations. */
 const MAX_HANDOFF_RESULT_CHARS = 400;
@@ -530,8 +542,22 @@ export class BeliefLoopController {
 		if (this.formulationReview() && this.pendingCorrections().length > 0) {
 			return "Answer every pending correction before reviewing focus.";
 		}
+		// The reading is reviewed only once its own scope has been accounted for: otherwise the old
+		// conclusions would carry into the new reading without ever being looked at.
+		const owed = this.pendingApplicability();
+		if (owed.length > 0) return TRANSITION_STEERS.applicabilityReview(this.describeBeliefs(owed));
 		if (this.focusReviewOwed()) return TRANSITION_STEERS.reviewFocus;
 		return undefined;
+	}
+
+	/** Belief ids as `\"statement\" (status)` for a steer the model has to read. */
+	private describeBeliefs(beliefIds: readonly string[]): string {
+		return beliefIds
+			.map((beliefId) => {
+				const belief = this.beliefSet.get(beliefId);
+				return belief ? `"${belief.statement}" (${beliefId}, ${statusOf(belief)})` : `(${beliefId}, unknown)`;
+			})
+			.join(", ");
 	}
 
 	/** Only an actual user input received against this version releases its wait. */
@@ -565,6 +591,69 @@ export class BeliefLoopController {
 	latestFormulationAdoption(): FormulationAdoption | undefined {
 		const task = this.currentTask();
 		return task ? latestFormulationAdoptionOf(task) : undefined;
+	}
+
+	/** Beliefs the current reading's review still has to account for. */
+	pendingApplicability(): readonly string[] {
+		const task = this.currentTask();
+		return task ? pendingApplicabilityBeliefs(task) : [];
+	}
+
+	/** Beliefs classified as needing re-examination under this reading and not yet probed again. */
+	unrevalidatedApplicability(): readonly FormulationApplicabilityEntry[] {
+		const task = this.currentTask();
+		return task ? unrevalidatedApplicability(task) : [];
+	}
+
+	/** One belief's standing under the current reading, or undefined when it was never classified. */
+	applicabilityFor(beliefId: string): FormulationApplicabilityEntry | undefined {
+		const task = this.currentTask();
+		return task ? applicabilityFor(task, beliefId) : undefined;
+	}
+
+	/**
+	 * Record what the previous reading's conclusions mean under the current one.
+	 *
+	 * A revision changes what the task asks, not what was observed, so this never rewrites a
+	 * belief's evidence or status: it answers the other question the reframe raises — whether that
+	 * evidence still addresses this reading. Without it, a supported belief keeps standing as a
+	 * finding of a task whose question it was never tested against.
+	 */
+	recordApplicability(entries: readonly FormulationApplicabilityEntry[]): { recorded: number; pending: number } {
+		const task = this.currentTask();
+		if (!task || task.status !== "active") throw new Error("there is no active task");
+		if (this.awaitingFormulationResponse()) throw new Error(TRANSITION_STEERS.awaitFormulationResponse);
+		const review = this.formulationReview();
+		if (!review) throw new Error("no revision is waiting for a review of the beliefs it affects");
+		const pending = new Set(this.pendingApplicability());
+		const seen = new Set<string>();
+		const cleaned: FormulationApplicabilityEntry[] = [];
+		for (const entry of entries) {
+			const beliefId = entry.beliefId.trim();
+			if (!beliefId) throw new Error("every applicability decision needs a `beliefId`");
+			if (seen.has(beliefId)) throw new Error(`belief ${beliefId} is classified twice in one call`);
+			seen.add(beliefId);
+			if (!pending.has(beliefId)) {
+				throw new Error(
+					`belief ${beliefId} is not waiting for an applicability decision; classify ${[...pending].join(", ") || "nothing"}`,
+				);
+			}
+			if (!APPLICABILITY_DECISIONS.has(entry.decision)) {
+				throw new Error(`unknown applicability decision ${String(entry.decision)}`);
+			}
+			const reason = entry.reason.trim();
+			if (!reason) throw new Error(`say why belief ${beliefId} is ${entry.decision}`);
+			cleaned.push({ beliefId, decision: entry.decision, reason });
+		}
+		if (cleaned.length === 0) throw new Error("an applicability review must classify at least one belief");
+		this.recordDomainEvent({
+			...this.domainEventBase(),
+			type: "FormulationApplicabilityRecorded",
+			taskId: task.id,
+			versionId: review.versionId,
+			entries: cleaned,
+		});
+		return { recorded: cleaned.length, pending: this.pendingApplicability().length };
 	}
 
 	private currentTask(): Task | undefined {
@@ -1328,6 +1417,19 @@ export class BeliefLoopController {
 	): Promise<{ state: LoopState; steer?: string }> {
 		const revisionBlocked = this.revisionGate();
 		if (revisionBlocked) return { state: { role: "propose" }, steer: revisionBlocked };
+		// Evidence gathered under the previous reading does not answer the current question on its
+		// own. A conclusion may not be reported while such a belief is still standing on it: the
+		// belief's status is unchanged and remains true of what was observed, but the task has to say
+		// what it now makes of it first.
+		const unrevalidated = this.unrevalidatedApplicability();
+		if (unrevalidated.length > 0) {
+			return {
+				state,
+				steer: TRANSITION_STEERS.revalidateUnderReading(
+					this.describeBeliefs(unrevalidated.map((entry) => entry.beliefId)),
+				),
+			};
+		}
 		if (unadjudicated.length > 0) {
 			return {
 				state,
@@ -1383,9 +1485,15 @@ export class BeliefLoopController {
 
 	private formatFinalReportContext(): string {
 		const beliefs = this.beliefSet.beliefs;
-		const supported = beliefs.filter((belief) => statusOf(belief) === "supported");
-		const refuted = beliefs.filter((belief) => statusOf(belief) === "refuted");
-		const inconclusive = beliefs.filter((belief) => statusOf(belief) === "inconclusive");
+		const task = this.currentTask();
+		const applicability = (beliefId: string) => (task ? applicabilityFor(task, beliefId) : undefined);
+		// A belief the current reading put out of scope is history, not a finding of this task: its
+		// evidence is untouched, but reporting it would answer a question the task no longer asks.
+		const inScope = (belief: Belief) => applicability(belief.id)?.decision !== "not-applicable";
+		const supported = beliefs.filter((belief) => statusOf(belief) === "supported").filter(inScope);
+		const refuted = beliefs.filter((belief) => statusOf(belief) === "refuted").filter(inScope);
+		const inconclusive = beliefs.filter((belief) => statusOf(belief) === "inconclusive").filter(inScope);
+		const outOfScope = beliefs.filter((belief) => applicability(belief.id)?.decision === "not-applicable");
 		const lines: string[] = ["<final_report_context>"];
 		if (supported.length > 0) {
 			lines.push("Supported beliefs:");
@@ -1393,6 +1501,13 @@ export class BeliefLoopController {
 				lines.push(`- ${belief.id} [${belief.domain}] ${belief.statement}`);
 				lines.push(`  expectation: ${belief.expectation}`);
 				for (const entry of belief.supportedBy) lines.push(`  evidence: ${entry.evidence}`);
+				const standing = applicability(belief.id);
+				if (standing?.decision === "carries-over") {
+					lines.push(`  carried into the current reading: ${standing.reason}`);
+				}
+				if (standing?.revalidatedByDeltaId !== undefined) {
+					lines.push(`  re-examined under the current reading (${standing.revalidatedByDeltaId})`);
+				}
 			}
 		}
 		if (refuted.length > 0) {
@@ -1414,6 +1529,14 @@ export class BeliefLoopController {
 			lines.push(`  delivered: ${this.taskOutcome.result}`);
 			lines.push(`  verified by: ${this.taskOutcome.evidence}`);
 			if (this.taskOutcome.blockers) lines.push(`  remaining blockers: ${this.taskOutcome.blockers}`);
+		}
+		if (outOfScope.length > 0) {
+			lines.push("Out of scope under the current reading (history, not findings of this task):");
+			for (const belief of outOfScope) {
+				lines.push(`- ${belief.id} [${belief.domain}] ${belief.statement}`);
+				const standing = applicability(belief.id);
+				if (standing) lines.push(`  why it is out of scope: ${standing.reason}`);
+			}
 		}
 		lines.push("</final_report_context>");
 		return lines.join("\n");
@@ -1816,6 +1939,21 @@ export class BeliefLoopController {
 			if (gate) lines.push(gate);
 			for (const correction of this.pendingCorrections()) {
 				lines.push(`Pending user response ${correction.id}: ${domainContentText(correction.original)}`);
+			}
+			const owed = this.pendingApplicability();
+			if (owed.length > 0) {
+				lines.push("Beliefs this reading has not accounted for yet:");
+				for (const beliefId of owed) {
+					const belief = this.beliefSet.get(beliefId);
+					lines.push(
+						belief ? `- "${belief.statement}" (${beliefId}, ${statusOf(belief)})` : `- (${beliefId}, unknown)`,
+					);
+				}
+			}
+			for (const entry of this.unrevalidatedApplicability()) {
+				lines.push(
+					`Belief ${entry.beliefId} must be probed again under this reading before the task can be reported: ${entry.reason}`,
+				);
 			}
 			lines.push("</current_formulation>", "");
 			return lines.join("\n");

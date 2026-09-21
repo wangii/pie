@@ -4,11 +4,13 @@ import {
 	AGENT_SESSION_DOMAIN_SCHEMA_VERSION,
 	type AgentSessionDomainEvent,
 	appendAgentSessionDomainEvent,
+	applicabilityComplete,
 	applyAgentSessionDomainEvent,
 	createAgentSessionSnapshot,
 	currentFormulation,
 	DomainReplayError,
 	type FormulationAdoption,
+	type FormulationApplicabilityEntry,
 	type FormulationContent,
 	type FormulationSource,
 	formulationDecisionOwed,
@@ -1092,5 +1094,159 @@ describe("formulation decision gate", () => {
 		expect(reDeferred.formulationDeferral?.answeredThroughEpisodeOrdinal).toBe(2);
 		expect(formulationDecisionOwed(reDeferred)).toBe(false);
 		expect(reDeferred.formulations).toEqual([]);
+	});
+});
+
+describe("revision applicability isolation", () => {
+	const version = (overrides: {
+		eventId: string;
+		ordinal?: number;
+		previousVersionId?: string;
+		content?: FormulationContent;
+		reason?: string;
+	}): AgentSessionDomainEvent => ({
+		...base,
+		type: "ProblemFormulationRecorded",
+		eventId: overrides.eventId,
+		taskId: "task-1",
+		version: {
+			id: `formulation-${overrides.eventId}`,
+			taskId: "task-1",
+			ordinal: overrides.ordinal ?? 1,
+			previousVersionId: overrides.previousVersionId,
+			recordedAt: base.timestamp,
+			origin: "propose",
+			content: overrides.content ?? CONTENT,
+			reason: overrides.reason ?? "the evidence pointed at identity, not the guard",
+			sources: [],
+		},
+	});
+
+	const focus = (eventId: string, beliefIds: readonly string[], versionId: string): AgentSessionDomainEvent => ({
+		...base,
+		type: "FocusDeclared",
+		eventId,
+		taskId: "task-1",
+		beliefIds,
+		formulation: { kind: "version", versionId },
+	});
+
+	const applicability = (
+		eventId: string,
+		versionId: string,
+		entries: readonly FormulationApplicabilityEntry[],
+	): AgentSessionDomainEvent => ({
+		...base,
+		type: "FormulationApplicabilityRecorded",
+		eventId,
+		taskId: "task-1",
+		versionId,
+		entries,
+	});
+
+	const v1 = version({ eventId: "v1" });
+	const v2 = version({
+		eventId: "v2",
+		ordinal: 2,
+		previousVersionId: "formulation-v1",
+		content: { ...CONTENT, focus: "where the identity is retained between attempts" },
+		reason: "the first probe moved the focus to retention",
+	});
+	const v3 = version({
+		eventId: "v3",
+		ordinal: 3,
+		previousVersionId: "formulation-v2",
+		content: { ...CONTENT, focus: "identity ownership across components" },
+		reason: "the correction moved the question to ownership",
+	});
+	const taskAfter = (events: readonly AgentSessionDomainEvent[]) =>
+		replayAgentSessionDomainEvents("session-1", events).tasks.get("task-1")!;
+
+	it("marks the decision stale when the belief comes back into scope, and replaces it when re-decided", () => {
+		const decided = taskAfter([
+			...beliefLoopEvents().slice(0, 6),
+			v1,
+			focus("focus-1", ["belief-1"], "formulation-v1"),
+			v2,
+			applicability("app-1", "formulation-v2", [
+				{ beliefId: "belief-1", decision: "not-applicable", reason: "this reading asks about another path" },
+			]),
+		]);
+		expect(decided.formulationReview?.applicability[0].stale).toBeUndefined();
+		expect(applicabilityComplete(decided.formulationReview!)).toBe(true);
+
+		// Declaring the belief back into focus makes the decision a statement about a scope the task no
+		// longer holds: it stops counting, so the belief is owed a fresh one.
+		const backInScope = taskAfter([
+			...beliefLoopEvents().slice(0, 6),
+			v1,
+			focus("focus-1", ["belief-1"], "formulation-v1"),
+			v2,
+			applicability("app-1", "formulation-v2", [
+				{ beliefId: "belief-1", decision: "not-applicable", reason: "this reading asks about another path" },
+			]),
+			focus("focus-2", ["belief-1"], "formulation-v2"),
+		]);
+		expect(backInScope.formulationReview?.applicability[0]).toEqual({
+			beliefId: "belief-1",
+			decision: "not-applicable",
+			reason: "this reading asks about another path",
+			stale: true,
+		});
+		expect(applicabilityComplete(backInScope.formulationReview!)).toBe(false);
+
+		const reDecided = taskAfter([
+			...beliefLoopEvents().slice(0, 6),
+			v1,
+			focus("focus-1", ["belief-1"], "formulation-v1"),
+			v2,
+			applicability("app-1", "formulation-v2", [
+				{ beliefId: "belief-1", decision: "not-applicable", reason: "this reading asks about another path" },
+			]),
+			focus("focus-2", ["belief-1"], "formulation-v2"),
+			applicability("app-2", "formulation-v2", [
+				{ beliefId: "belief-1", decision: "carries-over", reason: "it is in scope again" },
+			]),
+		]);
+		expect(reDecided.formulationReview?.applicability).toEqual([
+			{ beliefId: "belief-1", decision: "carries-over", reason: "it is in scope again" },
+		]);
+		expect(applicabilityComplete(reDecided.formulationReview!)).toBe(true);
+	});
+
+	it("rebuilds the review on a further revision instead of carrying the earlier decisions", () => {
+		const events: AgentSessionDomainEvent[] = [
+			...beliefLoopEvents().slice(0, 6),
+			v1,
+			focus("focus-1", ["belief-1"], "formulation-v1"),
+			v2,
+			applicability("app-1", "formulation-v2", [
+				{ beliefId: "belief-1", decision: "not-applicable", reason: "this reading asks about another path" },
+			]),
+			focus("focus-2", ["belief-1"], "formulation-v2"),
+			applicability("app-2", "formulation-v2", [
+				{ beliefId: "belief-1", decision: "carries-over", reason: "it is in scope again" },
+			]),
+		];
+		const beforeThird = taskAfter(events);
+		expect(beforeThird.formulationReview?.versionId).toBe("formulation-v2");
+		expect(beforeThird.formulationReview?.applicability).toHaveLength(1);
+
+		const afterThird = taskAfter([...events, v3]);
+		expect(afterThird.formulations.map((item) => item.ordinal)).toEqual([1, 2, 3]);
+		expect(currentFormulation(afterThird)?.id).toBe("formulation-v3");
+		// The new version's review starts from the scope that was in force when it was published, with
+		// nothing carried over from the version before it: decisions describe one reading.
+		expect(afterThird.formulationReview).toEqual({
+			versionId: "formulation-v3",
+			focusReviewed: false,
+			scopedBeliefIds: ["belief-1"],
+			introducedAtRevision: 1,
+			applicability: [],
+		});
+		// The belief records themselves are untouched: applicability never re-judges evidence.
+		expect(
+			statusOfDomainBelief(replayAgentSessionDomainEvents("session-1", [...events, v3]).beliefs.get("belief-1")!),
+		).toBe("proposed");
 	});
 });

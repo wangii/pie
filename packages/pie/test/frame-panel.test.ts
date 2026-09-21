@@ -2,6 +2,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type {
 	FormulationCorrection,
+	FormulationReview,
 	FormulationState,
 	ProblemFormulationVersion,
 } from "../src/core/agent-session-domain.ts";
@@ -55,7 +56,26 @@ function correction(overrides: Partial<FormulationCorrection> = {}): Formulation
 }
 
 function state(overrides: Partial<FormulationState> = {}): FormulationState {
-	return { current: null, deferral: null, corrections: [], decisionOwed: false, ...overrides };
+	return {
+		current: null,
+		deferral: null,
+		corrections: [],
+		decisionOwed: false,
+		pendingApplicability: [],
+		unrevalidated: [],
+		...overrides,
+	};
+}
+
+function review(overrides: Partial<FormulationReview> = {}): FormulationReview {
+	return {
+		versionId: "formulation-2",
+		focusReviewed: false,
+		scopedBeliefIds: [],
+		introducedAtRevision: 0,
+		applicability: [],
+		...overrides,
+	};
 }
 
 function view(overrides: Partial<FrameView> = {}): FrameView {
@@ -69,14 +89,14 @@ function plain(lines: readonly string[]): string[] {
 describe("frame panel", () => {
 	it("distinguishes waiting for the user from the subsequent focus review", () => {
 		const waiting = view({
-			state: state({ current: version(2), review: { versionId: "formulation-2", focusReviewed: false } }),
+			state: state({ current: version(2), review: review() }),
 		});
 		expect(plain(buildFrameSummaryLines(waiting, 80)).join("\n")).toContain("awaiting your response");
 		expect(plain(buildFrameDetailLines(waiting, 80)).join("\n")).toContain("Paused: reply");
 		const reviewing = view({
 			state: state({
 				current: version(2),
-				review: { versionId: "formulation-2", responseCorrectionId: "correction-1", focusReviewed: false },
+				review: { ...review(), responseCorrectionId: "correction-1" },
 			}),
 		});
 		expect(plain(buildFrameSummaryLines(reviewing, 80)).join("\n")).toContain("focus review owed");

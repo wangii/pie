@@ -32,6 +32,8 @@ const answer = (id: string) =>
 		correctionId: id,
 		response: "I keep the revised reading and will test its counterexample.",
 	});
+const applicability = (beliefId: string, decision: string, reason: string) =>
+	fauxToolCall("review_applicability", { entries: [{ beliefId, decision, reason }] });
 
 const harnesses: Harness[] = [];
 afterEach(() => {
@@ -109,7 +111,14 @@ describe("revision response and focus review", () => {
 		const h = await pausedHarness();
 		const taskId = h.session.taskId;
 		const state = h.session.getFormulationState();
-		expect(state?.review).toEqual({ versionId: state?.current?.id, focusReviewed: false });
+		expect(state?.review).toEqual({
+			versionId: state?.current?.id,
+			focusReviewed: false,
+			scopedBeliefIds: ["belief-1"],
+			introducedAtRevision: 1,
+			applicability: [],
+		});
+		expect(state?.pendingApplicability).toEqual(["belief-1"]);
 		expect(h.session.isIdle).toBe(true);
 		expect(h.eventsOfType("TaskClosed")).toHaveLength(0);
 		expect(h.eventsOfType("ExperimentSelected")).toHaveLength(0);
@@ -133,7 +142,13 @@ describe("revision response and focus review", () => {
 					difficulty: "low",
 				}),
 			]),
-			fauxAssistantMessage([focus(), select()]), // identical ids are a valid review
+			// The reading's own scope is accounted for before focus is reviewed; identical ids are a
+			// valid review of both.
+			fauxAssistantMessage([
+				applicability("belief-1", "carries-over", "the retry identity is still the question"),
+				focus(),
+				select(),
+			]),
 			fauxAssistantMessage("Observed: identity survives a retry."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", { op: "support", beliefId: "belief-1", evidence: "same identity observed" }),
@@ -171,7 +186,18 @@ describe("revision response and focus review", () => {
 			kind: "version",
 			versionId: state?.current?.id,
 		});
-		expect(h.session.messages.map(getMessageText).join("\n")).toContain("Review the task focus");
+		// The selection attempted before the reading's own scope was accounted for was refused with the
+		// applicability gate, and the recorded decision covered the belief the revision was made about.
+		expect(h.session.messages.map(getMessageText).join("\n")).toContain(
+			"say what each belief already in scope means under the new reading",
+		);
+		expect(task.formulationReview?.applicability).toEqual([
+			{
+				beliefId: "belief-1",
+				decision: "carries-over",
+				reason: "the retry identity is still the question",
+			},
+		]);
 	});
 
 	it("accepts a normal user reply, but neither an old target nor an extension message releases the version wait", async () => {
@@ -193,6 +219,9 @@ describe("revision response and focus review", () => {
 					fauxAssistantMessage([
 						answer(oldCorrection.id),
 						answer(responseId),
+						applicability("belief-1", "carries-over", "identity across components is still the question"),
+						// Narrowing the focus to nothing does not drop the duty to say what the belief the
+						// revision was made about still means.
 						fauxToolCall("focus_beliefs", { beliefIds: [] }),
 						conclude(),
 					]),
@@ -209,6 +238,8 @@ describe("revision response and focus review", () => {
 		const task = [...h.session.domainSnapshot.tasks.values()][0];
 		expect(task.formulationReview?.responseCorrectionId).toBe(responseId);
 		expect(task.formulationCorrections.map((item) => item.status)).toEqual(["resolved", "resolved"]);
+		expect(task.formulationReview?.applicability.map((entry) => entry.beliefId)).toEqual(["belief-1"]);
+		expect(task.formulationReview?.scopedBeliefIds).toEqual(["belief-1"]);
 		expect(task.status).toBe("completed");
 	});
 
@@ -233,12 +264,28 @@ describe("revision response and focus review", () => {
 		const correction = restored.submitFormulationCorrection("confirmed")!;
 		expect(() => restored.setFocus(["belief-1"])).toThrow("Answer");
 		restored.answerFormulationCorrection(correction.id, "I will keep this reading");
-		expect(() => restored.selectExperiment({ intent: "test", beliefIds: ["belief-1"] })).toThrow("Review");
+		// The response is answered, but the reading's own scope has not been accounted for yet.
+		expect(() => restored.selectExperiment({ intent: "test", beliefIds: ["belief-1"] })).toThrow(
+			"review_applicability",
+		);
+		restored.recordApplicability([
+			{
+				beliefId: "belief-1",
+				decision: "needs-revalidation",
+				reason: "the old probe answered the previous reading, not this one",
+			},
+		]);
+		expect(() => restored.selectExperiment({ intent: "test", beliefIds: ["belief-1"] })).toThrow(
+			"Review the task focus",
+		);
+		expect(restored.unrevalidatedApplicability().map((entry) => entry.beliefId)).toEqual(["belief-1"]);
 		restored.setFocus(["belief-1"]);
 		restored.selectExperiment({ intent: "test a counterexample", beliefIds: ["belief-1"] });
 		const replayed = new BeliefLoopController(h.session);
 		expect(replayed.awaitingFormulationResponse()).toBe(false);
 		expect(replayed.focusReviewOwed()).toBe(false);
+		expect(replayed.pendingApplicability()).toEqual([]);
+		expect(replayed.unrevalidatedApplicability().map((entry) => entry.beliefId)).toEqual(["belief-1"]);
 		expect(replayed.pendingExperiment?.beliefIds).toEqual(["belief-1"]);
 	});
 });

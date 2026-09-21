@@ -8,7 +8,8 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { WorkingStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
+import { InteractiveMode, phaseWorkingMessage } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 function renderLastLine(container: Container, width = 120): string {
@@ -1312,5 +1313,212 @@ describe("InteractiveMode.handleSessionCommand", () => {
 		expect(rendered).toContain("Epistemic: — (CH —)");
 		expect(rendered).toContain("Distillation: — (CH —)");
 		expect(rendered).toContain("Execution: — (CH —)");
+	});
+});
+
+describe("InteractiveMode working indicator phase label", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	/** Minimal `this` for `handleEvent`: only the fields the working-indicator cases touch. */
+	function fakeWorkingThis(role: string | undefined, workingMessage?: string) {
+		const setMessage = vi.fn();
+		const showStatusIndicator = vi.fn();
+		const indicator = { kind: "working", setMessage };
+		return {
+			setMessage,
+			showStatusIndicator,
+			indicator,
+			fakeThis: {
+				isInitialized: true,
+				footer: { invalidate: vi.fn() },
+				session: { getLoopRole: () => role },
+				workingMessage,
+				defaultWorkingMessage: "Working...",
+				workingVisible: true,
+				pendingTools: new Set<string>(),
+				settingsManager: { getShowTerminalProgress: () => false },
+				defaultEditor: {},
+				activeStatusIndicator: indicator,
+				showStatusIndicator,
+				resolveWorkingMessage: (InteractiveMode as any).prototype.resolveWorkingMessage,
+				ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+			} as any,
+		};
+	}
+
+	function phaseEvent(type: "CursorChanged" | "EpisodeClosed") {
+		return {
+			type,
+			schemaVersion: 1,
+			eventId: `evt-${type}`,
+			timestamp: new Date(0).toISOString(),
+			taskId: "task-1",
+			episodeId: "episode-1",
+			...(type === "CursorChanged" ? { stage: "executing" as const } : {}),
+		} as any;
+	}
+
+	test("names the running belief-loop phase and leaves finalReport generic", () => {
+		expect(phaseWorkingMessage("propose")).toBe("Proposition working..");
+		expect(phaseWorkingMessage("execution")).toBe("Execution working..");
+		expect(phaseWorkingMessage("distill")).toBe("Distillation working..");
+		expect(phaseWorkingMessage("finalReport")).toBeUndefined();
+		expect(phaseWorkingMessage(undefined)).toBeUndefined();
+	});
+
+	test("agent_start labels the indicator with the phase that is about to run", async () => {
+		const { fakeThis, showStatusIndicator } = fakeWorkingThis("execution");
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, { type: "agent_start" });
+
+		const indicator = showStatusIndicator.mock.calls[0]?.[0];
+		expect(indicator).toBeInstanceOf(WorkingStatusIndicator);
+		expect(indicator.render(60).join("\n")).toContain("Execution working..");
+	});
+
+	test("agent_start without a phase label falls back to the generic message", async () => {
+		const { fakeThis, showStatusIndicator } = fakeWorkingThis("finalReport");
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, { type: "agent_start" });
+
+		const indicator = showStatusIndicator.mock.calls[0]?.[0];
+		expect(indicator.render(60).join("\n")).toContain("Working...");
+	});
+
+	test("a phase change refreshes the visible indicator without a new agent_start", async () => {
+		const { fakeThis, setMessage } = fakeWorkingThis("distill");
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, phaseEvent("CursorChanged"));
+
+		expect(setMessage).toHaveBeenCalledWith("Distillation working..");
+	});
+
+	test("the final report drops the phase label instead of keeping the last one", async () => {
+		const { fakeThis, setMessage } = fakeWorkingThis("finalReport");
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, phaseEvent("EpisodeClosed"));
+
+		expect(setMessage).toHaveBeenCalledWith("Working...");
+	});
+
+	test("an extension working message wins over the phase label", async () => {
+		const { fakeThis, setMessage } = fakeWorkingThis("execution", "Custom...");
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, phaseEvent("CursorChanged"));
+
+		expect(setMessage).toHaveBeenCalledWith("Custom...");
+	});
+
+	test("no visible working indicator leaves phase changes alone", async () => {
+		const { fakeThis, setMessage } = fakeWorkingThis("execution");
+		fakeThis.activeStatusIndicator = undefined;
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, phaseEvent("CursorChanged"));
+
+		expect(setMessage).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode working indicator lifecycle", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	/** `this` for the working-indicator lifecycle cases, with a mutable belief-loop role. */
+	function fakeLifecycleThis(role: string | undefined, workingMessage?: string) {
+		const setMessage = vi.fn();
+		const showStatusIndicator = vi.fn();
+		const state: { role: string | undefined; streaming: boolean } = { role, streaming: true };
+		const indicator = { kind: "working", setMessage };
+		const fakeThis: any = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			session: { getLoopRole: () => state.role, isStreaming: state.streaming },
+			workingMessage,
+			defaultWorkingMessage: "Working...",
+			workingVisible: true,
+			pendingTools: new Set<string>(),
+			settingsManager: { getShowTerminalProgress: () => false },
+			defaultEditor: {},
+			activeStatusIndicator: indicator,
+			showStatusIndicator,
+			resolveWorkingMessage: (InteractiveMode as any).prototype.resolveWorkingMessage,
+			clearStatusIndicator: (kind?: string) => {
+				if (kind && fakeThis.activeStatusIndicator?.kind !== kind) return;
+				fakeThis.activeStatusIndicator = undefined;
+			},
+			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+		};
+		return { fakeThis, setMessage, showStatusIndicator, state };
+	}
+
+	function phaseEvent(type: "CursorChanged" | "EpisodeClosed") {
+		return {
+			type,
+			schemaVersion: 1,
+			eventId: `evt-${type}`,
+			timestamp: new Date(0).toISOString(),
+			taskId: "task-1",
+			episodeId: "episode-1",
+			...(type === "CursorChanged" ? { stage: "executing" as const } : {}),
+		} as any;
+	}
+
+	test("a retry indicator keeps its own message across phase changes", async () => {
+		const { fakeThis, setMessage } = fakeLifecycleThis("execution");
+		fakeThis.activeStatusIndicator = { kind: "retry", setMessage };
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, phaseEvent("CursorChanged"));
+
+		expect(setMessage).not.toHaveBeenCalled();
+	});
+
+	test("re-showing a hidden indicator uses the running phase", () => {
+		const { fakeThis, showStatusIndicator } = fakeLifecycleThis("execution");
+
+		(InteractiveMode as any).prototype.setWorkingVisible.call(fakeThis, false);
+		(InteractiveMode as any).prototype.setWorkingVisible.call(fakeThis, true);
+
+		const indicator = showStatusIndicator.mock.calls[0]?.[0];
+		expect(indicator.render(60).join("\n")).toContain("Execution working..");
+	});
+
+	test("clearing an extension working message restores the phase label", () => {
+		const { fakeThis, setMessage } = fakeLifecycleThis("distill", "Custom...");
+		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+
+		uiContext.setWorkingMessage(undefined);
+
+		expect(setMessage).toHaveBeenCalledWith("Distillation working..");
+	});
+
+	test("a task started after a conclusion shows the reset propose phase", async () => {
+		const { fakeThis, showStatusIndicator, state } = fakeLifecycleThis("finalReport");
+
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, { type: "agent_end" });
+		expect(fakeThis.activeStatusIndicator).toBeUndefined();
+
+		// AgentSession resets the loop to propose while preparing the new prompt, before the run starts.
+		state.role = "propose";
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, { type: "agent_start" });
+
+		const indicator = showStatusIndicator.mock.calls[0]?.[0];
+		expect(indicator.render(60).join("\n")).toContain("Proposition working..");
+	});
+
+	test("a mid-run role reset without a cursor event is picked up at the next message", async () => {
+		const { fakeThis, setMessage, state } = fakeLifecycleThis("finalReport", undefined);
+		fakeThis.addMessageToChat = vi.fn();
+
+		// A queued new task resets the loop to propose and records no CursorChanged.
+		state.role = "propose";
+		await (InteractiveMode as any).prototype.handleEvent.call(fakeThis, {
+			type: "message_start",
+			message: { role: "custom", customType: "test", content: "hi" },
+		});
+
+		expect(setMessage).toHaveBeenCalledWith("Proposition working..");
 	});
 });

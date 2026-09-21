@@ -61,6 +61,8 @@ function longView(ordinal = 3): FrameView {
 		deferral: null,
 		corrections: [1, 2, 3, 4, 5, 6].map(correction),
 		decisionOwed: false,
+		pendingApplicability: [],
+		unrevalidated: [],
 	};
 	return { state, history, adopted: { kind: "version", versionId: `formulation-${ordinal}` } };
 }
