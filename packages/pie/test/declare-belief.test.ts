@@ -247,7 +247,7 @@ describe("view_beliefs tool", () => {
 		const tool = createViewBeliefsToolDefinition(set);
 		const result = await tool.execute("tc-1", {}, undefined, undefined, undefined as never);
 
-		expect((result.content[0] as { text: string }).text).toContain("[FRAME]");
+		expect((result.content[0] as { text: string }).text).toContain("[OPEN]");
 		expect((result.content[0] as { text: string }).text).toContain("the cache is warm");
 	});
 });

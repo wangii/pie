@@ -52,6 +52,12 @@ distill records only evidence material to the judgment.
 
 ## What is outside the belief set
 
+- The **current problem formulation** (the Frame) is propose's task-local reading of what problem is
+  being solved, published by `set_formulation` as an immutable per-task version (or recorded by
+  `defer_formulation` as a deferral while no reading can be stated). It is formed from the task, the
+  user's intent, and the belief state: the same beliefs under a different task give a different
+  reading, so it is neither a belief nor an aggregate of beliefs. It conditions which hypotheses and
+  experiments come next and is never evidence for a belief.
 - The task objective is the domain `Target` derived from the user request.
 - Fast-path selection is `RoutingSet` control metadata written by `route_task`.
 - The **task focus** (`FocusSet`) is the control-only slice of belief ids the current task acts on,
@@ -80,12 +86,21 @@ execution evidence
   +-- adjudication: support / refute / refine / inconclusive
   |
   +-- residual: missing belief, referent refinement, or task-relevant reframing
+         |
+         +--> propose reconsiders the Frame (an anomaly need not become a belief first)
 ```
 
-Evidence settles existing beliefs. Residual exposes missing beliefs or reframing. Propose then
+Evidence settles existing beliefs. Residual exposes missing beliefs or reframing, and it also
+carries what the belief set does not explain: an anomaly that cannot yet change any belief's status
+is still a reason to reconsider the current reading, so that branch does not have to pass through a
+belief. The two branches are not substitutes — an unchanged belief set can still require
+reconsideration, and reconsideration never settles an unadjudicated belief. Propose then
 chooses which unresolved uncertainty matters next relative to task value, cost, risk, side effects,
 and evidence dependencies — and which task decision that choice could change.
 
+The Frame sits above this flow. Adjudicated beliefs are read into a formulation, the formulation
+orders which uncertainty propose considers next, and evidence that does not fit the reading forces a
+new formulation — so a revision can change the investigation without changing any belief's status.
 Focus sits beside this flow rather than in it: `focus_beliefs` decides what the task is acting on,
 and `select_experiment` picks the subset to probe. Neither is an arrow into the belief set, so
 neither can settle a belief, and an unresolved belief outside the focus neither dispatches nor

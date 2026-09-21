@@ -25,6 +25,29 @@ adjudicate beliefs, inspect residual, refine epistemic state
     +---- epistemically sufficient --------> FINAL REPORT
 ```
 
+That diagram is one layer of a two-layer cycle. The belief set is the evidence-grounded layer;
+the Frame is the task-conditioned layer that decides what the belief state is currently *read as*,
+and therefore which hypotheses and experiments come next:
+
+```text
+TASK + USER INTENT
+        |
+        v
+   BELIEF STATE --forms--> FRAME (current problem formulation)
+        ^                      |
+        |                      v
+     DISTILL            hypothesis space, attention, anomaly priority,
+        ^               next experiment selection
+        |                      |
+        +--- OBSERVATION <-----+
+```
+
+So the loop is `beliefs -> frame -> what becomes thinkable/testable -> observation -> beliefs`.
+The Frame's job is not to summarize the belief set but to shape the next round of belief
+formation. A Frame is not a larger or coarser belief, and the belief loop above still runs
+unchanged underneath it; the Frame layer is described under *Frame feedback and revision pause*
+below.
+
 Routing, execution leases, domain events, and model selection are implementation helpers.
 They are not cognitive phases and are not beliefs.
 
@@ -98,6 +121,32 @@ distill reads evidence, so withholding them would hide part of the basis for the
 `finalReport` writes rather than decides and stays on the `read` gate.
 
 ## Frame feedback and revision pause
+
+A Frame answers "what problem do I currently think I am solving", where a belief answers "what do I
+currently think is true". It is therefore not derived from the belief state alone:
+
+```text
+Frame_t = f(Task, user intent, B_t, Frame_t-1)      not      Frame = Aggregate(B_t)
+```
+
+The same beliefs under a different task yield a different Frame, and a reading can be stated before
+any evidence has been gathered, because the request itself already constrains it; what the runtime
+requires is that the decision be made once an experiment has been dispatched, not that a reading
+precede the first probe. A Frame is a *structural prior for the next inquiry* — it orders which
+hypotheses are generated, which anomaly matters, which tool is called, and when the current reading
+is no longer tenable — not a posterior claim about the world. That is why it is projected as the
+agent's own provisional position and never as support for a belief.
+
+Because the Frame conditions the next hypothesis and the context it is read in, a reading can seal
+itself: it produces only compatible beliefs, which strengthen it further. Reframing is therefore a
+normal operation rather than an exception. Two things keep the loop open: where the agent can name
+them, the reading says what observation would force a new reading (`implication` carries the
+direction; `tension` carries the conflict and may stay unstated), and propose may select a belief
+that conflicts with the current reading as a counterexample. That selection is subject to the usual
+gates — the belief must be in the task's focus, and a pending revision review still has to be
+answered first — so nothing is dispatched during the revision pause. The version history preserves
+the `X -> Y` transition instead of silently rewriting the reading, which is what makes a reframing
+reviewable.
 
 Evidence and beliefs inform the Frame; the Frame's objects, relations and scale inform task focus;
 focus guides experiments; distill's residual can prompt a new reading. Scope does not mechanically
@@ -221,6 +270,40 @@ Distill has two ordered steps:
 candidate beliefs directly implied by an observation; propose decides whether those uncertainties
 matter enough to execute next. Derived reasoning from supported beliefs is not automatically a new
 empirical assumption.
+
+### Two outputs, one step apart
+
+The two steps produce two different outputs, and the loop carries both forward:
+
+```text
+                       +--> adjudication --> belief-set changes
+observation --> distill
+                       +--> residual ------> anomaly / explanation gap / revision suggestion
+                                                      |
+                                                      v
+                                           propose reconsiders the Frame
+```
+
+- The adjudication branch answers "which judgments are now supported, refuted, or still open". It
+  settles beliefs or leaves them open.
+- The residual branch answers "what does the current belief set still not explain, and does the
+  current reading still organize this task". An anomaly that cannot yet change any belief's status
+  is still a reason to reconsider the reading, so this branch must not be required to travel
+  through a belief first.
+
+This is not a `belief-set -> Frame` pipeline. An unchanged belief set can still require a
+reconsideration (new evidence makes an existing relation matter, or the task's emphasis moved), and
+a changed belief set does not force a revision. Reconsidering is a normal step; publishing a new
+version happens only when the reading itself changes. Neither branch substitutes for the other:
+reconsidering does not settle an unadjudicated belief, and adjudicating does not stand in for
+looking at what the beliefs now mean for the task.
+
+The runtime does not yet carry the residual branch as a record. It does record a version-bound
+review after a revision (`formulationReview`: the user response plus the focus review), and a
+published version settles the formulation decision for good — so nothing records that a given round
+reconsidered the reading and kept it. That increment is planned in
+[milestone-formulation-recheck.md](milestone-formulation-recheck.md); until then this section states
+the design, not an implemented gate.
 
 ## Conclusion, task outcome, and reflection
 

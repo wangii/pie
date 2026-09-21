@@ -24,6 +24,11 @@
 验证使用 faux provider 定向回归；终端人工交互验证仍未执行。
 当前运行时细节见 [domain-model.md](domain-model.md) 与 [belief-loop-roles.md](belief-loop-roles.md)。
 
+另一个规划中的增量——distillation 的两路反馈与每轮 Frame 重审，包括 residual 记录、
+“已重审/维持不变”的可区分状态和对应验收场景——见
+[milestone-formulation-recheck.md](milestone-formulation-recheck.md)。它尚未实现；本文件下文
+描述的循环与门槛仍以当前实现为准。
+
 ## 产品目标
 
 用户要知道：**这个 agent 此刻把我交给它的事情当成什么事情。**
@@ -66,6 +71,30 @@ Frame 是一种暂定的问题理解，不使用这些真假或证据裁定状�
 Frame 不是 belief-set 的摘要，不能从 belief 状态机械推导出来。用户任务及其纠正同样参与
 问题理解：相同的系统证据，在不同任务下可能具有不同的重要性。
 
+### Frame 是任务条件下的问题理解，不是更粗的 belief
+
+两者的区别不是颗粒度，而是回答的问题和价值来源。Belief 是证据可修订的世界判断；
+Frame 是在任务与用户意图约束下对这种判断的当前解释，也是下一轮调查的结构性先验
+（哪些假设值得提、哪个异常重要、什么时候当前解释已经不成立），而不是对世界的又一个断言：
+
+```text
+Frame_t = f(任务, 用户意图, B_t, Frame_t-1)      而不是      Frame = Aggregate(B_t)
+```
+
+由此得到两条设计要求：
+
+- 形成暂定 Frame 不依赖已有证据：请求本身已经约束了理解，所以同一组 beliefs 在不同任务下
+  可以形成不同 Frame。运行时只在首次派发实验后才强制完成发布或暂缓决定，不在派发前强制发布。
+- Frame 进入上下文时始终标注为暂定立场，不是观察、不是证据；它指导如何寻找证据，
+  但不能因为某个替代解释不再优先就当成被证伪。
+
+由于 Frame 塑造下一轮假设和上下文，它可能自我强化：只生成与当前理解相容的假设，
+反过来又加强该理解。因此 reframing 是常规操作而不是异常：能说明时，Frame 写明什么观察会
+迫使重新表述（Implication 承载方向，Tension 承载张力且可暂缺，不因此成为必填字段），
+propose 可以选择与当前理解相冲突的 belief 作为反例，但仍受常规门槛约束（该 belief 需在
+任务 focus 内，且待回应的修订审阅必须先结清，修订暂停期间不派发）。版本历史保留
+`X -> Y` 的变化过程，使重新理解可被审阅而不是被静默改写。
+
 ### 通过任务 focus 连接到实验选择
 
 | 层次 | 作用 |
@@ -81,7 +110,9 @@ Frame 不是 belief-set 的摘要，不能从 belief 状态机械推导出来。
 
 ### 相互影响，但可以独立变化
 
-以下是已有 Frame 时的调查循环；首次调查可以在尚未形成 Frame 时开始。
+以下是已有 Frame 时的调查循环；首次调查可以在尚未形成 Frame 时开始。distillation 之后是
+两条独立的反馈路，不是一个 `belief set → Frame` 的流水线（详见
+[milestone-formulation-recheck.md](milestone-formulation-recheck.md)）：
 
 ```text
 用户任务 + 已有 beliefs / 证据
@@ -92,10 +123,17 @@ propose 形成或修订 Frame
               ↓
 execution 收集观察
               ↓
-distill 更新 beliefs，并提出修订建议
-              ↓
-propose 决定是否改变 Frame，再选择下一次实验
+distillation
+     ├─ 裁定 ─────────────→ belief set 更新
+     └─ residual ─→ 异常 / 解释缺口 / 修订建议
+                            ↓
+              propose 重审当前 Frame，再选择下一次实验
 ```
+
+为什么不是串行的一步接一步：异常（residual）不需要先变成 belief 才能影响理解，而 belief
+集合没有变化也仍然可能需要重审。两路不可互相替代：重审不能结清未裁定的 belief，裁定也
+不能代替“这些 beliefs 对当前任务意味着什么”的判断。本节的循环描述现有设计；其中
+“每轮重审必须留下结果”与“residual 需要记录”属尚未实现的增量，不是当前运行时已保证的行为。
 
 - Beliefs 改变，Frame 不变：新的证据进一步支持身份生命周期这一理解，调查继续沿用原 Frame。
 - Frame 改变，beliefs 不变：用户纠正任务重点，或 agent 对已有证据形成新的解释。
@@ -371,8 +409,8 @@ What this changes
   `selectDomainFrameBody` 一并改名。execution lease 的 `frameHorizon` →
   `episodeHorizon`（`FRAME_HORIZON_HEADROOM` → `EPISODE_HORIZON_HEADROOM`）。
 - `dispatchedFrameIds` 存的始终是 belief ID，按实际语义改名为 `dispatchedBeliefIds`。
-- 终端绘制帧、belief 面板旧 `[frame]` 文案、`view_beliefs` 的 `[FRAME]` 标签都不属于本次
-  改名范围，保持原样（面板文案由 M5 处理）。
+- 终端绘制帧、belief 面板旧 `[frame]` 文案都不属于本次改名范围，保持原样（面板文案由 M5 处理）。
+  `view_beliefs` 的 `[FRAME]` 标签在本次改名时保留，后由 M5 收尾替换为 `[OPEN]`（见下）。
 - GUI 消费者适配仍未完成：`gui/src/Model.cpp` 及其测试仍按旧事件名和 `frameId` 解析，
   与 v2 runtime 不兼容。该适配是后续依赖，不属于本 milestone，对外同步前必须完成。
   `packages/pie/docs/domain-model.md` 的 "Protocol versioning and old logs" 记录了这一点。
@@ -531,7 +569,8 @@ fast path 有 Frame 后才能成功关闭，发布失败不能假成功，收尾
 - **快捷键**：`app.frame.toggle`（默认 `shift+ctrl+g`）进入可配置 keybindings，并列入 `/hotkeys`；
   `/frame` 本身是命令，交互不依赖不可配置快捷键。
 - **面板文案**：belief 面板不再把 proposed beliefs 标成 `[frame]`；`view_beliefs` 的 `[FRAME]`
-  标签按 M1 的范围说明保持原样。
+  标签改为 `[OPEN]`，`formatBeliefsForView` 的 scope `"frame"` 改为 `"open"`，避免把未裁定
+  belief 称作 Frame。M1 中“`view_beliefs` 标签保持原样”的范围说明因此作废。
 - **宽度**：所有行经 `truncateToWidth`/`wrapTextWithAnsi`，测试覆盖 24/40/60 列下的中文内容。
 
 ### M6：回归验证与文档收敛

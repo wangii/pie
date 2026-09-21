@@ -5,9 +5,8 @@
  * A belief is a named relational assertion about product or code, carrying a
  * falsifiable `expectation` and a structured `evidenceRounds` estimate. Any number
  * of beliefs may be `proposed` (unadjudicated) at once: those open beliefs are the
- * *frame* — the set of beliefs the next execution episode probes. Each is
- * validated independently, so a batch of proposals is legal as long as every one
- * passes its own structural rules.
+ * candidates the next execution episode probes. Each is validated independently, so a batch of
+ * proposals is legal as long as every one passes its own structural rules.
  *
  * Records are immutable: `support`/`refute` append evidence, `refine`/`retract` mark
  * the prior record superseded and (for `refine`) add a new record. `status` is a
@@ -476,31 +475,31 @@ export class RoutingSet {
 
 /**
  * Render the belief set as structured text for the read-only `view_beliefs` tool — the
- * model's only surface onto beliefs (never injected into the system prompt). The frame
- * is called out with its expectation and evidence-round estimate.
+ * model's only surface onto beliefs (never injected into the system prompt). Open beliefs
+ * are listed first with their expectation and evidence-round estimate.
  *
  * Two scopes:
- * - `"all"`: the open frame and settled beliefs.
- * - `"frame"`: only the open frame being probed (statement, expectation, and evidence estimate).
+ * - `"all"`: the open beliefs and the settled beliefs.
+ * - `"open"`: only the beliefs still open to probing (statement, expectation, and evidence estimate).
  */
-export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | "frame" = "all"): string {
+export function formatBeliefsForView(beliefs: readonly Belief[], scope: "all" | "open" = "all"): string {
 	const unresolved = beliefs.filter((b) => {
 		const status = statusOf(b);
 		return status === "proposed" || status === "inconclusive";
 	});
 	const lines: string[] = [];
-	for (const frame of unresolved) {
-		lines.push(`[FRAME] ${frame.id} [${frame.domain}] ${frame.statement}`);
-		lines.push(`  expectation: ${frame.expectation}`);
-		lines.push(`  evidence rounds: ${frame.evidenceRounds}`);
-		for (const attempt of frame.inconclusiveBy) {
+	for (const belief of unresolved) {
+		lines.push(`[OPEN] ${belief.id} [${belief.domain}] ${belief.statement}`);
+		lines.push(`  expectation: ${belief.expectation}`);
+		lines.push(`  evidence rounds: ${belief.evidenceRounds}`);
+		for (const attempt of belief.inconclusiveBy) {
 			lines.push(`  inconclusive attempt: ${attempt.evidence}`);
 		}
-		if (frame.skillRefs && frame.skillRefs.length > 0) {
-			lines.push(`  skill refs: ${frame.skillRefs.join(", ")}`);
+		if (belief.skillRefs && belief.skillRefs.length > 0) {
+			lines.push(`  skill refs: ${belief.skillRefs.join(", ")}`);
 		}
 	}
-	if (scope === "frame") {
+	if (scope === "open") {
 		return lines.length > 0 ? lines.join("\n") : "No open beliefs to probe.";
 	}
 	const settled = beliefs.filter((b) => {

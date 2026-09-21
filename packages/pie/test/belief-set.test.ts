@@ -250,19 +250,20 @@ describe("formatBeliefsForView", () => {
 		propose(set, "open relation");
 
 		const text = formatBeliefsForView(set.beliefs);
-		expect(text).toContain("[FRAME]");
+		expect(text).toContain("[OPEN]");
 		expect(text).toContain("[SETTLED]");
 		expect(text).not.toContain("FRAMING");
+		expect(text).not.toContain("[FRAME]");
 		expect(text).not.toContain("routing");
 	});
 
-	test("renders inconclusive attempts in the open frame", () => {
+	test("renders inconclusive attempts in the open beliefs", () => {
 		const set = new BeliefSet();
 		const belief = propose(set, "retryable relation");
 		set.apply({ op: "inconclusive", beliefId: belief.id, evidence: "probe timed out" });
 
-		const text = formatBeliefsForView(set.beliefs, "frame");
-		expect(text).toContain("[FRAME]");
+		const text = formatBeliefsForView(set.beliefs, "open");
+		expect(text).toContain("[OPEN]");
 		expect(text).toContain("inconclusive attempt: probe timed out");
 	});
 });
