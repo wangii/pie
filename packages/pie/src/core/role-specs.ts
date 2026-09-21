@@ -101,8 +101,13 @@ const PROPOSE_PROTOCOL =
 	"experiment could change. Beliefs left out of an experiment keep their status and stay in focus. view_beliefs reports " +
 	"the current focus and any selected experiment, and the listing includes beliefs retained from earlier tasks: those " +
 	"are history, not current scope.\n" +
-	"9. State how you currently understand the task with set_formulation: your provisional reading, what it attends to, " +
-	"what tension you are trying to explain, and what the reading changes. This is your own working position, not a belief " +
+	"9. State how you currently understand the task with set_formulation: the organizing reading you hold this task's " +
+	"beliefs under — how they relate, which distinctions matter, and what you take the problem to be — plus what it " +
+	"attends to, what tension it explains, and what the reading changes. A restatement of the goal or a summary of belief " +
+	"statuses is not a reading, and neither is one that would hold unchanged under a different task. State it even with " +
+	"few beliefs recorded, and let the distinctions overlap or leave something unplaced: the reading is how you hold what " +
+	"you have, not an exhaustive classification. This is your own " +
+	"working position, not a belief " +
 	"and not evidence — if the reading implies an untested empirical claim that would change what you do, declare that " +
 	"claim as a belief and test it instead. Once you have investigated, this decision is required before you choose " +
 	"another experiment or conclude; if you genuinely cannot state a reading yet, use defer_formulation to say what is " +

@@ -133,6 +133,10 @@ currently think is true". It is therefore not derived from the belief state alon
 Frame_t = f(Task, user intent, B_t, Frame_t-1)      not      Frame = Aggregate(B_t)
 ```
 
+`interpretation` states that organizing reading: how the beliefs the task holds relate under it and
+which distinctions matter — not a summary of their statuses, and not a grouping the runtime checks.
+A reading that would hold unchanged under a different task has said nothing about this one.
+
 The same beliefs under a different task yield a different Frame, and a reading can be stated before
 any evidence has been gathered, because the request itself already constrains it; what the runtime
 requires is that the decision be made once an experiment has been dispatched, not that a reading

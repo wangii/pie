@@ -51,11 +51,11 @@ export type FormulationCitation = Static<typeof citationSchema>;
 const setFormulationSchema = Type.Object({
 	interpretation: Type.String({
 		description:
-			"How you currently understand this task, in the first person and provisional: what you take the problem to be now. Not a belief, and not a claim you are asserting is true.",
+			"How you currently understand this task, in the first person and provisional: the reading you hold this task's beliefs under — how they relate and which distinctions matter, not a summary of their statuses. The grouping may overlap or leave a belief unplaced, and a reading is expected even while the task still holds few beliefs. Not a belief, and not a claim you are asserting is true.",
 	}),
 	focus: Type.String({
 		description:
-			"Which objects, relations, or scales you are attending to under this reading. Prose, not a list of belief ids — the task's scope is declared separately with focus_beliefs.",
+			"Which objects, relations, or scales you are attending to under this reading, and why they matter to this task. Prose, not a list of belief ids — the task's scope is declared separately with focus_beliefs.",
 	}),
 	implication: Type.String({
 		description:
@@ -167,6 +167,9 @@ export function createSetFormulationToolDefinition(
 		promptSnippet: "Publish your current understanding of the task",
 		promptGuidelines: [
 			"State a provisional first-person reading, not a settled claim; the formulation is never evidence for a belief",
+			"Make the interpretation an organizing reading of the beliefs this task holds: how they relate and which distinctions matter — not a restatement of the goal and not a summary of belief statuses",
+			"A statement that would hold unchanged under a different task says nothing about this one; say what this reading rules in or out for the next choice",
+			"State a reading even when the task holds few beliefs or none yet, and let the distinctions overlap or leave something unplaced — an organizing reading is not an exhaustive classification",
 			"If a reading implies an untested empirical claim that would change what you do, record that claim as a belief and test it instead of asserting it here",
 			"Revise only for a substantive change in what you understand, where you are attending, or where the work goes; more evidence for the same reading is not a revision",
 			"Write the content in {beliefLang}",

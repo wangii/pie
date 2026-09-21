@@ -3,6 +3,7 @@ import type { AgentSession } from "../src/core/agent-session.ts";
 import type { FormulationContent } from "../src/core/agent-session-domain.ts";
 import { BeliefLoopController } from "../src/core/belief-loop/belief-loop-controller.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createSetFormulationToolDefinition } from "../src/core/tools/formulation.ts";
 
 const CONTENT: FormulationContent = {
 	interpretation: "I read this as an identity lifecycle problem",
@@ -471,5 +472,36 @@ describe("propose ownership of the decision", () => {
 		});
 		expect(controller.formulationDecisionOwed()).toBe(false);
 		expect(controller.currentFormulation()).toBeUndefined();
+	});
+});
+
+/**
+ * The prompt contract is the only place the interpretation standard lives: the runtime checks
+ * that the field is non-empty, so what keeps a goal restatement out of the record is the tool
+ * asking for an organizing reading in the first place.
+ */
+describe("formulation prompt contract", () => {
+	it("asks interpretation for an organizing reading rather than a summary of belief statuses", () => {
+		const tool = createSetFormulationToolDefinition(() => ({ outcome: "recorded", text: "recorded" }));
+		const guidelines = (tool.promptGuidelines ?? []).join(" ");
+		// TypeBox schemas carry their field descriptions on the runtime object, not in the static type.
+		const schema = JSON.stringify(tool.parameters);
+
+		expect(schema).toContain("how they relate");
+		expect(guidelines).toContain("summary of belief statuses");
+		expect(guidelines).toContain("would hold unchanged under a different task");
+	});
+
+	it("keeps the grouping loose and the reading available before beliefs accumulate", () => {
+		const tool = createSetFormulationToolDefinition(() => ({ outcome: "recorded", text: "recorded" }));
+		const guidelines = (tool.promptGuidelines ?? []).join(" ");
+		const schema = JSON.stringify(tool.parameters);
+
+		// Organizing the beliefs must not read as a precondition: a reading is owed early too, and the
+		// grouping is not an exhaustive classification the runtime checks.
+		expect(schema).toContain("may overlap or leave a belief unplaced");
+		expect(schema).toContain("few beliefs");
+		expect(guidelines).toContain("few beliefs or none yet");
+		expect(guidelines).toContain("overlap or leave something unplaced");
 	});
 });

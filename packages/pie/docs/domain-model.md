@@ -210,7 +210,7 @@ claim belongs in the Belief registry where it can be tested.
 
 ```cpp
 struct FormulationContent {
-  std::string interpretation;          // how I currently understand this task
+  std::string interpretation;          // the reading I hold this task's beliefs under
   std::optional<std::string> alternative; // a reading I am not prioritizing
   std::string focus;                   // which objects, relations, or scales I am attending to
   std::optional<std::string> tension;  // the conflict I am trying to explain; absent = not yet clear
@@ -253,6 +253,12 @@ understands, what it is attending to, and what that changes is a label rather th
 understanding. `alternative` and `tension` are optional and must stay genuinely optional: an agent
 with no rival reading and no articulated tension publishes without them rather than inventing
 content to fill a field, and a present-but-blank optional is rejected for the same reason.
+
+`interpretation` is the organizing reading of what the task holds, not a summary of it: it says
+how those beliefs relate under the current understanding and which distinctions matter, so the same
+beliefs organized under a different task-relevant distinction are a different interpretation.
+Nothing checks the grouping mechanically, so it may overlap or leave a belief unplaced; the field is
+judged by whether it changes the next choice, not by how many beliefs it names.
 
 #### Sources
 
