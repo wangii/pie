@@ -5,6 +5,8 @@ import type {
 	FormulationRecheck,
 	FormulationState,
 	ProblemFormulationVersion,
+	TaskAdvancement,
+	TaskAdvancementStage,
 } from "../../../core/agent-session-domain.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -26,6 +28,11 @@ export interface FrameView {
 	readonly history: readonly ProblemFormulationVersion[];
 	/** What the most recent dispatched round was chosen under, if anything has run. */
 	readonly adopted: FormulationAdoption | undefined;
+	/**
+	 * What the task is doing now, and what the agent said it would do next. Absent when no task is
+	 * open; the `finished` stage is rendered as nothing at all, because a closed task has no move.
+	 */
+	readonly advancement?: TaskAdvancement;
 }
 
 /** How many versions the detail view lists before summarizing the rest. */
@@ -107,6 +114,7 @@ export function buildFrameSummaryLines(view: FrameView, width: number): string[]
 	} else {
 		lines.push(truncateToWidth(`  ${theme.fg("dim", "the agent has not yet said how it reads this task")}`, width));
 	}
+	lines.push(...advancementLines(view, width, false));
 	return lines;
 }
 
@@ -195,6 +203,9 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 	}
 
 	lines.push(...recheckLines(state, history, width));
+
+	const advancement = advancementLines(view, width, true);
+	if (advancement.length > 0) lines.push(...advancement, "");
 
 	if (state.corrections.length > 0) {
 		lines.push(truncateToWidth(theme.bold("Corrections"), width));
@@ -294,6 +305,87 @@ function recheckLines(state: FormulationState, history: readonly ProblemFormulat
 		...wrapTextWithAnsi(`    ${recheck.reason}`, width),
 		"",
 	];
+}
+
+/** The runtime's stage in the panel's own words — short, because it shares a line with the label. */
+function stageText(stage: TaskAdvancementStage): string {
+	switch (stage) {
+		case "preparing":
+			return "preparing";
+		case "running":
+			return "running";
+		case "distilling":
+			return "working through the round";
+		case "waiting":
+			return "waiting for you";
+		default:
+			return "finished";
+	}
+}
+
+/**
+ * What the task is doing now: the agent's own words when it has any, the runtime's stage otherwise.
+ *
+ * While the task waits for the user the agent's sentence is deliberately dropped — the round it
+ * described is stopped, and repeating its wording as the current move would report work that is
+ * not running. The reason comes from the same state the panel's markers read.
+ */
+function nowText(advancement: TaskAdvancement, state: FormulationState): string {
+	switch (advancement.stage) {
+		case "waiting":
+			if (state.corrections.some((correction) => correction.status === "pending")) {
+				return "waiting for your response to a correction";
+			}
+			if (state.review && !state.review.responseCorrectionId) {
+				return "waiting for your response to the revised reading";
+			}
+			if (state.review && !state.review.focusReviewed) return "reviewing focus under your response";
+			return "waiting for your response";
+		case "preparing":
+			return advancement.action ?? "deciding what to probe next";
+		case "running":
+			return advancement.action ?? "gathering evidence for this round";
+		case "distilling":
+			return advancement.action ?? "working out what this round's evidence means";
+		default:
+			return advancement.action ?? "";
+	}
+}
+
+/**
+ * The current move: the stage the loop is actually in, what the agent is doing, and what it would
+ * do next if a stated condition holds.
+ *
+ * The next-step line is never invented. A step is shown only when the agent paired it with a
+ * condition; otherwise the fallback says the answer comes after this round, because guessing a
+ * direction from the stage label is exactly the fabrication the two-part projection exists to
+ * avoid. A finished task shows no move at all.
+ */
+function advancementLines(view: FrameView, width: number, detailed: boolean): string[] {
+	const advancement = view.advancement;
+	if (!advancement || advancement.stage === "finished") return [];
+	const lines: string[] = [];
+	if (detailed) {
+		lines.push(truncateToWidth(theme.bold("Current move"), width));
+		lines.push(truncateToWidth(`  ${theme.fg("muted", stageText(advancement.stage))}`, width));
+	} else {
+		lines.push(truncateToWidth(`  ${theme.fg("muted", `Current move: ${stageText(advancement.stage)}`)}`, width));
+	}
+	lines.push(...wrapTextWithAnsi(`    ${theme.fg("accent", "Now:")} ${nowText(advancement, view.state)}`, width));
+	if (advancement.stage === "waiting") return lines;
+	if (advancement.condition && advancement.next) {
+		lines.push(
+			...wrapTextWithAnsi(
+				`    ${theme.fg("accent", "If it holds:")} ${advancement.condition} → ${advancement.next}`,
+				width,
+			),
+		);
+		return lines;
+	}
+	if (advancement.action) {
+		lines.push(truncateToWidth(`    ${theme.fg("dim", "If it holds: to be decided after this round.")}`, width));
+	}
+	return lines;
 }
 
 /** The verdict phrased as what the agent did with the reading, without naming the round it happened in. */

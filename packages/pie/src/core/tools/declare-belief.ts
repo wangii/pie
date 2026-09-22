@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import {
+	type AdvancementIntent,
 	type Belief,
 	type BeliefDelta,
 	type BeliefSet,
@@ -99,6 +100,32 @@ const selectExperimentSchema = Type.Object({
 		description:
 			"Belief ids forming one coherent experiment. Must be a subset of the declared task focus. Dispatch is limited to this selection; beliefs left out keep their status and stay in focus.",
 	}),
+	advancement: Type.Optional(
+		Type.Object(
+			{
+				action: Type.String({
+					description:
+						"What you are doing right now, in the task's own terms — the action a reader would see you taking. Display only: it selects and authorizes nothing, and the runtime's own state decides what is actually running.",
+				}),
+				condition: Type.Optional(
+					Type.String({
+						description:
+							"The task-level finding that would make the next step right. Not tool success: an execution that ran cleanly says nothing about whether the belief it probed is supported. State it together with `next`, or omit both.",
+					}),
+				),
+				next: Type.Optional(
+					Type.String({
+						description:
+							"The one step you would take if that condition holds — one step, not a plan. Stating it promises nothing: it is never dispatched on its own.",
+					}),
+				),
+			},
+			{
+				description:
+					"Optional: what you are doing now and what you would do next if it holds, shown in the Frame panel. Not control metadata — it neither dispatches an experiment nor changes scope.",
+			},
+		),
+	),
 });
 
 const focusBeliefsSchema = Type.Object({
@@ -119,6 +146,24 @@ export const declareBeliefSystemPromptContribution = {
 		"When a skill matches the belief's target, pass its name in skillRefs so execution can load it",
 	],
 };
+
+/**
+ * The advancement text a selection may carry: what the agent is doing now, and what it would do
+ * next if a stated condition holds. Display metadata, so an incomplete pair is rejected rather
+ * than half-stored — a condition without a next step (or the reverse) reads as a promise the agent
+ * never made, and a blank action would put an empty line in the panel.
+ */
+function readAdvancement(advancement: SelectExperimentInput["advancement"]): AdvancementIntent | undefined {
+	if (!advancement) return undefined;
+	const action = advancement.action.trim();
+	if (!action) throw new Error("`advancement.action` cannot be blank.");
+	const condition = advancement.condition?.trim() || undefined;
+	const next = advancement.next?.trim() || undefined;
+	if ((condition === undefined) !== (next === undefined)) {
+		throw new Error("`advancement` must state `condition` and `next` together, or omit both.");
+	}
+	return condition && next ? { action, condition, next } : { action };
+}
 
 function requireBeliefId(input: DeclareBeliefInput, op: string): string {
 	if (!input.beliefId?.trim()) throw new Error(`${op} requires a \`beliefId\`.`);
@@ -232,6 +277,7 @@ export function createSelectExperimentToolDefinition(
 		promptGuidelines: [
 			"The selection must be a subset of the declared focus; unselected focus beliefs keep their status",
 			"State the action or conclusion the experiment could change, not what you hope to learn",
+			"Use `advancement` to say what you are doing now and what you would do next if a stated condition holds: keep it to one step, and keep the condition task-level — tool success is not a finding",
 		],
 		parameters: selectExperimentSchema,
 		executionMode: "sequential",
@@ -244,6 +290,7 @@ export function createSelectExperimentToolDefinition(
 				}
 				const beliefIds = [...new Set(input.beliefIds.map((id) => id.trim()).filter(Boolean))];
 				if (beliefIds.length === 0) throw new Error("select_experiment requires at least one belief id.");
+				const advancement = readAdvancement(input.advancement);
 				for (const beliefId of beliefIds) {
 					const belief = beliefSet.get(beliefId);
 					if (!belief) throw new Error(`Unknown belief id: ${beliefId}.`);
@@ -255,7 +302,7 @@ export function createSelectExperimentToolDefinition(
 						throw new Error(`Belief ${beliefId} is ${status}; only an unresolved belief can be selected.`);
 					}
 				}
-				onSelect?.({ intent, beliefIds });
+				onSelect?.({ intent, beliefIds, advancement });
 				return {
 					content: [
 						{

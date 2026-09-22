@@ -58,6 +58,7 @@ import type {
 	FormulationState,
 	FormulationVersionId,
 	ProblemFormulationVersion,
+	TaskAdvancement,
 } from "./agent-session-domain.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -726,6 +727,18 @@ export class AgentSession {
 	 */
 	getLatestFormulationAdoption(): FormulationAdoption | undefined {
 		return this._beliefLoop.latestFormulationAdoption();
+	}
+
+	/**
+	 * What the task is doing right now, and what the agent said it would do next.
+	 *
+	 * The stage comes from the runtime — the cursor and the obligations the task still owns — and the
+	 * wording comes from the agent. A client renders both as they are: the stage is what makes a
+	 * stale sentence impossible to mistake for current work, and the text is what makes the stage
+	 * readable in the task's own terms. Undefined when no task is open.
+	 */
+	getTaskAdvancement(): TaskAdvancement | undefined {
+		return this._beliefLoop.taskAdvancement();
 	}
 
 	/**

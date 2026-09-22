@@ -3629,6 +3629,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 			}
+			// The current move is read off the replayed state too, and it changes on events that say
+			// nothing about the formulation: a choice is made, a choice is voided, and the choice becomes
+			// the round's plan. Without these the panel would keep showing the previous move until some
+			// unrelated redraw happened.
+			case "ExperimentSelected":
+			case "ExperimentSelectionVoided":
+			case "PlanProduced": {
+				this.ui.requestRender();
+				break;
+			}
 			case "FormulationCorrectionSubmitted": {
 				this.ui.requestRender();
 				this.showStatus("Frame correction pending");
@@ -6556,6 +6566,7 @@ export class InteractiveMode {
 			state,
 			history: this.session.getFormulationHistory(),
 			adopted: this.session.getLatestFormulationAdoption(),
+			advancement: this.session.getTaskAdvancement(),
 		};
 	}
 

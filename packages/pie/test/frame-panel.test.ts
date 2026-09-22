@@ -83,7 +83,6 @@ function review(overrides: Partial<FormulationReview> = {}): FormulationReview {
 function view(overrides: Partial<FrameView> = {}): FrameView {
 	return { state: state(), history: [], adopted: undefined, ...overrides };
 }
-
 function plain(lines: readonly string[]): string[] {
 	return lines.map(stripAnsi);
 }
@@ -257,6 +256,131 @@ describe("frame panel", () => {
 				...buildFrameDetailLines(view({ state: state({ current: chinese }), history: [chinese] }), width),
 			];
 			for (const line of lines) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		}
+	});
+});
+
+describe("current move", () => {
+	it("shows the stage, the action, and the paired next step", () => {
+		const lines = plain(
+			buildFrameSummaryLines(
+				view({
+					state: state({ current: version(1) }),
+					advancement: {
+						stage: "running",
+						action: "comparing the call chain with the request log",
+						condition: "confirmation that the duplicate comes from a retry",
+						next: "design idempotent handling; do not change code yet",
+					},
+				}),
+				80,
+			),
+		).join("\n");
+		expect(lines).toContain("Current move: running");
+		expect(lines).toContain("Now: comparing the call chain with the request log");
+		// The next-step line wraps at the terminal width, so compare it with the breaks flattened.
+		expect(lines.replace(/\s+/g, " ")).toContain(
+			"If it holds: confirmation that the duplicate comes from a retry → design idempotent handling; do not change code yet",
+		);
+	});
+
+	it("drops the next step once the round's evidence is in, and keeps the action", () => {
+		// The result has arrived, so whether the condition held is exactly what the agent has not
+		// decided yet: the old sentence must not read as a promise that is still coming.
+		const distilling = plain(
+			buildFrameSummaryLines(
+				view({
+					state: state({ current: version(1) }),
+					advancement: { stage: "distilling", action: "comparing the call chain with the request log" },
+				}),
+				80,
+			),
+		).join("\n");
+		expect(distilling).toContain("Current move: working through the round");
+		expect(distilling).toContain("Now: comparing the call chain with the request log");
+		expect(distilling).toContain("If it holds: to be decided after this round.");
+
+		// A stage with nothing to say about the next step shows the stage's own reading of it.
+		const silent = plain(
+			buildFrameSummaryLines(view({ state: state({ current: version(1) }), advancement: { stage: "running" } }), 80),
+		).join("\n");
+		expect(silent).toContain("Now: gathering evidence for this round");
+		expect(silent).not.toContain("If it holds:");
+	});
+
+	it("reports the wait instead of the round it interrupted", () => {
+		const waiting = plain(
+			buildFrameSummaryLines(
+				view({
+					state: state({ current: version(2), review: review() }),
+					advancement: {
+						stage: "waiting",
+						action: "comparing the call chain with the request log",
+						condition: "confirmation that the duplicate comes from a retry",
+						next: "design idempotent handling",
+					},
+				}),
+				80,
+			),
+		).join("\n");
+		expect(waiting).toContain("Current move: waiting for you");
+		expect(waiting).toContain("Now: waiting for your response to the revised reading");
+		expect(waiting).not.toContain("comparing the call chain");
+		expect(waiting).not.toContain("If it holds:");
+
+		const waitingForCorrection = plain(
+			buildFrameSummaryLines(
+				view({
+					state: state({ current: version(1), corrections: [correction()] }),
+					advancement: { stage: "waiting", action: "comparing the call chain with the request log" },
+				}),
+				80,
+			),
+		).join("\n");
+		expect(waitingForCorrection).toContain("Now: waiting for your response to a correction");
+	});
+
+	it("shows no move for a finished task", () => {
+		const finished = plain(
+			buildFrameSummaryLines(
+				view({
+					state: state({ current: version(1) }),
+					advancement: { stage: "finished", action: "comparing the call chain with the request log" },
+				}),
+				80,
+			),
+		).join("\n");
+		expect(finished).not.toContain("Current move");
+		expect(finished).not.toContain("comparing the call chain");
+
+		// No advancement at all is the pre-investigation state: the panel says nothing about a move
+		// rather than inventing one, and the detail region keeps its other sections.
+		const absent = plain(buildFrameSummaryLines(view({ state: state({ current: version(1) }) }), 80)).join("\n");
+		expect(absent).not.toContain("Current move");
+	});
+
+	it("appears in the detail region and keeps every line inside the terminal", () => {
+		const move = {
+			stage: "running" as const,
+			action: "对照调用链与请求日志，定位重复请求的来源。",
+			condition: "确认重复请求来自重试",
+			next: "设计幂等处理方案，暂不修改代码。",
+		};
+		const item = view({ state: state({ current: version(1) }), advancement: move });
+		const detail = plain(buildFrameDetailLines(item, 80)).join("\n");
+		expect(detail).toContain("Current move");
+		expect(detail.replace(/\s+/g, " ")).toContain(
+			"If it holds: 确认重复请求来自重试 → 设计幂等处理方案，暂不修改代码。",
+		);
+
+		for (const width of [24, 40, 60]) {
+			for (const line of [
+				...buildFrameSummaryLines(item, width),
+				...buildFrameDetailLines(item, width),
+				...buildFrameDetailRegionLines(item, width),
+			]) {
 				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 		}

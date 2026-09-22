@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { JsonValue } from "@earendil-works/pi-ai";
+import type { AdvancementIntent } from "./belief-set.ts";
 import type { CustomEntry, SessionEntry } from "./session-manager.ts";
 
 /**
@@ -24,6 +25,9 @@ import type { CustomEntry, SessionEntry } from "./session-manager.ts";
 // v5 adds the revision response/focus-review gate; older logs cannot attest to it.
 // v6 adds the per-round formulation recheck: every distillation owes propose a result, so a v5 log
 // cannot tell "reconsidered and kept the reading" from "this round was never reconsidered".
+// A later change added the optional advancement intent on the selection and the plan. It is additive
+// and optional — a v6 log simply has no such text — so the version is unchanged: bumping it would
+// reject logs that replay faithfully.
 export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 6 as const;
 export const AGENT_SESSION_DOMAIN_CUSTOM_ENTRY = "pie.agent-session-domain-event";
 
@@ -394,10 +398,49 @@ export interface FormulationState {
 	readonly unrevalidated: readonly BeliefId[];
 }
 
+/**
+ * What the task is doing right now, as the runtime can attest it. Derived from replayed state —
+ * the cursor stage and the obligations the task still owes — never from the model's own wording.
+ *
+ * - `preparing`: a round is being chosen, or the task has not started probing yet.
+ * - `running`: the dispatched experiment is gathering evidence.
+ * - `distilling`: the round's result is being turned into epistemic state.
+ * - `waiting`: the next decision is the user's (a correction, a revised reading to answer, a focus
+ *   review), so no execution is running or may start.
+ * - `finished`: the task is closed; nothing is in progress.
+ */
+export type TaskAdvancementStage = "preparing" | "running" | "distilling" | "waiting" | "finished";
+
+/**
+ * The client-facing projection of the current move: the runtime's stage, plus whatever the agent
+ * last said it was doing and would do next.
+ *
+ * The two halves come from different places on purpose. The stage is a fact about the loop, so a
+ * silent or stale agent cannot make the panel claim work that is not happening; `action`,
+ * `condition`, and `next` are the agent's own words about that work, so the panel does not have to
+ * guess a task-specific action from a stage label. Text is absent whenever the agent has said
+ * nothing, and the panel then shows the stage alone rather than inventing a next step.
+ */
+export interface TaskAdvancement {
+	readonly stage: TaskAdvancementStage;
+	/** The agent's statement of what it is doing now. */
+	readonly action?: string;
+	/** The condition under which `next` becomes right; present exactly when `next` is. */
+	readonly condition?: string;
+	/** What the agent would do if `condition` holds. Display only: it dispatches nothing. */
+	readonly next?: string;
+}
+
 export interface Plan {
 	readonly id: PlanId;
 	readonly selectedToExplore: readonly BeliefId[];
 	readonly intent?: string;
+	/**
+	 * What the agent said it was doing when this experiment was chosen, copied from the selection so
+	 * the round keeps it after the selection itself is spent. It is a display intent, never a
+	 * dispatch: the plan is what authorizes the probe, not this text.
+	 */
+	readonly advancement?: AdvancementIntent;
 	/** The formulation version this experiment was chosen under. */
 	readonly formulation: FormulationAdoption;
 }
@@ -417,6 +460,8 @@ export interface ExperimentSelectionRecord {
 	readonly intent: string;
 	/** The belief ids forming one coherent experiment. */
 	readonly beliefIds: readonly BeliefId[];
+	/** What the agent says it is doing now, and what it would do next if this holds. */
+	readonly advancement?: AdvancementIntent;
 	/** The formulation version this selection was made under; `unformed` before the first one. */
 	readonly formulation: FormulationAdoption;
 }
@@ -684,6 +729,32 @@ export function createAgentSessionSnapshot(id: SessionId): AgentSessionSnapshot 
 
 function fail(event: Pick<DomainEventBase, "type" | "eventId">, message: string): never {
 	throw new DomainReplayError(`${event.type} (${event.eventId}): ${message}`);
+}
+
+/**
+ * Whether an advancement intent is readable: it needs an action, and its optional "if it holds"
+ * half has to be whole. A condition with no next step (or the reverse) is half an intention, which
+ * a reader would take for a promise the agent never made.
+ */
+function advancementFailure(advancement: AdvancementIntent | undefined): string | undefined {
+	if (advancement === undefined) return undefined;
+	if (!advancement.action.trim()) return "advancement has no action";
+	const condition = advancement.condition?.trim();
+	const next = advancement.next?.trim();
+	if ((condition === undefined) !== (next === undefined)) {
+		return "advancement must state the condition and the next step together, or neither";
+	}
+	return undefined;
+}
+
+/** The stored form of an advancement intent, or undefined when there is none to store. */
+export function storedAdvancement(advancement: AdvancementIntent | undefined): AdvancementIntent | undefined {
+	if (!advancement) return undefined;
+	const action = advancement.action.trim();
+	if (!action) return undefined;
+	const condition = advancement.condition?.trim();
+	const next = advancement.next?.trim();
+	return condition && next ? { action, condition, next } : { action };
 }
 
 function requireTask(snapshot: AgentSessionSnapshot, event: TaskEventBase): Task {
@@ -1492,10 +1563,13 @@ export function applyAgentSessionDomainEvent(
 			// on replay would fail a log over a belief that never became anything.
 			if (event.selection.beliefIds.length === 0) fail(event, "experiment selection has no beliefs");
 			if (!event.selection.intent.trim()) fail(event, "experiment selection has no intent");
+			const advancementError = advancementFailure(event.selection.advancement);
+			if (advancementError) fail(event, advancementError);
 			requireAdoption(event, task, event.selection.formulation);
 			const selection: ExperimentSelectionRecord = {
 				intent: event.selection.intent,
 				beliefIds: [...event.selection.beliefIds],
+				advancement: storedAdvancement(event.selection.advancement),
 				formulation: event.selection.formulation,
 			};
 			return {
@@ -1582,7 +1656,12 @@ export function applyAgentSessionDomainEvent(
 			// adoption is validated here as well as at body selection; a plan is the durable record
 			// of "this experiment was chosen because the task looked like this".
 			requireAdoption(event, task, event.plan.formulation);
-			const body = { ...episode.body, plan: event.plan };
+			const planAdvancementError = advancementFailure(event.plan.advancement);
+			if (planAdvancementError) fail(event, planAdvancementError);
+			const body = {
+				...episode.body,
+				plan: { ...event.plan, advancement: storedAdvancement(event.plan.advancement) },
+			};
 			// Dispatching commits the choice, so the selection stops being pending: what remains is
 			// the plan, which records the same beliefs as the decision that was actually made.
 			return {

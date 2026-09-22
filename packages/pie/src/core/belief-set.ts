@@ -118,6 +118,31 @@ export interface ExperimentSelection {
 	readonly intent: string;
 	/** The belief ids forming one coherent experiment. */
 	readonly beliefIds: readonly string[];
+	/** What the agent says it is doing now, and what it would do next if this holds. */
+	readonly advancement?: AdvancementIntent;
+}
+
+/**
+ * The agent's short-lived statement of the current move: what it is doing now, and what it would
+ * do next *if* the current step holds.
+ *
+ * Display metadata, not control metadata. It selects nothing, authorizes nothing, and dispatches
+ * nothing: the loop's own state — the cursor stage, the pending selection, the obligations the
+ * task still owes — decides what is actually happening, and this only lets the agent name that
+ * work in task terms instead of leaving the user to infer it from a stage label.
+ *
+ * `condition`/`next` are a pair because a condition without a next step, or a next step without
+ * its condition, reads as a promise the agent has not actually made. "The tool succeeded" is not
+ * a condition: an execution that ran cleanly says nothing about whether the belief it probed is
+ * supported.
+ */
+export interface AdvancementIntent {
+	/** What the agent is doing right now, in the task's own terms. */
+	readonly action: string;
+	/** The task-level condition under which the next step becomes right. */
+	readonly condition?: string;
+	/** What the agent would do if that condition holds. A step, not a plan. */
+	readonly next?: string;
 }
 
 /**

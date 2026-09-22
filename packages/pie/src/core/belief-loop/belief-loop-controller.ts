@@ -40,10 +40,14 @@ import {
 	pendingApplicabilityBeliefs,
 	pendingFormulationCorrections as pendingCorrectionsOf,
 	replayAgentSessionDomainEntries,
+	storedAdvancement,
 	type Task,
+	type TaskAdvancement,
+	type TaskAdvancementStage,
 	unrevalidatedApplicability,
 } from "../agent-session-domain.ts";
 import {
+	type AdvancementIntent,
 	type Belief,
 	type BeliefDelta,
 	BeliefSet,
@@ -56,6 +60,7 @@ import {
 	type TaskOutcome,
 	WITHDRAWN,
 } from "../belief-set.ts";
+
 import type { ContextUsage } from "../extensions/index.ts";
 import { resolveCliModel } from "../model-resolver.ts";
 import { ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
@@ -343,7 +348,7 @@ export class BeliefLoopController {
 				: (currentEpisode?.body.trajectory.map((execution) => execution.id) ?? []);
 		const selection = currentEpisode?.experimentSelection;
 		this.pendingExperiment = selection
-			? { intent: selection.intent, beliefIds: [...selection.beliefIds] }
+			? { intent: selection.intent, beliefIds: [...selection.beliefIds], advancement: selection.advancement }
 			: undefined;
 	}
 
@@ -449,7 +454,8 @@ export class BeliefLoopController {
 	selectExperiment(selection: ExperimentSelection): void {
 		const blocked = this.revisionGate();
 		if (blocked) throw new Error(blocked);
-		this.pendingExperiment = selection;
+		const advancement = storedAdvancement(selection.advancement);
+		this.pendingExperiment = { ...selection, advancement };
 		const episode = this.activeEpisode();
 		if (!episode || episode.status === "closed") return;
 		this.recordDomainEvent({
@@ -460,6 +466,7 @@ export class BeliefLoopController {
 			selection: {
 				intent: selection.intent,
 				beliefIds: [...selection.beliefIds],
+				advancement,
 				formulation: this.currentFormulationAdoption(),
 			},
 		});
@@ -613,6 +620,97 @@ export class BeliefLoopController {
 	latestFormulationAdoption(): FormulationAdoption | undefined {
 		const task = this.currentTask();
 		return task ? latestFormulationAdoptionOf(task) : undefined;
+	}
+
+	/**
+	 * What the task is doing right now, and what the agent said it would do next.
+	 *
+	 * The two halves come from different places on purpose. The stage is read off replayed facts —
+	 * the cursor and the obligations the task still owns — so the panel cannot be told that work is
+	 * happening when it is not. The text is whatever the agent said when it chose or dispatched a
+	 * round, and it is dropped once the reading it was stated under is no longer current: after a
+	 * revision, that sentence describes a task the agent no longer takes itself to be solving.
+	 */
+	taskAdvancement(): TaskAdvancement | undefined {
+		const task = this.currentTask();
+		if (!task) return undefined;
+		const stage = this.advancementStage(task);
+		if (stage === "finished") return { stage };
+		const live = this.liveAdvancement(task);
+		if (!live) return { stage };
+		// The "if it holds" half describes a step that has not happened yet, so it is only shown while
+		// that step is in flight: a pending choice, or the round gathering evidence for it. Once the
+		// round has distilled, whether the condition held is precisely what the agent has not yet
+		// decided, and repeating the old sentence would read as a promise kept — or still coming.
+		// The action stays, because it says what the round was about.
+		const inFlight = live.source === "selection" || stage === "running";
+		return inFlight ? { stage, ...live.intent } : { stage, action: live.intent.action };
+	}
+
+	/**
+	 * The stage the loop is actually in.
+	 *
+	 * A user response outranks the round: while a correction or a revised reading is unanswered the
+	 * work is stopped, and reporting the interrupted round's wording as "now" would describe work
+	 * that is not running. Otherwise the cursor — written by the loop itself at every role change —
+	 * decides, and a distilled round nobody has answered for yet counts as making sense of the
+	 * round rather than preparing the next one.
+	 */
+	private advancementStage(task: Task): TaskAdvancementStage {
+		if (task.status !== "active") return "finished";
+		if (
+			this.awaitingFormulationResponse() ||
+			this.pendingCorrections().length > 0 ||
+			this.pendingApplicability().length > 0 ||
+			this.focusReviewOwed()
+		) {
+			return "waiting";
+		}
+		const stage = this.domainSnapshot.cursor?.stage;
+		if (stage === "closed") return "finished";
+		if (stage === "distilling") return "distilling";
+		if (stage === "executing") return "running";
+		// A round that has distilled and not been answered for is still being made sense of, which is
+		// the work the user sees; a fresh selection means the task has moved on to preparing.
+		if (!this.pendingExperiment && this.formulationRecheckOwed()) return "distilling";
+		return "preparing";
+	}
+
+	/**
+	 * The advancement intent that still describes this task, and which record it came from.
+	 *
+	 * The open round's pending choice comes first: it is the move the agent is about to make. It
+	 * falls back to the plan of the round that actually ran — and only that one, because an older
+	 * round's sentence describes work nobody is doing any more. Neither a selection nor a plan whose
+	 * reading has been replaced is used: the reframe is exactly the case where the old sentence stops
+	 * being true, and the panel falls back to the stage rather than repeating it.
+	 */
+	private liveAdvancement(task: Task): { intent: AdvancementIntent; source: "selection" | "plan" } | undefined {
+		const selection = this.activeEpisode()?.experimentSelection;
+		if (selection?.advancement && this.intentStillDescribesTask(task, selection.formulation)) {
+			return { intent: selection.advancement, source: "selection" };
+		}
+		const ordinal = latestDispatchedEpisodeOrdinal(task);
+		if (ordinal === undefined) return undefined;
+		const dispatched = task.episodes.find((candidate) => candidate.ordinal === ordinal);
+		if (dispatched?.body.kind !== "belief-loop") return undefined;
+		const plan = dispatched.body.plan;
+		if (!plan?.advancement || !this.intentStillDescribesTask(task, plan.formulation)) return undefined;
+		return { intent: plan.advancement, source: "plan" };
+	}
+
+	/**
+	 * Whether an intent's reading is still the task's reading.
+	 *
+	 * An intent stated before any reading existed is kept: it named nothing that has since been
+	 * replaced, and the round it describes is still the current one — the panel shows separately which
+	 * version governed that round. Once a version exists, only the current one counts: after a
+	 * revision the earlier sentence is a claim about a task the agent no longer takes itself to be
+	 * solving, and it stops being displayed.
+	 */
+	private intentStillDescribesTask(task: Task, adoption: FormulationAdoption): boolean {
+		if (adoption.kind === "unformed") return true;
+		return currentFormulationOf(task)?.id === adoption.versionId;
 	}
 
 	/** Beliefs the current reading's review still has to account for. */
@@ -1443,7 +1541,7 @@ export class BeliefLoopController {
 						});
 					if (selected.length > 0) {
 						this.pendingExperiment = undefined;
-						return this.dispatchToExecution(selected, experiment.intent);
+						return this.dispatchToExecution(selected, experiment.intent, experiment.advancement);
 					}
 					// Every selected belief has since been settled or retracted, so there is nothing
 					// left to probe. Voiding records why the choice went away instead of leaving the
@@ -1734,7 +1832,11 @@ export class BeliefLoopController {
 		if (episode?.body.kind === "belief-loop") this.flushPendingDomainBeliefDeltas();
 	}
 
-	private dispatchToExecution(proposed: Belief[], intent?: string): { state: LoopState; steer: string } {
+	private dispatchToExecution(
+		proposed: Belief[],
+		intent?: string,
+		advancement?: AdvancementIntent,
+	): { state: LoopState; steer: string } {
 		// A round owns one experiment, and its plan is the durable record of which beliefs that
 		// experiment probes. Dispatching into an episode that already ran something — a round that a
 		// correction interrupted, or a fast path that ended in uncertainty — would either leave the
@@ -1749,6 +1851,7 @@ export class BeliefLoopController {
 		this.ensureDomainPlan(
 			proposed.map((belief) => belief.id),
 			intent ?? `Probe ${proposed.map((belief) => belief.id).join(", ")}`,
+			advancement,
 		);
 		this.evidenceWatermark = this.host.agent.state.messages.length;
 		const totalRounds = proposed.reduce((sum, b) => sum + b.evidenceRounds, 0);
@@ -2376,7 +2479,11 @@ export class BeliefLoopController {
 		this.pendingDomainBeliefDeltas = [];
 	}
 
-	ensureDomainPlan(selectedToExplore: readonly string[], intent?: string): string | undefined {
+	ensureDomainPlan(
+		selectedToExplore: readonly string[],
+		intent?: string,
+		advancement?: AdvancementIntent,
+	): string | undefined {
 		if (!this.currentTaskId || !this.currentEpisodeId) return undefined;
 		this.selectDomainEpisodeBody("belief-loop");
 		if (this.currentPlanId) return this.currentPlanId;
@@ -2390,6 +2497,10 @@ export class BeliefLoopController {
 				id: planId,
 				selectedToExplore: [...selectedToExplore],
 				intent,
+				// The round keeps the agent's own account of what it is doing: the selection it came
+				// from is spent the moment the probe is dispatched, and "what is this round for" must
+				// not disappear with it.
+				advancement: storedAdvancement(advancement),
 				// Which understanding this experiment was chosen under. Before the first publication
 				// there is nothing to name, and that fact is recorded rather than left blank.
 				formulation: this.currentFormulationAdoption(),
