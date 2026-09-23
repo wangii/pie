@@ -2,14 +2,67 @@
 
 ## [Unreleased]
 
+## [0.87.1] - 2026-09-22
+
+### New Features
+
+- **Latest frontier models** — Use Claude Opus 5.5, GPT-6 Sol, and GPT-6 Luna through supported providers, including GitHub Copilot. See [Choose a Model](docs/models.md#select-a-model).
+- **Grok 4.7 by default for xAI** — New xAI sessions now default to Grok 4.7. See [Provider Authentication](docs/providers.md#use-an-api-key-from-the-environment).
+
 ### Added
 
+- Added inherited Claude Opus 5.5, GPT-6 Sol, and GPT-6 Luna support for GitHub Copilot.
+- Added inherited GPT-6 Sol and GPT-6 Luna support for OpenAI API keys and OpenAI Codex subscriptions.
+- Added inherited Claude Opus 5.5 support for Anthropic with adaptive thinking and a 1M context window.
+
+### Changed
+
+- Changed the default xAI model to Grok 4.7.
+
+### Fixed
+
+- Fixed split-turn compaction summaries being refused by Claude Fable 5.1 by clearly separating the conversation and using continuation-oriented instructions ([#9908](https://github.com/earendil-works/pi/pull/9908) by [@davidbrai](https://github.com/davidbrai)).
+- Fixed missing or invalid `--mode` values being silently ignored instead of reporting an error and exiting with a nonzero status ([#9045](https://github.com/earendil-works/pi/issues/9045)).
+- Fixed inherited image-only user messages being rejected by some OpenAI-compatible providers because they included an empty text part ([#9797](https://github.com/earendil-works/pi/issues/9797)).
+- Fixed inherited Anthropic OAuth requests reporting an outdated Claude Code version.
+
+## [0.87.0] - 2026-09-21
+
+### New Features
+
+- **Canonical session context and extension boundaries** — Edit model context without rewriting history and add actionable lifecycle hooks. See [ContextEditEntry](docs/session-format.md#contexteditentry) and [extension events](docs/extensions.md#extension-events).
+- **Full-transcript context extensions** — Use `context_with_system` for per-request system-message transformations. See [`context_with_system`](docs/extensions.md#context_with_system).
+- **Per-model image input limits** — Configure cache-safe image resizing per model for attachments, `read`, and tool-result images. See [Image Input Limits](docs/models.md#image-input-limits).
+
+### Breaking Changes
+
+- Removed the inherited `shouldStopAfterTurn` agent option. Use `finishTurn` and return `{ action: "end" }` instead. `finishTurn` runs before `turn_end` but applies the decision afterward, and it also receives error and aborted responses; migrate normal-response predicates by returning `undefined` for those hard exits. See the `@earendil-works/pi-agent-core` changelog for a complete before-and-after example.
+- Added `ContextEditEntry` to the exported `SessionEntry` union. TypeScript consumers with exhaustive entry switches must handle `context_edit`; use `replacement: null` for omission and a content replacement otherwise.
+- Made `SessionManager` canonical for `AgentSession` provider context. Assigning `session.agent.state.messages` no longer replaces future request history; restore with `SessionManager.inMemory(cwd, { id }, entries)`, navigate with `session.navigateTree()`, or append through `session.sessionManager` and call `session.refreshContext()`.
+- Expanded `TurnEndEvent` with required boundary fields and added `AgentBeforeSettleEvent` to the exported `ExtensionEvent` union. Consumers constructing events or exhaustively switching on `ExtensionEvent` must handle the new shapes. `ExtensionRunner.emit()` no longer accepts `turn_end`; host integrations dispatch actionable boundaries with `emitBoundary(baseEvent, buildContext)`.
+- Deferred runs requested from `agent_settled` handlers until all settled handlers finish. Handlers still observe `ctx.isIdle() === true`, but no longer see a reentrant `agent_start` during the same notification dispatch.
+
+### Added
+
+- Added append-only model-context edits. For example, `sessionManager.appendContextEdit(entryId, null)` omits one message from future provider context without changing raw history, usage, or UI history.
+- Added actionable `turn_end` and `agent_before_settle` extension boundaries. Return `{ entries: [...event.entries, draft], continue: true }` to persist structural entries in order and ensure one next provider request without changing steering or follow-up scheduling.
+- Added retain-none compaction input: `sessionManager.appendCompaction(summary, null, tokensBefore)` stores the compaction's own ID as its kept boundary.
+- Added the `context_with_system` extension event, which runs after `context` handlers on the full transcript including system messages and sends its result verbatim. See [`context_with_system`](docs/extensions.md#context_with_system).
 - Added per-model image resize profiles through `inputLimits.images.resize` in `models.json`, applied to file attachments, image reads, and tool-result images ([#9631](https://github.com/earendil-works/pi/issues/9631)).
 
 ### Fixed
 
+- Fixed string context-edit replacements producing invalid assistant and tool-result message content instead of text blocks.
+- Fixed context-invisible boundary metadata and replacement edits causing newly appended or replaced input to be summarized before its first provider request.
+- Fixed edited-context accounting both discarding valid assistant usage captured after the latest context edit and reusing that usage after a later compaction made it stale.
+- Fixed selected error retries and final length/overflow recovery retaining abandoned model attempts in future provider context; post-run recovery omissions are now persisted without hiding raw transcript history or changing queue scheduling.
+- Fixed `context` handlers that filter or slice messages dropping the prompt and tool declarations, which after extension-driven compaction left requests without built-in tools or made Codex emit raw tool-call text. Handlers no longer see system messages; Pi restores the prompt and tool state after they run. See [`context`](docs/extensions.md#context) ([#9789](https://github.com/earendil-works/pi/issues/9789), [#9822](https://github.com/earendil-works/pi/issues/9822)).
+- Fixed `/bug` allowing uploads in offline mode while preserving local zip exports ([#9841](https://github.com/earendil-works/pi/pull/9841) by [@christianklotz](https://github.com/christianklotz)).
 - Fixed idle prompt-cache warming rebuilding expired caches when its timer or an extension decision is delayed.
 - Improved crash diagnostics with hints identifying loaded extensions that appear in the stack trace.
+- Fixed text files beginning with `GIF` being misclassified as images and omitted from `read` and CLI `@file` input ([#9755](https://github.com/earendil-works/pi/issues/9755)).
+- Fixed malformed prompt template frontmatter being silently ignored instead of reported as a resource warning ([#9830](https://github.com/earendil-works/pi/pull/9830) by [@christianklotz](https://github.com/christianklotz)).
+- Fixed inherited unknown OpenAI-compatible Chat Completions endpoints receiving strict tool schemas unless they explicitly advertise support ([#9816](https://github.com/earendil-works/pi/issues/9816)).
 
 ## [0.86.1] - 2026-09-20
 

@@ -515,7 +515,7 @@ argument-hint: "<PR-URL>"
 You are given one or more GitHub PR URLs: $@`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -538,7 +538,7 @@ argument-hint: "[instructions]"
 Wrap it. Additional instructions: $ARGUMENTS`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -560,7 +560,7 @@ description: Audit changelog entries before release
 Audit changelog entries for all commits since the last release.`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -582,7 +582,7 @@ argument-hint: ""
 Do something`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -604,7 +604,7 @@ argument-hint: "<issue>"
 Analyze GitHub issue(s): $ARGUMENTS`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],

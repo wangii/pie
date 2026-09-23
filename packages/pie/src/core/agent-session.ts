@@ -440,9 +440,20 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._beliefLoop.installAgentNextTurnRefresh();
-		const previousStop = this.agent.shouldStopAfterTurn;
-		this.agent.shouldStopAfterTurn = async (context, signal) =>
-			this._beliefLoop.awaitingFormulationResponse() || (await previousStop?.(context, signal)) === true;
+		// Pie pauses the run while the belief loop waits for the user's answer to a revised Frame.
+		// Agent core replaced `shouldStopAfterTurn` with `finishTurn`, whose `{ action: "end" }` is the
+		// same graceful stop: the turn's response and tool results finish, then the loop exits before
+		// the next provider request. An earlier decision to end wins, so both predicates are honored.
+		const previousFinishTurn = this.agent.finishTurn;
+		this.agent.finishTurn = async (turn, signal) => {
+			// The old stop hook was short-circuited by the pause: while the task waits on the user's
+			// answer, the boundary ends the run without running the hooks behind it first. Checking the
+			// pause again after them still catches a hook that itself brought the revision about.
+			if (this._beliefLoop.awaitingFormulationResponse()) return { action: "end" };
+			const previous = await previousFinishTurn?.(turn, signal);
+			if (previous?.action === "end" || this._beliefLoop.awaitingFormulationResponse()) return { action: "end" };
+			return previous?.action === "continue" ? { action: "continue" } : undefined;
+		};
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1232,6 +1243,17 @@ export class AgentSession {
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
+	}
+
+	/**
+	 * Rebuild the agent's provider context from the canonical session projection.
+	 *
+	 * The session log is the authority for what the model sees; `agent.state.messages` is a derived
+	 * view of it. Callers that changed the session out of band — a replaced session's setup, or an
+	 * appended context edit — bring that view back in step here instead of assigning messages.
+	 */
+	refreshContext(): void {
+		this.agent.state.messages = this.sessionManager.buildSessionProjection().messages;
 	}
 
 	/** Current steering mode */
@@ -2310,7 +2332,7 @@ export class AgentSession {
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
+			this.refreshContext();
 			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
 
 			// Get the saved compaction entry for the extension event
@@ -2636,7 +2658,7 @@ export class AgentSession {
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
+			this.refreshContext();
 			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
 
 			// Get the saved compaction entry for the extension event
@@ -3681,8 +3703,7 @@ export class AgentSession {
 			}
 
 			// Update agent state
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
+			this.refreshContext();
 
 			// The domain projection has to follow the leaf. Without this the replayed task and its
 			// current understanding keep describing the branch the session just left — a navigated
