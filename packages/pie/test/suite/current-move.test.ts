@@ -222,4 +222,39 @@ describe("current move", () => {
 		expect(harness.eventsOfType("ExperimentSelected")).toHaveLength(1);
 		expect(harness.eventsOfType("PlanProduced")[0]?.plan.advancement).toEqual(move);
 	});
+
+	it.each([
+		["English (unset)", undefined],
+		["Chinese", "Chinese"],
+		["Deutsch", "Deutsch"],
+	] as const)("asks for the move's words in the configured belief language: %s", async (_label, beliefLang) => {
+		// The stage words are the runtime's, but the action, condition, and next step are the agent's,
+		// so they follow the same language setting as every belief and formulation, whatever string the
+		// setting holds. Both records the panel reads carry that one sentence: the selection the agent
+		// wrote, and the plan it is copied onto at dispatch.
+		const harness = await createHarness(beliefLang ? { settings: { pie: { beliefLang } } } : {});
+		harnesses.push(harness);
+		let proposePrompt = "";
+		harness.setResponses([
+			() => {
+				proposePrompt = getMessageText(harness.session.messages[0]);
+				return fauxAssistantMessage([propose(), reading("local retry control"), focus(), select(move)]);
+			},
+			fauxAssistantMessage("Observed: one call, two requests."),
+			fauxAssistantMessage([adjudicate("inconclusive", "the probe did not separate the two paths")]),
+			fauxAssistantMessage([recheck("the round fits the reading"), conclude()]),
+			fauxAssistantMessage([conclude()]),
+			fauxAssistantMessage("the duplicate comes from a retry"),
+		]);
+		await harness.session.prompt("why are there duplicate requests?");
+
+		expect(harness.settingsManager.getBeliefLang()).toBe(beliefLang ?? "English");
+		expect(proposePrompt).toContain(`Write \`advancement\` in ${beliefLang ?? "English"}`);
+		expect(proposePrompt).not.toContain("{beliefLang}");
+
+		const selection = harness.eventsOfType("ExperimentSelected")[0]?.selection;
+		const plans = harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0);
+		expect(plans).toHaveLength(1);
+		expect(plans[0]?.plan.advancement).toEqual(selection?.advancement);
+	});
 });

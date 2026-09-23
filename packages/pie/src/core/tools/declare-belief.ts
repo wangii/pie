@@ -278,6 +278,7 @@ export function createSelectExperimentToolDefinition(
 			"The selection must be a subset of the declared focus; unselected focus beliefs keep their status",
 			"State the action or conclusion the experiment could change, not what you hope to learn",
 			"Use `advancement` to say what you are doing now and what you would do next if a stated condition holds: keep it to one step, and keep the condition task-level — tool success is not a finding",
+			"Write `advancement` in {beliefLang}: the Frame panel shows its action, condition, and next step to the user as the current move",
 		],
 		parameters: selectExperimentSchema,
 		executionMode: "sequential",

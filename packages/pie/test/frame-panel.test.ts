@@ -210,6 +210,77 @@ describe("frame panel", () => {
 		}
 	});
 
+	it("carries the owed decision the summary marked, so hiding the summary cannot drop it", () => {
+		// The first investigation's obligation: a reading is owed and the summary says so in a marker
+		// the region displaces while it is open.
+		const owed = view({ state: state({ decisionOwed: true }) });
+		expect(plain(buildFrameSummaryLines(owed, 80)).join("\n")).toContain("decision owed");
+		const detail = plain(buildFrameDetailLines(owed, 80)).join("\n");
+		expect(detail).toContain("Decision owed");
+		expect(detail).toContain("Not yet: an investigation has run");
+
+		// One statement per state, whichever surface carries it: when a reconsideration section
+		// speaks for the obligation, the first-decision notice would be a second answer to it.
+		const recheckOwed = view({ state: state({ current: version(1), decisionOwed: true, recheckOwed: true }) });
+		const owedDetail = plain(buildFrameDetailLines(recheckOwed, 80)).join("\n");
+		expect(owedDetail).not.toContain("Decision owed");
+		expect(owedDetail).toContain("Not yet: distillation has reported");
+
+		const withRecord = view({
+			state: state({
+				current: version(1),
+				recheck: {
+					episodeId: "episode-1",
+					verdict: "maintained",
+					reason: "the round's evidence fits the reading",
+					recordedAt: "2026-09-20T10:06:00.000Z",
+				},
+			}),
+		});
+		expect(plain(buildFrameDetailLines(withRecord, 80)).join("\n")).not.toContain("Decision owed");
+
+		// Nothing owed, nothing said.
+		expect(
+			plain(buildFrameDetailLines(view({ state: state({ current: version(1) }) }), 80)).join("\n"),
+		).not.toContain("Decision owed");
+
+		for (const width of [24, 40, 60]) {
+			for (const line of [...buildFrameSummaryLines(owed, width), ...buildFrameDetailLines(owed, width)]) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		}
+	});
+
+	it("keeps the owed decision reachable when a long move fills the bounded region", () => {
+		// The region is capped and elides from the bottom, so a long move can push the notice out of
+		// it. The commands' line says where the omitted lines went, and that path is the same detail
+		// lines without the cap.
+		const long = view({
+			state: state({ decisionOwed: true }),
+			advancement: {
+				stage: "running",
+				action:
+					"comparing the call chain with the request log across every retry path in the client, tracing which layer re-issues the request".repeat(
+						2,
+					),
+				condition: "the trace shows two requests issued from one call site without an intervening error".repeat(3),
+				next: "read the retry helper".repeat(10),
+			},
+		});
+		const region = plain(buildFrameDetailRegionLines(long, 80));
+		expect(region.length).toBeLessThanOrEqual(16);
+		expect(region.join("\n")).not.toContain("Decision owed");
+		expect(region[1]).toContain("/frame full");
+		expect(region[2]).toContain("more line(s)");
+		// What `/frame full` writes to the transcript: the same lines, uncapped.
+		expect(plain(buildFrameDetailLines(long, 80)).join("\n")).toContain("Decision owed");
+
+		// The state the task actually reaches — propose owes the reading before another round can be
+		// chosen — keeps the notice inside the region.
+		const preparing = view({ state: state({ decisionOwed: true }), advancement: { stage: "preparing" } });
+		expect(plain(buildFrameDetailRegionLines(preparing, 80)).join("\n")).toContain("Decision owed");
+	});
+
 	it("shows the current version, what is missing when deferred, and pending corrections", () => {
 		const published = plain(buildFrameSummaryLines(view({ state: state({ current: version(2) }) }), 80));
 		expect(published[0]).toContain("v2");
@@ -384,6 +455,27 @@ describe("current move", () => {
 				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 		}
+	});
+
+	it("opens the detail region with the move above the reading it is taken under", () => {
+		const item = view({
+			state: state({ current: version(1) }),
+			advancement: { stage: "running", action: "comparing the call chain with the request log" },
+		});
+		const detail = plain(buildFrameDetailLines(item, 80));
+		expect(detail[0]).toContain("Current move");
+		const titleIndex = detail.findIndex((line) => line.includes("HOW I SEE THIS TASK"));
+		expect(titleIndex).toBeGreaterThan(0);
+		expect(detail.slice(0, titleIndex).join("\n")).toContain("Now: comparing the call chain with the request log");
+
+		// The region keeps the same ordering: the move holds line 0, the commands still line 1.
+		const region = plain(buildFrameDetailRegionLines(item, 80));
+		expect(region[0]).toContain("Current move");
+		expect(region[1]).toContain("/frame close to hide");
+
+		// A task with no move to report keeps the reading at the top of the region.
+		const absent = plain(buildFrameDetailLines(view({ state: state({ current: version(1) }) }), 80));
+		expect(absent[0]).toContain("HOW I SEE THIS TASK");
 	});
 });
 

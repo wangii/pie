@@ -6,7 +6,12 @@ import type {
 	FormulationState,
 	ProblemFormulationVersion,
 } from "../src/core/agent-session-domain.ts";
-import { FrameDetailPanel, FramePanel, type FrameView } from "../src/modes/interactive/components/frame-panel.ts";
+import {
+	FrameDetailPanel,
+	FramePanel,
+	type FrameView,
+	summaryPanelShown,
+} from "../src/modes/interactive/components/frame-panel.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -69,12 +74,37 @@ function longView(ordinal = 3): FrameView {
 	return { state, history, adopted: { kind: "version", versionId: `formulation-${ordinal}` } };
 }
 
-function renderDock(view: FrameView, width: number, height: number) {
+/** The state the first investigation leaves behind: no reading yet, and the decision still owed. */
+function owedView(): FrameView {
+	return {
+		state: {
+			current: null,
+			deferral: null,
+			corrections: [],
+			decisionOwed: true,
+			recheckOwed: false,
+			recheck: null,
+			pendingApplicability: [],
+			unrevalidated: [],
+		},
+		history: [],
+		adopted: undefined,
+	};
+}
+
+function renderDock(
+	view: FrameView,
+	width: number,
+	height: number,
+	options: { summaryRequested?: boolean; detailVisible?: boolean } = {},
+) {
+	const summaryRequested = options.summaryRequested ?? true;
+	const detailVisible = options.detailVisible ?? true;
 	const summaryContainer = new Container();
 	summaryContainer.addChild(new FramePanel(() => view));
 	const detailContainer = new Container();
 	const detail = new FrameDetailPanel(() => view);
-	detail.setVisible(true);
+	detail.setVisible(detailVisible);
 	detailContainer.addChild(detail);
 	const statusContainer = new Container();
 	statusContainer.addChild(new Text("Frame detail shown — type below to reply, /frame close to hide", 1, 0));
@@ -83,10 +113,16 @@ function renderDock(view: FrameView, width: number, height: number) {
 	const footerContainer = new Container();
 	footerContainer.addChild(new Text("0.0%/1.0M  model · medium", 0, 0));
 
-	// The dock entries and options are the ones interactive-mode.ts builds.
+	// The dock entries and options are the ones interactive-mode.ts builds, including the summary
+	// standing down while the region is open.
 	const dock = new VStack([
-		{ component: summaryContainer, shrink: 1, minSize: 0 },
-		{ component: detailContainer, shrink: 1, minSize: 0, visible: () => true },
+		{
+			component: summaryContainer,
+			shrink: 1,
+			minSize: 0,
+			visible: () => summaryPanelShown(summaryRequested, detailVisible),
+		},
+		{ component: detailContainer, shrink: 1, minSize: 0, visible: () => detailVisible },
 		{ component: statusContainer, shrink: 1, minSize: 0 },
 		{ component: editorContainer, shrink: 1, minSize: 3 },
 		{ component: footerContainer, shrink: 1, minSize: 1 },
@@ -101,11 +137,16 @@ function renderDock(view: FrameView, width: number, height: number) {
 	const frame = renderLayoutFrame(root, width, height, () => {});
 	const dockBox = frame.root.children[1];
 	if (!dockBox) throw new Error("dock did not get a layout box");
+	// A hidden dock entry is left out of `children`, so the boxes are matched to the components they
+	// were laid out for rather than by position: with the summary standing down, positional lookup
+	// would report the region's height as the summary's.
+	const heightOf = (component: Container): number =>
+		dockBox.children.find((child) => child.component === component)?.rect.height ?? 0;
 	return {
 		text: frame.lines.map(stripAnsi).join("\n"),
-		summaryHeight: dockBox.children[0]?.rect.height ?? -1,
-		detailHeight: dockBox.children[1]?.rect.height ?? -1,
-		editorHeight: dockBox.children[3]?.rect.height ?? -1,
+		summaryHeight: heightOf(summaryContainer),
+		detailHeight: heightOf(detailContainer),
+		editorHeight: heightOf(editorContainer),
 	};
 }
 
@@ -133,5 +174,37 @@ describe("frame detail region layout", () => {
 		expect(after.editorHeight).toBeGreaterThanOrEqual(3);
 		expect(after.text).toContain("v4");
 		expect(before.text).toContain("v3");
+	});
+
+	it("draws the summary or the region, never both, and restores the summary on close", () => {
+		const view = longView();
+		const open = renderDock(view, 80, 24);
+		// The summary's own line, which the region would otherwise duplicate above itself.
+		expect(open.text).not.toContain("Frame v3");
+		expect(open.text).toContain("HOW I SEE THIS TASK");
+		expect(open.summaryHeight).toBe(0);
+
+		const closed = renderDock(view, 80, 24, { detailVisible: false });
+		expect(closed.text).toContain("Frame v3");
+		expect(closed.text).not.toContain("HOW I SEE THIS TASK");
+		expect(closed.summaryHeight).toBeGreaterThan(0);
+
+		// A summary the user had switched off stays off after the region closes.
+		const switchedOff = renderDock(view, 80, 24, { summaryRequested: false, detailVisible: false });
+		expect(switchedOff.text).not.toContain("Frame v3");
+		expect(switchedOff.summaryHeight).toBe(0);
+	});
+
+	it("keeps the state the summary marked as decision owed when the region replaces it", () => {
+		// With the summary standing down, the region is the only surface left: the blocked state has
+		// to survive the swap, in the words each surface uses.
+		const summary = renderDock(owedView(), 80, 24, { detailVisible: false });
+		expect(summary.text).toContain("decision owed");
+		expect(summary.text).not.toContain("Decision owed");
+
+		const open = renderDock(owedView(), 80, 24);
+		expect(open.text).not.toContain("Frame not yet formed");
+		expect(open.text).toContain("Decision owed");
+		expect(open.summaryHeight).toBe(0);
 	});
 });

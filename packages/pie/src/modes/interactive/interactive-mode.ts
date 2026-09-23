@@ -136,7 +136,13 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
-import { buildFrameDetailLines, FrameDetailPanel, FramePanel, type FrameView } from "./components/frame-panel.ts";
+import {
+	buildFrameDetailLines,
+	FrameDetailPanel,
+	FramePanel,
+	type FrameView,
+	summaryPanelShown,
+} from "./components/frame-panel.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -1000,7 +1006,9 @@ export class InteractiveMode {
 				component: this.framePanelContainer,
 				shrink: 1,
 				minSize: 0,
-				visible: () => this.framePanelVisible,
+				// The summary stands down while the region is open: both print the same state, and the
+				// region is the fuller answer. The toggle is kept, so closing the region restores it.
+				visible: () => summaryPanelShown(this.framePanelVisible, this.frameDetailVisible),
 			},
 			{
 				component: this.frameDetailContainer,

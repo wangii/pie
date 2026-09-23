@@ -51,6 +51,18 @@ function frameHeadline(state: FormulationState): string {
 }
 
 /**
+ * Whether the summary is drawn.
+ *
+ * Both panels answer the same question — how the agent reads this task — so showing them together
+ * prints two versions of one state, and the summary's own line is the weaker of the two. While the
+ * region is open the summary stands down; the user's toggle is kept rather than cleared, so closing
+ * the region restores whatever they had chosen.
+ */
+export function summaryPanelShown(summaryRequested: boolean, detailVisible: boolean): boolean {
+	return summaryRequested && !detailVisible;
+}
+
+/**
  * The compact dock panel: what the agent currently takes the task to be, in one or two lines.
  *
  * It is deliberately a summary. The full reading, its history, and propose's answers to
@@ -119,15 +131,21 @@ export function buildFrameSummaryLines(view: FrameView, width: number): string[]
 }
 
 /**
- * The full view: the current reading in its own terms, why it changed, which version governed the
- * last round, and what became of each correction the user submitted.
+ * The full view: what the agent is doing now, then the current reading in its own terms, why it
+ * changed, which version governed the last round, and what became of each correction the user
+ * submitted.
  *
- * It is the answer to "the agent misunderstood me — what happened?", so the correction section
- * keeps answered corrections beside their response rather than dropping them once handled.
+ * The move comes first because it is the one thing the region is opened to check — the summary
+ * states it in a line, and this is where the action and its condition are read in full — while the
+ * reading below is what that move is being taken under. It is the answer to "the agent
+ * misunderstood me — what happened?", so the correction section keeps answered corrections beside
+ * their response rather than dropping them once handled.
  */
 export function buildFrameDetailLines(view: FrameView, width: number): string[] {
 	const { state, history, adopted } = view;
 	const lines: string[] = [];
+	const advancement = advancementLines(view, width, true);
+	if (advancement.length > 0) lines.push(...advancement, "");
 	const title = state.current ? `HOW I SEE THIS TASK   v${state.current.ordinal}` : "HOW I SEE THIS TASK";
 	lines.push(truncateToWidth(theme.bold(title), width));
 	lines.push("");
@@ -187,6 +205,21 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 		lines.push("");
 	}
 
+	if (state.decisionOwed && !state.recheckOwed && !state.recheck) {
+		// The summary's own marker for this state is "decision owed", and the region replaces the
+		// summary while it is open. The condition is the summary's marker condition exactly, so the
+		// two surfaces never disagree about it: a per-round reconsideration has its own section
+		// below and is the right thing to show once one exists.
+		lines.push(truncateToWidth(theme.bold("Decision owed"), width));
+		lines.push(
+			...wrapTextWithAnsi(
+				"  Not yet: an investigation has run and the agent has not said how it reads this task. Before another round is chosen it owes either that reading or a record of what is still missing.",
+				width,
+			),
+		);
+		lines.push("");
+	}
+
 	if (adopted) {
 		lines.push(
 			truncateToWidth(
@@ -203,9 +236,6 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 	}
 
 	lines.push(...recheckLines(state, history, width));
-
-	const advancement = advancementLines(view, width, true);
-	if (advancement.length > 0) lines.push(...advancement, "");
 
 	if (state.corrections.length > 0) {
 		lines.push(truncateToWidth(theme.bold("Corrections"), width));
@@ -488,10 +518,11 @@ const MAX_DETAIL_REGION_LINES = 16;
  * The detail lines, with the commands on their own line.
  *
  * Both hints have to survive what the layout does to the region: it clips from the bottom on a short
- * terminal and truncates every line on a narrow one. So the title keeps line 0, the commands get
- * line 1 of their own (a hint appended to the title would be cut by the title's own length — at 40
- * columns `HOW I SEE THIS TASK   v3 · /frame clo…` names neither command), and the elision note
- * comes directly under that.
+ * terminal and truncates every line on a narrow one. So the body's first line keeps line 0 — the
+ * current move when there is one, otherwise the reading's own title — the commands get line 1 of
+ * their own (a hint appended to that line would be cut by its own length — at 40 columns
+ * `HOW I SEE THIS TASK   v3 · /frame clo…` names neither command), and the elision note comes
+ * directly under that.
  */
 export function buildFrameDetailRegionLines(
 	view: FrameView,
