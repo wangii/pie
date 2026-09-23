@@ -103,7 +103,12 @@ export function buildFrameSummaryLines(view: FrameView, width: number): string[]
 	if (state.review && !state.review.responseCorrectionId) {
 		markers.push(theme.fg("warning", "awaiting your response"));
 	} else if (state.review && !state.review.focusReviewed) {
-		markers.push(theme.fg("warning", "focus review owed"));
+		// The reading's own scope is accounted for before its focus is reviewed, so the marker names
+		// the decision still owed: calling it a focus review while beliefs are unclassified would
+		// point the reader at an obligation the agent has not reached, the same way the move line would.
+		markers.push(
+			theme.fg("warning", state.pendingApplicability.length > 0 ? "belief review owed" : "focus review owed"),
+		);
 	}
 	// One marker, describing the last round: either nobody has said what it means for the reading
 	// yet, or somebody has and this is what they said. Showing a past "rechecked" beside an owed
@@ -198,7 +203,9 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 	} else if (state.review && !state.review.focusReviewed) {
 		lines.push(
 			...wrapTextWithAnsi(
-				"User response received; the agent must answer pending corrections and review focus before continuing.",
+				state.pendingApplicability.length > 0
+					? "User response received; the agent must answer pending corrections, then review what the earlier beliefs still mean, before continuing."
+					: "User response received; the agent must answer pending corrections and review focus before continuing.",
 				width,
 			),
 		);
@@ -369,7 +376,14 @@ function nowText(advancement: TaskAdvancement, state: FormulationState): string 
 			if (state.review && !state.review.responseCorrectionId) {
 				return "waiting for your response to the revised reading";
 			}
-			if (state.review && !state.review.focusReviewed) return "reviewing focus under your response";
+			// The reading's own scope is accounted for before its focus is reviewed, so while beliefs
+			// are still unclassified that is the step actually owed — naming focus alone sends the
+			// reader looking at an obligation the agent has not reached yet.
+			if (state.review && !state.review.focusReviewed) {
+				return state.pendingApplicability.length > 0
+					? "reviewing what the earlier beliefs still mean under your response"
+					: "reviewing focus under your response";
+			}
 			return "waiting for your response";
 		case "preparing":
 			return advancement.action ?? "deciding what to probe next";

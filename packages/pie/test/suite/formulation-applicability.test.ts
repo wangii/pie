@@ -381,4 +381,96 @@ describe("revision applicability review", () => {
 		// the task was completed on, not in the runtime.
 		expect(h.session.getFormulationState()).toBeUndefined();
 	});
+
+	/**
+	 * A belief the revision never carried over because it did not exist yet: it is declared in the
+	 * very turn that puts it in focus, so its delta is still in flight — the round that carries it is
+	 * not dispatched until the turn ends. Owing the review a decision about it would owe one that
+	 * `FormulationApplicabilityRecorded` refuses (it names a belief no delta has recorded), and the
+	 * gate that asks is the same gate that blocks the dispatch which would record it.
+	 *
+	 * Driven through the controller rather than through scripted turns: the state under test cannot
+	 * be scripted past, because a run that reaches it has nowhere to go — exactly the deadlock these
+	 * tests are about. A regression therefore fails on an assertion rather than by never finishing.
+	 */
+	const adjudicate = (beliefId: string, op: string, evidence: string) =>
+		fauxToolCall("declare_belief", { op, beliefId, evidence });
+
+	/** One dispatched round under v1, then v2: the episode the revision paused on is the fresh one. */
+	async function roundThenRevision(h: Harness): Promise<void> {
+		h.setResponses([
+			fauxAssistantMessage([belief(), reading("local retry control"), focus(), select()]),
+			fauxAssistantMessage("Observed: the retry reused the same identity"),
+			fauxAssistantMessage([adjudicate("belief-1", "inconclusive", "the probe never reached a second attempt")]),
+			fauxAssistantMessage([reading("cross-component identity ownership")]),
+		]);
+		await h.session.prompt("Investigate identity ownership");
+	}
+
+	/** What the propose turn does when it declares a belief and puts it in the same focus. */
+	function declareAndFocus(c: BeliefLoopController): string {
+		const delta = {
+			op: "propose" as const,
+			statement: "the other path names its target explicitly",
+			domain: "code" as const,
+			expectation: "the target is named, not inferred",
+			evidenceRounds: 1,
+		};
+		const belief = c.beliefSet.apply(delta);
+		c.onBeliefDelta(delta, belief, undefined);
+		return belief.id;
+	}
+
+	it("owes no decision for a belief whose delta is still in flight when the response is answered", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		await roundThenRevision(h);
+		const correction = h.session.submitFormulationCorrection("also consider the other path")!;
+		const c = new BeliefLoopController(h.session);
+		c.answerFormulationCorrection(correction.id, "I keep the revised reading and will test its counterexample.");
+		expect(c.focusReviewOwed()).toBe(true);
+		// The same turn declares a new belief and puts it in focus, before any round has dispatched.
+		const beliefId = declareAndFocus(c);
+		c.setFocus(["belief-1", beliefId]);
+		expect(c.beliefSet.get(beliefId)?.statement).toBe("the other path names its target explicitly");
+		expect(c.domainSnapshot.beliefs.has(beliefId)).toBe(false);
+
+		// It is in focus and in the belief set, but no delta recorded it, so it was not part of the
+		// reading this revision carried over: the review asks about the belief it did carry.
+		expect(c.formulationReview()?.scopedBeliefIds).toEqual(["belief-1"]);
+		expect(c.pendingApplicability()).toEqual(["belief-1"]);
+		expect(() =>
+			c.recordApplicability([{ beliefId, decision: "carries-over", reason: "it is in scope now" }]),
+		).toThrow("not waiting for an applicability decision");
+
+		// The review closes on that belief, and the next experiment may dispatch — which is the step
+		// that records the new belief.
+		c.recordApplicability([{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }]);
+		c.setFocus(["belief-1", beliefId]);
+		expect(c.focusReviewOwed()).toBe(false);
+		expect(() => c.selectExperiment({ intent: "probe the reviewed reading", beliefIds: ["belief-1"] })).not.toThrow();
+	});
+
+	it("keeps a belief declared in a later round out of a review that has already closed", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		await roundThenRevision(h);
+		const correction = h.session.submitFormulationCorrection("also consider the other path")!;
+		const c = new BeliefLoopController(h.session);
+		c.answerFormulationCorrection(correction.id, "I keep the revised reading.");
+		c.recordApplicability([{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }]);
+		c.setFocus(["belief-1"]);
+		expect(c.focusReviewOwed()).toBe(false);
+		expect(c.pendingApplicability()).toEqual([]);
+
+		// The review is closed but still on the task, and a later round declares a belief and focuses
+		// it in one turn: the scope must not grow after the fact.
+		const beliefId = declareAndFocus(c);
+		c.setFocus(["belief-1", beliefId]);
+		expect(c.formulationReview()?.scopedBeliefIds).toEqual(["belief-1"]);
+		expect(c.pendingApplicability()).toEqual([]);
+		expect(c.focusReviewOwed()).toBe(false);
+		expect(c.revisionGate()).toBeUndefined();
+		expect(() => c.selectExperiment({ intent: "probe the reviewed reading", beliefIds: ["belief-1"] })).not.toThrow();
+	});
 });

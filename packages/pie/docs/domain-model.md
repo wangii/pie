@@ -315,6 +315,12 @@ unchanged. Experiment selection, routing and conclusion remain gated until that 
 revision requires another response; answering an earlier correction cannot acknowledge a later
 version. These states are replayed with the active branch, including its beliefs and focus.
 
+The review is scoped to the beliefs the revision actually carried over: the focus in force when it
+was published, plus any recorded belief put back in focus while the review stands. A belief
+declared in the turn that focuses it is not one of them — its delta is still in flight, so it has
+no state under the reviewed reading, and recording an applicability decision about it would name a
+belief the log has not recorded yet.
+
 The terminal shows the wait and the review obligation. Reply normally to continue the paused task.
 `/frame correct` records a correction; when idle, a subsequent prompt starts its processing.
 RPC exposes the same review through `get_state.formulation.review` and the domain snapshot, and the

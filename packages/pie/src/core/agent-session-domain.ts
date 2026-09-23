@@ -327,6 +327,11 @@ export interface FormulationReview {
 	 * already existed then and is brought back into focus while the review is owed. Beliefs first
 	 * introduced after the revision belong to the new reading and are not asked about — which is
 	 * also what stops a narrowed focus from being a way to skip the review.
+	 *
+	 * "Existed then" means recorded, not merely declared: a belief whose delta is still in flight
+	 * has no state for the review to judge, and `FormulationApplicabilityRecorded` refuses to name
+	 * one. Publication flushes what is pending, so a belief carried over from the reviewed reading
+	 * is always recorded and always in this list.
 	 */
 	readonly scopedBeliefIds: readonly BeliefId[];
 	/** `task.introducedBeliefs.length` when the version was published; ids after it are new. */
@@ -940,16 +945,26 @@ export function applicabilityFor(task: Task, beliefId: BeliefId): FormulationApp
  * was first introduced after the revision: the reading that produced it is the one being reviewed,
  * so a belief it created is not carried-over evidence. Inherited history has no index in this
  * task's `introducedBeliefs` at all, so it counts as pre-existing and must be classified.
+ *
+ * "Pre-existing" is read off the durable registry as well as off the index. A belief declared in
+ * the turn that focuses it has no record yet — its delta is still in flight, because the round that
+ * carries it is not dispatched until the turn ends — so it did not exist when the version was
+ * published either. Counting it as pre-existing would owe it a decision that
+ * `FormulationApplicabilityRecorded` then refuses (it names a belief no delta has recorded), and
+ * the review could never be completed. A belief the revision really did carry over always has a
+ * record: publication flushes what is pending before it writes the version.
  */
 function reviewScopeAfterFocus(
 	task: Task,
 	review: FormulationReview,
 	focused: readonly BeliefId[],
+	beliefs: ReadonlyMap<BeliefId, Belief>,
 ): readonly BeliefId[] {
 	const scoped = [...review.scopedBeliefIds];
 	const known = new Set(scoped);
 	for (const beliefId of focused) {
 		if (known.has(beliefId)) continue;
+		if (!beliefs.has(beliefId)) continue;
 		const introduced = task.introducedBeliefs.indexOf(beliefId);
 		if (introduced !== -1 && introduced >= review.introducedAtRevision) continue;
 		known.add(beliefId);
@@ -1212,7 +1227,7 @@ export function applyAgentSessionDomainEvent(
 				const applicability = review.applicability.map((entry) =>
 					entry.decision === "not-applicable" && declared.has(entry.beliefId) ? { ...entry, stale: true } : entry,
 				);
-				const scopedBeliefIds = reviewScopeAfterFocus(task, review, event.beliefIds);
+				const scopedBeliefIds = reviewScopeAfterFocus(task, review, event.beliefIds, snapshot.beliefs);
 				const candidate = { ...review, scopedBeliefIds, applicability };
 				// The review of the reading is complete only once every belief it has to account for has a
 				// decision that still counts: otherwise a focus declaration would mark the reading reviewed

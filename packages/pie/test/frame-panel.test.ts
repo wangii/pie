@@ -101,6 +101,25 @@ describe("frame panel", () => {
 			}),
 		});
 		expect(plain(buildFrameSummaryLines(reviewing, 80)).join("\n")).toContain("focus review owed");
+		expect(plain(buildFrameDetailLines(reviewing, 80)).join("\n").replace(/\s+/g, " ")).toContain(
+			"answer pending corrections and review focus before continuing",
+		);
+
+		// The reading's own scope is accounted for before its focus is reviewed, so the marker and the
+		// detail name that decision while it is still owed rather than calling it a focus review.
+		const scoping = view({
+			state: state({
+				current: version(2),
+				review: { ...review(), responseCorrectionId: "correction-1" },
+				pendingApplicability: ["belief-1"],
+			}),
+		});
+		const scopingSummary = plain(buildFrameSummaryLines(scoping, 80)).join("\n");
+		expect(scopingSummary).toContain("belief review owed");
+		expect(scopingSummary).not.toContain("focus review owed");
+		const scopingDetail = plain(buildFrameDetailLines(scoping, 80)).join("\n").replace(/\s+/g, " ");
+		expect(scopingDetail).toContain("review what the earlier beliefs still mean");
+		expect(scopingDetail).not.toContain("review focus before continuing");
 		for (const width of [24, 40, 60]) {
 			for (const item of [waiting, reviewing]) {
 				for (const line of [...buildFrameSummaryLines(item, width), ...buildFrameDetailLines(item, width)]) {
@@ -411,6 +430,24 @@ describe("current move", () => {
 			),
 		).join("\n");
 		expect(waitingForCorrection).toContain("Now: waiting for your response to a correction");
+
+		// The reading's own scope is accounted for before its focus is reviewed, so while beliefs are
+		// still unclassified the panel names that step rather than one the agent has not reached.
+		const reviewingBeliefs = plain(
+			buildFrameSummaryLines(
+				view({
+					state: state({
+						current: version(2),
+						review: { ...review(), responseCorrectionId: "correction-1" },
+						pendingApplicability: ["belief-1"],
+					}),
+					advancement: { stage: "waiting" },
+				}),
+				80,
+			),
+		).join("\n");
+		expect(reviewingBeliefs).toContain("Now: reviewing what the earlier beliefs still mean under your response");
+		expect(reviewingBeliefs).not.toContain("reviewing focus under your response");
 	});
 
 	it("shows no move for a finished task", () => {
