@@ -579,7 +579,7 @@ export class InteractiveMode {
 	private widgetContainerBelow!: Container;
 	private beliefPanelContainer!: Container;
 	private beliefPanel!: BeliefSetPanel;
-	private beliefPanelVisible = true;
+	private beliefPanelVisible = false;
 	private framePanelContainer!: Container;
 	private framePanel!: FramePanel;
 	private framePanelVisible = true;

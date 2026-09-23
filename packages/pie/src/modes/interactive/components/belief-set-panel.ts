@@ -12,7 +12,7 @@ import { theme } from "../theme/theme.ts";
  * candidate judgment rather than a reading of the task. The status label already says "proposed".
  */
 export class BeliefSetPanel implements Component {
-	private visible = true;
+	private visible = false;
 	private readonly getBeliefs: () => readonly Belief[];
 
 	constructor(getBeliefs: () => readonly Belief[]) {
