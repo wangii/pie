@@ -37,6 +37,17 @@ function beginTask(controller: BeliefLoopController): void {
 	controller.beginDomainTask("is the cache persistent?", "is the cache persistent?");
 }
 
+/** release the wait every publication now leaves, and close its review. */
+function releasePublication(controller: BeliefLoopController): void {
+	controller.receiveFormulationResponse("keep this reading");
+	const correction = controller.pendingCorrections()[0];
+	if (correction) controller.answerFormulationCorrection(correction.id, "I keep this reading.");
+	for (const beliefId of controller.pendingApplicability()) {
+		controller.recordApplicability([{ beliefId, decision: "carries-over", reason: "still the question" }]);
+	}
+	controller.setFocus([...controller.focusSet.beliefIds]);
+}
+
 describe("formulation publishing", () => {
 	it("records a first version and numbers revisions from it", () => {
 		const { controller, events } = createController();
@@ -49,6 +60,19 @@ describe("formulation publishing", () => {
 		expect(first.value.previousVersionId).toBeUndefined();
 		expect(first.value.origin).toBe("propose");
 		expect(controller.currentFormulation()?.id).toBe(first.value.id);
+
+		// the first publication waits for the user, so the revision is only allowed after
+		// the response, the applicability review of the scope it carried, and the focus review.
+		expect(controller.awaitingFormulationResponse()).toBe(true);
+		controller.receiveFormulationResponse("keep this reading");
+		const correction = controller.pendingCorrections()[0];
+		if (correction) controller.answerFormulationCorrection(correction.id, "I keep this reading.");
+		for (const beliefId of controller.pendingApplicability()) {
+			controller.recordApplicability([{ beliefId, decision: "carries-over", reason: "still the question" }]);
+		}
+		controller.setFocus(["belief-1"]);
+		expect(controller.awaitingFormulationResponse()).toBe(false);
+		expect(controller.revisionGate()).toBeUndefined();
 
 		const revised = controller.publishFormulation({
 			content: { ...CONTENT, focus: "where identity is retained between attempts" },
@@ -268,6 +292,7 @@ describe("formulation state restoration", () => {
 
 		const first = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
 		if (first.outcome === "rejected") throw new Error(first.reason);
+		releasePublication(controller);
 		const second = controller.publishFormulation({
 			content: { ...CONTENT, implication: "check retention before touching the guard" },
 			reason: "the first probe narrowed the direction",
@@ -328,6 +353,19 @@ describe("propose ownership of the decision", () => {
 			expectation: "a post-logout read keeps the value",
 			evidenceRounds: 1,
 		});
+		// record the belief through the delta path, so the review's scope names a belief
+		// the durable log knows about.
+		controller.onBeliefDelta(
+			{
+				op: "propose",
+				statement: "the cache survives logout",
+				domain: "product",
+				expectation: "a post-logout read keeps the value",
+				evidenceRounds: 1,
+			},
+			belief,
+			undefined,
+		);
 		controller.setFocus([belief.id]);
 		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
 		expect(controller.pendingExperiment).toBeDefined();
@@ -337,6 +375,7 @@ describe("propose ownership of the decision", () => {
 		// The selection belonged to the previous reading, so it is gone rather than silently
 		// re-scoped under the new one.
 		expect(controller.pendingExperiment).toBeUndefined();
+		releasePublication(controller);
 
 		// Choosing again is what re-arms the dispatch, and the new choice is its own record.
 		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
@@ -358,10 +397,24 @@ describe("propose ownership of the decision", () => {
 			expectation: "a post-logout read keeps the value",
 			evidenceRounds: 1,
 		});
+		// record the belief through the delta path, so the review's scope names a belief
+		// the durable log knows about.
+		controller.onBeliefDelta(
+			{
+				op: "propose",
+				statement: "the cache survives logout",
+				domain: "product",
+				expectation: "a post-logout read keeps the value",
+				evidenceRounds: 1,
+			},
+			belief,
+			undefined,
+		);
 		controller.setFocus([belief.id]);
 		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
 		const published = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
 		if (published.outcome === "rejected") throw new Error(published.reason);
+		releasePublication(controller);
 		controller.selectExperiment({ intent: "what the answer must report", beliefIds: [belief.id] });
 
 		// The sequence lives in the log, not only in the field: a reader sees the choice, the

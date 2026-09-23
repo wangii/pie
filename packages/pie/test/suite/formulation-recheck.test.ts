@@ -81,7 +81,23 @@ describe("per-round formulation recheck", () => {
 			if (adjudicated) owedPrompt = harness.session.agent.state.systemPrompt;
 		});
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			// focus before publishing; the selection moves to the turn after the reply.
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			// Choosing again without answering. The round is what owes the result, so the same gate
@@ -95,6 +111,7 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		expect(userText(harness)).toContain("so say what it means for how you read this task");
 		// Two experiments ran, and the second one only after the round had been answered.
@@ -114,7 +131,7 @@ describe("per-round formulation recheck", () => {
 		const task = lastTask(harness);
 		expect(formulationRecheckOwed(task)).toBe(false);
 		expect(task.formulationRecheck?.reason).toBe("the second round fits the reading too");
-		expect(task.formulationReview).toBeUndefined();
+		expect(task.formulationReview?.focusReviewed).toBe(true);
 
 		// The obligation is visible where the reading is read, not only in the steer that follows it,
 		// and it is stated as the agent's own position rather than as evidence about the task.
@@ -127,13 +144,29 @@ describe("per-round formulation recheck", () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			// The round is answered by changing the reading rather than by keeping it.
 			fauxAssistantMessage([reading("persistence is settled, the lifetime is the question"), conclude()]),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		const versions = harness.eventsOfType("ProblemFormulationRecorded");
 		expect(versions.map((event) => event.version.ordinal)).toEqual([1, 2]);
@@ -158,7 +191,22 @@ describe("per-round formulation recheck", () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			fauxAssistantMessage([
@@ -172,6 +220,7 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("the cache survives logout, restart unknown"),
 		]);
 		await harness.session.prompt("can you still read it?");
+		await harness.session.prompt("keep the reading");
 
 		const rechecks = harness.eventsOfType("FormulationRecheckRecorded");
 		expect(rechecks).toHaveLength(1);
@@ -187,7 +236,22 @@ describe("per-round formulation recheck", () => {
 		const answered = await createHarness({});
 		harnesses.push(answered);
 		answered.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			fauxAssistantMessage([recheck(), recheck("kept it again"), conclude()]),
@@ -195,6 +259,7 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 		await answered.session.prompt("is the cache persistent?");
+		await answered.session.prompt("keep the reading");
 		expect(toolText(answered, "recheck_formulation")).toContain("already been reconsidered");
 		expect(answered.eventsOfType("FormulationRecheckRecorded")).toHaveLength(1);
 
@@ -203,7 +268,7 @@ describe("per-round formulation recheck", () => {
 		const unformed = await createHarness({});
 		harnesses.push(unformed);
 		unformed.setResponses([
-			fauxAssistantMessage([propose(), ...select()]),
+			fauxAssistantMessage([propose(), fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }), ...select()]),
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			fauxAssistantMessage([recheck(), reading("persistence across logout"), conclude()]),
@@ -231,18 +296,40 @@ describe("per-round formulation recheck", () => {
 			afterDistillation = harness.sessionManager.getLeafId()!;
 		});
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			fauxAssistantMessage([recheck(), conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout"),
 			// A second task in the same session: its own reading, its own round, its own result.
-			fauxAssistantMessage([
-				propose("the second task asks about eviction"),
-				reading("eviction under pressure"),
-				...select(),
-			]),
+			fauxAssistantMessage([propose("the second task asks about eviction"), reading("eviction under pressure")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- pressure evicted the value."),
 			fauxAssistantMessage([adjudicate("support", "pressure evicted the value as predicted")]),
 			fauxAssistantMessage([recheck("the second task's round fits its reading"), conclude()]),
@@ -250,7 +337,9 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("eviction is pressure-driven"),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 		await harness.session.prompt("does pressure evict the cache?");
+		await harness.session.prompt("keep the reading");
 
 		// The new task did not inherit the previous understanding, so it did not inherit the answer
 		// to the previous round either: what is recorded is its own.
@@ -306,7 +395,12 @@ describe("per-round formulation recheck", () => {
 		// own text. It is not turned into a belief, and it is not the reason the reading was kept.
 		const residual = "Residual: nothing yet explains why the second read missed the cache.";
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+				...select(),
+			]),
 			fauxAssistantMessage("Observed:\n- the first read hit the cache, the second did not."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -316,11 +410,23 @@ describe("per-round formulation recheck", () => {
 				}),
 				fauxText(residual),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage([recheck("the round's evidence fits the reading"), conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("persistence is unsettled"),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		// The residual became no belief, and no belief's evidence was drawn from it: an anomaly is a
 		// reason to reconsider the reading, never support for a claim.
@@ -371,11 +477,12 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		expect(correctionId).not.toBe("");
 		expect(userText(harness)).toContain("The user corrected your reading of this task");
 		const task = lastTask(harness);
-		expect(task.formulationCorrections.map((correction) => correction.status)).toEqual(["resolved"]);
+		expect(task.formulationCorrections.map((correction) => correction.status)).toEqual(["resolved", "resolved"]);
 		// The correction was answered first and the round reconsidered after it, in that order.
 		expect(eventIndex(harness, (event) => event.type === "FormulationCorrectionResolved")).toBeLessThan(
 			eventIndex(harness, (event) => event.type === "FormulationRecheckRecorded"),
@@ -400,7 +507,22 @@ describe("per-round formulation recheck", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			fauxAssistantMessage([recheck("the round's evidence fits the reading"), conclude()]),
@@ -408,6 +530,7 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 		const before = lastTask(harness).formulationRecheck;
 
 		await harness.session.compact();
@@ -425,7 +548,22 @@ describe("per-round formulation recheck", () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			// Concluding without adjudicating the belief the round was dispatched for: the loop keeps
 			// the role in distill rather than letting the round end.
@@ -436,6 +574,7 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		// The refusal names the unadjudicated belief, and the record that follows covers the round
 		// only once its adjudication is done — there is nothing to reconsider before that.

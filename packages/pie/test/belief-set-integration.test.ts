@@ -16,13 +16,14 @@ import { createHarness, getMessageText, type Harness } from "./suite/harness.ts"
  * selection is safe.
  */
 const select = (beliefIds: string[], intent = "which action to take") => [
+	// Focus first: the review a publication creates is scoped to the focus in force then.
+	fauxToolCall("focus_beliefs", { beliefIds }),
 	fauxToolCall("set_formulation", {
 		interpretation: "I currently read this as a question about which behavior actually holds",
 		focus: "the observations the selected beliefs predict",
 		implication: "which conclusion the answer must report turns on what the probe shows",
 		reason: "initial reading before the first probe",
 	}),
-	fauxToolCall("focus_beliefs", { beliefIds }),
 	fauxToolCall("select_experiment", { intent, beliefIds }),
 ];
 
@@ -87,8 +88,34 @@ describe("belief-loop integration", () => {
 					expectation: "the post-logout request has a new session id",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1", "belief-2"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1", "belief-2"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1", "belief-2"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1", "belief-2"] }),
+					fauxToolCall("select_experiment", {
+						intent: "which action to take",
+						beliefIds: ["belief-1", "belief-2"],
+					}),
+				]);
+			},
+
 			fauxAssistantMessage(
 				"Observed:\n- the post-logout read returned the cached value.\n- the request used a new session id.",
 			),
@@ -110,6 +137,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("review logout cache behavior");
+		await harness.session.prompt("keep the reading");
 
 		expect(harness.session.beliefs.map(statusOf)).toEqual(["supported", "supported"]);
 		const executionPlans = harness
@@ -145,8 +173,30 @@ describe("belief-loop integration", () => {
 					expectation: "code and README describe the same result",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			fauxAssistantMessage("Observed:\n- `foo.ts:42` returns X.\n- README claims Y."),
 			fauxAssistantMessage([
@@ -162,6 +212,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("audit the behavior");
+		await harness.session.prompt("keep the reading");
 
 		expect(statusOf(harness.session.beliefs[0]!)).toBe("refuted");
 		expect(harness.session.beliefs[0]?.refutedBy[0]?.evidence).toContain("foo.ts:42");
@@ -179,8 +230,30 @@ describe("belief-loop integration", () => {
 					expectation: "one handler covers all authentication",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage(
 				"Observed:\n- OAuth uses oauth.ts.\n- sessions use session.ts.\n- API tokens use token.ts.",
 			),
@@ -218,6 +291,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("review authentication");
+		await harness.session.prompt("keep the reading");
 
 		expect(statusOf(harness.session.beliefs[0]!)).toBe("superseded");
 		expect(statusOf(harness.session.beliefs[1]!)).toBe("supported");
@@ -239,8 +313,30 @@ describe("belief-loop integration", () => {
 					expectation: "a remote probe returns the cached value",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the remote cache endpoint was unavailable."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -264,6 +360,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("does the remote cache persist?");
+		await harness.session.prompt("keep the reading");
 
 		expect(statusOf(harness.session.beliefs[0]!)).toBe("supported");
 		expect(harness.session.beliefs[0]?.inconclusiveBy).toHaveLength(1);
@@ -294,18 +391,30 @@ describe("belief-loop integration", () => {
 					expectation: "a post-login read returns the prior value",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 				fauxToolCall("set_formulation", {
 					interpretation: "I currently read this as a question about which behavior actually holds",
 					focus: "the observations the focused belief predicts",
 					implication: "which conclusion the answer must report turns on what the probe shows",
 					reason: "initial reading before the first probe",
 				}),
-				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
-				fauxToolCall("select_experiment", {
-					intent: "whether to change the adapter",
-					beliefIds: ["belief-1"],
-				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "whether to change the adapter", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -325,6 +434,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("fix cancellation");
+		await harness.session.prompt("keep the reading");
 
 		const executionPlans = harness
 			.eventsOfType("PlanProduced")
@@ -352,8 +462,32 @@ describe("belief-loop integration", () => {
 					beliefIds: ["belief-1"],
 				}),
 			]),
-			fauxAssistantMessage([...select(["belief-1"])]),
+			fauxAssistantMessage([
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
+			]),
 			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "support",
@@ -367,6 +501,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("fix cancellation");
+		await harness.session.prompt("keep the reading");
 
 		const selections = harness.session.messages.filter(
 			(message) => message.role === "toolResult" && message.toolName === "select_experiment",
@@ -389,14 +524,29 @@ describe("belief-loop integration", () => {
 					expectation: "the request observes the cancellation",
 					evidenceRounds: 1,
 				}),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 				fauxToolCall("set_formulation", {
 					interpretation: "I currently read this as a question about which behavior actually holds",
 					focus: "the observations the focused belief predicts",
 					implication: "which conclusion the answer must report turns on what the probe shows",
 					reason: "initial reading before the first probe",
 				}),
-				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				]);
+			},
 			// Tools run in call order, so the selection lands before the same focus is restated.
 			// Restating an unchanged scope must not discard the selection.
 			fauxAssistantMessage([
@@ -420,6 +570,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("fix cancellation");
+		await harness.session.prompt("keep the reading");
 
 		const plans = harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0);
 		expect(plans).toHaveLength(1);
@@ -439,8 +590,30 @@ describe("belief-loop integration", () => {
 					expectation: "the request observes the cancellation",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -455,6 +628,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("fix cancellation");
+		await harness.session.prompt("keep the reading");
 
 		const viewBeliefs = harness.session.getRegisteredTool("view_beliefs");
 		expect(viewBeliefs).toBeDefined();
@@ -499,7 +673,31 @@ describe("belief-loop integration", () => {
 					evidenceRounds: 1,
 				}),
 			]),
-			fauxAssistantMessage([...select(["belief-2"])]),
+			fauxAssistantMessage([
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-2"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-2"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-2"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-2"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -518,6 +716,7 @@ describe("belief-loop integration", () => {
 
 		await harness.session.prompt("answer the first question");
 		await harness.session.prompt("fix cancellation");
+		await harness.session.prompt("keep the reading");
 
 		// Only the second task's own belief was ever dispatched.
 		const plans = harness.eventsOfType("PlanProduced").filter((event) => event.plan.selectedToExplore.length > 0);
@@ -600,8 +799,30 @@ describe("belief-loop integration", () => {
 					expectation: "the request observes the cancellation",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the request observes the cancellation."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -629,6 +850,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("fix cancellation");
+		await harness.session.prompt("keep the reading");
 
 		const userText = harness.session.messages
 			.filter((message) => message.role === "user")
@@ -689,8 +911,30 @@ describe("belief-loop integration", () => {
 					expectation: "a read hits the cache",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed: the read hit the cache."),
 			fauxAssistantMessage([fauxToolCall("declare_belief", { op: "support", beliefId: "belief-1" })]),
 			fauxAssistantMessage([
@@ -706,6 +950,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("check the cache");
+		await harness.session.prompt("keep the reading");
 
 		const distillations = harness.eventsOfType("DistillationProduced");
 		expect(distillations).toHaveLength(1);
@@ -746,8 +991,30 @@ describe("belief-loop integration", () => {
 					expectation: "a remote probe returns the cached value",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the remote cache endpoint was unavailable."),
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
@@ -762,6 +1029,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("does the remote cache persist?");
+		await harness.session.prompt("keep the reading");
 
 		// The belief remains inconclusive: it is not retried nor dropped, so the guard did
 		// not block conclusion the way an *unadjudicated* proposal would. It survives to the
@@ -818,8 +1086,30 @@ describe("belief-loop integration", () => {
 					expectation: "a probe returns the cached value",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "initial reading before the first probe",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: ["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			// Two probe calls exhaust the episode horizon (ceil(1 * 1.3) = 2).
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
@@ -838,6 +1128,7 @@ describe("belief-loop integration", () => {
 		]);
 
 		await harness.session.prompt("does the cache persist?");
+		await harness.session.prompt("keep the reading");
 
 		const userText = harness.session.messages
 			.filter((message) => message.role === "user")

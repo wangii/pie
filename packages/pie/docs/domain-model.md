@@ -6,7 +6,7 @@
 
 > **Every schema bump so far has been breaking.** v2 renamed the execution-round vocabulary from
 > `TaskFrame`/`frameId` to `ExecutionEpisode`/`episodeId`; v3 added the task-level problem
-> formulation; v4 added the experiment selection; v5 added revision response and focus review;
+> formulation; v4 added the experiment selection; v5 added the publication response and focus review;
 > v6 added the per-round formulation recheck.
 > Older logs are rejected rather than migrated —
 > see [Protocol versioning and old logs](#protocol-versioning-and-old-logs).
@@ -244,7 +244,7 @@ struct FormulationCorrection {
   Timestamp receivedAt;
   FormulationCorrectionStatus status;  // Pending | Resolved
   std::optional<std::string> response; // propose's answer; required once resolved
-  std::optional<FormulationVersionId> recordedVersionId; // the revision that answered it, if any
+  std::optional<FormulationVersionId> recordedVersionId; // the version that answered it, if any
 };
 ```
 
@@ -297,11 +297,13 @@ and creates no version. Deciding whether a paraphrase is substantive would take 
 compare semantics, and the runtime deliberately does not add one — which also means more evidence
 for an unchanged reading never manufactures a revision.
 
-#### Revision response and focus review
+#### Publication response and focus review
 
-A revision (ordinal > 1) creates task-local `formulationReview`:
-`{ versionId, responseCorrectionId?, focusReviewed: false }`. The first publication does not
-require user interaction, and the first investigation may still run without a Frame.
+Every publication creates task-local `formulationReview`:
+`{ versionId, responseCorrectionId?, focusReviewed: false }` — the first version as much as a
+revision, because the first reading is what the investigation is about to be built on. What remains
+permitted without a user handshake is an unformed preliminary investigation, not the publication
+that follows it.
 
 Until a user response targets that exact version, the run stops after the tool batch and the task
 stays active. Later tools in the batch cannot dispatch, reframe, change focus, or conclude. A normal
@@ -315,7 +317,7 @@ unchanged. Experiment selection, routing and conclusion remain gated until that 
 revision requires another response; answering an earlier correction cannot acknowledge a later
 version. These states are replayed with the active branch, including its beliefs and focus.
 
-The review is scoped to the beliefs the revision actually carried over: the focus in force when it
+The review is scoped to the beliefs the reading actually carried over: the focus in force when it
 was published, plus any recorded belief put back in focus while the review stands. A belief
 declared in the turn that focuses it is not one of them — its delta is still in flight, so it has
 no state under the reviewed reading, and recording an applicability decision about it would name a
@@ -429,7 +431,7 @@ Two consequences follow directly, and both are observable in the event stream:
 
 - Within one turn, tools run in call order. A turn that selects an experiment and then publishes a
   version ends with no selection. After a first publication, selecting again binds the new version;
-  after a revision, user response and focus review must precede the new selection.
+  after a publication, user response and focus review must precede the new selection.
 - An already-dispatched experiment is untouched. Its `Plan` and its episode's observations stay
   exactly as recorded — a reframe does not un-run what ran, nor erase the evidence it produced.
 
@@ -746,7 +748,7 @@ operation: the runtime replays the branch the leaf moved to before it reports an
 so a client is never told the agent holds an understanding from a branch it just left.
 
 `get_state` answers the same question for clients that want only the current reading: it carries
-the active task's `FormulationState` (current version, deferral, corrections, revision review, and
+the active task's `FormulationState` (current version, deferral, corrections, formulation review, and
 whether the decision is still owed), and `get_domain_snapshot` returns the whole replayed snapshot — the
 tasks, their beliefs, and the cursor — in a JSON-serializable shape.
 
@@ -785,8 +787,8 @@ carries no `FormulationAdoption`, so a replayed v2 plan is indistinguishable fro
 was never formed — exactly the distinction `Unformed` exists to preserve. A v3 log is rejected for
 the same kind of reason: an episode in it has no way to say whether an experiment was chosen and
 not yet dispatched, so replaying one would silently drop a choice the runtime was holding or
-invent one it never made. A v4 log cannot attest that a revision received a user response followed
-by focus review, so it is rejected by v5 rather than silently treating old scope as reviewed. A v5
+invent one it never made. A v4 log cannot attest that a publication received a user response
+followed by focus review, so it is rejected by v5 rather than silently treating old scope as reviewed. A v5
 log cannot attest a per-round recheck either: it records a distillation only when the round echoed
 an adjudication, so a round that changed no belief is invisible in it, and nothing in it separates
 "reconsidered and kept the reading" from "never reconsidered". Replaying one would read as a task
@@ -862,8 +864,9 @@ model and must not become a second source of truth.
     the Task has no version, so a decision made under a version always names it.
 16. A formulation version never carries belief status, and never counts as evidence for a belief.
 17. Publishing a version leaves the focus slice, every belief record, and every already-recorded
-    observation untouched; it invalidates a selection that has not been dispatched. A revision also
-    requires a user response followed by explicit focus review, without forcing different belief ids.
+    observation untouched; it invalidates a selection that has not been dispatched. A publication
+    also requires a user response followed by explicit focus review, without forcing different belief
+    ids.
 18. Every belief-loop round that reached distillation carries a reconsideration result before
     propose chooses another experiment or concludes, and a result that keeps the reading creates no
     version. Recording one neither settles an unadjudicated belief nor answers the applicability

@@ -112,10 +112,11 @@ const PROPOSE_PROTOCOL =
 	"claim as a belief and test it instead. Once you have investigated, this decision is required before you choose " +
 	"another experiment or conclude; if you genuinely cannot state a reading yet, use defer_formulation to say what is " +
 	"missing and why. Publishing a new version voids any experiment you selected but have not dispatched, so select again " +
-	"afterwards. A revision (not the first version) pauses execution and conclusion until the user responds to that " +
-	"version. Answer the response, then account for the beliefs already in scope under the new reading with " +
+	"afterwards. Every publication pauses execution and conclusion until the user responds to that version — the first " +
+	"reading as much as a revision, since nothing is built on an understanding the user has not seen. Answer the " +
+	"response, then account for the beliefs already in scope under the reading with " +
 	"review_applicability — carries-over, not-applicable, or needs-revalidation, with a reason for each, including the " +
-	"beliefs the revised frame leaves out — and then review focus with focus_beliefs, even if the same ids remain " +
+	"beliefs the reading leaves out — and then review focus with focus_beliefs, even if the same ids remain " +
 	"relevant. A belief classified needs-revalidation may not be reported until it has been probed again under the new " +
 	"reading. " +
 	"Reconsider the reading when residual evidence conflicts with its assumptions or scope, or a user correction changes " +
@@ -230,15 +231,15 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 
 export const TRANSITION_STEERS = {
 	awaitFormulationResponse:
-		"Execution is paused for your response to the revised Frame. Reply to confirm, correct, or clarify this reading; " +
-		"the agent must answer your response and review focus before continuing.",
+		"Execution is paused for your response to the Frame. Reply to confirm, correct, or clarify this reading; " +
+		"the agent must answer your response and review the reading before continuing.",
 	reviewFocus:
 		"Review the task focus under the current Frame with focus_beliefs before selecting an experiment, routing to " +
 		"fast path, or concluding. The same belief ids are allowed: review relevance, not truth. Keep counterexamples in scope.",
 	applicabilityReview: (statements: string) =>
-		`The Frame was revised, so say what each belief already in scope means under the new reading with ` +
+		`A Frame has been published, so say what each belief already in scope means under this reading with ` +
 		`review_applicability: ${statements}. carries-over keeps it as a finding, not-applicable records that this task no ` +
-		`longer asks about it, and needs-revalidation says its evidence was gathered under the old reading and must be ` +
+		`longer asks about it, and needs-revalidation says its evidence was gathered under a different reading and must be ` +
 		`probed again before the task may report it. This changes no belief's status, and it is owed for every belief listed ` +
 		`— including any that a narrowed focus leaves out.`,
 	revalidateUnderReading: (statements: string) =>

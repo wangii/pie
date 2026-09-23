@@ -195,7 +195,7 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 	if (state.review && !state.review.responseCorrectionId) {
 		lines.push(
 			...wrapTextWithAnsi(
-				"Paused: reply to confirm, correct, or clarify this revised Frame. The agent will answer and review focus before continuing.",
+				"Paused: reply to confirm, correct, or clarify this Frame. The agent will answer and review the reading before continuing.",
 				width,
 			),
 		);

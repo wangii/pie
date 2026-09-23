@@ -440,7 +440,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._beliefLoop.installAgentNextTurnRefresh();
-		// Pie pauses the run while the belief loop waits for the user's answer to a revised Frame.
+		// Pie pauses the run while the belief loop waits for the user's answer to the Frame.
 		// Agent core replaced `shouldStopAfterTurn` with `finishTurn`, whose `{ action: "end" }` is the
 		// same graceful stop: the turn's response and tool results finish, then the loop exits before
 		// the next provider request. An earlier decision to end wins, so both predicates are honored.
@@ -448,7 +448,7 @@ export class AgentSession {
 		this.agent.finishTurn = async (turn, signal) => {
 			// The old stop hook was short-circuited by the pause: while the task waits on the user's
 			// answer, the boundary ends the run without running the hooks behind it first. Checking the
-			// pause again after them still catches a hook that itself brought the revision about.
+			// pause again after them still catches a hook that itself brought the publication about.
 			if (this._beliefLoop.awaitingFormulationResponse()) return { action: "end" };
 			const previous = await previousFinishTurn?.(turn, signal);
 			if (previous?.action === "end" || this._beliefLoop.awaitingFormulationResponse()) return { action: "end" };
@@ -1410,6 +1410,14 @@ export class AgentSession {
 
 		if (await this._checkCompaction(msg)) {
 			return true;
+		}
+
+		// A hard exit ends the run without the agent loop polling its queues, so a message queued
+		// during the failed turn cannot be delivered by continuing: repeating the run would only
+		// re-request the same failure. Observed as an unbounded post-run loop when a provider
+		// answered instantly with an error while a steering message was still queued.
+		if (msg.stopReason === "error" || msg.stopReason === "aborted") {
+			return false;
 		}
 
 		// The agent loop drains both queues before emitting agent_end. Any messages

@@ -43,10 +43,16 @@ async function pausedHarness(): Promise<Harness> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	harness.setResponses([
+		// focus before publishing; the second version waits for the user's reply to the first.
 		fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
-		fauxAssistantMessage([reading("cross-component identity ownership"), select(), focus(), conclude()]),
+		(context) => {
+			const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+			const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+			return fauxAssistantMessage([answer(correctionId), reading("cross-component identity ownership")]);
+		},
 	]);
 	await harness.session.prompt("Investigate identity ownership");
+	await harness.session.prompt("keep the reading");
 	return harness;
 }
 
@@ -90,8 +96,16 @@ describe("revision response and focus review", () => {
 				firstLeaf = h.sessionManager.getLeafId()!;
 			}
 		});
-		h.setResponses([fauxAssistantMessage([reading("local"), reading("system-wide")])]);
+		h.setResponses([
+			fauxAssistantMessage([reading("local")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([answer(replyId), reading("system-wide")]);
+			},
+		]);
 		await h.session.prompt("Investigate");
+		await h.session.prompt("keep the reading");
 		const correction = h.session.submitFormulationCorrection("use component ownership instead")!;
 		h.setResponses([fauxAssistantMessage([reading("component ownership"), answer(correction.id), conclude()])]);
 		await h.session.prompt("Process my correction");
@@ -100,7 +114,9 @@ describe("revision response and focus review", () => {
 		const latestLeaf = h.sessionManager.getLeafId()!;
 		await h.session.navigateTree(firstLeaf);
 		expect(h.session.getFormulationState()?.current?.ordinal).toBe(1);
-		expect(h.session.getFormulationState()?.review).toBeUndefined();
+		// every publication leaves a review, so at the first version's leaf the review is
+		// that version's — not absent.
+		expect(h.session.getFormulationState()?.review?.versionId).toBe(h.session.getFormulationState()?.current?.id);
 		await h.session.navigateTree(latestLeaf);
 		expect(h.session.getFormulationState()?.current?.ordinal).toBe(3);
 		expect(h.session.getFormulationState()?.review?.responseCorrectionId).toBeUndefined();
@@ -194,7 +210,7 @@ describe("revision response and focus review", () => {
 		// The selection attempted before the reading's own scope was accounted for was refused with the
 		// applicability gate, and the recorded decision covered the belief the revision was made about.
 		expect(h.session.messages.map(getMessageText).join("\n")).toContain(
-			"say what each belief already in scope means under the new reading",
+			"say what each belief already in scope means under this reading",
 		);
 		expect(task.formulationReview?.applicability).toEqual([
 			{
@@ -242,7 +258,7 @@ describe("revision response and focus review", () => {
 		expect(responseId).not.toBe("");
 		const task = [...h.session.domainSnapshot.tasks.values()][0];
 		expect(task.formulationReview?.responseCorrectionId).toBe(responseId);
-		expect(task.formulationCorrections.map((item) => item.status)).toEqual(["resolved", "resolved"]);
+		expect(task.formulationCorrections.map((item) => item.status)).toEqual(["resolved", "resolved", "resolved"]);
 		expect(task.formulationReview?.applicability.map((entry) => entry.beliefId)).toEqual(["belief-1"]);
 		expect(task.formulationReview?.scopedBeliefIds).toEqual(["belief-1"]);
 		expect(task.status).toBe("completed");

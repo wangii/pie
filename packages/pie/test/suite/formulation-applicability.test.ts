@@ -72,14 +72,30 @@ describe("revision applicability review", () => {
 				belief(),
 				...(withSecondBelief ? [secondBelief()] : []),
 				focus(scope),
-				select(),
 				reading("local retry control"),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					applicabilityEntries(
+						scope.map((beliefId) => ({
+							beliefId,
+							decision: "carries-over" as const,
+							reason: "still the question under this reading",
+						})),
+					),
+					focus(scope),
+					select(),
+				]);
+			},
 			fauxAssistantMessage("Observed: the retry reused the same identity"),
 			fauxAssistantMessage([support()]),
 			fauxAssistantMessage([reading("cross-component identity ownership")]),
 		]);
 		await h.session.prompt("Investigate identity ownership");
+		await h.session.prompt("keep the reading");
 		expect(h.session.getFormulationState()?.review?.versionId).toBeDefined();
 		return h;
 	}
@@ -101,7 +117,6 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("identity is unchanged on the path this reading asks about"),
 		]);
 		await h.session.prompt("Continue with my response");
-
 		const task = h.session.domainSnapshot.tasks.get(taskId)!;
 		// The narrowed focus is what the task acts on now, and the belief it dropped still had to be
 		// accounted for: the review keeps the scope it was published against.
@@ -130,6 +145,11 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage([conclude()]), // focus has not been reviewed yet
 			fauxAssistantMessage([focus()]),
 			fauxAssistantMessage([conclude()]), // nothing has been probed under this reading
+		]);
+		await h.session.prompt("Continue with my response");
+		// The refused conclusion is answered by refining the belief into the claim this reading
+		// asks about; the refinement needs a turn of its own after the refusal.
+		h.setResponses([
 			fauxAssistantMessage([
 				fauxToolCall("declare_belief", {
 					op: "refine",
@@ -144,8 +164,7 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("identity is reused across the tested boundary"),
 		]);
-		await h.session.prompt("Continue with my response");
-
+		await h.session.prompt("probe the cross-component case");
 		const task = h.session.domainSnapshot.tasks.get(taskId)!;
 		// The conclusion was refused while the belief stood on the old reading, and said why.
 		expect(text(h, "user")).toContain("may not report it as settled");
@@ -164,7 +183,23 @@ describe("revision applicability review", () => {
 		harnesses.push(h);
 		// Task A settles belief-1 and completes.
 		h.setResponses([
-			fauxAssistantMessage([belief(), focus(), select(), reading("local retry control")]),
+			fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					applicabilityEntries(
+						["belief-1"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					select(),
+				]);
+			},
 			fauxAssistantMessage("Observed: the retry reused the same identity"),
 			fauxAssistantMessage([support()]),
 			fauxAssistantMessage([conclude()]),
@@ -172,14 +207,32 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("identity survives a retry"),
 		]);
 		await h.session.prompt("Is identity preserved across a retry?");
+		await h.session.prompt("keep the reading");
 		expect(h.session.beliefs.map(statusOf)).toEqual(["supported"]);
 
 		// Task B has its own belief and its own reading, which is then revised.
 		h.setResponses([
 			fauxAssistantMessage([secondBelief(), focus(["belief-2"]), reading("the other path names its target")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					applicabilityEntries(
+						["belief-2"].map((beliefId) => ({
+							beliefId,
+							decision: "carries-over",
+							reason: "still the question",
+						})),
+					),
+					focus(["belief-2"]),
+					select(),
+				]);
+			},
 			fauxAssistantMessage([reading("both paths must name their target"), select(["belief-2"]), conclude()]),
 		]);
 		await h.session.prompt("Does the other path name its target?");
+		await h.session.prompt("keep the reading");
 		const correction = h.session.submitFormulationCorrection("identity matters too")!;
 		const pendingByTurn: string[][] = [];
 		const unsubscribe = h.session.subscribe((event) => {
@@ -225,12 +278,23 @@ describe("revision applicability review", () => {
 		harnesses.push(h);
 		h.setResponses([
 			// belief-2 exists before the revision but is not in the focus the revision was made under.
-			fauxAssistantMessage([belief(), secondBelief(), focus(), select(), reading("local retry control")]),
+			fauxAssistantMessage([belief(), secondBelief(), focus(), reading("local retry control")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					applicabilityEntries([{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }]),
+					focus(),
+					select(),
+				]);
+			},
 			fauxAssistantMessage("Observed: the retry reused the same identity"),
 			fauxAssistantMessage([support()]),
 			fauxAssistantMessage([reading("cross-component identity ownership")]),
 		]);
 		await h.session.prompt("Investigate identity ownership");
+		await h.session.prompt("keep the reading");
 		const correction = h.session.submitFormulationCorrection("also consider the other path")!;
 		const pendingByTurn: string[][] = [];
 		const unsubscribe = h.session.subscribe((event) => {
@@ -399,12 +463,24 @@ describe("revision applicability review", () => {
 	/** One dispatched round under v1, then v2: the episode the revision paused on is the fresh one. */
 	async function roundThenRevision(h: Harness): Promise<void> {
 		h.setResponses([
-			fauxAssistantMessage([belief(), reading("local retry control"), focus(), select()]),
+			// focus before publishing, then one user-driven turn that reviews and dispatches.
+			fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					applicability("carries-over", "still the question under this reading"),
+					focus(),
+					select(),
+				]);
+			},
 			fauxAssistantMessage("Observed: the retry reused the same identity"),
 			fauxAssistantMessage([adjudicate("belief-1", "inconclusive", "the probe never reached a second attempt")]),
 			fauxAssistantMessage([reading("cross-component identity ownership")]),
 		]);
 		await h.session.prompt("Investigate identity ownership");
+		await h.session.prompt("keep the reading");
 	}
 
 	/** What the propose turn does when it declares a belief and puts it in the same focus. */

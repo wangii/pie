@@ -744,7 +744,7 @@ export class BeliefLoopController {
 		if (!task || task.status !== "active") throw new Error("there is no active task");
 		if (this.awaitingFormulationResponse()) throw new Error(TRANSITION_STEERS.awaitFormulationResponse);
 		const review = this.formulationReview();
-		if (!review) throw new Error("no revision is waiting for a review of the beliefs it affects");
+		if (!review) throw new Error("no reading is waiting for a review of the beliefs it affects");
 		const pending = new Set(this.pendingApplicability());
 		const seen = new Set<string>();
 		const cleaned: FormulationApplicabilityEntry[] = [];
@@ -1414,7 +1414,7 @@ export class BeliefLoopController {
 			return;
 		}
 		if (this.awaitingFormulationResponse()) {
-			// A revision published from the distill turn pauses the run before `transition` runs, so
+			// A publication made from the distill turn pauses the run before `transition` runs, so
 			// the round's distillation would never be recorded — and a round with no record cannot be
 			// asked for a reconsideration later. The round did reach distillation, which is all the
 			// recheck gate reads, so it is recorded here for the same reason the transition records it.
@@ -1426,10 +1426,13 @@ export class BeliefLoopController {
 			this.emitCursorChanged("propose");
 			const revision = this.currentFormulation();
 			if (revision && turn.toolResults.some((result) => result.toolName === "set_formulation" && !result.isError)) {
+				// The first reading has no predecessor to differ from, so it is shown as what it changes
+				// rather than as what changed since the last version.
+				const change = revision.ordinal === 1 ? "What it changes" : "What changed";
 				await this.host.sendCustomMessage(
 					{
 						customType: "formulation_wait",
-						content: `Frame v${revision.ordinal}: ${revision.content.interpretation}\nFocus: ${revision.content.focus}\nWhat changed: ${revision.content.implication}\nReason: ${revision.reason}\n${TRANSITION_STEERS.awaitFormulationResponse}`,
+						content: `Frame v${revision.ordinal}: ${revision.content.interpretation}\nFocus: ${revision.content.focus}\n${change}: ${revision.content.implication}\nReason: ${revision.reason}\n${TRANSITION_STEERS.awaitFormulationResponse}`,
 						display: true,
 						details: { versionId: revision.id },
 					},

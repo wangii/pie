@@ -88,8 +88,27 @@ describe("distillation residual", () => {
 					expectation: "code and README describe the same result",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				// focus before publishing, so the review's scope is set at publication.
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "the reading the choice is made under",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			fauxAssistantMessage("Observed:\n- `foo.ts:42` returns X.\n- README claims Y."),
 			// Adjudication first, then the residual — the two ordered steps distill works in. The
@@ -117,6 +136,8 @@ describe("distillation residual", () => {
 		]);
 
 		await harness.session.prompt("audit the behavior");
+		// the reply that releases the wait, then the turn that reviews and dispatches.
+		await harness.session.prompt("keep the reading");
 
 		expect(statusOf(harness.session.beliefs[0]!)).toBe("inconclusive");
 		expect(proposeSaw).toHaveLength(1);
@@ -144,8 +165,27 @@ describe("distillation residual", () => {
 					expectation: "a second attempt gets a fresh budget",
 					evidenceRounds: 1,
 				}),
-				...select(["belief-1"]),
+				// focus before publishing, so the review's scope is set at publication.
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the selected beliefs predict",
+					implication: "which conclusion the answer must report turns on what the probe shows",
+					reason: "the reading the choice is made under",
+				}),
 			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", { intent: "which action to take", beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage([fauxToolCall("inspect", {})]),
 			fauxAssistantMessage("Observed:\n- the first attempt consumed the budget."),
 			fauxAssistantMessage([
@@ -183,6 +223,8 @@ describe("distillation residual", () => {
 		]);
 
 		await harness.session.prompt("audit the retry budget");
+		// the reply that releases the wait, then the turn that reviews and dispatches.
+		await harness.session.prompt("keep the reading");
 
 		expect(statusOf(harness.session.beliefs[0]!)).toBe("inconclusive");
 		// Two propose turns recorded: the one that chose the second experiment, and the one that

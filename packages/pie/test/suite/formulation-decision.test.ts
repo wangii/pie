@@ -65,12 +65,25 @@ describe("formulation decision", () => {
 			// Concluding now would answer the task without the agent ever saying what it made of it,
 			// so the call is refused and propose is sent back for the decision.
 			fauxAssistantMessage([conclude()]),
-			fauxAssistantMessage([reading("persistence across logout is the question"), conclude()]),
+			fauxAssistantMessage([reading("persistence across logout is the question")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					conclude(),
+				]);
+			},
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		const plans = harness.eventsOfType("PlanProduced");
 		const selectionPlan = plans.find((event) => event.plan.selectedToExplore.length > 0);
@@ -105,12 +118,29 @@ describe("formulation decision", () => {
 			// Distill concludes directly, which normally hands straight to finalReport.
 			fauxAssistantMessage([support, conclude()]),
 			fauxAssistantMessage([reading("persistence is settled, the question is its lifetime")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					fauxToolCall("select_experiment", {
+						intent: "what the answer must report",
+						beliefIds: ["belief-1"],
+					}),
+					conclude(),
+				]);
+			},
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout"),
 		]);
 
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		// The reading exists, and it was required *before* the task could finish: the distilled
 		// conclusion cannot be the last word on a task that never stated its reading.
@@ -140,6 +170,18 @@ describe("formulation decision", () => {
 				fauxToolCall("select_experiment", { intent: "what the answer must report", beliefIds: ["belief-1"] }),
 				reading("persistence across logout is the question"),
 			]),
+			// The publication waits for the user; the reply releases it and closes the review.
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				]);
+			},
 			// Sent back to choose again under the version that now exists.
 			fauxAssistantMessage([
 				fauxToolCall("select_experiment", { intent: "what the answer must report", beliefIds: ["belief-1"] }),
@@ -153,11 +195,14 @@ describe("formulation decision", () => {
 		]);
 
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
 
 		const versions = harness.eventsOfType("ProblemFormulationRecorded");
 		expect(versions).toHaveLength(1);
-		// The voided selection is visible as "nothing is selected", which is what forces the re-choice.
-		expect(userText(harness)).toContain("No experiment is selected");
+		// The voided selection is recorded as its own event, which is what forces the re-choice.
+		// (The "No experiment is selected" steer is written by the propose transition, which the
+		// publication's pause pre-empts, so the event is the contract's own evidence.)
+		expect(harness.eventsOfType("ExperimentSelectionVoided")).toHaveLength(1);
 
 		// Exactly one experiment ever ran, and its plan records the version it was chosen under.
 		const selectionPlans = harness
@@ -199,22 +244,50 @@ describe("formulation decision", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage([...firstProbe, reading("persistence across logout is the question")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			// A revision during the round, which must leave scope and truth alone.
 			fauxAssistantMessage([support, reading("persistence is settled, the question is its lifetime")]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep the revision." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+					conclude(),
+				]);
+			},
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout for its TTL"),
 		]);
 
 		await harness.session.prompt("is the cache persistent?");
+		await harness.session.prompt("keep the reading");
+		await harness.session.prompt("keep the revision");
 
 		const versions = harness.eventsOfType("ProblemFormulationRecorded");
 		expect(versions.map((event) => event.version.ordinal)).toEqual([1, 2]);
 		expect(versions[1].version.previousVersionId).toBe(versions[0].version.id);
 
-		// Scope and truth are separate objects: revising the reading re-declares neither.
-		expect(harness.eventsOfType("FocusDeclared")).toHaveLength(1);
+		// Scope and truth are separate objects: neither publication re-declares them. The two
+		// trailing declarations are the review closures the response contract requires (one per
+		// publication), not the revision re-stating the scope it already had.
+		expect(harness.eventsOfType("FocusDeclared")).toHaveLength(3);
+		expect(harness.eventsOfType("ExperimentSelectionVoided")).toHaveLength(1);
 		expect(harness.session.beliefs.map(statusOf)).toEqual(["supported"]);
 
 		// The current reading is what the next role actually reads, and it is labeled as the agent's

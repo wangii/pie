@@ -340,11 +340,11 @@ packages/pie 根目录执行；每个新建或修改的测试文件单独运行�
 - 已有“修订后旧结论是否仍适用”的审查：`FormulationApplicabilityRecorded` 携带
   `{ versionId, entries }`，注释写明它记录“the previous reading's conclusions mean under this
   one”（`src/core/agent-session-domain.ts:575-582`）；`recordApplicability` 在没有待结清的
-  `formulationReview` 时报错 `no revision is waiting for a review of the beliefs it affects`
+  `formulationReview` 时报错 `no reading is waiting for a review of the beliefs it affects`
   （`src/core/belief-loop/belief-loop-controller.ts:622-655`），即它只在发布新版本后可用。
-- 已有版本绑定的重审状态：修订（ordinal > 1）会创建任务级 `formulationReview`
+- 已有版本绑定的重审状态：发布（含首版）会创建任务级 `formulationReview`
   `{ versionId, responseCorrectionId?, focusReviewed: false }`，要求用户回应后由 propose 调用
-  `focus_beliefs` 结清（`docs/domain-model.md` 的 “Revision response and focus review”、
+  `focus_beliefs` 结清（`docs/domain-model.md` 的 “Publication response and focus review”、
   `src/core/agent-session-domain.ts:315-334,491`）。
 
 尚未实现（M7 的范围）：

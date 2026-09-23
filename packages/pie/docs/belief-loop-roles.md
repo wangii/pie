@@ -45,7 +45,7 @@ TASK + USER INTENT
 So the loop is `beliefs -> frame -> what becomes thinkable/testable -> observation -> beliefs`.
 The Frame's job is not to summarize the belief set but to shape the next round of belief
 formation. A Frame is not a larger or coarser belief, and the belief loop above still runs
-unchanged underneath it; the Frame layer is described under *Frame feedback and revision pause*
+unchanged underneath it; the Frame layer is described under *Frame feedback and response pause*
 below.
 
 Routing, execution leases, domain events, and model selection are implementation helpers.
@@ -124,7 +124,7 @@ generated output", "never edit the vendored tree") change which action propose s
 distill reads evidence, so withholding them would hide part of the basis for the decision.
 `finalReport` writes rather than decides and stays on the `read` gate.
 
-## Frame feedback and revision pause
+## Frame feedback and response pause
 
 A Frame answers "what problem do I currently think I am solving", where a belief answers "what do I
 currently think is true". It is therefore not derived from the belief state alone:
@@ -151,8 +151,8 @@ normal operation rather than an exception. Two things keep the loop open: where 
 them, the reading says what observation would force a new reading (`implication` carries the
 direction; `tension` carries the conflict and may stay unstated), and propose may select a belief
 that conflicts with the current reading as a counterexample. That selection is subject to the usual
-gates — the belief must be in the task's focus, and a pending revision review still has to be
-answered first — so nothing is dispatched during the revision pause. The version history preserves
+gates — the belief must be in the task's focus, and a pending reading review still has to be
+answered first — so nothing is dispatched during the response pause. The version history preserves
 the `X -> Y` transition instead of silently rewriting the reading, which is what makes a reframing
 reviewable.
 
@@ -161,15 +161,17 @@ focus guides experiments; distill's residual can prompt a new reading. Scope doe
 map files to functions, components to data structures, or systems to component definitions: explain
 which distinctions matter for this task. A Frame is never evidence and may guide counterexample probes.
 
-First publication and unformed preliminary investigation remain permitted without a user handshake.
-A substantive revision, however, pauses the run at the tool boundary, keeps the task active, and
-waits for a user response against that version. A normal reply resumes the same task through the
-correction channel; earlier queued input or an automated extension message cannot acknowledge it.
-There is no automatic approval on timeout. The terminal shows the revised reading and why it changed.
+Every publication pauses the run at the tool boundary, keeps the task active, and waits for a user
+response against that version — the first reading as much as a revision, because the investigation
+is built on the reading and the user has not seen it yet. What remains permitted without a user
+handshake is an unformed preliminary investigation, not the publication that follows it. A normal
+reply resumes the same task through the correction channel; earlier queued input or an automated
+extension message cannot acknowledge it. There is no automatic approval on timeout. The terminal
+shows the reading and what it changes.
 
 Propose answers the response, then explicitly calls `focus_beliefs` before selecting an experiment,
 routing to fast path or concluding. It may keep exactly the same ids. `FocusDeclared.formulation`
-records which version was reviewed; another revision requires another response and review.
+records which version was reviewed; another publication requires another response and review.
 Review changes relevance, never belief truth or the adjudication debt of an interrupted experiment.
 
 Substantive change remains propose's judgment: accumulated confirming evidence or wording edits

@@ -323,14 +323,14 @@ export interface FormulationReview {
 	readonly responseCorrectionId?: FormulationCorrectionId;
 	readonly focusReviewed: boolean;
 	/**
-	 * The beliefs this revision has to account for: the scope at publication, plus any belief that
+	 * The beliefs this reading has to account for: the scope at publication, plus any belief that
 	 * already existed then and is brought back into focus while the review is owed. Beliefs first
-	 * introduced after the revision belong to the new reading and are not asked about — which is
+	 * introduced after publication belong to the new reading and are not asked about — which is
 	 * also what stops a narrowed focus from being a way to skip the review.
 	 *
 	 * "Existed then" means recorded, not merely declared: a belief whose delta is still in flight
 	 * has no state for the review to judge, and `FormulationApplicabilityRecorded` refuses to name
-	 * one. Publication flushes what is pending, so a belief carried over from the reviewed reading
+	 * one. Publication flushes what is pending, so a belief carried over from an earlier reading
 	 * is always recorded and always in this list.
 	 */
 	readonly scopedBeliefIds: readonly BeliefId[];
@@ -1291,15 +1291,15 @@ export function applyAgentSessionDomainEvent(
 				tasks: replaceTask(snapshot, {
 					...task,
 					formulations: [...task.formulations, version],
-					formulationReview: current
-						? {
-								versionId: version.id,
-								focusReviewed: false,
-								scopedBeliefIds: [...task.focus],
-								introducedAtRevision: task.introducedBeliefs.length,
-								applicability: [],
-							}
-						: undefined,
+					// Every publication waits for the user: the first reading is the one the
+					// investigation is about to be built on, so it is reviewed like a revision.
+					formulationReview: {
+						versionId: version.id,
+						focusReviewed: false,
+						scopedBeliefIds: [...task.focus],
+						introducedAtRevision: task.introducedBeliefs.length,
+						applicability: [],
+					},
 					// Publishing answers the deferral: whatever was missing has been supplied, so the
 					// deferred state stops being current. The deferral record itself is not erased from
 					// the event log, only from the task's current state.
