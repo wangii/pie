@@ -73,12 +73,16 @@ describe("per-round formulation recheck", () => {
 		// What propose reads, captured as its turn starts right after the distillation: the block is
 		// rebuilt on every role change, so this is the prompt the answering turn was actually given.
 		let owedPrompt = "";
+		let owedFrame = "";
 		harness.session.subscribe((event) => {
 			if (event.type !== "turn_end" || owedPrompt) return;
 			const adjudicated = event.toolResults.some((result) =>
 				/Applied (support|refute|refine|inconclusive)/.test(getMessageText(result)),
 			);
-			if (adjudicated) owedPrompt = harness.session.agent.state.systemPrompt;
+			if (adjudicated) {
+				owedPrompt = harness.session.agent.state.systemPrompt;
+				owedFrame = harness.session.getFrameProjection();
+			}
 		});
 		harness.setResponses([
 			// focus before publishing; the selection moves to the turn after the reply.
@@ -135,7 +139,7 @@ describe("per-round formulation recheck", () => {
 
 		// The obligation is visible where the reading is read, not only in the steer that follows it,
 		// and it is stated as the agent's own position rather than as evidence about the task.
-		expect(owedPrompt).toContain("<current_formulation>");
+		expect(owedFrame).toContain("<current_formulation>");
 		expect(owedPrompt).toContain("you have not yet said what it means for this reading");
 		expect(owedPrompt).toContain("recheck_formulation to keep it");
 	});
@@ -179,12 +183,14 @@ describe("per-round formulation recheck", () => {
 
 		// And the reading's projection now says what the agent made of the round, with the basis it
 		// gave — labelled as a position, never as evidence for a belief.
-		const prompt = harness.session.agent.state.systemPrompt;
-		expect(prompt).toContain("<current_formulation>");
-		expect(prompt).toContain("you reconsidered this reading and changed it");
-		expect(prompt).toContain("Your stated basis, which is a position and not evidence");
-		expect(prompt).toContain("the reading the round was chosen under");
-		expect(prompt).not.toContain("you have not yet said what it means for this reading");
+		const frame = harness.session.getFrameProjection();
+		expect(frame).toContain("<current_formulation>");
+		expect(frame).toContain("you reconsidered this reading and changed it");
+		expect(frame).toContain("Your stated basis, which is a position and not evidence");
+		expect(frame).toContain("the reading the round was chosen under");
+		expect(harness.session.agent.state.systemPrompt).not.toContain(
+			"you have not yet said what it means for this reading",
+		);
 	});
 
 	it("accepts a deferral as the round's result without erasing the current reading", async () => {
@@ -288,6 +294,12 @@ describe("per-round formulation recheck", () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		let afterDistillation = "";
+		const frameProjections: string[] = [];
+		const captureRequestFrame = (context: Parameters<FauxResponseFactory>[0]) => {
+			const message = context.messages.at(-1);
+			const text = message ? getMessageText(message) : "";
+			if (text.includes("<current_formulation>")) frameProjections.push(text);
+		};
 		// Capture the leaf the run passed through right after the first distillation was recorded.
 		// Subscribing to the domain event rather than to the turn means the entry holding the round
 		// is already committed, so navigating back to it lands on a branch that owes the result.
@@ -295,7 +307,7 @@ describe("per-round formulation recheck", () => {
 			if (event.type !== "DistillationProduced" || afterDistillation) return;
 			afterDistillation = harness.sessionManager.getLeafId()!;
 		});
-		harness.setResponses([
+		const responses: Parameters<typeof harness.setResponses>[0] = [
 			fauxAssistantMessage([
 				propose(),
 				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
@@ -318,7 +330,10 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("the cache survives logout"),
 			// A second task in the same session: its own reading, its own round, its own result.
-			fauxAssistantMessage([propose("the second task asks about eviction"), reading("eviction under pressure")]),
+			fauxAssistantMessage([
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("eviction under pressure"),
+			]),
 			(context) => {
 				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
 				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
@@ -335,11 +350,33 @@ describe("per-round formulation recheck", () => {
 			fauxAssistantMessage([recheck("the second task's round fits its reading"), conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("eviction is pressure-driven"),
-		]);
+		];
+		harness.setResponses(
+			responses.map(
+				(step) =>
+					((context, options, state, model) => {
+						captureRequestFrame(context);
+						return typeof step === "function" ? step(context, options, state, model) : step;
+					}) satisfies FauxResponseFactory,
+			),
+		);
 		await harness.session.prompt("is the cache persistent?");
 		await harness.session.prompt("keep the reading");
 		await harness.session.prompt("does pressure evict the cache?");
 		await harness.session.prompt("keep the reading");
+
+		// Each provider request receives one current Frame, and a new task gets its own reading.
+		for (const frame of frameProjections) {
+			expect(frame.match(/<current_formulation>/g) ?? []).toHaveLength(1);
+		}
+		const firstTaskFrames = frameProjections.filter((frame) => frame.includes("persistence across logout"));
+		expect(firstTaskFrames.length).toBeGreaterThan(1);
+		const secondTaskStart = frameProjections.findIndex((frame) => frame.includes("eviction under pressure"));
+		expect(secondTaskStart).toBeGreaterThan(0);
+		for (const frame of frameProjections.slice(secondTaskStart)) {
+			expect(frame).toContain("eviction under pressure");
+			expect(frame).not.toContain("persistence across logout");
+		}
 
 		// The new task did not inherit the previous understanding, so it did not inherit the answer
 		// to the previous round either: what is recorded is its own.
@@ -464,7 +501,22 @@ describe("per-round formulation recheck", () => {
 				}),
 			]);
 		harness.setResponses([
-			fauxAssistantMessage([propose(), reading("persistence across logout"), ...select()]),
+			fauxAssistantMessage([
+				propose(),
+				fauxToolCall("focus_beliefs", { beliefIds: ["belief-1"] }),
+				reading("persistence across logout"),
+			]),
+			(context) => {
+				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+				return fauxAssistantMessage([
+					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
+					fauxToolCall("review_applicability", {
+						entries: [{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }],
+					}),
+					...select(),
+				]);
+			},
 			fauxAssistantMessage("Observed:\n- the post-logout read kept the value."),
 			fauxAssistantMessage([adjudicate("inconclusive", "the probe never reached a second attempt")]),
 			// Closing the task while the correction stands unanswered: the loop puts the correction

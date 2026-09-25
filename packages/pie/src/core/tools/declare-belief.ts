@@ -308,7 +308,7 @@ export function createSelectExperimentToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Selected experiment: ${beliefIds.join(", ")} -- decision: ${intent}`,
+							text: `Selected experiment: ${beliefIds.join(", ")}.`,
 						},
 					],
 					details: undefined,
@@ -391,7 +391,7 @@ export function createDeclareBeliefToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Applied ${delta.op}: ${belief.id} ${belief.statement} [${belief.domain}] (${statusOf(belief)}).`,
+							text: `Applied ${delta.op}: ${belief.id} [${belief.domain}] (${statusOf(belief)}).`,
 						},
 					],
 					details: undefined,

@@ -193,6 +193,13 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		tools: ({ fullActiveToolNames }) =>
 			fullActiveToolNames.filter(
 				(name) =>
+					// Scheduling belongs to propose: an execution turn that could re-scope the task or
+					// re-choose the experiment would be writing the state the next propose turn reads, and
+					// a correction is handed back to propose at the tool boundary rather than answered here.
+					// `view_beliefs` stays: the probe role needs the statement it is testing.
+					name !== "focus_beliefs" &&
+					name !== "select_experiment" &&
+					name !== "answer_correction" &&
 					name !== "route_task" &&
 					name !== "declare_belief" &&
 					name !== "conclude" &&

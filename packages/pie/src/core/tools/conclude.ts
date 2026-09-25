@@ -51,7 +51,7 @@ export function createConcludeToolDefinition(
 			const outcome = parseTaskOutcome(input);
 			onConclude?.(outcome);
 			return {
-				content: [{ type: "text", text: `Investigation concluded. Delivered: ${outcome.result}` }],
+				content: [{ type: "text", text: "Investigation concluded." }],
 				details: undefined,
 				// Terminate the tool-call loop: concluding is the terminal action, so the harness
 				// hands off to the finalReport role on the next turn via a steering message.
@@ -90,7 +90,7 @@ export function createReportOutcomeToolDefinition(
 			const outcome = parseTaskOutcome(input);
 			onOutcome?.(outcome);
 			return {
-				content: [{ type: "text", text: `Recorded delivered result: ${outcome.result}` }],
+				content: [{ type: "text", text: "Recorded delivered result." }],
 				details: undefined,
 			};
 		},

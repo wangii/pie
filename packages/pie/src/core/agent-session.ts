@@ -440,6 +440,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._beliefLoop.installAgentNextTurnRefresh();
+		this._beliefLoop.installAgentFrameRequestProjection();
 		// Pie pauses the run while the belief loop waits for the user's answer to the Frame.
 		// Agent core replaced `shouldStopAfterTurn` with `finishTurn`, whose `{ action: "end" }` is the
 		// same graceful stop: the turn's response and tool results finish, then the loop exits before
@@ -696,6 +697,11 @@ export class AgentSession {
 	}
 
 	/** Tool-call names in the just-finished turn that the current role was not offered. */
+	/** The Frame as it is delivered to the model for the current request. */
+	getFrameProjection(): string {
+		return this._beliefLoop.frameStateMessage();
+	}
+
 	/** The live belief set, read-only. Exposed for `/bs` and diagnostics. */
 	get beliefs(): readonly Belief[] {
 		return this._beliefLoop.beliefSet.beliefs;
@@ -3142,7 +3148,7 @@ export class AgentSession {
 						result.outcome === "unchanged"
 							? `Formulation unchanged (still version ${result.value.ordinal}); no new version was recorded. ` +
 								`If the reading still holds, record that with recheck_formulation instead of resubmitting it.`
-							: `Recorded formulation version ${result.value.ordinal}: ${result.value.content.interpretation}`,
+							: `Recorded formulation version ${result.value.ordinal}.`,
 				};
 			}) as ToolDefinition,
 		);
@@ -3163,7 +3169,7 @@ export class AgentSession {
 						result.outcome === "unchanged"
 							? "The same deferral is already recorded; no new record was made. If the current reading still holds, " +
 								"record that with recheck_formulation instead of deferring again."
-							: `Deferred stating a formulation. Missing: ${result.value.missingInformation}`,
+							: "Recorded a formulation deferral.",
 				};
 			}) as ToolDefinition,
 		);
@@ -3186,7 +3192,7 @@ export class AgentSession {
 				if (result.outcome === "rejected") return result;
 				return {
 					outcome: "recorded",
-					text: `Answered ${input.correctionId}: ${result.value.response}`,
+					text: `Answered ${input.correctionId}.`,
 				};
 			}) as ToolDefinition,
 		);
