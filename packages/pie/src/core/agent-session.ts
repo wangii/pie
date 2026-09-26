@@ -585,7 +585,9 @@ export class AgentSession {
 				const correction = this._beliefLoop.pendingCorrections()[0];
 				return {
 					block: true,
-					reason: TRANSITION_STEERS.correctionBlocked(correction?.id ?? "an unanswered correction"),
+					reason: correction
+						? TRANSITION_STEERS.correctionBlocked(correction.id)
+						: TRANSITION_STEERS.unauthorizedTool(toolCall.name),
 				};
 			}
 			const runner = this._extensionRunner;

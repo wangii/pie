@@ -229,6 +229,7 @@ function projectMessage(
 	role: LoopRole,
 	elidedProbeToolCalls: Set<string>,
 	evidenceWatermark: number,
+	taskStartIndex: number,
 ): AgentMessage | undefined {
 	switch (ROLE_SPECS[role].projection) {
 		case "belief":
@@ -236,6 +237,10 @@ function projectMessage(
 		case "distill":
 			return maskOperationalDetail(message, index < evidenceWatermark, elidedProbeToolCalls, true);
 		case "execution":
+			// The execution role sees the current task only: system framing plus everything from the
+			// task's start. Prior-task user/bash/custom/assistant text passes `maskBeliefBookkeeping`
+			// unchanged, so the task boundary has to be applied here rather than by role.
+			if (index < taskStartIndex && message.role !== "system") return undefined;
 			return maskBeliefBookkeeping(message);
 		case "finalReport": {
 			const masked = maskOperationalDetail(message, true, elidedProbeToolCalls);
@@ -251,10 +256,11 @@ export function projectMessagesFor(
 	messages: AgentMessage[],
 	role: LoopRole,
 	evidenceWatermark: number,
+	taskStartIndex = 0,
 ): AgentMessage[] {
 	const elided = elidedProbeToolCallIds(messages);
 	return messages
-		.map((message, index) => projectMessage(message, index, role, elided, evidenceWatermark))
+		.map((message, index) => projectMessage(message, index, role, elided, evidenceWatermark, taskStartIndex))
 		.filter((message): message is AgentMessage => message !== undefined);
 }
 
@@ -265,9 +271,10 @@ export function projectContextMessages(
 	role: LoopRole,
 	evidenceWatermark: number,
 	beliefSetUsable: boolean,
+	taskStartIndex = 0,
 ): AgentMessage[] {
 	if (!beliefSetUsable) {
 		return messages.slice();
 	}
-	return projectMessagesFor(messages, role, evidenceWatermark);
+	return projectMessagesFor(messages, role, evidenceWatermark, taskStartIndex);
 }

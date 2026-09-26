@@ -304,6 +304,10 @@ export class BeliefLoopController {
 	}
 	/** Index into `agent.state.messages` below which raw operational detail is masked. */
 	evidenceWatermark = 0;
+	/** Index into `agent.state.messages` where the current task's own messages begin. Unlike
+	 *  `evidenceWatermark`, this is NOT overwritten by dispatch: it marks the task boundary, so the
+	 *  execution projection can drop the previous task's messages (all roles) from its input. */
+	taskStartIndex = 0;
 	/** Set when a follow-up is queued while the loop is concluding. */
 	pendingNewTask = false;
 	/** Belief-set size at task reset. */
@@ -474,6 +478,7 @@ export class BeliefLoopController {
 						this.role,
 						this.evidenceWatermark,
 						this.beliefSetUsable,
+						this.taskStartIndex,
 					),
 				},
 				model: this.roleModel(),
@@ -1351,8 +1356,12 @@ export class BeliefLoopController {
 	 * execution call, and propose is the role that answers the correction in the first place.
 	 */
 	blocksToolCall(toolName: string): boolean {
-		if (this.role !== "execution" || !isProbeTool(toolName)) return false;
-		return this.pendingCorrections().length > 0;
+		if (this.role !== "execution") return false;
+		if (this.pendingCorrections().length > 0 && isProbeTool(toolName)) return true;
+		// Authorization is read at the call site, not only steered after the turn: a call the role's
+		// surface does not include is refused, so a subtraction-once list cannot be bypassed by a
+		// model that remembers a tool from an earlier surface.
+		return !this.roleToolNames().includes(toolName);
 	}
 
 	/**
@@ -1514,6 +1523,9 @@ export class BeliefLoopController {
 		this.taskOutcome = undefined;
 		this.focusSet.reset();
 		this.evidenceWatermark = this.host.agent.state.messages.length;
+		// The task boundary: everything already in the transcript belongs to the previous task. This
+		// is set here and never by a dispatch, so the execution projection keeps only this task.
+		this.taskStartIndex = this.host.agent.state.messages.length;
 		this.repeatedFailures = new Map();
 		this.repeatedFailureNudged = new Set();
 		this.beliefSet.pruneForNewTask();
@@ -2360,12 +2372,22 @@ export class BeliefLoopController {
 	private roleToolNames(): string[] {
 		const tools = ROLE_SPECS[this.role].tools;
 		const names = typeof tools === "function" ? tools({ fullActiveToolNames: this.fullActiveToolNames }) : [...tools];
+		// The execution surface is authorized per tool: a tool whose declaration omits "execution"
+		// is dropped from the surface here and refused at call time, since `blocksToolCall` reads
+		// this result. An undeclared tool follows the built-in default and stays available.
+		const surface = this.role === "execution" ? names.filter((name) => this.executionEligible(name)) : names;
 		// The fast path is the execution role without a belief loop, so it is the only surface
 		// that gets `report_outcome` — its explicit task-result submission.
-		if (this.loopState.role === "execution" && this.loopState.fastPath && !names.includes("report_outcome")) {
-			return [...names, "report_outcome"];
+		if (this.loopState.role === "execution" && this.loopState.fastPath && !surface.includes("report_outcome")) {
+			return [...surface, "report_outcome"];
 		}
-		return names;
+		return surface;
+	}
+
+	/** Whether the execution role may use a tool, per the tool's declared `roles`; undeclared tools stay. */
+	private executionEligible(name: string): boolean {
+		const declared = this.host.getToolDefinition(name)?.roles;
+		return declared === undefined || declared.includes("execution");
 	}
 
 	roleModelFor(role: "propose" | "distill" | "execution" | "finalReport"): Model<any> | undefined {

@@ -470,6 +470,14 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	prepareArguments?: (args: unknown) => Static<TParams>;
 
 	/**
+	 * Belief-loop roles this tool may be used by. Used to authorize the execution role's tool
+	 * surface: a tool that declares roles without "execution" is not offered to (and is refused
+	 * at call time for) the execution role. Omitted roles mean the tool follows the built-in
+	 * default, which authorizes every role whose surface includes it.
+	 */
+	roles?: readonly string[];
+
+	/**
 	 * Per-tool execution mode override.
 	 * - "sequential": this tool must execute one at a time with other tool calls.
 	 * - "parallel": this tool can execute concurrently with other tool calls.

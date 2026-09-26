@@ -345,4 +345,7 @@ export const TRANSITION_STEERS = {
 	correctionBlocked: (id: string) =>
 		`Blocked: the user corrected the task's reading (${id}) while this round was running, so no new execution call ` +
 		`starts. Report what you already observed; propose answers the correction next.`,
+	unauthorizedTool: (name: string) =>
+		`Blocked: "${name}" is not authorized for the execution role. Use one of the execution role's declared ` +
+		`tools, or report that the observation is not available with them.`,
 } as const;
