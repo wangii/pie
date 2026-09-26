@@ -245,14 +245,23 @@ export function createFocusBeliefsToolDefinition(
 				// when no controller is attached (a bare tool use, e.g. in a test).
 				if (onFocus) onFocus(beliefIds);
 				else focusSet.select(beliefIds);
+				// Focus is scope, not an experiment: a settled belief may stay in it for later
+				// re-examination. Naming the settled ids keeps that legitimate while making clear they
+				// cannot be dispatched, so the next selection is not a guess.
+				const settled = beliefIds.filter((beliefId) => {
+					const belief = beliefSet.get(beliefId);
+					if (!belief) return false;
+					const status = statusOf(belief);
+					return status === "supported" || status === "refuted" || status === "superseded";
+				});
+				const lines = [
+					beliefIds.length > 0 ? `Focused beliefs: ${beliefIds.join(", ")}` : "Focused beliefs: (none)",
+				];
+				if (settled.length > 0) {
+					lines.push(`Already settled (in scope, not selectable): ${settled.join(", ")}.`);
+				}
 				return {
-					content: [
-						{
-							type: "text",
-							text:
-								beliefIds.length > 0 ? `Focused beliefs: ${beliefIds.join(", ")}` : "Focused beliefs: (none)",
-						},
-					],
+					content: [{ type: "text", text: lines.join("\n") }],
 					details: undefined,
 				};
 			} catch (error) {
@@ -292,15 +301,33 @@ export function createSelectExperimentToolDefinition(
 				const beliefIds = [...new Set(input.beliefIds.map((id) => id.trim()).filter(Boolean))];
 				if (beliefIds.length === 0) throw new Error("select_experiment requires at least one belief id.");
 				const advancement = readAdvancement(input.advancement);
+				// A selection only lands on an unresolved, in-focus belief. When it does not, the rejection
+				// has to say what *can* be selected: without that list the caller can only guess id after id,
+				// and every rejected candidate costs a whole call.
+				const selectable = (): string =>
+					focusSet.beliefIds
+						.filter((beliefId) => {
+							const candidate = beliefSet.get(beliefId);
+							if (!candidate) return false;
+							const candidateStatus = statusOf(candidate);
+							return candidateStatus === "proposed" || candidateStatus === "inconclusive";
+						})
+						.join(", ") || "none";
 				for (const beliefId of beliefIds) {
 					const belief = beliefSet.get(beliefId);
 					if (!belief) throw new Error(`Unknown belief id: ${beliefId}.`);
 					if (!focusSet.has(beliefId)) {
-						throw new Error(`Belief ${beliefId} is outside the declared focus; add it with focus_beliefs first.`);
+						throw new Error(
+							`Belief ${beliefId} is outside the declared focus; add it with focus_beliefs first. ` +
+								`Selectable (unresolved, in focus): ${selectable()}.`,
+						);
 					}
 					const status = statusOf(belief);
 					if (status !== "proposed" && status !== "inconclusive") {
-						throw new Error(`Belief ${beliefId} is ${status}; only an unresolved belief can be selected.`);
+						throw new Error(
+							`Belief ${beliefId} is ${status}; only an unresolved belief can be selected. ` +
+								`Selectable (unresolved, in focus): ${selectable()}.`,
+						);
 					}
 				}
 				onSelect?.({ intent, beliefIds, advancement });

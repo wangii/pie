@@ -305,6 +305,11 @@ export const TRANSITION_STEERS = {
 		"Your execution budget for this experiment is exhausted. This states the budget was spent, not that the experiment " +
 		"is done or undone. Report every materially distinct observation you did gather with its source, location, or command " +
 		"result; note what was not yet observed, if anything; and do not add conclusions.",
+	repeatedFailure: (toolName: string, count: number) =>
+		`The same ${toolName} call has now been rejected ${count} times with the same reason. Repeating it will not change ` +
+		`the answer: change the call rather than re-issuing it. Read the rejection text for the args it says are required, ` +
+		`and if the reason is a reference or state problem, use view_beliefs to read the current ids and statuses before ` +
+		`trying again. If no valid call exists, say what is blocking instead of retrying.`,
 	concludeRejected: (reason: string) =>
 		`Concluding was rejected: ${reason} The task is not complete until a delivered result and the evidence that it ` +
 		`was delivered are recorded, so state what you actually delivered (the answer, change, or artifact) and how it ` +

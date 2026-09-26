@@ -96,6 +96,29 @@ export interface RoleStatus {
 
 const EPISODE_HORIZON_HEADROOM = 1.3;
 
+/** Same-signature tool failures tolerated before the loop tells the model to change the call. */
+const REPEAT_FAILURE_THRESHOLD = 3;
+
+/**
+ * Count one tool-failure signature and decide whether this failure is the one that warrants the
+ * one-time escalation steer. Kept pure so the threshold and the once-only rule stay testable
+ * without standing up a session: the caller owns the state, this owns the rule.
+ */
+export function countRepeatedFailure(
+	counts: Map<string, number>,
+	nudged: Set<string>,
+	toolName: string,
+	reason: string,
+	threshold: number,
+): { signature: string; count: number; escalate: boolean } {
+	const signature = `${toolName}: ${reason}`;
+	const count = (counts.get(signature) ?? 0) + 1;
+	counts.set(signature, count);
+	const escalate = count >= threshold && !nudged.has(signature);
+	if (escalate) nudged.add(signature);
+	return { signature, count, escalate };
+}
+
 /** The applicability decisions a belief can be given against a revision. */
 const APPLICABILITY_DECISIONS = new Set<FormulationApplicabilityDecision>([
 	"carries-over",
@@ -287,6 +310,10 @@ export class BeliefLoopController {
 	beliefsAtTaskReset = 0;
 	/** Set when a fast-path run reported a tool error. */
 	fastPathFailure = false;
+	/** Tool failures counted by signature (`tool: first reason line`), so one signature that keeps
+	 *  failing is escalated once instead of spinning for the rest of the session. */
+	private repeatedFailures = new Map<string, number>();
+	private repeatedFailureNudged = new Set<string>();
 	/** The current task's request text. */
 	currentTaskRequestText = "";
 	/** Explicit experiment selection from propose, consumed on dispatch. */
@@ -385,6 +412,8 @@ export class BeliefLoopController {
 		this.reflected = false;
 		this.fastPathFailure = false;
 		this.taskOutcome = undefined;
+		this.repeatedFailures = new Map();
+		this.repeatedFailureNudged = new Set();
 		// The watermark indexes the message list that just changed, so it cannot carry over: what
 		// counted as the current episode's raw evidence on the old branch says nothing about this
 		// one. Masking by default is the safe direction — the next dispatch sets a fresh watermark.
@@ -1485,6 +1514,8 @@ export class BeliefLoopController {
 		this.taskOutcome = undefined;
 		this.focusSet.reset();
 		this.evidenceWatermark = this.host.agent.state.messages.length;
+		this.repeatedFailures = new Map();
+		this.repeatedFailureNudged = new Set();
 		this.beliefSet.pruneForNewTask();
 		this.beliefsAtTaskReset = this.beliefSet.beliefs.length;
 	}
@@ -1495,6 +1526,7 @@ export class BeliefLoopController {
 			this.applyRoleSurface();
 			return;
 		}
+		this.noteRepeatedFailures(turn);
 		if (this.pendingNewTask) {
 			this.pendingNewTask = false;
 			this.resetLoopForNewTask();
@@ -2296,6 +2328,33 @@ export class BeliefLoopController {
 			content: [{ type: "text", text }],
 			timestamp: Date.now(),
 		});
+	}
+
+	/**
+	 * Count this turn's failed tool calls by signature and tell the model once when one signature
+	 * keeps failing. A rejection that repeats verbatim carries no new information, so without this
+	 * the loop can re-issue the same call for a whole session (observed: 45 identical
+	 * `review_applicability` rejections, ended only by a user steer). The counter is per task: a new
+	 * task's failures are its own.
+	 */
+	private noteRepeatedFailures(turn: PrepareNextTurnContext): void {
+		for (const result of turn.toolResults) {
+			if (!result.isError) continue;
+			const reason = this.host._messageText(result).trim().split("\n")[0] ?? "";
+			const { count, escalate } = countRepeatedFailure(
+				this.repeatedFailures,
+				this.repeatedFailureNudged,
+				result.toolName,
+				reason,
+				REPEAT_FAILURE_THRESHOLD,
+			);
+			if (!escalate) continue;
+			this.host.agent.steer({
+				role: "user",
+				content: [{ type: "text", text: TRANSITION_STEERS.repeatedFailure(result.toolName, count) }],
+				timestamp: Date.now(),
+			});
+		}
 	}
 
 	private roleToolNames(): string[] {

@@ -4,6 +4,7 @@ import {
 	createDeclareBeliefToolDefinition,
 	createFocusBeliefsToolDefinition,
 	createRouteTaskToolDefinition,
+	createSelectExperimentToolDefinition,
 } from "../src/core/tools/declare-belief.ts";
 import { createViewBeliefsToolDefinition } from "../src/core/tools/view-beliefs.ts";
 
@@ -188,6 +189,41 @@ describe("route_task tool", () => {
 });
 
 describe("focus_beliefs tool", () => {
+	test("names the settled beliefs it is keeping in scope", async () => {
+		const set = new BeliefSet();
+		const proposed = set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		const settled = set.apply({
+			op: "propose",
+			statement: "the replica is stale",
+			domain: "code",
+			expectation: "a read returns the stale replica",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: settled.id, evidence: "the read returned the stale replica" });
+		const focusSet = new FocusSet();
+		const tool = createFocusBeliefsToolDefinition(set, focusSet);
+
+		const result = await tool.execute(
+			"tc-1",
+			{ beliefIds: [proposed.id, settled.id] },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		const text = (result.content[0] as { text: string }).text;
+
+		// Focus is scope, not an experiment: keeping a settled belief in it is legitimate, but the
+		// return has to say it cannot be dispatched, or the next selection is a guess.
+		expect(text).toContain(`Focused beliefs: ${proposed.id}, ${settled.id}`);
+		expect(text).toContain(`Already settled (in scope, not selectable): ${settled.id}.`);
+	});
+
 	// The focus slice is owned by the controller, which compares the declared ids against the
 	// slice it currently holds to tell a re-declaration from a real scope change (a real change
 	// invalidates an experiment selected under the earlier scope). If the tool also writes the
@@ -235,6 +271,41 @@ describe("focus_beliefs tool", () => {
 });
 
 describe("view_beliefs tool", () => {
+	test("tells a rejected selection what could be selected instead", async () => {
+		const set = new BeliefSet();
+		const open = set.apply({
+			op: "propose",
+			statement: "the cache is warm",
+			domain: "code",
+			expectation: "reads hit the cache",
+			evidenceRounds: 1,
+		});
+		const settled = set.apply({
+			op: "propose",
+			statement: "the replica is stale",
+			domain: "code",
+			expectation: "a read returns the stale replica",
+			evidenceRounds: 1,
+		});
+		set.apply({ op: "support", beliefId: settled.id, evidence: "the read returned the stale replica" });
+		const focusSet = new FocusSet();
+		focusSet.select([open.id, settled.id]);
+		const tool = createSelectExperimentToolDefinition(set, focusSet);
+
+		const rejected = tool.execute(
+			"tc-1",
+			{ beliefIds: [settled.id], intent: "whether the replica is stale" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		// A rejection that names only the failing id leaves the caller guessing id after id; the
+		// selectable set is what makes the rejection self-correcting.
+		await expect(rejected).rejects.toThrow(
+			`Belief ${settled.id} is supported; only an unresolved belief can be selected. ` +
+				`Selectable (unresolved, in focus): ${open.id}.`,
+		);
+	});
 	test("renders open and adjudicated world beliefs", async () => {
 		const set = new BeliefSet();
 		set.apply({
