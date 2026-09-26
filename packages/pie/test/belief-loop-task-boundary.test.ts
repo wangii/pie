@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
@@ -40,7 +40,14 @@ function createController(): { controller: BeliefLoopController; messages: Agent
 		sessionManager: SessionManager.inMemory(process.cwd(), { id: "session-task-boundary" }),
 		_emit: () => {},
 		_fullActiveToolNames: ["read", "view_beliefs", "declare_belief", "conclude"],
-		agent: { state: { messages } },
+		agent: { state: { messages, model: { contextWindow: 1000 } } },
+		// Deterministic stand-in: token count == message count, so the regression to a full-history
+		// execution projection (the usage entry point dropping `taskStartIndex`) is detectable.
+		_estimateContextUsage: (projected: AgentMessage[], contextWindow: number) => ({
+			tokens: projected.length,
+			contextWindow,
+			percent: 0,
+		}),
 	} as unknown as AgentSession;
 	return { controller: new BeliefLoopController(host), messages };
 }
@@ -85,6 +92,53 @@ describe("task-boundary execution projection", () => {
 		expect(joined).not.toContain("TASK-ONE-REQUEST");
 		expect(joined).not.toContain("TASK-ONE-PROBE-OUTPUT");
 		expect(joined).not.toContain("TASK-ONE-ASSISTANT");
+	});
+
+	it("the execution usage entry point applies the same taskStartIndex boundary as the prompt path", () => {
+		const { controller, messages } = createController();
+		messages.push(userMessage("TASK-ONE-REQUEST"));
+		messages.push(userMessage("TASK-ONE-FOLLOWUP"));
+		controller.resetLoopForNewTask();
+		messages.push(userMessage("TASK-TWO-REQUEST"));
+
+		const usage = controller.getRoleContextUsage();
+		if (!usage) throw new Error("expected role usage");
+
+		// The usage entry point must project execution with the task boundary, i.e. exactly what the
+		// model-input path builds (projectContextMessages with the same taskStartIndex).
+		const promptPath = projectContextMessages(
+			messages,
+			"execution",
+			controller.evidenceWatermark,
+			true,
+			controller.taskStartIndex,
+		);
+		expect(usage.execution.tokens).toBe(promptPath.length);
+		// And that boundary actually excludes the prior task from the usage count.
+		expect(usage.execution.tokens).toBeLessThan(messages.length);
+	});
+
+	it("drops a prior-task ledger-only system message but keeps the framing head", () => {
+		const { controller, messages } = createController();
+		messages.push({ role: "system", content: "SYSTEM-FRAMING", timestamp: 0 } as AgentMessage);
+		const ledger: AgentMessage = {
+			role: "system",
+			content: "",
+			toolsAdded: [{ name: "tool_a", description: "tool_a", parameters: Type.Object({}) }],
+			timestamp: 1,
+		} as AgentMessage;
+		messages.push(ledger);
+		messages.push(userMessage("TASK-ONE-REQUEST"));
+		controller.resetLoopForNewTask();
+		messages.push(userMessage("TASK-TWO-REQUEST"));
+
+		const projected = projectContextMessages(messages, "execution", messages.length, true, controller.taskStartIndex);
+		// The stale ledger entry is gone; the framing head is kept; propose still reads it all.
+		expect(projected).not.toContain(ledger);
+		expect(projected.some((message) => message.role === "system" && textOf(message) === "SYSTEM-FRAMING")).toBe(true);
+		expect(projectContextMessages(messages, "propose", messages.length, true, controller.taskStartIndex)).toContain(
+			ledger,
+		);
 	});
 
 	it("keeps a system message that sits before the boundary", () => {
@@ -238,5 +292,103 @@ describe("task-boundary execution projection on the real prompt path", () => {
 		expect(proposeContexts[0]).toContain("TASK-ONE-REQUEST");
 		expect(proposeContexts[0]).toContain("Applied routing");
 		expect(proposeContexts[0]).toContain("TASK-TWO-REQUEST");
+	}, 30000);
+
+	it("the provider still declares the execution role's tools after the boundary drops prior-task ledger entries", async () => {
+		let inspectCount = 0;
+		const inspectTool: AgentTool = {
+			name: "inspect",
+			label: "Inspect",
+			description: "Return an observation",
+			parameters: Type.Object({}),
+			execute: async () => {
+				inspectCount += 1;
+				return { content: [{ type: "text", text: `PROBE-OBSERVATION-${inspectCount}` }], details: undefined };
+			},
+		};
+		const harness = await createHarness({ ...fastHarnessOptions, tools: [inspectTool] });
+		harnesses.push(harness);
+
+		// The provider payload is the real request after `declareToolChanges`, so `getCurrentTools`
+		// over it is exactly what the model would be offered, independent of any hand-rolled fold.
+		const captured: { task: "one" | "two"; tools: string[] }[] = [];
+		const route = () =>
+			fauxAssistantMessage([
+				fauxToolCall("route_task", {
+					decision: "fast-path",
+					reason: "no unresolved uncertainty can change this action or its safety",
+					suitabilityProbability: 0.9,
+					successProbability: 0.9,
+					estimatedSteps: 1,
+					difficulty: "low",
+				}),
+			]);
+		const formulation = () =>
+			fauxAssistantMessage([
+				fauxToolCall("set_formulation", {
+					interpretation: "I currently read this as a question about which behavior actually holds",
+					focus: "the observations the run produced",
+					implication: "which conclusion the answer must report turns on what the run showed",
+					reason: "reading after the run",
+				}),
+			]);
+
+		let task: "one" | "two" = "one";
+		let proposeCount = 0;
+		let executionCount = 0;
+		const respond = (context: { messages: AgentMessage[] }) => {
+			const seen = context.messages.map((message) => getMessageText(message)).join("\n");
+			if (task === "one" && seen.includes("TASK-TWO-REQUEST")) {
+				task = "two";
+				proposeCount = 0;
+				executionCount = 0;
+			}
+			const label = task === "two" ? "TASK-TWO" : "TASK-ONE";
+			const role = roleOf(seen);
+			if (role === "execution") {
+				executionCount += 1;
+				captured.push({
+					task,
+					tools: getCurrentTools(context.messages as unknown as Parameters<typeof getCurrentTools>[0])
+						.map((tool) => tool.name)
+						.sort(),
+				});
+				if (executionCount === 1) return fauxAssistantMessage([fauxToolCall("inspect", {})]);
+				return fauxAssistantMessage([
+					fauxToolCall("report_outcome", { result: `${label}-ANSWER`, evidence: "observed" }),
+				]);
+			}
+			if (role === "propose") {
+				proposeCount += 1;
+				if (proposeCount === 1) return route();
+				if (proposeCount === 2) return formulation();
+				return fauxAssistantMessage([
+					fauxToolCall("focus_beliefs", { beliefIds: [] }),
+					fauxToolCall("conclude", { result: `${label}-ANSWER`, evidence: "observed" }),
+				]);
+			}
+			if (role === "distill") return fauxAssistantMessage(`Summary: completed the ${label} request.`);
+			if (role === "finalReport") return fauxAssistantMessage(`${label}-ANSWER`);
+			return fauxAssistantMessage(`Summary: completed the ${label} request.`);
+		};
+
+		harness.setResponses(Array.from({ length: 60 }, () => respond));
+
+		await harness.session.prompt("TASK-ONE-REQUEST");
+		harness.session.approveFormulation();
+		await harness.session.waitForIdle();
+		await harness.session.prompt("TASK-TWO-REQUEST");
+		harness.session.approveFormulation();
+		await harness.session.waitForIdle();
+
+		const taskOne = captured.filter((entry) => entry.task === "one");
+		const taskTwo = captured.filter((entry) => entry.task === "two");
+		expect(taskOne.length).toBeGreaterThan(0);
+		expect(taskTwo.length).toBeGreaterThan(0);
+		for (const entry of captured) {
+			expect(entry.tools.length).toBeGreaterThan(0);
+		}
+		// Same role surface in both tasks: the boundary dropped messages, not tools.
+		expect(taskTwo[0]?.tools).toEqual(taskOne[0]?.tools);
 	}, 30000);
 });

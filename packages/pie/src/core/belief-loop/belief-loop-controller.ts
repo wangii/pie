@@ -2993,7 +2993,12 @@ export class BeliefLoopController {
 				contextWindow,
 			),
 			execution: this.host._estimateContextUsage(
-				projectMessagesFor(this.host.agent.state.messages, "execution", this.evidenceWatermark),
+				projectMessagesFor(
+					this.host.agent.state.messages,
+					"execution",
+					this.evidenceWatermark,
+					this.taskStartIndex,
+				),
 				contextWindow,
 			),
 		};

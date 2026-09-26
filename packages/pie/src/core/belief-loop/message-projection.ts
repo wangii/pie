@@ -240,7 +240,20 @@ function projectMessage(
 			// The execution role sees the current task only: system framing plus everything from the
 			// task's start. Prior-task user/bash/custom/assistant text passes `maskBeliefBookkeeping`
 			// unchanged, so the task boundary has to be applied here rather than by role.
-			if (index < taskStartIndex && message.role !== "system") return undefined;
+			if (index < taskStartIndex) {
+				if (message.role !== "system") return undefined;
+				// Keep the transcript head (the current role prompt, rewritten in place) and any other
+				// system message that still carries prompt text or sections. Drop the prior-task
+				// ledger-only entries (no content, just toolsAdded/toolsRemoved): the agent loop folds
+				// the remaining system messages, diffs that against the executable set, and re-declares
+				// the difference on the next request, so the model's tool surface is unchanged while the
+				// stale deltas stop being replayed.
+				if (index === 0) return maskBeliefBookkeeping(message);
+				const system = message as { content?: string; sections?: Record<string, unknown> };
+				const hasPromptText = (system.content ?? "").length > 0;
+				const hasSections = system.sections !== undefined && Object.keys(system.sections).length > 0;
+				if (!hasPromptText && !hasSections) return undefined;
+			}
 			return maskBeliefBookkeeping(message);
 		case "finalReport": {
 			const masked = maskOperationalDetail(message, true, elidedProbeToolCalls);
