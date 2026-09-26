@@ -498,6 +498,18 @@ export class InteractiveMode {
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
+	/**
+	 * The confirmation a `/frame approve` just printed, so a continuation that fails can correct that
+	 * line in place instead of leaving the optimistic version standing beside its retraction.
+	 */
+	private pendingApprovalConfirmation: { versionId: string; component: Text } | undefined = undefined;
+	/**
+	 * The rendered wait block of each published reading, by version id. An approval resolves the block
+	 * it was made against, and that has to be visible where the block is read — the message body telling
+	 * the user to approve stays in the log as history, and this note is what keeps it from reading as a
+	 * still-open instruction.
+	 */
+	private formulationWaitComponents = new Map<string, CustomMessageComponent>();
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
@@ -3320,6 +3332,27 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
+			case "formulation_resume_failed": {
+				// The approval is in the log either way; this says the turn it announced did not continue.
+				// The confirmation printed for this version is rewritten rather than left standing beside its
+				// retraction, so the transcript holds one statement about it, and that statement is true.
+				const failure =
+					theme.fg("accent", `Frame ${event.versionId} approved`) +
+					"\n" +
+					theme.fg("error", `The agent did not resume: ${event.reason}. Send a message to continue.`);
+				const wait = this.formulationWaitComponents.get(event.versionId);
+				if (wait) wait.setStatusLine(this.formulationWaitResolution(event.versionId));
+				const pending = this.pendingApprovalConfirmation;
+				if (pending && pending.versionId === event.versionId) {
+					pending.component.setText(failure);
+					this.pendingApprovalConfirmation = undefined;
+				} else {
+					this.chatContainer.addChild(new Text(failure, this.outputPad, 0));
+				}
+				this.ui.requestRender();
+				break;
+			}
+
 			case "entry_appended":
 				if (event.entry.type === "custom") {
 					this.addCustomEntryToChat(event.entry);
@@ -3759,6 +3792,14 @@ export class InteractiveMode {
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
+					if (message.customType === "formulation_wait") {
+						const versionId = (message.details as { versionId?: string } | undefined)?.versionId;
+						if (versionId) {
+							// A re-render after a navigation must show the same resolution the live render does.
+							component.setStatusLine(this.formulationWaitResolution(versionId));
+							this.formulationWaitComponents.set(versionId, component);
+						}
+					}
 				}
 				break;
 			}
@@ -6610,10 +6651,13 @@ export class InteractiveMode {
 	/**
 	 * `/frame` — how the agent currently reads this task, with its history and corrections.
 	 *
-	 * `/frame correct <text>` submits a correction instead of opening the region. Both are the user's
-	 * half of the formulation contract: the region is how they see what the agent takes the task to
-	 * be, and the correction is how they say it is wrong. Opening the region never replaces the
-	 * editor, so a correction can be typed while the reading it corrects is on screen.
+	 * `/frame approve` releases the pause on the version on screen — it is the user's own act on
+	 * that reading, and the only way a plain "yes" could otherwise be mistaken for consent is
+	 * removed by this being a command rather than a reply. `/frame correct <text>` submits a
+	 * correction instead. Both are the user's half of the formulation contract: the region is how
+	 * they see what the agent takes the task to be, `correct` is how they say it is wrong, and
+	 * `approve` is how they say to build on it. Opening the region never replaces the editor, so
+	 * either act can be issued while the reading it concerns is on screen.
 	 */
 	private handleFrameCommand(argument: string): void {
 		const text = argument.trim();
@@ -6629,11 +6673,56 @@ export class InteractiveMode {
 			this.writeFrameDetailToTranscript();
 			return;
 		}
+		if (text === "approve" || text.startsWith("approve ")) {
+			this.approveFrame(text.slice("approve".length).trim());
+			return;
+		}
 		if (text === "correct" || text.startsWith("correct ")) {
 			this.submitFrameCorrection(text.slice("correct".length).trim());
 			return;
 		}
-		this.showStatus("Usage: /frame, /frame history, /frame full, /frame correct <text>, or /frame close");
+		this.showStatus(
+			"Usage: /frame, /frame history, /frame full, /frame approve [version], /frame correct <text>, or /frame close",
+		);
+	}
+
+	/**
+	 * `/frame approve [version]` — the user's own act on the reading on screen.
+	 *
+	 * The version argument is for approving an explicitly named version; without it the version
+	 * currently waiting is approved. A refusal is reported verbatim (no reading waiting, or a
+	 * version that is not the one on the table) instead of being shown as consent, because the
+	 * whole point of the command is that approval is a deliberate act.
+	 */
+	private approveFrame(versionId: string): void {
+		const result = this.session.approveFormulation(versionId || undefined);
+		if (result.outcome === "rejected") {
+			this.showStatus(`Frame approval rejected: ${result.reason}`);
+			return;
+		}
+		const wait = this.formulationWaitComponents.get(result.approval.versionId);
+		if (wait) wait.setStatusLine(this.formulationWaitResolution(result.approval.versionId));
+		const confirmation = new Text(
+			theme.fg("accent", `Frame ${result.approval.versionId} approved`) +
+				"\n" +
+				// "Starting" is the part this command can attest: the continuation turn is launched before
+				// `approveFormulation` returns. Whether it settles is reported afterwards, and a failure
+				// rewrites this line rather than adding a second, contradictory one.
+				theme.fg(
+					"muted",
+					"Approval recorded; the agent is starting to continue on this reading. A later revision waits for its own approval.",
+				),
+			1,
+			0,
+		);
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(confirmation);
+		this.pendingApprovalConfirmation =
+			result.continuation === "started"
+				? { versionId: result.approval.versionId, component: confirmation }
+				: undefined;
+		this.ui.requestRender();
+		return;
 	}
 
 	/**
@@ -6654,6 +6743,25 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Text(buildFrameDetailLines(view, width).join("\n"), 1, 0));
 		this.ui.requestRender();
 		this.showStatus("Frame detail written to the transcript");
+	}
+
+	/**
+	 * The status note a wait block carries, read off the session rather than remembered here: the
+	 * resolution is the fact that the version was approved, so a re-render derives the same note the
+	 * live update wrote.
+	 */
+	private formulationWaitResolution(versionId: string): string | undefined {
+		const resume = this.session.getFormulationResume();
+		if (!resume || resume.versionId !== versionId) return undefined;
+		if (resume.phase === "failed") {
+			return theme.fg("error", "Resolved with a failure: the agent did not resume on this reading.");
+		}
+		return theme.fg(
+			"muted",
+			resume.phase === "started"
+				? "Resolved: approved; continuing on this reading."
+				: "Resolved: approved and continued on this reading.",
+		);
 	}
 
 	private submitFrameCorrection(text: string): void {

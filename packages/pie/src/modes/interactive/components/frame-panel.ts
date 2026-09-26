@@ -100,8 +100,8 @@ export function buildFrameSummaryLines(view: FrameView, width: number): string[]
 	if (pending.length > 0) {
 		markers.push(theme.fg("warning", `${pending.length} correction${pending.length === 1 ? "" : "s"} pending`));
 	}
-	if (state.review && !state.review.responseCorrectionId) {
-		markers.push(theme.fg("warning", "awaiting your response"));
+	if (state.awaitingResponse) {
+		markers.push(theme.fg("warning", "awaiting your approval"));
 	} else if (state.review && !state.review.focusReviewed) {
 		// The reading's own scope is accounted for before its focus is reviewed, so the marker names
 		// the decision still owed: calling it a focus review while beliefs are unclassified would
@@ -192,10 +192,12 @@ export function buildFrameDetailLines(view: FrameView, width: number): string[] 
 		lines.push("");
 	}
 
-	if (state.review && !state.review.responseCorrectionId) {
+	if (state.awaitingResponse) {
 		lines.push(
 			...wrapTextWithAnsi(
-				"Paused: reply to confirm, correct, or clarify this Frame. The agent will answer and review the reading before continuing.",
+				"Paused: this Frame waits for your own act on it — approve it with /frame approve to build on this reading, " +
+					"or correct it with /frame correct <text>. A plain reply is a message, not consent; the agent will answer a " +
+					"correction and review the reading before continuing.",
 				width,
 			),
 		);

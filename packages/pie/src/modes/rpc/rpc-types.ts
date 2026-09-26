@@ -32,6 +32,10 @@ export type RpcCommand =
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "clear_queue" }
+	// The user's own acts on a published Frame. `approve_frame` is the only command that releases the
+	// pause on a reading; a plain prompt/steer/follow_up is ordinary input and never consent.
+	| { id?: string; type: "approve_frame"; versionId?: string }
+	| { id?: string; type: "frame_correct"; message: string }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State
@@ -160,6 +164,20 @@ export type RpcResponse =
 			command: "clear_queue";
 			success: true;
 			data: { steering: string[]; followUp: string[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "approve_frame";
+			success: true;
+			data: { outcome: "recorded" | "unchanged"; versionId: string; continuation: "started" };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "frame_correct";
+			success: true;
+			data: { correctionId: string };
 	  }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 

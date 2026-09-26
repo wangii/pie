@@ -37,6 +37,7 @@ core/tools/view-beliefs.ts
 index.ts
 main.ts
 modes/interactive/components/belief-set-panel.ts
+modes/interactive/components/custom-message.ts
 modes/interactive/components/footer.ts
 modes/interactive/components/frame-panel.ts
 modes/interactive/interactive-mode.ts

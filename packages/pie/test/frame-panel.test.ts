@@ -63,6 +63,9 @@ function state(overrides: Partial<FormulationState> = {}): FormulationState {
 		decisionOwed: false,
 		recheckOwed: false,
 		recheck: null,
+		awaitingResponse: false,
+		approved: false,
+		resume: null,
 		pendingApplicability: [],
 		unrevalidated: [],
 		...overrides,
@@ -90,10 +93,10 @@ function plain(lines: readonly string[]): string[] {
 describe("frame panel", () => {
 	it("distinguishes waiting for the user from the subsequent focus review", () => {
 		const waiting = view({
-			state: state({ current: version(2), review: review() }),
+			state: state({ current: version(2), review: review(), awaitingResponse: true }),
 		});
-		expect(plain(buildFrameSummaryLines(waiting, 80)).join("\n")).toContain("awaiting your response");
-		expect(plain(buildFrameDetailLines(waiting, 80)).join("\n")).toContain("Paused: reply");
+		expect(plain(buildFrameSummaryLines(waiting, 80)).join("\n")).toContain("awaiting your approval");
+		expect(plain(buildFrameDetailLines(waiting, 80)).join("\n")).toContain("Paused: this Frame waits");
 		const reviewing = view({
 			state: state({
 				current: version(2),

@@ -28,7 +28,12 @@ import type { CustomEntry, SessionEntry } from "./session-manager.ts";
 // A later change added the optional advancement intent on the selection and the plan. It is additive
 // and optional — a v6 log simply has no such text — so the version is unchanged: bumping it would
 // reject logs that replay faithfully.
-export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 6 as const;
+// v7 adds the explicit Frame approval (`FormulationApproved` / `FormulationReview.approval`). A v6
+// log releases its wait through a correction record, so its "ok" replies are indistinguishable from
+// real objections; replaying one under the new rule would either leave every v6 task waiting for an
+// approval nobody can give, or silently read a correction as consent. Both are wrong, so v6 is
+// rejected rather than reinterpreted.
+export const AGENT_SESSION_DOMAIN_SCHEMA_VERSION = 7 as const;
 export const AGENT_SESSION_DOMAIN_CUSTOM_ENTRY = "pie.agent-session-domain-event";
 
 export type SessionId = string;
@@ -318,9 +323,29 @@ export interface FormulationApplicabilityEntry {
 	readonly stale?: boolean;
 }
 
+/**
+ * The user's explicit approval of one published version.
+ *
+ * Approving is a different act from objecting: a correction says how the reading is wrong, an
+ * approval says "build on this one". They used to share the correction record, which made every
+ * plain reply ("ok", "yes") a pending objection the agent then had to answer and re-review. Keeping
+ * them apart is what lets the wait stay mandatory while the work behind it stops growing.
+ *
+ * It is bound to a version id, so an approval can never carry over to a reading published after it.
+ */
+export interface FormulationApproval {
+	readonly versionId: FormulationVersionId;
+	readonly approvedAt: string;
+}
+
 export interface FormulationReview {
 	readonly versionId: FormulationVersionId;
 	readonly responseCorrectionId?: FormulationCorrectionId;
+	/**
+	 * Set once the user approved *this* version. Publishing a revision creates a fresh review, so an
+	 * approval never reaches a reading the user has not seen.
+	 */
+	readonly approval?: FormulationApproval;
 	readonly focusReviewed: boolean;
 	/**
 	 * The beliefs this reading has to account for: the scope at publication, plus any belief that
@@ -397,10 +422,44 @@ export interface FormulationState {
 	readonly recheckOwed: boolean;
 	/** The most recent round's reconsideration result, or `null` when none has been recorded. */
 	readonly recheck: FormulationRecheck | null;
+	/**
+	 * Whether the pending review is still waiting for the user's own act on that version — approval
+	 * or an objection. The run is paused while this is true.
+	 */
+	readonly awaitingResponse: boolean;
+	/** Whether the version awaiting its response has been approved by the user. */
+	readonly approved: boolean;
+	/**
+	 * The continuation an approval started, or `null` when none has been started in this runtime.
+	 * `resumed: false` is the case the approval result cannot express: the decision is recorded and
+	 * no run is continuing on it.
+	 */
+	readonly resume: FormulationResumeState | null;
 	/** Beliefs the current reading's review still has to classify. */
 	readonly pendingApplicability: readonly BeliefId[];
 	/** Classified `needs-revalidation` and not yet probed again under this reading. */
 	readonly unrevalidated: readonly BeliefId[];
+}
+
+/**
+ * What happened to the continuation turn an approval starts.
+ *
+ * Recording the approval says only that the user acted on the reading. Whether a run is actually
+ * continuing on it is a second fact, and the two must stay separable: a client that reads only the
+ * first would report "the agent continues" for a session that is sitting idle. This is runtime
+ * state, not replayed domain state — replaying the log restores the approval, not the delivery of
+ * the turn that followed it — so it lives beside the formulation state rather than in it.
+ */
+export interface FormulationResumeState {
+	readonly versionId: FormulationVersionId;
+	/**
+	 * `started` while the continuation is in flight, then what became of it. Starting is knowable
+	 * synchronously — the turn is launched before the approval returns — so it is recorded as soon
+	 * as it happens rather than inferred afterwards from the absence of a failure.
+	 */
+	readonly phase: "started" | "settled" | "failed";
+	/** Why the continuation did not settle; set only when `phase` is `failed`. */
+	readonly reason?: string;
 }
 
 /**
@@ -666,6 +725,9 @@ export type AgentSessionDomainEvent =
 			sources: readonly FormulationSource[];
 			deferredAt: string;
 	  })
+	// The user's own act on one published reading. Separate from a correction on purpose: this is
+	// "proceed on this reading", not "this reading is wrong", and only an explicit act records it.
+	| (TaskEventBase & { type: "FormulationApproved"; versionId: FormulationVersionId; approvedAt: string })
 	| (TaskEventBase & { type: "FormulationCorrectionSubmitted"; correction: FormulationCorrection })
 	| (TaskEventBase & {
 			type: "FormulationCorrectionResolved";
@@ -1229,12 +1291,13 @@ export function applyAgentSessionDomainEvent(
 				);
 				const scopedBeliefIds = reviewScopeAfterFocus(task, review, event.beliefIds, snapshot.beliefs);
 				const candidate = { ...review, scopedBeliefIds, applicability };
-				// The review of the reading is complete only once every belief it has to account for has a
-				// decision that still counts: otherwise a focus declaration would mark the reading reviewed
-				// while the old conclusions were never looked at.
+				// The review of the reading is complete only once the user has acted on that version —
+				// approval and objection both count, and neither is reachable from a plain message — and every
+				// belief it has to account for has a decision that still counts: otherwise a focus declaration
+				// would mark the reading reviewed while the old conclusions were never looked at.
 				const readingReviewed =
 					applicabilityComplete(candidate) &&
-					review.responseCorrectionId !== undefined &&
+					(review.responseCorrectionId !== undefined || review.approval !== undefined) &&
 					pendingFormulationCorrections(task).length === 0;
 				nextReview = { ...candidate, focusReviewed: review.focusReviewed || readingReviewed };
 			}
@@ -1329,6 +1392,39 @@ export function applyAgentSessionDomainEvent(
 						// stood at this point in the log, and a later episode re-opens the decision.
 						answeredThroughEpisodeOrdinal: latestDispatchedEpisodeOrdinal(task) ?? 0,
 					},
+				}),
+			};
+		}
+		case "FormulationApproved": {
+			const task = requireTask(snapshot, event);
+			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
+			if (!event.approvedAt.trim()) fail(event, "formulation approval has no recorded time");
+			if (!task.formulations.some((version) => version.id === event.versionId)) {
+				fail(event, `formulation approval names unknown version ${event.versionId}`);
+			}
+			// An approval is an act on the reading the user was shown. Approving a version that a later
+			// publication has replaced would record consent for a reading nobody is looking at any more.
+			const current = currentFormulation(task);
+			if (current?.id !== event.versionId) {
+				fail(event, `formulation approval names ${event.versionId}, which is not the current reading`);
+			}
+			const review = task.formulationReview;
+			if (!review || review.versionId !== event.versionId) {
+				fail(event, `formulation ${event.versionId} is not waiting for a response`);
+			}
+			// An objection the user has not yet had answered is not consent: the version stays unapproved
+			// until propose has answered what was said about it.
+			if (pendingFormulationCorrections(task).some((correction) => correction.targetVersionId === event.versionId)) {
+				fail(event, `formulation ${event.versionId} still has an unanswered objection`);
+			}
+			// Approving the same version again is a no-op rather than a second decision: a client that
+			// retries after a reconnect must not create a duplicate record of the same act.
+			if (review.approval !== undefined) return snapshot;
+			return {
+				...snapshot,
+				tasks: replaceTask(snapshot, {
+					...task,
+					formulationReview: { ...review, approval: { versionId: event.versionId, approvedAt: event.approvedAt } },
 				}),
 			};
 		}
@@ -1786,7 +1882,7 @@ export function domainEventsFromSessionEntries(entries: readonly SessionEntry[])
 						`so far has been a breaking change with no migration path (v2 renamed TaskFrame to ` +
 						`ExecutionEpisode; v3 added problem-formulation records; v4 added the experiment ` +
 						`selection; v5 added revision response and focus review; v6 added the per-round ` +
-						`formulation recheck), so a v${version} session is rejected rather than replayed with missing ` +
+						`formulation recheck; v7 added explicit Frame approval), so a v${version} session is rejected rather than replayed with missing ` +
 						`or misread records.`,
 				);
 			}

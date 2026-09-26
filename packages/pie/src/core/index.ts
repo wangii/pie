@@ -7,6 +7,7 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type FormulationApprovalOutcome,
 	type ModelCycleResult,
 	type PromptOptions,
 	type SessionStats,
@@ -36,6 +37,7 @@ export {
 	type ExecutionId,
 	type FastPathEpisode,
 	type FormulationAdoption,
+	type FormulationApproval,
 	type FormulationContent,
 	type FormulationCorrection,
 	type FormulationCorrectionId,
@@ -44,6 +46,7 @@ export {
 	type FormulationOrigin,
 	type FormulationRecheck,
 	type FormulationRecheckVerdict,
+	type FormulationResumeState,
 	type FormulationSource,
 	type FormulationVersionId,
 	formulationContentError,
@@ -85,6 +88,10 @@ export {
 	createAgentSessionServices,
 } from "./agent-session-services.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+export {
+	BeliefLoopController,
+	type FormulationApprovalResult,
+} from "./belief-loop/belief-loop-controller.ts";
 export type { CompactionResult } from "./compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 export { areExperimentalFeaturesEnabled } from "./experimental.ts";
@@ -137,4 +144,5 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+
 export { createSyntheticSourceInfo } from "./source-info.ts";

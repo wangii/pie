@@ -54,7 +54,9 @@ import type {
 	AgentSessionDomainEvent,
 	AgentSessionSnapshot,
 	FormulationAdoption,
+	FormulationApproval,
 	FormulationCorrection,
+	FormulationResumeState,
 	FormulationState,
 	FormulationVersionId,
 	ProblemFormulationVersion,
@@ -188,6 +190,9 @@ export type AgentSessionEvent =
 			steering: readonly string[];
 			followUp: readonly string[];
 	  }
+	// The approval is recorded either way; this is what says no run continued on it, so a listener
+	// (or a client's event stream) can correct the confirmation the command itself printed.
+	| { type: "formulation_resume_failed"; versionId: FormulationVersionId; reason: string }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
@@ -341,6 +346,22 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // AgentSession Class
 // ============================================================================
 
+/**
+ * What `approveFormulation` reports at the moment it returns.
+ *
+ * `continuation: "started"` is the synchronous truth: the turn has been launched. Whether it settles
+ * cannot be known here — the delivery happens after this returns — so it is reported later as the
+ * resume state and, on failure, as the `formulation_resume_failed` event. A rejected approval starts
+ * nothing, which is why it carries no continuation.
+ */
+export type FormulationApprovalOutcome =
+	| { readonly outcome: "rejected"; readonly reason: string }
+	| {
+			readonly outcome: "recorded" | "unchanged";
+			readonly approval: FormulationApproval;
+			readonly continuation: "started";
+	  };
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -388,6 +409,8 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private readonly _beliefLoop: BeliefLoopController;
+	/** The most recent approval's continuation attempt, for `getFormulationState` and diagnostics. */
+	private _lastFormulationResume: FormulationResumeState | undefined;
 	/** The full active tool names, independent of the current role's projected subset. */
 	_fullActiveToolNames: string[] = [];
 	private _cwd: string;
@@ -726,6 +749,9 @@ export class AgentSession {
 			decisionOwed: this._beliefLoop.formulationDecisionOwed(),
 			recheckOwed: this._beliefLoop.formulationRecheckOwed(),
 			recheck: this._beliefLoop.formulationRecheck() ?? null,
+			awaitingResponse: this._beliefLoop.awaitingFormulationResponse(),
+			approved: this._beliefLoop.formulationApproval() !== undefined,
+			resume: this._lastFormulationResume ?? null,
 			review: this._beliefLoop.formulationReview(),
 			pendingApplicability: [...this._beliefLoop.pendingApplicability()],
 			unrevalidated: this._beliefLoop.unrevalidatedApplicability().map((entry) => entry.beliefId),
@@ -781,6 +807,78 @@ export class AgentSession {
 			trimmed,
 			targetVersionId ?? this._beliefLoop.currentFormulation()?.id,
 		);
+	}
+
+	/**
+	 * Record the user's approval of the reading that is waiting for a response.
+	 *
+	 * Approval is an act, not a message: this is the only path that releases the wait without an
+	 * objection, and it names the version, so it cannot be carried over to a later publication. A
+	 * plain prompt/steer/follow-up is ordinary input and is never read as consent.
+	 *
+	 * `versionId` defaults to the version currently on the table, which is what the user was shown;
+	 * naming another version is refused rather than silently approving the wrong reading.
+	 */
+	approveFormulation(versionId?: FormulationVersionId): FormulationApprovalOutcome {
+		const result = this._beliefLoop.approveFormulation(versionId);
+		if (result.outcome === "rejected") return result;
+		// Approving is a user's act, and the agent continues on it. Recording the decision is not
+		// enough on its own: the pause ended the run, so without this the task would sit idle with
+		// nothing left to resume it and the user would have to send an unrelated message.
+		//
+		// The launch is synchronous, so "the continuation started" is already a fact when this returns;
+		// whether it settles is not, and is reported afterwards as the resume state and, on failure, as
+		// an event. Carrying `continuation: "started"` here is what keeps the response-time answer honest
+		// instead of leaving the caller to read a field that is only filled once the turn is over.
+		this._lastFormulationResume = { versionId: result.approval.versionId, phase: "started" };
+		void this._resumeAfterApproval(result.approval.versionId);
+		return { ...result, continuation: "started" };
+	}
+
+	/**
+	 * Start the continuation turn an approval releases.
+	 *
+	 * The caller is not made to wait for the turn, and starting it must not fail the approval — the
+	 * decision is already recorded and the user can always send the next message themselves. But
+	 * "the approval is recorded" and "a run is continuing" are different facts, and only the first is
+	 * true by construction: a failure here becomes session state and an event, so the two never
+	 * collapse into the same optimistic confirmation.
+	 */
+	private async _resumeAfterApproval(versionId: FormulationVersionId): Promise<void> {
+		// Displayed on purpose: the pause before this point is resolved, and the transcript should say
+		// so between the wait block it answers and any later one, rather than leaving the user to infer
+		// it from which panel state happens to render next.
+		const message = {
+			customType: "formulation_approved",
+			content: [
+				{
+					type: "text" as const,
+					text:
+						`The user approved Frame ${versionId}: the pause on that reading is resolved and the agent ` +
+						"continues on it.",
+				},
+			],
+			display: true,
+			details: { versionId },
+		};
+		try {
+			await this.sendCustomMessage(message, { triggerTurn: true });
+			this._lastFormulationResume = { versionId, phase: "settled" };
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this._lastFormulationResume = { versionId, phase: "failed", reason };
+			this._emit({ type: "formulation_resume_failed", versionId, reason });
+		}
+	}
+
+	/**
+	 * The continuation attempt an approval started, or undefined when none has been started.
+	 *
+	 * Exposed because the approval result cannot answer it: `recorded` means the user's act is in the
+	 * log, not that a run is continuing on the reading it approved.
+	 */
+	getFormulationResume(): FormulationResumeState | undefined {
+		return this._lastFormulationResume;
 	}
 
 	// =========================================================================
@@ -1510,9 +1608,6 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
-				if (options.source !== "extension") {
-					this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, options?.images));
-				}
 				if (options.streamingBehavior === "followUp") {
 					await this._queueFollowUp(expandedText, currentImages);
 				} else {
@@ -1612,9 +1707,6 @@ export class AgentSession {
 			if (!this._beliefLoop.currentTaskId) {
 				this._beliefLoop.beginDomainTask(text, expandedText, options?.images, currentImages);
 			} else {
-				if (options?.source !== "extension") {
-					this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, options?.images));
-				}
 				this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
 			}
 			this._beliefLoop.applyRoleSurface();
@@ -1709,7 +1801,8 @@ export class AgentSession {
 		let expandedText = this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-		this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, images));
+		// A steering message is input, not consent: it never releases the Frame wait. Approval and
+		// objection are explicit acts (see `approveFormulation` / `submitFormulationCorrection`).
 		await this._queueSteer(expandedText, images);
 	}
 
@@ -1730,7 +1823,6 @@ export class AgentSession {
 		let expandedText = this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-		this._beliefLoop.receiveFormulationResponse(this._beliefLoop.promptContent(text, images));
 		await this._queueFollowUp(expandedText, images);
 	}
 

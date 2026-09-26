@@ -74,11 +74,8 @@ describe("revision applicability review", () => {
 				focus(scope),
 				reading("local retry control"),
 			]),
-			(context) => {
-				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+			(_context) => {
 				return fauxAssistantMessage([
-					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
 					applicabilityEntries(
 						scope.map((beliefId) => ({
 							beliefId,
@@ -95,7 +92,8 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage([reading("cross-component identity ownership")]),
 		]);
 		await h.session.prompt("Investigate identity ownership");
-		await h.session.prompt("keep the reading");
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		expect(h.session.getFormulationState()?.review?.versionId).toBeDefined();
 		return h;
 	}
@@ -107,16 +105,17 @@ describe("revision applicability review", () => {
 		h.setResponses([
 			// The response is answered first, so the applicability review is no longer blocked by the
 			// wait; then the focus narrows to nothing.
-			fauxAssistantMessage([
-				answer(correction.id),
-				applicability("not-applicable", "this reading asks about a different path"),
-				focus([]),
-			]),
+			// The answer is all this turn may do: answering leaves the version waiting for its approval.
+			fauxAssistantMessage([answer(correction.id)]),
+			fauxAssistantMessage([applicability("not-applicable", "this reading asks about a different path"), focus([])]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage([conclude()]),
 			fauxAssistantMessage("identity is unchanged on the path this reading asks about"),
 		]);
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version still waits until the user approves it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		const task = h.session.domainSnapshot.tasks.get(taskId)!;
 		// The narrowed focus is what the task acts on now, and the belief it dropped still had to be
 		// accounted for: the review keeps the scope it was published against.
@@ -138,15 +137,17 @@ describe("revision applicability review", () => {
 		const taskId = h.session.taskId!;
 		const correction = h.session.submitFormulationCorrection("test the cross-component case")!;
 		h.setResponses([
-			fauxAssistantMessage([
-				answer(correction.id),
-				applicability("needs-revalidation", "the probe answered the previous reading"),
-			]),
+			// The answer is all this turn may do: answering leaves the version waiting for its approval.
+			fauxAssistantMessage([answer(correction.id)]),
+			fauxAssistantMessage([applicability("needs-revalidation", "the probe answered the previous reading")]),
 			fauxAssistantMessage([conclude()]), // focus has not been reviewed yet
 			fauxAssistantMessage([focus()]),
 			fauxAssistantMessage([conclude()]), // nothing has been probed under this reading
 		]);
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version still waits until the user approves it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		// The refused conclusion is answered by refining the belief into the claim this reading
 		// asks about; the refinement needs a turn of its own after the refusal.
 		h.setResponses([
@@ -184,11 +185,8 @@ describe("revision applicability review", () => {
 		// Task A settles belief-1 and completes.
 		h.setResponses([
 			fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
-			(context) => {
-				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+			(_context) => {
 				return fauxAssistantMessage([
-					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
 					applicabilityEntries(
 						["belief-1"].map((beliefId) => ({
 							beliefId,
@@ -207,17 +205,15 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("identity survives a retry"),
 		]);
 		await h.session.prompt("Is identity preserved across a retry?");
-		await h.session.prompt("keep the reading");
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		expect(h.session.beliefs.map(statusOf)).toEqual(["supported"]);
 
 		// Task B has its own belief and its own reading, which is then revised.
 		h.setResponses([
 			fauxAssistantMessage([secondBelief(), focus(["belief-2"]), reading("the other path names its target")]),
-			(context) => {
-				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+			(_context) => {
 				return fauxAssistantMessage([
-					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
 					applicabilityEntries(
 						["belief-2"].map((beliefId) => ({
 							beliefId,
@@ -232,7 +228,8 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage([reading("both paths must name their target"), select(["belief-2"]), conclude()]),
 		]);
 		await h.session.prompt("Does the other path name its target?");
-		await h.session.prompt("keep the reading");
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		const correction = h.session.submitFormulationCorrection("identity matters too")!;
 		const pendingByTurn: string[][] = [];
 		const unsubscribe = h.session.subscribe((event) => {
@@ -240,8 +237,9 @@ describe("revision applicability review", () => {
 			pendingByTurn.push([...(h.session.getFormulationState()?.pendingApplicability ?? ["no-open-task"])]);
 		});
 		h.setResponses([
+			// The answer is all this turn may do: answering leaves the version waiting for its approval.
+			fauxAssistantMessage([answer(correction.id)]),
 			fauxAssistantMessage([
-				answer(correction.id),
 				applicabilityEntries([{ beliefId: "belief-2", decision: "carries-over", reason: "still this question" }]),
 				focus(["belief-2"]),
 			]),
@@ -260,12 +258,18 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("both paths name their target"),
 		]);
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version still waits until the user approves it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		unsubscribe();
 
 		// Inherited history has no place in this task's own belief order, so it counts as pre-existing:
 		// putting it back in scope owes a statement about what it means under this reading.
-		expect(pendingByTurn[0]).toEqual([]);
-		expect(pendingByTurn[1]).toEqual(["belief-1"]);
+		// The first turn only answers the objection; the review's own scope is classified next, and the
+		// inherited belief is owed a statement only once the later focus declaration brings it in.
+		expect(pendingByTurn[0]).toEqual(["belief-2"]);
+		expect(pendingByTurn[1]).toEqual([]);
+		expect(pendingByTurn[2]).toEqual(["belief-1"]);
 		const task = [...h.session.domainSnapshot.tasks.values()].at(-1)!;
 		expect(task.formulationReview?.applicability.map((entry) => entry.beliefId)).toEqual(["belief-2", "belief-1"]);
 		// Neither belief's evidence or status changed: applicability records a standing, not a verdict.
@@ -279,11 +283,8 @@ describe("revision applicability review", () => {
 		h.setResponses([
 			// belief-2 exists before the revision but is not in the focus the revision was made under.
 			fauxAssistantMessage([belief(), secondBelief(), focus(), reading("local retry control")]),
-			(context) => {
-				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+			(_context) => {
 				return fauxAssistantMessage([
-					fauxToolCall("answer_correction", { correctionId: replyId, response: "I keep this reading." }),
 					applicabilityEntries([{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }]),
 					focus(),
 					select(),
@@ -294,7 +295,8 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage([reading("cross-component identity ownership")]),
 		]);
 		await h.session.prompt("Investigate identity ownership");
-		await h.session.prompt("keep the reading");
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		const correction = h.session.submitFormulationCorrection("also consider the other path")!;
 		const pendingByTurn: string[][] = [];
 		const unsubscribe = h.session.subscribe((event) => {
@@ -302,11 +304,9 @@ describe("revision applicability review", () => {
 			pendingByTurn.push([...(h.session.getFormulationState()?.pendingApplicability ?? ["no-open-task"])]);
 		});
 		h.setResponses([
-			fauxAssistantMessage([
-				answer(correction.id),
-				applicability("carries-over", "still the question this reading asks"),
-				focus(),
-			]),
+			// The answer is all this turn may do: answering leaves the version waiting for its approval.
+			fauxAssistantMessage([answer(correction.id)]),
+			fauxAssistantMessage([applicability("carries-over", "still the question this reading asks"), focus()]),
 			fauxAssistantMessage([focus(["belief-1", "belief-2"])]),
 			fauxAssistantMessage([
 				applicabilityEntries([{ beliefId: "belief-2", decision: "carries-over", reason: "in scope now" }]),
@@ -322,12 +322,19 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("both paths are covered by this reading"),
 		]);
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version still waits until the user approves it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		unsubscribe();
 
 		// The review's scope was [belief-1]; belief-2 was never classified, so putting it in focus after
 		// the review closed still owes a statement about what it means under this reading.
-		expect(pendingByTurn[0]).toEqual([]);
-		expect(pendingByTurn[1]).toEqual(["belief-2"]);
+		// The first turn only answers the objection, so the review's own belief is still unaccounted
+		// for there; the scope is classified in the next turn, and belief-2 is owed only once the
+		// later focus declaration brings it in.
+		expect(pendingByTurn[0]).toEqual(["belief-1"]);
+		expect(pendingByTurn[1]).toEqual([]);
+		expect(pendingByTurn[2]).toEqual(["belief-2"]);
 		const task = [...h.session.domainSnapshot.tasks.values()][0]!;
 		expect(task.formulationReview?.applicability.map((entry) => entry.beliefId)).toEqual(["belief-1", "belief-2"]);
 		expect(task.status).toBe("completed");
@@ -344,11 +351,9 @@ describe("revision applicability review", () => {
 		h.setResponses([
 			// Turn 1 puts belief-1 out of scope and empties the focus; turn 2 brings it back, which makes
 			// the earlier `not-applicable` a statement about a scope the task no longer holds.
-			fauxAssistantMessage([
-				answer(correction.id),
-				applicability("not-applicable", "this reading asks about another path"),
-				focus([]),
-			]),
+			// The answer is all this turn may do: answering leaves the version waiting for its approval.
+			fauxAssistantMessage([answer(correction.id)]),
+			fauxAssistantMessage([applicability("not-applicable", "this reading asks about another path"), focus([])]),
 			fauxAssistantMessage([focus()]),
 			fauxAssistantMessage([applicability("carries-over", "it is in scope again under this reading")]),
 			fauxAssistantMessage([conclude()]),
@@ -356,10 +361,15 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("identity is reused on the path this reading asks about"),
 		]);
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version still waits until the user approves it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		unsubscribe();
 
-		expect(pendingByTurn[0]).toEqual([]);
-		expect(pendingByTurn[1]).toEqual(["belief-1"]);
+		// The first turn only answers the objection; the stale decision is replaced in the next turn,
+		// and the belief the reading put back in scope is owed a fresh statement after that.
+		expect(pendingByTurn[1]).toEqual([]);
+		expect(pendingByTurn[2]).toEqual(["belief-1"]);
 		// The fresh decision replaced the stale one, and the task was able to finish on it.
 		const task = [...h.session.domainSnapshot.tasks.values()][0]!;
 		expect(task.formulationReview?.applicability.map((entry) => entry.decision)).toEqual(["carries-over"]);
@@ -376,11 +386,14 @@ describe("revision applicability review", () => {
 		const unsubscribe = h.session.subscribe((event) => {
 			if (event.type !== "turn_end") return;
 			owed.push([...(h.session.getFormulationState()?.unrevalidated ?? ["no-open-task"])]);
-			if (owed.length === 1) leafAfterDecisions = h.sessionManager.getLeafId()!;
+			// Turn 1 only answers the objection, so the decisions are on the leaf the *next* turn ends
+			// at: that is the branch those decisions live on.
+			if (owed.length === 2) leafAfterDecisions = h.sessionManager.getLeafId()!;
 		});
 		h.setResponses([
+			// The answer is all this turn may do: answering leaves the version waiting for its approval.
+			fauxAssistantMessage([answer(correction.id)]),
 			fauxAssistantMessage([
-				answer(correction.id),
 				applicabilityEntries([
 					{
 						beliefId: "belief-1",
@@ -415,12 +428,16 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage("identity is reused across the tested boundary"),
 		]);
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version still waits until the user approves it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		unsubscribe();
 		const latestLeaf = h.sessionManager.getLeafId()!;
 
 		const task = h.session.domainSnapshot.tasks.get(taskId)!;
-		// Turn 1 accounts for both beliefs, turn 2 reviews focus, turn 3 adjudicates belief-2: after it
-		// the duty on belief-1 is still open, which is the case a path-insensitive check would miss.
+		// After the answering turn, turn 1 accounts for both beliefs, turn 2 reviews focus and turn 3
+		// adjudicates belief-2: after that the duty on belief-1 is still open, which is the case a
+		// path-insensitive check would miss.
 		expect(owed[2]).toEqual(["belief-1"]);
 		expect(text(h, "user")).toContain("may not report it as settled");
 		const entries = task.formulationReview?.applicability ?? [];
@@ -430,8 +447,9 @@ describe("revision applicability review", () => {
 		expect(task.status).toBe("completed");
 
 		// The decisions are log state: the branch that holds them replays them exactly, and going back
-		// to the revision restores the duty as owed rather than answered.
-		expect(owed[0]).toEqual(["belief-1"]);
+		// to the revision restores the duty as owed rather than answered. The turn that recorded them
+		// is the one after the answering turn, and there the duty on belief-1 is still open.
+		expect(owed[1]).toEqual(["belief-1"]);
 		await h.session.navigateTree(leafAfterDecisions);
 		const decided = new BeliefLoopController(h.session);
 		expect(decided.pendingApplicability()).toEqual([]);
@@ -465,11 +483,8 @@ describe("revision applicability review", () => {
 		h.setResponses([
 			// focus before publishing, then one user-driven turn that reviews and dispatches.
 			fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
-			(context) => {
-				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-				const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
+			(_context) => {
 				return fauxAssistantMessage([
-					fauxToolCall("answer_correction", { correctionId, response: "I keep this reading." }),
 					applicability("carries-over", "still the question under this reading"),
 					focus(),
 					select(),
@@ -480,7 +495,8 @@ describe("revision applicability review", () => {
 			fauxAssistantMessage([reading("cross-component identity ownership")]),
 		]);
 		await h.session.prompt("Investigate identity ownership");
-		await h.session.prompt("keep the reading");
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 	}
 
 	/** What the propose turn does when it declares a belief and puts it in the same focus. */
@@ -504,6 +520,8 @@ describe("revision applicability review", () => {
 		const correction = h.session.submitFormulationCorrection("also consider the other path")!;
 		const c = new BeliefLoopController(h.session);
 		c.answerFormulationCorrection(correction.id, "I keep the revised reading and will test its counterexample.");
+		// Answering is not consent: the version waits for the user's approval before anything else runs.
+		c.approveFormulation();
 		expect(c.focusReviewOwed()).toBe(true);
 		// The same turn declares a new belief and puts it in focus, before any round has dispatched.
 		const beliefId = declareAndFocus(c);
@@ -534,6 +552,8 @@ describe("revision applicability review", () => {
 		const correction = h.session.submitFormulationCorrection("also consider the other path")!;
 		const c = new BeliefLoopController(h.session);
 		c.answerFormulationCorrection(correction.id, "I keep the revised reading.");
+		// Answering is not consent: approving is what lets the review of this version be closed.
+		c.approveFormulation();
 		c.recordApplicability([{ beliefId: "belief-1", decision: "carries-over", reason: "still the question" }]);
 		c.setFocus(["belief-1"]);
 		expect(c.focusReviewOwed()).toBe(false);

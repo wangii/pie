@@ -16,6 +16,7 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type FormulationApprovalOutcome,
 	type ModelCycleResult,
 	type ParsedSkillBlock,
 	type PromptOptions,
@@ -48,6 +49,7 @@ export {
 	type ExperimentSelectionRecord,
 	type FastPathEpisode,
 	type FormulationAdoption,
+	type FormulationApproval,
 	type FormulationContent,
 	type FormulationCorrection,
 	type FormulationCorrectionId,
@@ -56,6 +58,7 @@ export {
 	type FormulationOrigin,
 	type FormulationRecheck,
 	type FormulationRecheckVerdict,
+	type FormulationResumeState,
 	type FormulationSource,
 	type FormulationState,
 	type FormulationVersionId,
@@ -84,6 +87,7 @@ export {
 	type TaskOutcome,
 } from "./core/agent-session-domain.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
+export type { FormulationApprovalResult } from "./core/belief-loop/belief-loop-controller.ts";
 // Compaction
 export {
 	type BranchPreparation,

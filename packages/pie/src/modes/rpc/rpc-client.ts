@@ -229,6 +229,27 @@ export class RpcClient {
 	}
 
 	/**
+	 * Approve the Frame on the table, or a named version.
+	 *
+	 * Approval is an act rather than a message: no prompt/steer/follow-up releases the Frame pause,
+	 * and a later revision waits for its own approval. A refusal rejects the returned promise.
+	 */
+	async approveFrame(
+		versionId?: string,
+	): Promise<{ outcome: "recorded" | "unchanged"; versionId: string; continuation: "started" }> {
+		const response = await this.send({ type: "approve_frame", versionId });
+		return this.getData(response);
+	}
+
+	/**
+	 * Record a user correction to the current Frame, addressed to the version on the table.
+	 */
+	async frameCorrect(message: string): Promise<{ correctionId: string }> {
+		const response = await this.send({ type: "frame_correct", message });
+		return this.getData(response);
+	}
+
+	/**
 	 * Start a new session, optionally with parent tracking.
 	 * @param parentSession - Optional parent session path for lineage tracking
 	 * @returns Object with `cancelled: true` if an extension cancelled the new session

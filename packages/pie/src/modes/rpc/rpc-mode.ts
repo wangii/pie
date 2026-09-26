@@ -461,6 +461,29 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "clear_queue", session.clearQueue());
 			}
 
+			case "approve_frame": {
+				// The user's own act on the reading on the table. A refusal is returned as an error rather
+				// than an approval: reporting "nothing was waiting" as consent is exactly the failure this
+				// command exists to remove.
+				const result = session.approveFormulation(command.versionId);
+				if (result.outcome === "rejected") return error(id, "approve_frame", result.reason);
+				return success(id, "approve_frame", {
+					outcome: result.outcome,
+					versionId: result.approval.versionId,
+					// The turn was launched before this response was produced; whether it settles is reported
+					// later by `get_state`'s formulation resume and the `formulation_resume_failed` event.
+					continuation: result.continuation,
+				});
+			}
+
+			case "frame_correct": {
+				const correction = session.submitFormulationCorrection(command.message);
+				if (!correction) {
+					return error(id, "frame_correct", "no active task, or the correction was blank");
+				}
+				return success(id, "frame_correct", { correctionId: correction.id });
+			}
+
 			case "new_session": {
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);

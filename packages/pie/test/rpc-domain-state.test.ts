@@ -250,4 +250,58 @@ describe("RPC domain state", () => {
 			await cleanup();
 		}
 	}, 30000);
+	it("records an explicit approval over RPC and refuses a version that is not on the table", async () => {
+		const { cleanup } = await startRpcMode();
+		try {
+			void send({ type: "prompt", message: "is the cache persistent?" });
+			await waitForEvent("ProblemFormulationRecorded");
+
+			// An approval names the reading it is for; naming one that is not waiting is an error
+			// rather than a silent success.
+			const wrong = await send({ type: "approve_frame", versionId: "formulation-nope" });
+			expect(wrong.success).toBe(false);
+			expect(String(wrong.error)).toContain("is not the reading waiting for approval");
+
+			const approved = await send({ type: "approve_frame" });
+			expect(approved.success).toBe(true);
+			expect((approved.data as { outcome: string }).outcome).toBe("recorded");
+			expect(String((approved.data as { versionId: string }).versionId)).toMatch(/^formulation-/);
+
+			// The same act twice is a no-op, not a second decision.
+			const again = await send({ type: "approve_frame" });
+			expect(again.success).toBe(true);
+			expect((again.data as { outcome: string }).outcome).toBe("unchanged");
+
+			const state = await send({ type: "get_state" });
+			const formulation = (state.data as { formulation: Record<string, unknown> }).formulation;
+			expect(formulation.approved).toBe(true);
+			expect(formulation.awaitingResponse).toBe(false);
+		} finally {
+			await cleanup();
+		}
+	}, 30000);
+
+	it("records an explicit correction over RPC without recording it as approval", async () => {
+		const { cleanup } = await startRpcMode();
+		try {
+			void send({ type: "prompt", message: "is the cache persistent?" });
+			await waitForEvent("ProblemFormulationRecorded");
+
+			const blank = await send({ type: "frame_correct", message: "   " });
+			expect(blank.success).toBe(false);
+			expect(String(blank.error)).toContain("no active task, or the correction was blank");
+
+			const corrected = await send({ type: "frame_correct", message: "the question is about the re-arm path" });
+			expect(corrected.success).toBe(true);
+			expect(String((corrected.data as { correctionId: string }).correctionId)).toMatch(/^formulation-correction-/);
+
+			const state = await send({ type: "get_state" });
+			const formulation = (state.data as { formulation: Record<string, unknown> }).formulation;
+			// An objection is not consent: the approval slot stays empty.
+			expect(formulation.approved).toBe(false);
+			expect((formulation.corrections as unknown[]).length).toBe(1);
+		} finally {
+			await cleanup();
+		}
+	}, 30000);
 });

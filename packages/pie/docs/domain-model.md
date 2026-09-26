@@ -754,7 +754,7 @@ tasks, their beliefs, and the cursor — in a JSON-serializable shape.
 
 ## Protocol versioning and old logs
 
-`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `6`. Every stored event carries the version
+`AGENT_SESSION_DOMAIN_SCHEMA_VERSION` currently reads `7`. Every stored event carries the version
 twice — once on the entry envelope, once on the event — and replay rejects any event whose version
 is not the current one.
 
@@ -765,7 +765,22 @@ is not the current one.
 | v3 | Problem-formulation records; `FormulationAdoption` on `Plan`/`FastPathEpisode` | no |
 | v4 | Experiment-selection records (`ExperimentSelected`/`ExperimentSelectionVoided`) | no |
 | v5 | Version-bound user response and focus review | no |
-| v6 | The per-round formulation recheck | yes |
+| v6 | The per-round formulation recheck | no |
+| v7 | Explicit Frame approval (`FormulationApproved`), separate from an objection | yes |
+
+### Reopening a session written before v7
+
+A v6 log is rejected rather than replayed, and the reason is specific to this bump: in v6 the
+wait on a published reading is released by a *correction* record, so a plain reply ("ok", "yes")
+is stored exactly like a real objection. v7 keeps approvals in their own record. Replaying a v6
+log under the v7 rule would either leave every v6 task waiting for an approval that was never
+asked for, or read an objection as consent — both are wrong, and guessing which one a given
+reply meant would rewrite the user's own history.
+
+Practical consequence, which the CLI/RPC surfaces do not hide: an older session file cannot be
+continued by this runtime. `DomainReplayError` names the stored version and the required one when
+the session is opened. Continuing the work means starting a new task in the current version; the
+old file is left untouched on disk and remains readable by the runtime version that wrote it.
 
 Every bump is a rename or an addition, never a migration, and the code is deliberately written
 that way:

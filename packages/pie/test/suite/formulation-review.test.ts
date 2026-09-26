@@ -43,22 +43,21 @@ async function pausedHarness(): Promise<Harness> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	harness.setResponses([
-		// focus before publishing; the second version waits for the user's reply to the first.
+		// focus before publishing; the publication pauses the run until the user approves it.
 		fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
-		(context) => {
-			const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-			const correctionId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
-			return fauxAssistantMessage([answer(correctionId), reading("cross-component identity ownership")]);
-		},
+		// After the approval the loop resumes and the second reading is published under the first
+		// one's scope; publishing is not gated by the review, so the reading alone is enough here.
+		fauxAssistantMessage([reading("cross-component identity ownership")]),
 	]);
 	await harness.session.prompt("Investigate identity ownership");
-	await harness.session.prompt("keep the reading");
+	harness.session.approveFormulation();
+	await harness.session.waitForIdle();
 	return harness;
 }
 
 describe("revision response and focus review", () => {
 	it("rejects v5 logs explicitly without rewriting them", () => {
-		expect(AGENT_SESSION_DOMAIN_SCHEMA_VERSION).toBe(6);
+		expect(AGENT_SESSION_DOMAIN_SCHEMA_VERSION).toBe(7);
 		const legacy = SessionManager.inMemory();
 		legacy.appendCustomEntry("pie.agent-session-domain-event", {
 			schemaVersion: 5,
@@ -66,7 +65,7 @@ describe("revision response and focus review", () => {
 		});
 		const before = JSON.stringify(legacy.getBranch());
 		expect(() => replayAgentSessionDomainEntries(legacy.getSessionId(), legacy.getBranch())).toThrow(
-			"schema v5, but this runtime requires v6",
+			"schema v5, but this runtime requires v7",
 		);
 		expect(JSON.stringify(legacy.getBranch())).toBe(before);
 	});
@@ -98,14 +97,15 @@ describe("revision response and focus review", () => {
 		});
 		h.setResponses([
 			fauxAssistantMessage([reading("local")]),
-			(context) => {
-				const seen = context.messages.map((message) => getMessageText(message)).join("\n");
-				const replyId = /formulation-correction-[0-9a-f-]+/.exec(seen)?.[0] ?? "";
-				return fauxAssistantMessage([answer(replyId), reading("system-wide")]);
-			},
+			fauxAssistantMessage([
+				applicability("belief-1", "carries-over", "identity across components is still the question"),
+				focus(),
+				reading("system-wide"),
+			]),
 		]);
 		await h.session.prompt("Investigate");
-		await h.session.prompt("keep the reading");
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		const correction = h.session.submitFormulationCorrection("use component ownership instead")!;
 		h.setResponses([fauxAssistantMessage([reading("component ownership"), answer(correction.id), conclude()])]);
 		await h.session.prompt("Process my correction");
@@ -189,6 +189,10 @@ describe("revision response and focus review", () => {
 			if (trace.length > 15) h.session.agent.abort();
 		});
 		await h.session.prompt("Continue with my response");
+		// Answering the objection is not consent: the version waits for its approval, so the rest of the
+		// script runs only after the user gives it.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		unsubscribe();
 		expect(trace.length, trace.join("\n")).toBeLessThanOrEqual(15);
 		expect(trace).toContain("route_task:error");
@@ -221,7 +225,7 @@ describe("revision response and focus review", () => {
 		]);
 	});
 
-	it("accepts a normal user reply, but neither an old target nor an extension message releases the version wait", async () => {
+	it("treats a normal reply as input rather than consent, and releases the wait only for an explicit act on the version on the table", async () => {
 		const h = await pausedHarness();
 		const history = h.session.getFormulationHistory();
 		const oldCorrection = h.session.submitFormulationCorrection("about the old reading", history[0].id)!;
@@ -232,36 +236,143 @@ describe("revision response and focus review", () => {
 		expect(h.session.getFormulationState()?.review?.responseCorrectionId).toBeUndefined();
 		expect(h.eventsOfType("TaskClosed")).toHaveLength(0);
 
-		let responseId = "";
-		const unsubscribe = h.session.subscribe((event) => {
-			if (event.type === "FormulationCorrectionSubmitted") {
-				responseId = event.correction.id;
-				h.appendResponses([
-					fauxAssistantMessage([
-						answer(oldCorrection.id),
-						answer(responseId),
-						applicability("belief-1", "carries-over", "identity across components is still the question"),
-						// Narrowing the focus to nothing does not drop the duty to say what the belief the
-						// revision was made about still means.
-						fauxToolCall("focus_beliefs", { beliefIds: [] }),
-						conclude(),
-					]),
-					fauxAssistantMessage([conclude()]),
-					fauxAssistantMessage("reviewed"),
-				]);
-			}
-		});
-		// Read the generated correction id from the domain event before the model's first response.
-		h.setResponses([]);
-		await h.session.prompt("I agree with the revised scope");
-		unsubscribe();
-		expect(responseId).not.toBe("");
+		// A plain reply is a message, not an act on the reading: it records no correction, does not
+		// restart the paused run, and leaves the wait exactly where it was. The corrections counted
+		// here are the old-target one, and no new one is added by the reply.
+		await expect(h.session.prompt("I agree with the revised scope")).rejects.toThrow("paused");
+		expect(h.session.getFormulationState()?.awaitingResponse).toBe(true);
+		expect(h.eventsOfType("FormulationCorrectionSubmitted")).toHaveLength(1);
+
+		// Queueing a steering or follow-up message is also input, not an act on the reading, and
+		// clearing the queue afterwards cannot turn a message nobody delivered into consent.
+		await h.session.steer("steer is not consent");
+		await h.session.followUp("neither is a follow-up");
+		expect(h.session.getFormulationState()?.awaitingResponse).toBe(true);
+		expect(h.eventsOfType("FormulationCorrectionSubmitted")).toHaveLength(1);
+		h.session.clearQueue();
+		expect(h.session.getFormulationState()?.awaitingResponse).toBe(true);
+
+		// Only an explicit correction against the version on the table releases the pause; answering it
+		// still has to account for the reading's own scope before the task can close.
+		const correction = h.session.submitFormulationCorrection("I agree with the revised scope")!;
+		h.setResponses([
+			// Answering is all this turn may do: once every objection is answered the version is waiting
+			// again, so the calls queued behind the answers are blocked.
+			fauxAssistantMessage([answer(oldCorrection.id), answer(correction.id)]),
+			fauxAssistantMessage([
+				applicability("belief-1", "carries-over", "identity across components is still the question"),
+				// Narrowing the focus to nothing does not drop the duty to say what the belief the
+				// revision was made about still means.
+				fauxToolCall("focus_beliefs", { beliefIds: [] }),
+				conclude(),
+			]),
+			fauxAssistantMessage([conclude()]),
+			fauxAssistantMessage("reviewed"),
+		]);
+		await h.session.prompt("Continue");
+		// The correction is answered by this turn; the reading it objected to still needs approval.
+		h.session.approveFormulation();
+		await h.session.waitForIdle();
 		const task = [...h.session.domainSnapshot.tasks.values()][0];
-		expect(task.formulationReview?.responseCorrectionId).toBe(responseId);
-		expect(task.formulationCorrections.map((item) => item.status)).toEqual(["resolved", "resolved", "resolved"]);
+		expect(task.formulationReview?.responseCorrectionId).toBe(correction.id);
+		expect(task.formulationCorrections.map((item) => item.status)).toEqual(["resolved", "resolved"]);
 		expect(task.formulationReview?.applicability.map((entry) => entry.beliefId)).toEqual(["belief-1"]);
 		expect(task.formulationReview?.scopedBeliefIds).toEqual(["belief-1"]);
 		expect(task.status).toBe("completed");
+	});
+
+	it("keeps a version waiting for approval after a correction is answered without a revision", async () => {
+		const h = await pausedHarness();
+		const taskId = h.session.taskId!;
+		const correction = h.session.submitFormulationCorrection("keep this scope; test a counterexample")!;
+		h.setResponses([
+			fauxAssistantMessage([answer(correction.id)]),
+			// Nothing may be dispatched or concluded on a reading the user never approved: the run
+			// stops handing back to the user, so these are never reached.
+			fauxAssistantMessage([focus(), select(), conclude()]),
+			fauxAssistantMessage("the reading is unchanged and unapproved"),
+		]);
+		await h.session.prompt("Continue with my response");
+		const task = h.session.domainSnapshot.tasks.get(taskId)!;
+		expect(task.formulationCorrections.map((item) => item.status)).toEqual(["resolved"]);
+		expect(task.formulationReview?.approval).toBeUndefined();
+		expect(h.session.getFormulationState()?.awaitingResponse).toBe(true);
+		expect(h.eventsOfType("ExperimentSelected")).toHaveLength(0);
+		expect(h.eventsOfType("TaskClosed")).toHaveLength(0);
+	});
+
+	it("records a continuation that did not start instead of reporting the approval as consent", async () => {
+		const h = await pausedHarness();
+		// The approval is already recorded on the second reading; what is being observed is the turn
+		// that is supposed to continue on it. Injecting the failure is the only way to reach the case
+		// a transport or an aborted run produces in practice.
+		const target = h.session as unknown as { sendCustomMessage: (...args: unknown[]) => Promise<void> };
+		const original = target.sendCustomMessage;
+		target.sendCustomMessage = async () => {
+			throw new Error("transport closed");
+		};
+		// `phase` is written synchronously on approval, so the state already names the reading being
+		// continued when this returns — the failure is what the pre-existing entry cannot express.
+		const before = h.session.getFormulationResume();
+		expect(before?.versionId).not.toBe(h.session.getFormulationState()?.review?.versionId);
+
+		const result = h.session.approveFormulation();
+		target.sendCustomMessage = original;
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// The approval is recorded — the user's act is not undone by a failure to resume — and the
+		// continuation is a separately readable fact rather than an inference from the first.
+		expect(result.outcome).toBe("recorded");
+		const versionId = result.outcome === "recorded" ? result.approval.versionId : "";
+		expect(h.session.getFormulationState()?.resume).toEqual({
+			versionId,
+			phase: "failed",
+			reason: "transport closed",
+		});
+		expect(h.eventsOfType("formulation_resume_failed").map((event) => event.reason)).toEqual(["transport closed"]);
+		expect(h.session.getFormulationState()?.awaitingResponse).toBe(false);
+	});
+
+	it("records a continuation that started, so the two outcomes stay distinguishable", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		h.setResponses([
+			fauxAssistantMessage([belief(), focus(), reading("local retry control")]),
+			fauxAssistantMessage([reading("cross-component identity ownership")]),
+		]);
+		await h.session.prompt("Investigate identity ownership");
+		const approved = h.session.getFormulationState()?.current?.id;
+		expect(approved).toBeDefined();
+		expect(h.session.getFormulationState()?.resume).toBe(null);
+
+		h.session.approveFormulation();
+		// The continuation is started, not awaited by the caller: the record is written when the
+		// resumed turn actually went out.
+		// `started` is written synchronously and `settled` only once the turn's delivery resolves, so
+		// the settled phase is what has to be waited for, not idleness alone.
+		for (let i = 0; i < 200 && h.session.getFormulationResume()?.phase !== "settled"; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		await h.session.waitForIdle();
+
+		expect(h.session.getFormulationResume()).toEqual({ versionId: approved, phase: "settled" });
+		// The transcript records the act between the wait it answers and any later one: the earlier
+		// block is not deleted, and it is no longer the last word on that version.
+		const custom = h.session.messages
+			.filter((message) => message.role === "custom")
+			.map((message) => ({
+				type: (message as { customType?: string }).customType,
+				display: (message as { display?: boolean }).display,
+			}));
+		expect(custom.map((entry) => entry.type)).toEqual([
+			"formulation_wait",
+			"formulation_approved",
+			"formulation_wait",
+		]);
+		expect(custom.map((entry) => entry.display)).toEqual([true, true, true]);
+		// The reading the approval was made against is the one named, not whichever version a later
+		// publication made current.
+		expect(h.session.getFormulationState()?.current?.id).not.toBe(approved);
 	});
 
 	it("restores the version gate, beliefs and focus from the branch and refuses premature selection or outcome", async () => {
@@ -285,6 +396,9 @@ describe("revision response and focus review", () => {
 		const correction = restored.submitFormulationCorrection("confirmed")!;
 		expect(() => restored.setFocus(["belief-1"])).toThrow("Answer");
 		restored.answerFormulationCorrection(correction.id, "I will keep this reading");
+		// Answering it releases the pause so this can be recorded, but the reading still has to be
+		// approved before anything is dispatched or concluded on it.
+		restored.approveFormulation();
 		// The response is answered, but the reading's own scope has not been accounted for yet.
 		expect(() => restored.selectExperiment({ intent: "test", beliefIds: ["belief-1"] })).toThrow(
 			"review_applicability",

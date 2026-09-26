@@ -47,6 +47,7 @@ src/**
 !src/index.ts
 !src/main.ts
 !src/modes/interactive/components/belief-set-panel.ts
+!src/modes/interactive/components/custom-message.ts
 !src/modes/interactive/components/footer.ts
 !src/modes/interactive/components/frame-panel.ts
 !src/modes/interactive/interactive-mode.ts

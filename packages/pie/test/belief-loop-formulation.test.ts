@@ -37,9 +37,9 @@ function beginTask(controller: BeliefLoopController): void {
 	controller.beginDomainTask("is the cache persistent?", "is the cache persistent?");
 }
 
-/** release the wait every publication now leaves, and close its review. */
+/** approve the reading every publication waits on, and close its review. */
 function releasePublication(controller: BeliefLoopController): void {
-	controller.receiveFormulationResponse("keep this reading");
+	controller.approveFormulation();
 	const correction = controller.pendingCorrections()[0];
 	if (correction) controller.answerFormulationCorrection(correction.id, "I keep this reading.");
 	for (const beliefId of controller.pendingApplicability()) {
@@ -64,7 +64,7 @@ describe("formulation publishing", () => {
 		// the first publication waits for the user, so the revision is only allowed after
 		// the response, the applicability review of the scope it carried, and the focus review.
 		expect(controller.awaitingFormulationResponse()).toBe(true);
-		controller.receiveFormulationResponse("keep this reading");
+		controller.approveFormulation();
 		const correction = controller.pendingCorrections()[0];
 		if (correction) controller.answerFormulationCorrection(correction.id, "I keep this reading.");
 		for (const beliefId of controller.pendingApplicability()) {
@@ -591,5 +591,63 @@ describe("formulation prompt contract", () => {
 		expect(guidelines).toContain("only when you can name a real possibility");
 		expect(schema).toContain("name the finding rather than the fact that a round happened");
 		expect(schema).toContain("do not invent one");
+	});
+});
+
+describe("frame projection per role", () => {
+	it("keeps the reading for every role but sends propose's own obligations only to propose", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		const belief = controller.beliefSet.apply({
+			op: "propose",
+			statement: "the cache survives logout",
+			domain: "product",
+			expectation: "a post-logout read keeps the value",
+			evidenceRounds: 1,
+		});
+		controller.onBeliefDelta(
+			{
+				op: "propose",
+				statement: "the cache survives logout",
+				domain: "product",
+				expectation: "a post-logout read keeps the value",
+				evidenceRounds: 1,
+			},
+			belief,
+			undefined,
+		);
+		controller.setFocus([belief.id]);
+		controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+
+		// propose owes the review, so it reads what the reading has not accounted for yet. The
+		// publication time is bookkeeping the next decision does not turn on.
+		const proposeFrame = controller.frameStateMessage();
+		expect(proposeFrame).toContain("Beliefs this reading has not accounted for yet:");
+		expect(proposeFrame).not.toContain("published 20");
+
+		// A probing role gets the reading and the gate, never a list it may not act on.
+		controller.loopState = { role: "execution", episodeHorizon: 2, leaseReportNudged: false };
+		const executionFrame = controller.frameStateMessage();
+		expect(executionFrame).toContain("<current_formulation>");
+		expect(executionFrame).toContain("Interpretation:");
+		expect(executionFrame).not.toContain("Beliefs this reading has not accounted for yet:");
+	});
+});
+
+describe("approval against an unanswered objection", () => {
+	it("refuses to approve a version while an objection against it is unanswered", () => {
+		const { controller } = createController();
+		beginTask(controller);
+		const published = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		expect(published.outcome).toBe("recorded");
+		const correction = controller.submitFormulationCorrection("this is not the question")!;
+		expect(controller.pendingCorrections().map((item) => item.id)).toEqual([correction.id]);
+
+		// Approving records consent for a reading the user just objected to, with the answer still
+		// outstanding. The version has to stay unapproved until the objection has been answered.
+		const result = controller.approveFormulation();
+		expect(result.outcome).toBe("rejected");
+		expect(controller.formulationApproval()).toBeUndefined();
+		expect(controller.pendingCorrections().map((item) => item.id)).toEqual([correction.id]);
 	});
 });

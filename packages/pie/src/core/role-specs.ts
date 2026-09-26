@@ -238,8 +238,10 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 
 export const TRANSITION_STEERS = {
 	awaitFormulationResponse:
-		"Execution is paused for your response to the Frame. Reply to confirm, correct, or clarify this reading; " +
-		"the agent must answer your response and review the reading before continuing.",
+		"Execution is paused until you act on this Frame yourself. Approve it to build on this reading, or correct it to say " +
+		"it is wrong; a plain reply is treated as an ordinary message and does not release the pause. Approving records your " +
+		"decision for this version only — a later revision waits for its own approval — and the agent must answer a " +
+		"correction and review the reading before continuing.",
 	reviewFocus:
 		"Review the task focus under the current Frame with focus_beliefs before selecting an experiment, routing to " +
 		"fast path, or concluding. The same belief ids are allowed: review relevance, not truth. Keep counterexamples in scope.",
@@ -282,6 +284,11 @@ export const TRANSITION_STEERS = {
 		`No experiment is selected, so these beliefs stay out of execution: ${statements}. Declare the task focus with ` +
 		`focus_beliefs (if not already declared) and select the next experiment with select_experiment, naming the task ` +
 		`decision its outcome could change. Dispatch is limited to the selected beliefs.`,
+	// The focus is already declared, so asking for it again would repeat the step the model just took —
+	// the next action is the selection, and saying so is what keeps one obligation from costing two turns.
+	selectExperimentAfterFocus: (statements: string) =>
+		`No experiment is selected, so these beliefs stay out of execution: ${statements}. Select the next experiment with ` +
+		`select_experiment, naming the task decision its outcome could change. Dispatch is limited to the selected beliefs.`,
 	deepenOrConclude:
 		"Choose the unresolved uncertainty with the highest expected task-relevant information gain, or conclude if no " +
 		"obvious unresolved uncertainty could materially change the answer.",

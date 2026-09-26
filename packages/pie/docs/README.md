@@ -2,6 +2,7 @@
 
 This directory contains only documentation for PIE's epistemic model and belief loop:
 
+- [LLM request and Frame overview](overview.md)
 - [Belief-loop roles](belief-loop-roles.md)
 - [Epistemic boundary](epistemic-view-skeleton.md)
 - [Framing beliefs removal](framing-belief.md)
