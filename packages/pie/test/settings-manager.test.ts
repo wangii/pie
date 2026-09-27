@@ -287,6 +287,41 @@ describe("SettingsManager", () => {
 			expect(manager.getFastPathThinkingLevel()).toBe("max");
 		});
 
+		it("loads the propose and finalReport model slots from settings-pie.json", () => {
+			writeFileSync(
+				join(agentDir, "settings-pie.json"),
+				JSON.stringify({
+					defaultModel: "pie-default",
+					defaultThinkingLevel: "medium",
+					proposeModel: "pie-propose",
+					proposeThinkingLevel: "high",
+					reportModel: "pie-report",
+					reportThinkingLevel: "low",
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getProposeModel()).toBe("pie-propose");
+			expect(manager.getProposeThinkingLevel()).toBe("high");
+			expect(manager.getReportModel()).toBe("pie-report");
+			expect(manager.getReportThinkingLevel()).toBe("low");
+		});
+
+		it("falls back to defaultModel and defaultThinkingLevel for the propose and report slots", () => {
+			writeFileSync(
+				join(agentDir, "settings-pie.json"),
+				JSON.stringify({ defaultModel: "pie-default", defaultThinkingLevel: "medium" }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getProposeModel()).toBe("pie-default");
+			expect(manager.getReportModel()).toBe("pie-default");
+			expect(manager.getProposeThinkingLevel()).toBe("medium");
+			expect(manager.getReportThinkingLevel()).toBe("medium");
+		});
+
 		it("loads pie settings from settings-pie.json alongside non-pie from settings.json", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),

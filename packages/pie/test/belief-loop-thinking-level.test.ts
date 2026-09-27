@@ -2,7 +2,8 @@ import { describe, expect, test } from "vitest";
 import { type LoopState, selectRoleThinkingLevel } from "../src/core/belief-loop/belief-loop-controller.ts";
 
 const levels = {
-	default: "minimal" as const,
+	propose: "minimal" as const,
+	report: "low" as const,
 	execution: "medium" as const,
 	fastPath: "high" as const,
 	distillation: "xhigh" as const,
@@ -21,7 +22,14 @@ describe("selectRoleThinkingLevel", () => {
 		expect(selectRoleThinkingLevel("execution", state("execution"), levels, "max")).toBe("medium");
 		expect(selectRoleThinkingLevel("execution", state("execution", true), levels, "max")).toBe("high");
 		expect(selectRoleThinkingLevel("distill", state("distill"), levels, "max")).toBe("xhigh");
-		expect(selectRoleThinkingLevel("finalReport", state("finalReport"), levels, "max")).toBe("minimal");
+		expect(selectRoleThinkingLevel("finalReport", state("finalReport"), levels, "max")).toBe("low");
+	});
+
+	test("propose and finalReport select levels independently", () => {
+		expect(selectRoleThinkingLevel("propose", state("propose"), { ...levels, propose: undefined }, "max")).toBe(
+			"max",
+		);
+		expect(selectRoleThinkingLevel("finalReport", state("finalReport"), levels, "max")).toBe("low");
 	});
 
 	test("falls back to the session level when a role setting is absent", () => {

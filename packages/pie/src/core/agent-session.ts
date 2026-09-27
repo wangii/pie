@@ -64,7 +64,12 @@ import type {
 } from "./agent-session-domain.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { BeliefLoopController, type LoopState, type RoleStatus } from "./belief-loop/belief-loop-controller.ts";
+import {
+	BeliefLoopController,
+	type LoopState,
+	type RoleStatus,
+	shouldDegradeRoleModel,
+} from "./belief-loop/belief-loop-controller.ts";
 import { isProbeTool } from "./belief-loop/message-projection.ts";
 import type { Belief } from "./belief-set.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
@@ -114,6 +119,7 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import { resolveCliModel } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -1507,6 +1513,10 @@ export class AgentSession {
 			return true;
 		}
 
+		if (await this._degradeModelAfterFailure(msg)) {
+			return true;
+		}
+
 		if (msg.stopReason === "error" && this._retryAttempt > 0) {
 			this._emit({
 				type: "auto_retry_end",
@@ -1532,6 +1542,68 @@ export class AgentSession {
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
 		return this.agent.hasQueuedMessages();
+	}
+
+	/** Whether a failed turn should fall back to the configured default model. */
+	private _shouldDegradeModel(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		// Context overflow is recovered by compaction, not by changing models.
+		if (isContextOverflow(message, this.model?.contextWindow ?? 0)) return false;
+		// A role is degraded once; a failure after that has no further fallback and ends the run.
+		if (this._beliefLoop.currentRoleDegraded) return false;
+		return shouldDegradeRoleModel(
+			this._beliefLoop.roleConfiguredModelSpec(this._beliefLoop.role),
+			this.settingsManager.getDefaultModel(),
+		);
+	}
+
+	/**
+	 * Fall back to `defaultModel` after a role's model fails.
+	 *
+	 * The retry path re-issues the same model; when its budget is spent or the failure is
+	 * not retryable (auth/provider failures, quota, request setup), this switches the
+	 * current role to the session's default model and resends the turn. Context overflow is
+	 * excluded above because compaction owns that recovery. The failed assistant message is
+	 * removed first, exactly as the retry path does, because `runAgentLoopContinue` refuses to
+	 * continue when the last message is an assistant message and the resend must not carry a
+	 * stale error turn. Both the immediate continuation and later turns then use the default:
+	 * `agent.state.model` is set for the continuation's first turn, and `markRoleDegraded` makes
+	 * `roleModelFor` resolve `defaultModel` for later turns instead of the failed role model.
+	 */
+	private async _degradeModelAfterFailure(message: AssistantMessage): Promise<boolean> {
+		if (!this._shouldDegradeModel(message)) {
+			return false;
+		}
+		const role = this._beliefLoop.role;
+		this._beliefLoop.markRoleDegraded(role);
+		const messages = this.agent.state.messages;
+		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+			this.agent.state.messages = messages.slice(0, -1);
+		}
+		const fallback = this._beliefLoop.roleModelFor(role);
+		if (fallback) {
+			this.agent.state.model = fallback;
+		}
+		this._retryAttempt = 0;
+		return true;
+	}
+
+	/**
+	 * Resolve `defaultModel` when the current model has no usable credential, so a run can
+	 * start on the default instead of failing at the pre-run credential check. Returns
+	 * undefined when there is no distinct default model with configured auth.
+	 */
+	private async _resolveAuthFallbackModel(): Promise<Model<any> | undefined> {
+		const spec = this.settingsManager.getDefaultModel();
+		if (!spec) return undefined;
+		const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this._modelRuntime });
+		const model = resolved.model;
+		if (!model) return undefined;
+		if (modelsAreEqual(model, this.model)) return undefined;
+		const configured =
+			this._modelRuntime.hasConfiguredAuth(model.provider) ||
+			(await this._modelRuntime.checkAuth(model.provider)) !== undefined;
+		return configured ? model : undefined;
 	}
 
 	/**
@@ -1636,15 +1708,21 @@ export class AgentSession {
 				this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 				(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
 			if (!hasConfiguredAuth) {
-				const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
-				if (isOAuth) {
-					throw new Error(
-						`Authentication failed for "${this.model.provider}". ` +
-							`Credentials may have expired or network is unavailable. ` +
-							`Run '/login ${this.model.provider}' to re-authenticate.`,
-					);
+				const fallback = await this._resolveAuthFallbackModel();
+				if (fallback) {
+					this._beliefLoop.markRoleDegraded(this._beliefLoop.role);
+					this.agent.state.model = fallback;
+				} else {
+					const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
+					if (isOAuth) {
+						throw new Error(
+							`Authentication failed for "${this.model.provider}". ` +
+								`Credentials may have expired or network is unavailable. ` +
+								`Run '/login ${this.model.provider}' to re-authenticate.`,
+						);
+					}
+					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 				}
-				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
 
 			// Check if we need to compact before sending (catches aborted responses).

@@ -5,7 +5,7 @@
 
 export type LoopRole = "propose" | "distill" | "execution" | "finalReport";
 
-export type ModelPolicy = "default" | "execution" | "distillation" | "fastPath";
+export type ModelPolicy = "propose" | "report" | "execution" | "distillation" | "fastPath";
 
 export type ProjectionKind = "belief" | "distill" | "execution" | "finalReport";
 
@@ -141,7 +141,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 		// Propose owns the whole control surface: routing, the belief state, scope, the experiment
 		// selection, and the formulation decision are all its call.
 		tools: [...BELIEF_SURFACE_TOOLS],
-		modelPolicy: "default",
+		modelPolicy: "propose",
 		projection: "belief",
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, which the propose role does not have. Choose the next uncertainty with ` +
@@ -229,7 +229,7 @@ export const ROLE_SPECS: Record<LoopRole, RoleSpec> = {
 			"If a task outcome was recorded, state the delivered result and how it was verified, and carry any remaining blocker. " +
 			"Distinguish established findings from unresolved or inconclusive points. You have no tools.",
 		tools: [],
-		modelPolicy: "default",
+		modelPolicy: "report",
 		projection: "finalReport",
 		strayToolSteer: (names) =>
 			`You tried to call ${names}, but finalReport has no tools. Write the evidence-grounded conclusion in plain text.`,

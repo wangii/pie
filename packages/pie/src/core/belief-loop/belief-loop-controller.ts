@@ -64,7 +64,7 @@ import {
 
 import type { ContextUsage } from "../extensions/index.ts";
 import { resolveCliModel } from "../model-resolver.ts";
-import { ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
+import { type LoopRole, ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
 import { buildSystemPrompt } from "../system-prompt.ts";
 import type { FormulationCitation } from "../tools/formulation.ts";
 import { isProbeTool, projectContextMessages, projectMessagesFor } from "./message-projection.ts";
@@ -222,7 +222,8 @@ export function selectRoleThinkingLevel(
 	role: LoopState["role"],
 	loopState: LoopState,
 	levels: {
-		default?: ThinkingLevel;
+		propose?: ThinkingLevel;
+		report?: ThinkingLevel;
 		execution?: ThinkingLevel;
 		fastPath?: ThinkingLevel;
 		distillation: ThinkingLevel;
@@ -236,7 +237,9 @@ export function selectRoleThinkingLevel(
 				? loopState.role === "execution" && loopState.fastPath
 					? levels.fastPath
 					: levels.execution
-				: levels.default;
+				: role === "propose"
+					? levels.propose
+					: levels.report;
 	return configured ?? sessionLevel;
 }
 
@@ -247,11 +250,11 @@ export function selectRoleThinkingLevel(
  *
  * It consults `ROLE_SPECS[role].modelPolicy` as the single source of truth for
  * which setting a role uses, so the role → model mapping never drifts from the
- * role spec (propose and finalReport/`default`, distill/`distillation`, execution/`execution`).
+ * role spec (propose/`propose`, finalReport/`report`, distill/`distillation`,
+ * execution/`execution`).
  *
- * - `propose` always follows the `default` model so every proposal turn sticks to
- *   the cost/quality strategy (it used to only match the first proposal after a
- *   task reset, then fall back to the session model).
+ * - `propose` uses its own `propose` model so a proposal turn's cost/quality
+ *   strategy is independent of the final synthesis model.
  * - `execution` uses `fastPath` when the loop is in the execution fast-path, else
  *   `execution`.
  *
@@ -262,19 +265,34 @@ export function selectRoleModelSpec(
 	role: LoopState["role"],
 	loopState: LoopState,
 	models: {
-		default?: string;
+		propose?: string;
+		report?: string;
 		execution?: string;
 		fastPath?: string;
 		distillation?: string;
 	},
 ): string | undefined {
 	const policy = ROLE_SPECS[role].modelPolicy;
-	if (policy === "default") return models.default;
+	if (policy === "propose") return models.propose;
+	if (policy === "report") return models.report;
 	if (policy === "distillation") return models.distillation;
 	if (policy === "execution") {
 		return loopState.role === "execution" && loopState.fastPath ? models.fastPath : models.execution;
 	}
-	return policy === "fastPath" ? models.fastPath : models.default;
+	return models.fastPath;
+}
+
+/**
+ * Whether a failed role turn should fall back to `defaultModel`.
+ *
+ * The retry classification answers a different question — whether a failure is
+ * worth re-issuing on the same model. Degradation asks whether the role is running
+ * on a model other than the configured default, so that a distinct model exists to
+ * fall back to. An absent `defaultSpec` means there is nothing to degrade to and
+ * the failure is left as-is.
+ */
+export function shouldDegradeRoleModel(roleSpec: string | undefined, defaultSpec: string | undefined): boolean {
+	return roleSpec !== undefined && defaultSpec !== undefined && roleSpec !== defaultSpec;
 }
 
 // ============================================================================
@@ -296,6 +314,8 @@ export class BeliefLoopController {
 	consumedRouteIds: Set<string> = new Set();
 	/** True once the cheap pre-conclusion adversarial check has fired for the current task. */
 	reflected = false;
+	/** Roles whose configured model failed this task and now run on `defaultModel`. */
+	private degradedRoles = new Set<LoopRole>();
 	/** Latest cache hit rate per belief-loop role, captured at message_end. */
 	roleCacheHitRate: Partial<Record<"propose" | "distill" | "execution", number>> = {};
 	/** Full active tool names (independent of the current role's subset), owned by the host. */
@@ -459,7 +479,8 @@ export class BeliefLoopController {
 				this.role,
 				this.loopState,
 				{
-					default: this.host.settingsManager.getDefaultThinkingLevel(),
+					propose: this.host.settingsManager.getProposeThinkingLevel(),
+					report: this.host.settingsManager.getReportThinkingLevel(),
 					execution: this.host.settingsManager.getExecutionThinkingLevel(),
 					fastPath: this.host.settingsManager.getFastPathThinkingLevel(),
 					distillation: this.host.settingsManager.getDistillationThinkingLevel(),
@@ -1528,6 +1549,7 @@ export class BeliefLoopController {
 		this.taskStartIndex = this.host.agent.state.messages.length;
 		this.repeatedFailures = new Map();
 		this.repeatedFailureNudged = new Set();
+		this.degradedRoles.clear();
 		this.beliefSet.pruneForNewTask();
 		this.beliefsAtTaskReset = this.beliefSet.beliefs.length;
 	}
@@ -2390,14 +2412,32 @@ export class BeliefLoopController {
 		return declared === undefined || declared.includes("execution");
 	}
 
+	/** The configured model spec for a role, ignoring any degradation fallback. */
+	roleConfiguredModelSpec(role: "propose" | "distill" | "execution" | "finalReport"): string | undefined {
+		return selectRoleModelSpec(role, this.loopState, {
+			propose: this.host.settingsManager.getProposeModel(),
+			report: this.host.settingsManager.getReportModel(),
+			execution: this.host.settingsManager.getExecutionModel(),
+			fastPath: this.host.settingsManager.getFastPathModel(),
+			distillation: this.host.settingsManager.getDistillationModel(),
+		});
+	}
+
+	/** Whether the role running now has already fallen back to `defaultModel`. */
+	get currentRoleDegraded(): boolean {
+		return this.degradedRoles.has(this.role);
+	}
+
+	/** Record that a role's configured model failed and now falls back to `defaultModel`. */
+	markRoleDegraded(role: LoopRole): void {
+		this.degradedRoles.add(role);
+	}
+
 	roleModelFor(role: "propose" | "distill" | "execution" | "finalReport"): Model<any> | undefined {
 		if (this.beliefSetUsable) {
-			const spec = selectRoleModelSpec(role, this.loopState, {
-				default: this.host.settingsManager.getDefaultModel(),
-				execution: this.host.settingsManager.getExecutionModel(),
-				fastPath: this.host.settingsManager.getFastPathModel(),
-				distillation: this.host.settingsManager.getDistillationModel(),
-			});
+			const spec = this.degradedRoles.has(role)
+				? this.host.settingsManager.getDefaultModel()
+				: this.roleConfiguredModelSpec(role);
 			if (spec) {
 				const resolved = resolveCliModel({ cliModel: spec, modelRuntime: this.host.modelRuntime });
 				if (resolved.model) {

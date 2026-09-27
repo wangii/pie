@@ -116,6 +116,14 @@ export interface PieSettings {
 	executionThinkingLevel?: ThinkingLevel;
 	/** Thinking level for fast-path execution. */
 	fastPathThinkingLevel?: ThinkingLevel;
+	/** Model for the belief loop's propose role. Defaults to `defaultModel`. */
+	proposeModel?: string;
+	/** Thinking level for the belief loop's propose role. Defaults to `defaultThinkingLevel`. */
+	proposeThinkingLevel?: ThinkingLevel;
+	/** Model for the belief loop's finalReport role. Defaults to `defaultModel`. */
+	reportModel?: string;
+	/** Thinking level for the belief loop's finalReport role. Defaults to `defaultThinkingLevel`. */
+	reportThinkingLevel?: ThinkingLevel;
 	/** Model for the belief loop's execution (probe) role; overrides the session model for that role only. */
 	executionModel?: string;
 	/**
@@ -838,6 +846,14 @@ export class SettingsManager {
 		return this.settings.pie?.defaultModel ?? this.settings.defaultModel;
 	}
 
+	getProposeModel(): string | undefined {
+		return this.settings.pie?.proposeModel ?? this.getDefaultModel();
+	}
+
+	getReportModel(): string | undefined {
+		return this.settings.pie?.reportModel ?? this.getDefaultModel();
+	}
+
 	getExecutionModel(): string | undefined {
 		return this.settings.pie?.executionModel;
 	}
@@ -925,6 +941,14 @@ export class SettingsManager {
 
 	getDefaultThinkingLevel(): ThinkingLevel | undefined {
 		return this.settings.pie?.defaultThinkingLevel ?? this.settings.defaultThinkingLevel;
+	}
+
+	getProposeThinkingLevel(): ThinkingLevel | undefined {
+		return this.settings.pie?.proposeThinkingLevel ?? this.getDefaultThinkingLevel();
+	}
+
+	getReportThinkingLevel(): ThinkingLevel | undefined {
+		return this.settings.pie?.reportThinkingLevel ?? this.getDefaultThinkingLevel();
 	}
 
 	setDefaultThinkingLevel(level: ThinkingLevel): void {
