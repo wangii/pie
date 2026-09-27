@@ -69,8 +69,8 @@ export class NodeSqliteDatabase implements SqliteDatabase {
 		} catch (error) {
 			try {
 				this.database.exec("ROLLBACK");
-			} catch {
-				// Preserve the error that caused the transaction to fail.
+			} catch (rollbackError) {
+				throw new AggregateError([error, rollbackError], "SQLite transaction failed and rollback failed");
 			}
 			throw error;
 		}

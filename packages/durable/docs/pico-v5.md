@@ -10,7 +10,7 @@ import type {
   JsonValue,
   ReplicatedState,
 } from "@earendil-works/chord";
-import { applyImmutable, type Op } from "@earendil-works/chord/delta";
+import type { Op } from "@earendil-works/chord/delta";
 import type {
   Message,
   Models,
@@ -55,8 +55,9 @@ Required invariants:
 3. All visible progress is durable. There is no volatile publication path.
 4. External effects do not run inside the Session mutation transaction.
 5. Entries and IDs are immutable and never reused after a committed write.
-6. Document drafts are revoked when their transaction callback settles. Values
-   assigned into a draft are copied by value.
+6. Document drafts are fully revoked when their transaction callback settles:
+   the Session synchronously prepares or aborts every open change at that point.
+   Values assigned into a draft are copied by value and must be strict JSON.
 7. The mutation line remains held through storage settlement and committed-state
    adoption. Listener callbacks run later, off the line.
 8. An uncertain storage failure is fatal to the open Session. It publishes
@@ -69,20 +70,37 @@ The concrete JSON representations may add bookkeeping fields, but must preserve
 these contracts.
 
 ```ts
-type Id = number;
+declare const idBrand: unique symbol;
+type Id<Kind extends string, Type = unknown> = number & {
+  readonly [idBrand]: {
+    readonly kind: Kind;
+    readonly type: Type;
+  };
+};
+type ConversationId = Id<"conversation">;
+type EntryId = Id<"entry">;
+type TaskId<Result = unknown> = Id<"task", Result>;
+type SubmissionId = Id<"submission">;
+type DocumentId = Id<"document">;
+
+declare const seqBrand: unique symbol;
 /** Strictly increases between commits; gaps are permitted. */
-type Seq = number;
-const ROOT_CONVERSATION_ID: Id = 1;
+type Seq = number & { readonly [seqBrand]: "sequence" };
+const ROOT_CONVERSATION_ID = 1 as ConversationId;
+
+type ConversationOwnership =
+  | { readonly kind: "ownerless" }
+  | { readonly kind: "task"; readonly taskId: TaskId };
 
 type ConversationRecord = {
-  readonly id: Id;
+  readonly id: ConversationId;
   readonly parent?: {
-    readonly conversationId: Id;
-    readonly at: Id;
+    readonly conversationId: ConversationId;
+    readonly at: EntryId;
   };
   readonly owner?: {
-    readonly conversationId: Id;
-    readonly taskId: Id;
+    readonly conversationId: ConversationId;
+    readonly taskId: TaskId;
   };
 };
 ```
@@ -108,30 +126,30 @@ order yields the effective prompt and tool set.
 
 ```ts
 type ContextEdit = {
-  readonly target: Id;
+  readonly target: EntryId;
 } & (
   | { readonly action: "omit"; readonly messages?: never }
   | { readonly action: "replace"; readonly messages: readonly Message[] }
 );
 
 type EntryRecord = {
-  readonly id: Id;
-  readonly conversationId: Id;
+  readonly id: EntryId;
+  readonly conversationId: ConversationId;
   readonly kind: string;
   readonly model?: readonly Message[];
   readonly data?: JsonValue;
-  readonly head?: Id;
+  readonly head?: EntryId;
   readonly edits?: readonly ContextEdit[];
-  readonly byTaskId?: Id;
+  readonly byTaskId?: TaskId;
 };
 
 type EntryDraft = Omit<EntryRecord, "id" | "conversationId" | "byTaskId" | "head"> & {
-  readonly head?: Id | "self";
+  readonly head?: EntryId | "self";
 };
 
 type SubmissionRecordBase = {
-  readonly id: Id;
-  readonly conversationId: Id;
+  readonly id: SubmissionId;
+  readonly conversationId: ConversationId;
   readonly requestId?: string;
 };
 
@@ -148,21 +166,21 @@ type SubmissionRecord =
         }
       | {
           readonly status: "placed";
-          readonly entry: Id;
+          readonly entry: EntryId;
           readonly answer?: never;
           readonly reason?: never;
           readonly detail?: never;
         }
       | {
           readonly status: "done";
-          readonly entry: Id;
-          readonly answer: Id;
+          readonly entry: EntryId;
+          readonly answer: EntryId;
           readonly reason?: never;
           readonly detail?: never;
         }
       | {
           readonly status: "unanswered";
-          readonly entry?: Id;
+          readonly entry?: EntryId;
           readonly answer?: never;
           readonly reason: string;
           readonly detail?: JsonValue;
@@ -180,7 +198,7 @@ type SubmissionRecord =
         }
       | {
           readonly status: "done";
-          readonly entry: Id;
+          readonly entry: EntryId;
           readonly answer?: never;
           readonly reason?: never;
           readonly detail?: never;
@@ -201,10 +219,18 @@ type SubmissionCreate = SubmissionRecord extends infer Record
   : never;
 ```
 
+ID brands are compile-time only. IDs and sequences remain ordinary numbers in
+memory, JSON, JSONL, and SQLite. Code applies a brand only at a trusted creation
+or decoding boundary. The distinct sequence brand prevents an entity ID from
+being used as a document commit point.
+
 Conversation history parenting and task ownership are separate:
 
 - `parent` controls inherited entries and historical documents.
-- `owner` controls task authorization, subtree abort, and subtree idle waits.
+- `owner` records task attribution and connects scopes for subtree abort and idle traversal. It is not an access-control capability.
+- Creation always supplies `ConversationOwnership` explicitly. The Session
+  derives the persisted owner's conversation from the named task; callers never
+  construct the persisted owner pair.
 
 A conversation's owner remains recorded after the owning task becomes terminal.
 
@@ -276,10 +302,13 @@ type SectionSeed =
   | { readonly key: string; readonly remove: true };
 
 type ConversationSpec = {
-  readonly parent?: { readonly conversationId: Id; readonly at: Id };
   readonly model?: ModelRef;
   readonly sections?: readonly SectionSeed[];
   readonly activeTools?: readonly string[];
+};
+
+type ConversationCreateSpec = ConversationSpec & {
+  readonly ownership: ConversationOwnership;
 };
 
 type AnyTask = {
@@ -300,7 +329,7 @@ type HarnessOptions = {
   readonly taskKinds?: readonly AnyTask[];
   readonly sections?: readonly SystemSection<JsonValue>[];
   readonly now?: () => number;
-  readonly root?: Omit<ConversationSpec, "parent">;
+  readonly root?: ConversationSpec;
   readonly onReport?: (error: unknown) => void;
 };
 
@@ -322,7 +351,7 @@ type SettledSubmissionRecord = SubmissionRecord & {
 };
 
 interface Submission {
-  readonly id: Id;
+  readonly id: SubmissionId;
   status(context: Context): Promise<SubmissionRecord>;
   wait(context: Context): Promise<SettledSubmissionRecord>;
   abort(context: Context): Promise<"aborted" | "already_placed" | "settled">;
@@ -339,7 +368,7 @@ type HooksOf<K> = K extends Task<infer _I, infer _S, infer _R, infer H>
   : never;
 
 interface Conversation {
-  readonly id: Id;
+  readonly id: ConversationId;
   submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
 
   getModel(context: Context): Promise<ModelRef | undefined>;
@@ -365,16 +394,16 @@ interface Conversation {
   context(context: Context): Promise<ContextView>;
   entries(
     query: Omit<EntryQuery, "conversationId">,
-    cursor: Cursor | undefined,
     limit: number,
+    cursor: Cursor | undefined,
     context: Context,
   ): Promise<Page<EntryRecord, Cursor>>;
   fork(
-    at: Id,
-    spec: Omit<ConversationSpec, "parent">,
+    at: EntryId,
+    spec: ConversationCreateSpec,
     context: Context,
   ): Promise<Conversation>;
-  collapse(instructions: string | undefined, context: Context): Promise<Id>;
+  collapse(instructions: string | undefined, context: Context): Promise<TaskId>;
   reset(handoff: string | undefined, context: Context): Promise<void>;
   abort(context: Context): Promise<void>;
   waitForIdle(context: Context): Promise<void>;
@@ -404,22 +433,22 @@ interface Harness extends Session {
 
   root(context: Context): Promise<Conversation>;
   onConversation(listener: (conversation: Conversation) => void): () => void;
-  conversation(id: Id, context: Context): Promise<Conversation | undefined>;
+  conversation(id: ConversationId, context: Context): Promise<Conversation | undefined>;
   createConversation(
-    spec: ConversationSpec & { readonly input?: UserInput },
+    spec: ConversationCreateSpec & { readonly input?: UserInput },
     context: Context,
   ): Promise<Conversation>;
 
-  getTask(id: Id, context: Context): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
-  submission(id: Id, context: Context): Promise<Submission | undefined>;
+  getTask<R>(id: TaskId<R>, context: Context): Promise<TaskRecord<JsonValue, JsonValue, R> | undefined>;
+  submission(id: SubmissionId, context: Context): Promise<Submission | undefined>;
   abortSubmission(
-    id: Id,
+    id: SubmissionId,
     context: Context,
-    conversationId?: Id,
+    conversationId?: ConversationId,
   ): Promise<"aborted" | "already_placed" | "settled" | "not_found">;
-  abortTask(id: Id, context: Context): Promise<"marked" | "terminal">;
-  markTask(id: Id, context: Context): Promise<"marked" | "terminal">;
-  waitForTask<R>(ref: TaskRef<R>, context: Context): Promise<SettledTask<R>>;
+  abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
+  markTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
+  waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
   waitForIdle(context: Context): Promise<void>;
 }
 
@@ -449,8 +478,8 @@ handler dispatches during open. Dynamic registration is available after open and
 does not resurrect a task already settled by that pass.
 
 The root conversation always has reserved ID `ROOT_CONVERSATION_ID` (`1`). Empty
-storage creates that conversation from `options.root`; reopen looks it up by the
-reserved ID. `options.root` never overwrites existing state. `root()` returns
+storage creates that conversation from `options.root` as ownerless; reopen looks
+it up by the reserved ID. `options.root` never overwrites existing state. `root()` returns
 that handle. A conversation with no configured model produces a durable
 `no_model` generation failure.
 
@@ -466,11 +495,14 @@ function that unregisters only that exact token. It supports declaration
 movement during normal operation, not replacement of executing extension code;
 section 7.4 governs code reload.
 
-Conversation creation atomically commits the conversation, built-in
-configuration and section/tool seeds, and an optional input submission. For a fork,
-omitted model, section, and active-tool values follow their document definition's
-fork policy; provided values override those forked built-in values in the same
-commit. Other documents follow their own definitions without special handling.
+Conversation creation atomically commits the conversation, its explicitly
+selected ownership, built-in configuration and section/tool seeds, and an
+optional input submission. Host callers must choose ownerless or task ownership
+in `ConversationCreateSpec`; neither the Harness nor a conversation handle
+infers ownership from call context. For a fork, omitted model, section, and
+active-tool values follow their document definition's fork policy; provided
+values override those forked built-in values in the same commit. Other documents
+follow their own definitions without special handling.
 
 The built-in conversation configuration document contains the selected model,
 thinking level, an ordered array of section key/value records, and active tool
@@ -479,7 +511,7 @@ is `"off"`. It is rewindable with `fork: "asOf"`, so a child starts from the
 configuration visible at its selected entry unless explicit creation seeds
 override it. Conversation creation eagerly
 creates it, so `getModel()`, `getThinkingLevel()`, `getActiveTools()`, and
-`getSection()` return detached committed snapshots without a get-or-create
+`getSection()` return immutable committed snapshots without a get-or-create
 write. Each setter performs one ordinary Session commit against that document;
 `setSection(section, undefined)` removes the value. A setter does not start
 generation or append a system entry. Request preparation later compares the
@@ -517,23 +549,25 @@ fork-aware stored history; callers cannot substitute another conversation ID.
 Generic Session-wide document operations remain available directly on `Harness`
 because `Harness extends Session`.
 
-`fork()` requires a concrete visible parent entry and applies section 3.7.
+`fork()` requires a concrete visible parent entry and explicit ownership, then
+applies section 3.7.
 `collapse()` returns the newly admitted background collapse task ID, not its
 future summary entry. `reset()` durably admits a passive self-head reset or
 handoff write and then resolves; while busy, placement follows section 6 and may
 occur later. Observe its placement through the conversation watch. An idle wait
 does not guarantee placement of queued passive writes.
 
-`markTask()` only commits `abortRequested`; it neither signals nor joins an
-active invocation. The scheduler notices the mark on its next drain.
-`abortTask()` also signals and joins an active run before starting the abort
-invocation. `Conversation.abort()` withdraws queued input submissions, marks
-non-background tasks in the conversation and owned subtree, signals them, and
-resolves only after that subtree is ordinarily idle. Passive writes and
-background tasks survive. Conversation idle means no non-background live task
-in that conversation or its ownership subtree; Harness idle applies the same
-rule Session-wide. Pending dependency- or deadline-blocked work is still live
-and therefore not idle. Cancelling an idle wait aborts only that waiter.
+`markTask()` commits `abortRequested` and the durable foreground-subtree
+cascade; it neither signals nor joins active invocations. The scheduler notices
+the marks on its next drain. `abortTask()` also signals and joins the active run
+before starting the abort invocation. `Conversation.abort()` withdraws queued
+input submissions, marks non-background tasks selected by ordinary ownership
+traversal, signals them, and resolves only after that scope is ordinarily idle.
+Passive writes and background subtrees survive. Conversation idle means no live
+non-background task selected from that conversation. Harness idle applies the
+same traversal from every ownerless conversation root. Pending dependency- or
+deadline-blocked work is still live and therefore not idle. Cancelling an idle
+wait aborts only that waiter.
 
 `onConversation()` synchronously visits the currently loaded committed
 conversations in ascending ID order, then reports each later creation after its
@@ -558,10 +592,11 @@ the terminal receipt. Aborting an already terminal task returns `terminal`; an
 unknown ID rejects. Explicit task abort includes a background task. Cancelling a
 task or idle wait does not abort work.
 
-`Conversation.watch()` atomically captures an immutable structural view and
-registers for later complete Session commits. Its `WatchHandle` uses the same
-serialized asynchronous update and reset-compaction contract as `watchDoc()` in
-section 9.2. It carries no semantic events and owns no second tracker.
+`Conversation.watch()` atomically captures its current immutable structural
+revision and registers for later complete Session commits. Its `WatchHandle`
+uses the same serialized asynchronous, latest-revision delivery contract as
+`watchDoc()` in section 9.2. It carries no semantic events and owns no second
+persistence authority.
 
 `close()` is equivalent to `suspend()` for v1. It seals mutation admission and
 task reservation, signals invocations, and stops watches. Outside the Session
@@ -734,21 +769,21 @@ A persisted document instance has one `DocumentRecord`:
 
 ```ts
 type DocumentRecord = {
-  readonly id: Id;              // unique incarnation
+  readonly id: DocumentId;      // unique incarnation
   readonly kind: string;        // stable definition kind
   readonly key?: string;        // families only
   readonly createdAt: Seq;      // stamped by the committing storage
   readonly retiredAt?: Seq;
 } & (
   | { readonly scope: { readonly kind: "session" } }
-  | ({ readonly scope: { readonly kind: "conversation"; readonly conversationId: Id } } & (
+  | ({ readonly scope: { readonly kind: "conversation"; readonly conversationId: ConversationId } } & (
       | { readonly history: "latest"; readonly fork: "current" | "initial" }
       | {
           readonly history: "rewindable";
           readonly fork: "asOf" | "current" | "initial";
         }
     ))
-  | { readonly scope: { readonly kind: "task"; readonly taskId: Id } }
+  | { readonly scope: { readonly kind: "task"; readonly taskId: TaskId } }
 );
 
 type DocumentCreate = DocumentRecord extends infer Record
@@ -781,54 +816,72 @@ interface Session extends DocumentObserver {
   close(context: Context): Promise<void>;
 
   snapshot<T extends JsonObject>(token: SessionDocToken<T>, context: Context): Promise<Readonly<T> | undefined>;
-  snapshot<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: Id, context: Context): Promise<Readonly<T> | undefined>;
-  snapshot<T extends JsonObject>(token: TaskDocToken<T>, taskId: Id, context: Context): Promise<Readonly<T> | undefined>;
+  snapshot<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: ConversationId, context: Context): Promise<Readonly<T> | undefined>;
+  snapshot<T extends JsonObject>(token: TaskDocToken<T>, taskId: TaskId, context: Context): Promise<Readonly<T> | undefined>;
   snapshot<T extends JsonObject, I extends JsonValue>(token: SessionDocFamilyToken<T, I>, key: string, context: Context): Promise<Readonly<T> | undefined>;
-  snapshot<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: Id, key: string, context: Context): Promise<Readonly<T> | undefined>;
-  snapshot<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: Id, key: string, context: Context): Promise<Readonly<T> | undefined>;
+  snapshot<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, context: Context): Promise<Readonly<T> | undefined>;
+  snapshot<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: TaskId, key: string, context: Context): Promise<Readonly<T> | undefined>;
 
-  snapshotAsOf<T extends JsonObject>(token: RewindableConversationDocToken<T>, conversationId: Id, at: Id, context: Context): Promise<Readonly<T> | undefined>;
-  snapshotAsOf<T extends JsonObject, I extends JsonValue>(token: RewindableConversationDocFamilyToken<T, I>, conversationId: Id, key: string, at: Id, context: Context): Promise<Readonly<T> | undefined>;
+  snapshotAsOf<T extends JsonObject>(token: RewindableConversationDocToken<T>, conversationId: ConversationId, at: EntryId, context: Context): Promise<Readonly<T> | undefined>;
+  snapshotAsOf<T extends JsonObject, I extends JsonValue>(token: RewindableConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, at: EntryId, context: Context): Promise<Readonly<T> | undefined>;
 
   documentSource<T extends JsonObject>(token: SessionDocToken<T>, context: Context): Promise<DocumentSource<T> | undefined>;
-  documentSource<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: Id, context: Context): Promise<DocumentSource<T> | undefined>;
-  documentSource<T extends JsonObject>(token: TaskDocToken<T>, taskId: Id, context: Context): Promise<DocumentSource<T> | undefined>;
+  documentSource<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: ConversationId, context: Context): Promise<DocumentSource<T> | undefined>;
+  documentSource<T extends JsonObject>(token: TaskDocToken<T>, taskId: TaskId, context: Context): Promise<DocumentSource<T> | undefined>;
   documentSource<T extends JsonObject, I extends JsonValue>(token: SessionDocFamilyToken<T, I>, key: string, context: Context): Promise<DocumentSource<T> | undefined>;
-  documentSource<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: Id, key: string, context: Context): Promise<DocumentSource<T> | undefined>;
-  documentSource<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: Id, key: string, context: Context): Promise<DocumentSource<T> | undefined>;
+  documentSource<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, context: Context): Promise<DocumentSource<T> | undefined>;
+  documentSource<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: TaskId, key: string, context: Context): Promise<DocumentSource<T> | undefined>;
 }
 
 interface Tx {
-  conversation(id: Id): Promise<ConversationRecord | undefined>;
-  entry(id: Id): Promise<EntryRecord | undefined>;
-  task(id: Id): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
-  scanEntries(query: EntryQuery): Promise<readonly EntryRecord[]>;
-  scanTasks(query: TaskQuery): Promise<readonly TaskRecord<JsonValue, JsonValue, JsonValue>[]>;
+  conversation(id: ConversationId): Promise<ConversationRecord | undefined>;
+  entry(id: EntryId): Promise<EntryRecord | undefined>;
+  task(id: TaskId): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
+  scanConversations(query: ConversationQuery, limit: number, cursor?: Cursor): Promise<Page<ConversationRecord, Cursor>>;
+  scanEntries(query: EntryQuery, limit: number, cursor?: Cursor): Promise<Page<EntryRecord, Cursor>>;
+  scanTasks(query: TaskQuery, limit: number, cursor?: Cursor): Promise<Page<TaskRecord<JsonValue, JsonValue, JsonValue>, Cursor>>;
 
-  createConversation(value: Omit<ConversationRecord, "id">): Promise<ConversationRecord>;
-  appendEntry(conversationId: Id, value: EntryDraft): Promise<EntryRecord>;
+  createConversation(options: { readonly ownership: ConversationOwnership }): Promise<ConversationRecord>;
+  forkConversation(
+    parentConversationId: ConversationId,
+    at: EntryId,
+    options: { readonly ownership: ConversationOwnership },
+  ): Promise<ConversationRecord>;
+  appendEntry(conversationId: ConversationId, value: EntryDraft): Promise<EntryRecord>;
   createTask<I, S extends { phase: string }, R, H extends object>(
     task: Task<I, S, R, H>, input: I, options?: TaskOptions,
-  ): Promise<TaskRef<R>>;
+  ): Promise<TaskId<R>>;
   setTask(value: TaskRecord<JsonValue, JsonValue, JsonValue>): void;
 
   doc<T extends JsonObject>(token: SessionDocToken<T>): Promise<Draft<T>>;
-  doc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: Id): Promise<Draft<T>>;
-  doc<T extends JsonObject>(token: TaskDocToken<T>, taskId: Id): Promise<Draft<T>>;
+  doc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: ConversationId): Promise<Draft<T>>;
+  doc<T extends JsonObject>(token: TaskDocToken<T>, taskId: TaskId): Promise<Draft<T>>;
   doc<T extends JsonObject, I extends JsonValue>(token: SessionDocFamilyToken<T, I>, key: string, seed: I): Promise<Draft<T>>;
-  doc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: Id, key: string, seed: I): Promise<Draft<T>>;
-  doc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: Id, key: string, seed: I): Promise<Draft<T>>;
+  doc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, seed: I): Promise<Draft<T>>;
+  doc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: TaskId, key: string, seed: I): Promise<Draft<T>>;
 
   retireDoc<T extends JsonObject>(token: SessionDocToken<T>): Promise<void>;
-  retireDoc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: Id): Promise<void>;
-  retireDoc<T extends JsonObject>(token: TaskDocToken<T>, taskId: Id): Promise<void>;
+  retireDoc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: ConversationId): Promise<void>;
+  retireDoc<T extends JsonObject>(token: TaskDocToken<T>, taskId: TaskId): Promise<void>;
   retireDoc<T extends JsonObject, I extends JsonValue>(token: SessionDocFamilyToken<T, I>, key: string): Promise<void>;
-  retireDoc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: Id, key: string): Promise<void>;
-  retireDoc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: Id, key: string): Promise<void>;
+  retireDoc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string): Promise<void>;
+  retireDoc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: TaskId, key: string): Promise<void>;
 }
 ```
 
-ID-creating transaction methods are asynchronous because remote storage may allocate globally unique IDs durably. Only public typed `tx.doc()` is get-or-create. Internal fork copying may create
+ID-creating transaction methods are asynchronous because remote storage may
+allocate globally unique numeric IDs durably. Conversation creation always
+requires explicit ownership; no transaction wrapper injects the executing task.
+For task ownership, the caller supplies only a typed task ID. The Session derives
+the persisted owner conversation from the task's final candidate record.
+
+An owner task may be committed or staged earlier in the same transaction. Before
+Storage admission, the Session rejects a missing, terminal, or abort-marked owner,
+including one made terminal or abort-marked later in that transaction. Existing
+owner edges remain valid when their owners terminalize afterward. Conversation
+creation returns an inert record, never an operational handle.
+`forkConversation()` additionally validates one visible entry and applies section
+3.7. Only public typed `tx.doc()` is get-or-create. Internal fork copying may create
 new incarnations directly from stored values without a definition. `tx.doc()`
 receives the definition token that supplies
 its static type, initializer, migration, and checkpoint policy. Scope-preserving
@@ -858,9 +911,11 @@ registered and ordinary documents are not scanned at open.
 - A terminal candidate rejects later task-document access. Terminal settlement
   retires both existing task documents and task documents created earlier in the
   same transaction.
-- `snapshot()` returns a detached JSON copy.
+- `snapshot()` returns the current shareable immutable revision. Mutation of it
+  or any retained descendant is unsupported; callers that need mutable ownership
+  must copy it first.
 - `documentSource()` returns an opaque source bound to one committed incarnation.
-- `tx.doc()` returns one revocable copy-on-write `Draft<T>` for the transaction.
+- `tx.doc()` returns one revocable Astra overlay `Draft<T>` for the transaction.
 - Historical reads never create documents in the past.
 
 `snapshotAsOf()` is available only for rewindable conversation documents. It
@@ -877,13 +932,15 @@ alive at the target commit.
 
 ### 3.4 Mutation ownership
 
-Pico uses Chord Delta's transaction shape directly:
+Pico uses Chord Delta's Astra-immutable transaction shape directly:
 
 ```ts
 interface Prepared<T extends object> {
   readonly base: T;
   readonly value: T;
   readonly ops: readonly Op[];
+  readonly baseRevision: number;
+  abort(): void;
 }
 interface Change<T extends object> {
   readonly state: Draft<T>;
@@ -892,64 +949,91 @@ interface Change<T extends object> {
 }
 interface Tracker<T extends object> {
   readonly value: T;
+  readonly revision: number;
   beginChange(): Change<T>;
   prepareReplace(value: T): Prepared<T>;
   adopt(prepared: Prepared<T>): void;
 }
 ```
 
-One tracker has at most one open change. `prepare()` revokes the draft and returns
-an inert branded result without changing `tracker.value`; `abort()` is
-idempotent. `adopt()` accepts only a result from that tracker whose `base` is
-still current. `ops.length === 0` implies `value === base`. Pico's Session line
-ensures no tracker becomes stale between preparation, Storage settlement, and
-adoption.
+Each loaded document owns one tracker whose `value` is its current immutable
+revision. Immutability is a trusted ownership contract, not runtime freezing:
+a revision and its descendants must never be mutated after transfer to the
+tracker. `prepare()` revokes the draft, emits detached self-contained
+operations, and computes `value` with the optimized immutable applier before
+Storage admission. Unchanged subtrees are structurally shared with `base`.
+Operation placement payloads may also be shared with `value`; mutating either a
+prepared operation or an immutable revision is unsupported. Astra preserves an
+empty operation batch for changes it proves are no-ops, but Pico performs no
+additional whole-value equality pass for nonempty structural batches.
 
-Each loaded document owns one tracker. The first `tx.doc()` acquisition calls
-`tracker.beginChange()` and memoizes that change's draft for the rest of the
-possibly async Session callback.
+`abort()` is idempotent. `adopt()` accepts only a prepared result from that
+tracker at its current revision, then performs only a synchronous pointer swap
+to the already-computed immutable `value`. It performs no diffing, application,
+allocation, or callback. The Session line permits at most one open change per
+tracker and ensures no result becomes stale between preparation, Storage
+settlement, and adoption.
+
+The first `tx.doc()` acquisition calls `tracker.beginChange()` and memoizes that
+change's draft for the rest of the possibly async Session callback.
 
 Transaction behavior:
 
 ```text
 begin transaction
   acquire and memoize document changes by logical address
-  mutate revocable copy-on-write drafts
+  mutate revocable Astra overlay drafts
 callback settles
-  seal Tx and synchronously reject further draft/Tx use
+  seal Tx; synchronously prepare or abort every open change, revoking every draft
   if any acquisition is pending: abort open changes, reject, then drain and abort it
 callback fails with no pending acquisition
   abort every open change; persist and publish nothing
 callback succeeds with no pending acquisition
-  prepare every open change -> immutable candidate + frozen Chord Op[]
-  normalize deep no-ops to the previous value + []
+  prepare every open change -> immutable next revision + self-contained Chord Op[]
   Session evaluates each required/ordinary document write exactly once
+  prepare every affected loaded conversation mount revision
   Storage.commit persists the atomic batch while the Session line remains held
 storage succeeds
-  adopt every prepared change and enqueue candidate/ops publication
+  adopt every prepared change by pointer swap and enqueue immutable revision/ops publication
   release the line; invoke listeners later
 storage fails
-  poison Session and publish nothing
+  abort every prepared change, poison Session, and publish nothing
 ```
 
 A pending acquisition that resolves after sealing never exposes a draft; its
 change is aborted and its promise rejects. The Session observes every such
-settlement before releasing the line.
+settlement before releasing the line. Initializer, migration, and replacement
+roots come from caller code: the Session copies each one into exclusive kernel
+ownership, rejecting any value that is not strict JSON, before it becomes an
+immutable tracker revision. Loaded and fork-copy roots are already detached
+strict JSON from Storage and enter the tracker without another copy. Chord's
+`track()` and `prepareReplace()` take ownership in O(1) without traversal, so
+every root they receive must come from one of these sources. Migration callbacks
+never receive a live tracker revision.
 
-`prepare()` performs all JSON, ownership, diff, and freezing work. Preparation or
-checkpoint failure occurs before Storage admission and rolls back normally.
-Adoption performs no diffing, allocation, or callback. The prepared candidate
-itself becomes the immutable published value; Pico does not replay its operations
-to construct another copy. An unchanged existing current-version document writes
-and publishes nothing. Creation and required version transitions still write a
-base when their prepared operation batch is empty; an equal-value version base
-does not emit a watch update.
+Preparation, validation, checkpoint, or mounted-view preparation failure occurs
+before Storage admission and rolls back normally. The Session performs no
+strict-JSON walk of prepared operations or selected bases: roots are checked on
+entry and Chord checks every draft placement, so every revision, operation
+payload, and base is strict JSON by construction. Tracker branding and `baseRevision` enforce ownership and staleness; the
+Session never substitutes caller-created prepared values. The prepared immutable
+candidate itself becomes the adopted and published value. Storage receives that complete value only when the
+Session selects a base; otherwise it receives only the prepared operation batch.
+An existing current-version document with an empty batch writes and publishes
+nothing. A nonempty structural batch whose final value is deeply equal to its
+base remains a valid durable change and publication. Creation and required
+version transitions still write a base when their prepared batch is empty; an
+equal-value version base does not emit a watch update.
 
-Values assigned into a draft are copied immediately by value. Repeated placements
-are independent. Chord may structurally share unchanged immutable subtrees across
-revisions. Operation tuples, paths, splice payload arrays, permutations, and the
-outer batch are frozen before checkpoint code, Storage, or listeners can observe
-them.
+Values assigned into a draft are copied immediately by value. Repeated
+placements are independent. Chord checks each placement while copying it and
+throws at the offending assignment, before the draft changes, when the value is
+not strict JSON: `undefined` array elements or nested object values, non-finite
+numbers, functions, symbols, bigints, accessors, symbol keys, sparse arrays, or
+objects whose prototype is neither `Object.prototype` nor `null`. Assigning
+`undefined` directly to an object property deletes that property. Draft reads, draft writes, and all `Tx` operations
+reject after the callback settles. The prepared immutable value remains readable
+by Session-owned checkpoint and Storage preparation.
 
 ```ts
 let escaped: Draft<LiveState>;
@@ -960,8 +1044,7 @@ escaped.message = message; // throws: the draft was revoked
 ```
 
 Fire-and-forget work that mutates a draft before the owner callback settles may
-silently enter that transaction and is unsupported. After settlement, draft and
-`Tx` operations reject.
+silently enter that transaction and is unsupported.
 
 ### 3.5 Bases and checkpoints
 
@@ -1021,7 +1104,10 @@ access-driven: `tx.doc()`, `snapshot()`, `snapshotAsOf()`, `documentSource()`, a
 `watchDoc()` reconstruct and migrate through the token supplied to that call.
 Harness open does not sweep ordinary documents.
 
-- Read-only access migrates only its returned in-memory value and never writes.
+- Read-only access migrates only in memory and never writes. It may cache a
+  tracker over that migrated immutable revision together with the older stored
+  version marker; the next successful `tx.doc()` access still writes the required
+  current-version base. Migration always starts from a detached stored value.
   `tx.doc()` stages migration in its enclosing transaction; callback failure
   persists nothing, and later draft edits coalesce into one final required base.
 - Rewindable history is not rewritten. Current and historical reconstructed
@@ -1048,7 +1134,7 @@ Each conversation document follows the history/fork policy persisted in its
 | conversation setting | child value |
 |---|---|
 | `fork: "asOf"` | parent value at `E`'s commit |
-| `fork: "current"` | parent value when the fork commit runs |
+| `fork: "current"` | committed parent value selected when the fork commit runs |
 | `fork: "initial"` | no copied instance; initializer on first child access |
 
 `current` and `asOf` copy logically present conversation singleton and family
@@ -1057,6 +1143,32 @@ values become independent child instances with new IDs and initial bases.
 `initial` copies no instance; first access in the child creates it from the
 supplied definition. Task documents and tasks are never copied. Session documents
 remain shared and are not rewindable.
+
+Fork copying reads committed stored values rather than typed tracker caches. A
+transaction that creates a fork therefore rejects if it also writes one of the
+parent's `fork: "current"` documents; commit the parent change first so the fork
+has one unambiguous stored source revision.
+
+Forks stage backend-side `document.copy` commands carrying the child create
+record and an exact source incarnation/point. Storage materializes each source
+and persists its stored value/version as the child's independent initial base;
+remote Storage performs this server-side. Every copy reads committed pre-batch
+source state independent of write-array order. A selected source may not be
+created, changed, or retired in the same batch. Copying remains atomic with the
+conversation, overrides, registry writes, and other mutations.
+
+An unaccessed copy retains only its descriptor in Session memory. Typed access
+inside the creating transaction lazily reads the detached source, migrates when
+required, and replaces the copy with one ordinary child create containing the
+final prepared value. Definition-free copies publish explicit `document.copy`
+metadata rather than a value. That metadata announces Storage-backed initial
+state and is never interpreted as a document value. Document sources, watches,
+and mounted views hydrate by capturing their baseline and subscription
+atomically on the Session line: a later commit already present becomes the
+baseline, while one committed after registration is delivered. Publications
+and watches are convergence mechanisms, not audit streams. A mounted aggregate
+must acquire all of its document baselines and commit subscription in one
+Session-line operation so it never exposes a mixture from one commit.
 
 ## 4. Transactions and storage ownership
 
@@ -1116,12 +1228,12 @@ type TaskState<S, R> =
   | { readonly status: "terminal"; readonly outcome: TaskOutcome<R> };
 
 type TaskRecord<I, S, R> = {
-  readonly id: Id;
-  readonly conversationId: Id;
+  readonly id: TaskId<R>;
+  readonly conversationId: ConversationId;
   readonly kind: string;
   readonly version: number;
   readonly input: I;
-  readonly after: readonly Id[];
+  readonly after: readonly TaskId[];
   readonly background: boolean;
   readonly abortRequested: boolean;
 } & (
@@ -1150,8 +1262,8 @@ type PhaseHandler<I, P, S, R, H extends object> = (
 ) => Promise<void>;
 
 interface TaskRuntime<I, S, R, H extends object> extends DocumentObserver {
-  readonly taskId: Id;
-  readonly conversationId: Id;
+  readonly taskId: TaskId<R>;
+  readonly conversationId: ConversationId;
   readonly signal: AbortSignal;
   readonly hooks: HookRunner<H>;
 
@@ -1162,6 +1274,7 @@ interface TaskRuntime<I, S, R, H extends object> extends DocumentObserver {
 
   memo<T extends JsonValue>(name: string, context: Context): Promise<T | undefined>;
   memo<T extends JsonValue>(name: string, candidate: T, context: Context): Promise<T>;
+  conversation(id: ConversationId, context: Context): Promise<ConversationHandle | undefined>;
   sleep(until: number, context: Context): Promise<void>;
 }
 
@@ -1184,11 +1297,9 @@ interface Task<I, S extends { phase: string }, R, H extends object> {
   readonly definition: TaskDefinition<I, S, R, H>;
 }
 
-declare const taskResultType: unique symbol;
-type TaskRef<R> = { readonly id: Id; readonly [taskResultType]?: R };
 type TaskOptions = {
-  readonly conversationId?: Id;
-  readonly after?: readonly Id[];
+  readonly conversationId?: ConversationId;
+  readonly after?: readonly TaskId[];
   readonly background?: boolean;
 };
 
@@ -1196,6 +1307,13 @@ function defineTask<I, S extends { phase: string }, R, H extends object = {}>(
   definition: TaskDefinition<I, S, R, H>,
 ): Task<I, S, R, H>;
 ```
+
+`TaskId<R>` is the numeric task ID itself with an erased result-type brand. It
+replaces a separate task-reference wrapper: `createTask()` returns `TaskId<R>`,
+typed waits infer `R` from that ID, and result-agnostic operations accept
+`TaskId<unknown>`. A task's `conversationId` is immutable after creation; a
+replacement that moves an existing task to another conversation rejects before
+Storage admission so persisted conversation-owner edges cannot become stale.
 
 The phase map is exhaustive and phase-narrowed. A handler may perform several
 commits around one effect, but each durable checkpoint is a full replacement.
@@ -1293,10 +1411,35 @@ the durable mark on reopen. Cancelling one caller's `Context` only cancels
 that call or wait; it does not durably abort shared work unless the invoked API
 commits an abort mark.
 
-A task may create owned conversations. Abort and idle operations traverse the
-conversation ownership tree. History parents are irrelevant to this traversal.
-Background tasks do not block ordinary idle waits and survive ordinary
-conversation abort unless explicitly included.
+A task may create owned conversations. Conversations are durable scopes; tasks
+are the units of live work counted by idle and marked by abort. History parents
+are irrelevant to ownership traversal.
+
+Ordinary traversal starts at an explicitly addressed conversation, visits its
+tasks, and follows conversations owned by each non-background task. It follows
+owner edges after the owner becomes terminal, but a background owner is a
+boundary: ordinary traversal skips that task and its complete owned subtree.
+Direct conversation operations start inside that conversation regardless of its
+owner. Directly aborting a live background task includes that task and follows
+its ordinary owned subtree; nested background owners remain boundaries. Full
+teardown crosses every boundary, marks every live task, and must seal new
+admission while it gathers the complete indexed ownership subtree.
+
+`Conversation.abort()` withdraws queued inputs and marks live non-background
+tasks selected by ordinary traversal. `Conversation.waitForIdle()` waits until
+that traversal contains no live non-background task. Harness idle performs the
+same traversal from every ownerless conversation root rather than globally
+counting tasks, so ordinary work below a background owner does not block it.
+Explicit `waitForTask()` waits for its referenced task regardless of the task's
+background flag.
+
+An abort mark atomically and idempotently cascades to foreground-owned work,
+including conversations, tasks, and submissions staged in the same transaction.
+Terminal outcomes `failed`, `faulted`, `orphaned`, and `aborted` record the same
+durable cancellation intent; `completed` does not. Conversation records and
+owner edges are never retired with the task. Active invocations are signalled
+after commit, and a terminal receipt guarantees durable cancellation intent,
+not descendant quiescence.
 
 Initial task definitions are registered before open performs live-task migration
 and orphan reconciliation. Dynamic registration begins only after that pass.
@@ -1315,8 +1458,8 @@ itself is an ordered conversation document containing tagged items:
 
 ```ts
 type InboxItem =
-  | { readonly id: Id; readonly mode: "steer" | "followUp"; readonly message: Message }
-  | { readonly id: Id; readonly mode: "write"; readonly entry: EntryDraft };
+  | { readonly id: SubmissionId; readonly mode: "steer" | "followUp"; readonly message: Message }
+  | { readonly id: SubmissionId; readonly mode: "write"; readonly entry: EntryDraft };
 ```
 
 A built-in turn-control document has an optional `active` value naming the task
@@ -1368,8 +1511,8 @@ never trigger generation by themselves. A final boundary without continuation
 or user triggers leaves the conversation idle.
 
 Selected and stale items are removed positionally while retained item order is
-preserved. Chord's revision differ must express scattered removals without
-carrying retained values; IDs are not substituted for positional inbox
+preserved. Chord's Astra operation generator must express scattered removals
+without carrying retained values; IDs are not substituted for positional inbox
 semantics.
 
 ## 7. Hooks, tools, and system sections
@@ -1411,16 +1554,16 @@ type ToolExecutionResult = {
   readonly control?: ToolControl;
 };
 
-interface OwnedConversation {
-  readonly id: Id;
+interface ConversationHandle {
+  readonly id: ConversationId;
   submit(submission: InputSubmissionDraft, context: Context): Promise<Submission>;
   abort(context: Context): Promise<void>;
   waitForIdle(context: Context): Promise<void>;
 }
 
 interface ToolExecutionApi extends DocumentObserver {
-  readonly taskId: Id;
-  readonly conversationId: Id;
+  readonly taskId: TaskId;
+  readonly conversationId: ConversationId;
   readonly callId: string;
   stream(chunk: string | Uint8Array): void;
   commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T>;
@@ -1432,13 +1575,10 @@ interface ToolExecutionApi extends DocumentObserver {
     input: I,
     options: Omit<TaskOptions, "conversationId">,
     context: Context,
-  ): Promise<TaskRef<R>>;
-  getTask<R>(ref: TaskRef<R>, context: Context): Promise<TaskRecord<JsonValue, JsonValue, R> | undefined>;
-  waitForTask<R>(ref: TaskRef<R>, context: Context): Promise<SettledTask<R>>;
-  createConversation(
-    spec: Omit<ConversationSpec, "parent"> & { readonly inherit?: boolean },
-    context: Context,
-  ): Promise<OwnedConversation>;
+  ): Promise<TaskId<R>>;
+  getTask<R>(id: TaskId<R>, context: Context): Promise<TaskRecord<JsonValue, JsonValue, R> | undefined>;
+  waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
+  conversation(id: ConversationId, context: Context): Promise<ConversationHandle | undefined>;
 }
 
 type ToolRegistration = Tool & {
@@ -1456,14 +1596,20 @@ type ToolRegistration = Tool & {
 };
 ```
 
-Omitted `replay` is `unsafe`. Omitted output bounds are 64 KiB, 200 lines, and
-`retain: "head"`. `stream()` synchronously accepts UTF-8 output into that
+Omitted `replay` is `unsafe`. Omitted output bounds are 50 KiB, 2,000 lines,
+and `retain: "head"`. `stream()` synchronously accepts UTF-8 output into that
 invocation-owned bounded buffer and throws after invocation end. Throttled
 commits publish the retained output and dropped byte/line counts in the tool
 presentation document. If `execute()` omits `content`, the final retained stream
 becomes one text content item; no stream becomes an empty content list. Explicit
 text in explicit result content is bounded by the same limits before transcript
 persistence; non-text content is retained as declared by its pi-ai type.
+
+`stream()` never spills complete output to a file because spilling requires a
+filesystem, which may be remote or unavailable. A tool that must preserve
+complete output spills through the `ExecutionEnv` or `FileSystem` it was given,
+such as shell execution with spill capture, and reports the resulting path in its
+result details or progress.
 
 `progress(value)` replaces the invocation's complete JSON `progress` payload; it
 does not merge keys. Its promise resolves after the corresponding or coalesced
@@ -1481,35 +1627,82 @@ validated before and after `beforeTool` hooks.
 
 After hooks and validation, the tool task durably records the final call and
 resolved replay policy before execution. Recovery does not rerun `beforeTool`
-and does not let a changed registry declaration alter that stored policy.
+and passes the same stored arguments to `execute()`. A replay-safe tool may
+reconstruct a submission from those arguments when that transformation is pure.
+Random values, timestamps, mutable document/configuration reads, or other derived
+inputs that must remain stable are first captured in a durable memo, checkpoint,
+or task input. A background supervisor receives the final submission draft in
+its own durable input so it can finish independently. Recovery does not let a
+changed registry declaration alter the stored replay policy.
 
-An owned conversation accepts only input submissions; tools use ordinary
-transaction writes for passive entries.
+A tool-acquired conversation handle accepts only input submissions; tools use
+ordinary transaction writes for passive entries.
 
 A tool executes in a durable task. It may:
 
 - write bounded progress/output to a presentation or task-scoped document;
 - commit memos;
 - create and wait for tasks;
-- create owned conversations;
+- atomically create or fork explicitly owned conversations through `commit()`;
 - observe documents for which it has a token/reference;
 - mutate authorized documents through `commit()`;
 - return bounded model content and separate diagnostic details.
 
-Tool operations use the invoking task's admission and
-invocation-lifetime gates. Task creation defaults to that task's conversation.
-Trusted document access follows sections 3.3 and 9.2; there is no additional
-document subtree authorization layer. `createConversation()` records the
-invoking task as owner and returns an invocation-bound handle. `inherit` defaults
-to `false`. When true, creation atomically selects the invoking conversation's
-newest committed visible entry as `parent.at`; if no entry exists, it creates no
-history parent. Conversation documents then apply section 3.7 at that entry, and
-explicit model/section seeds override their inherited built-in values. With no
-parent, documents initialize normally. That handle's
-operations reject after the invocation ends. A `Submission` returned by its
-`submit()` is invocation-bound in the same way; the admitted submission remains
-durable after those methods reject. Invocation-owned document watches stop when
-the invocation ends.
+Tool operations use the invoking task's admission and invocation-lifetime gates.
+Task creation defaults to that task's conversation. Trusted document and
+conversation access follows sections 3.3 and 9.2; there is no additional subtree
+authorization layer. Possession of a Session-global typed ID is sufficient in
+trusted code.
+
+Tools have no conversation-creation convenience method. They create or fork a
+conversation inside `commit()`, state its ownership explicitly, atomically stage
+any related document/task writes, and receive only the inert record. After that
+commit settles, `conversation(id)` acquires an invocation-bound operational
+handle for submission, explicit abort, and idle waits without changing
+ownership. A commit callback must not call `conversation()` or use a previously
+acquired handle: nested Session operations and external effects are forbidden
+while the mutation line is held. A handle's operations reject after the
+invocation ends. A `Submission` returned by its `submit()` is invocation-bound in
+the same way; the admitted submission remains durable after those methods reject.
+Invocation-owned document watches stop when the invocation ends.
+
+A foreground subagent conversation is explicitly owned by its tool task. One
+transaction creates or forks the child and records its durable registry mapping;
+after settlement the tool reacquires the child, submits with the registered
+request ID, and waits for that submission's result. Aborting or abnormally
+terminalizing the tool task cascades through the owned scope.
+
+A background subagent is provisioned in one transaction. After deduplicating by
+its durable registry key, the tool stages a background supervisor task `B`, a
+child conversation `C` explicitly owned by `B`, and the registry mapping from the
+semantic name to `C` plus its stable request ID. `B` may be staged earlier in the
+same transaction and used immediately as `C`'s owner. Its durable input contains
+the exact submission draft and the registry location/key; it need not contain
+`C`'s not-yet-created ID. Once scheduled, `B` resolves `C` from the mapping,
+verifies the immutable owner edge, and performs normal `Conversation.submit()`.
+A crash before admission makes `B` retry; a crash after admission returns the
+existing request-ID-deduplicated `Submission`. The initiating tool may race the
+same submit for lower latency and wait only for the durable admission receipt.
+The supervisor may complete after setup: its terminal record retains
+`background`, so ancestor ordinary abort and idle traversal continue to stop at
+its owned scope.
+
+Applications may maintain a conversation document mapping semantic subagent
+names to durable conversation IDs and application-minted submission request IDs.
+Such a live registry uses `fork: "initial"` so children do not inherit the
+parent's agent list and its update is not a selected fork source. Conversation
+creation/forking, supervisor creation when applicable, and the registry mapping
+commit atomically. The supervisor input, tool's durable final arguments, or a
+durable checkpoint must retain enough information to reconstruct the exact
+submission draft; the registry itself need not duplicate that payload. Initial
+or later input then uses the registered stable request ID with the full
+`Conversation.submit()` state machine. A crash before admission leaves a durable
+request to submit; a crash after admission retries the same request and receives
+the existing `Submission`. A read-only lookup by conversation/request ID can
+report absence or return the durable queued/placed/done/unanswered receipt.
+Submission admission therefore needs no private transaction shortcut and does
+not move onto `Tx`. Kernel ownership indexes independently drive abort and idle
+traversal.
 
 A tool result may request `addTools`, `terminate`, or `handoff`. Post-tools
 applies added tool names to configured loadout, uses a final boundary for
@@ -1678,7 +1871,7 @@ does not delete transcript history.
 
 ### 9.1 Document source
 
-Chord exposes this source-adoption contract from its replicated-state layer:
+Chord's existing replicated-state layer exposes this source-adoption contract:
 
 ```ts
 interface ReplicatedStateSourceFrame<T> {
@@ -1723,10 +1916,10 @@ interface DocumentSource<T extends JsonObject>
 
 type WatchEnd =
   | { readonly reason: "stopped" | "cancelled" | "session_closed" | "retired" }
-  | { readonly reason: "listener_error"; readonly error: Error };
+  | { readonly reason: "listener_error" | "diff_error"; readonly error: Error };
 
 interface WatchHandle<T> {
-  /** Immutable acquisition snapshot. This reference never changes. */
+  /** Acquisition revision before start; latest delivered immutable revision afterward. */
   readonly value: T;
   /** Installs the sole serialized asynchronous listener. */
   start(listener: (ops: readonly Op[], context: Context) => Promise<void>): void;
@@ -1740,22 +1933,24 @@ type DocumentWatch<T extends JsonObject> = WatchHandle<Readonly<T> | null>;
 
 interface DocumentObserver {
   watchDoc<T extends JsonObject>(token: SessionDocToken<T>, context: Context): Promise<DocumentWatch<T> | undefined>;
-  watchDoc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: Id, context: Context): Promise<DocumentWatch<T> | undefined>;
-  watchDoc<T extends JsonObject>(token: TaskDocToken<T>, taskId: Id, context: Context): Promise<DocumentWatch<T> | undefined>;
+  watchDoc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: ConversationId, context: Context): Promise<DocumentWatch<T> | undefined>;
+  watchDoc<T extends JsonObject>(token: TaskDocToken<T>, taskId: TaskId, context: Context): Promise<DocumentWatch<T> | undefined>;
   watchDoc<T extends JsonObject, I extends JsonValue>(token: SessionDocFamilyToken<T, I>, key: string, context: Context): Promise<DocumentWatch<T> | undefined>;
-  watchDoc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: Id, key: string, context: Context): Promise<DocumentWatch<T> | undefined>;
-  watchDoc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: Id, key: string, context: Context): Promise<DocumentWatch<T> | undefined>;
+  watchDoc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, context: Context): Promise<DocumentWatch<T> | undefined>;
+  watchDoc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: TaskId, key: string, context: Context): Promise<DocumentWatch<T> | undefined>;
 }
 ```
 
 `DocumentSource` is an opaque Chord-recognized `ReplicatedStateSource`. A Chord
-replicated state adopts it directly and forwards its committed immutable value
-and operations without another tracker or re-diff. `attach()` is one synchronous
-boundary: `snapshot.value` includes every commit through `snapshot.cursor`, and
-the attachment buffers only later frames. `activate()` installs the sole listener
-and synchronously drains those frames in contiguous cursor order before returning.
-An operation already covered by the snapshot is never redelivered. Source-backed
-state is publication-only and Pico remains its sole mutator.
+replicated state adopts Pico's shareable committed immutable revisions directly,
+without another tracker or a value copy. `attach()` is one synchronous boundary:
+`snapshot.value` includes every commit through `snapshot.cursor`, and the
+attachment buffers only later frames. `activate()` installs the sole listener
+and synchronously drains those frames in contiguous cursor order before
+returning. An operation already covered by the snapshot is never redelivered.
+Source-backed state is publication-only and Pico remains its sole mutator.
+Source revisions and operation placement payloads may share trusted immutable
+containers.
 
 Source and watch acquisition never create; absent lookup returns `undefined`.
 Successful acquisition binds one concrete incarnation. Retirement publishes a
@@ -1777,20 +1972,18 @@ has a token and owner/key. There is no additional subtree permission system insi
 Session code.
 
 `watchDoc()` is available on task, hook, and tool APIs. On the Session line,
-acquisition resolves one existing concrete incarnation, captures its immutable
-committed value, and registers the handle for every later committed operation
-batch. It returns `undefined` when absent. `watch.value` is that fixed acquisition snapshot and
-never changes.
+acquisition resolves one existing concrete incarnation, captures its current
+immutable tracker revision in O(1), and registers the handle for later current
+revisions. It returns `undefined` when absent. Before `start()`,
+`watch.value` remains the acquisition revision even when newer revisions commit.
 
 ```ts
 const watch = await api.watchDoc(JobOutputDoc, producerTaskId, context);
 if (watch === undefined) return;
-let value = watch.value;
 try {
-  await initializeConsumer(value, context);
-  watch.start(async (ops, deliveryContext) => {
-    value = applyImmutable(value, ops);
-    await consume(value, deliveryContext);
+  await initializeConsumer(watch.value, context);
+  watch.start(async (_ops, deliveryContext) => {
+    await consume(watch.value, deliveryContext);
   });
 } catch (error) {
   watch.stop();
@@ -1799,59 +1992,50 @@ try {
 }
 ```
 
-The caller initializes from `value` before `start()`. `start()` synchronously
-installs the sole listener, changes the prepared handle to active, and schedules
-delivery; it never invokes the listener inline. A second `start()`, or `start()`
-after stop, throws.
+The caller initializes from the acquisition revision before `start()`.
+`start()` synchronously installs the sole listener, changes the prepared handle
+to active, and schedules delivery; it never invokes the listener inline. A
+second `start()`, or `start()` after stop, throws.
 
-One per-watch delivery line awaits each callback before starting the next, so
-callbacks never overlap. Commits never wait for callback settlement: while one
-batch is in flight, later batches append to the pending queue. Empty operation
-batches are discarded before enqueueing and cannot consume queue bookkeeping. An
-update accepted between acquisition and return, or between return and `start()`,
-is therefore not lost. The listener's promise covers all work the watch
-serializes; fire-and-forget work started by the listener is outside that
-guarantee.
+Each watch retains only its last delivered immutable revision and the newest
+committed immutable revision. It retains no operation queue and never constructs
+reset frames. Before each callback, off the Session line, it computes
+`diffRevisions(lastDelivered, newest)` and advances `watch.value` to that exact
+newest revision. An empty derived batch advances the value silently without
+invoking the listener. A nonempty batch is delivered with a watch-owned Context
+that carries values from the newest coalesced commit's Context while its
+cancellation lifetime belongs to the watch. If a newer revision arrives while a callback
+is in flight, the delivery line repeats after that callback settles. Callbacks
+never overlap, and commits never wait for callback settlement.
 
-The pending queue is bounded only by the total number of operations in its
-undelivered batches. It never estimates serialized size or calls
-`JSON.stringify()` to make a compaction decision. When the operation-count limit
-is exceeded, the handle leaves the in-flight batch untouched and replaces the
-entire pending suffix with one newly allocated root replacement batch:
+An update accepted between acquisition and return, or between return and
+`start()`, is therefore not lost. Slow or unstarted watches converge directly to
+the latest committed state with memory bounded by immutable revision references,
+not queued operation count. Intermediate commits and redundant nonempty batches
+may be coalesced away when their net revision diff is empty. Code that must audit
+every transition must persist each fact as an immutable entry or in its own
+journal. The listener's promise covers all work the watch serializes;
+fire-and-forget work started by the listener is outside that guarantee.
 
-```ts
-[["r", latestImmutablePublishedValue]]
-```
+`watch.value` and every previously returned revision remain stable forever under
+the trusted immutability contract. Consumers must not mutate them or any retained
+descendant. A consumer needing mutable ownership must copy first.
 
-The reset counts as one pending operation regardless of the document's in-memory
-size. Later deltas append behind it. If the operation-count limit is exceeded
-again, the whole pending suffix is replaced with a newer reset rather than
-accumulating an unbounded operation list. This bounds delta bookkeeping, not the
-document value itself. This watch observes convergent committed state, not every
-intermediate transition.
+A watch remains bound to its original incarnation. Retirement sets its newest
+revision to `null`. Before start, `value` remains the acquisition revision;
+after start, the terminal diff advances `watch.value` to `null`, invokes the
+listener, and closes as `retired`. Recreation requires another watch.
 
-The replacement value is the prepared immutable candidate corresponding exactly
-to the last batch compacted into it. Pico adopts and publishes that candidate
-after storage succeeds; it never exposes a draft or borrowed storage value.
-Watches may share the immutable candidate and frozen operation payloads. A
-mutable consumer must detach them before using mutable `apply()` or `track()`.
-
-A watch remains bound to its original incarnation. Retirement replaces the
-pending suffix with `[["r", null]]`. Before start, `value` remains the original
-snapshot and the terminal reset becomes the first delivered batch. While active,
-the reset follows any in-flight callback. Successful terminal delivery closes as
-`retired`; recreation requires another watch.
-
-`stop()` is idempotent, unregisters the handle, discards pending batches,
-prevents another callback from starting, and signals the watch delivery context.
-An in-flight callback is allowed to settle; `closed` resolves only afterward.
-The acquisition `Context` governs the watch lifetime. Cancellation during
-acquisition cleans up any registration before rejecting. Cancellation immediately
-after successful acquisition may return an already-stopped handle,
+`stop()` is idempotent, unregisters the handle, discards its pending latest
+revision, prevents another callback from starting, and signals the watch-owned
+delivery Context. An in-flight callback is allowed to settle; `closed` resolves only
+afterward. The acquisition `Context` governs the watch lifetime. Cancellation
+during acquisition cleans up any registration before rejecting. Cancellation
+immediately after successful acquisition may return an already-stopped handle,
 whose `start()` throws and whose `closed` reports `cancelled`. Invocation
-termination and Session close stop owned watches similarly. Listener rejection
-is reported, discards pending work, and closes only that watch as
-`listener_error`. The first termination reason wins, and every late rejection is
+termination and Session close stop owned watches similarly. Diff or listener
+failure is reported, discards pending work, and closes only that watch as
+`diff_error` or `listener_error`, respectively. The first termination reason wins, and every late rejection is
 observed.
 
 ### 9.3 Conversation view
@@ -1878,26 +2062,31 @@ document op ["s", ["message"], value]
 ```
 
 Entry appends/head changes and every changed mounted document are included in
-the same publication. The mount owns no document revision producer and performs no semantic
-projection. It materializes one immutable published view per batch with
-`applyImmutable(previousView, mountedOps)` so every conversation watch can share
-that value for reset compaction. A Chord adapter assigns a contiguous in-memory
-delivery sequence per view source lifetime.
+the same publication. Before Storage admission, the Session derives the mounted
+operation batch and prepares each affected loaded mount's next immutable revision
+with the optimized immutable applier. Failure rolls back normally. After Storage
+success, finalization only installs the prepared mount pointers/cursors and
+enqueues publication. Mounted document revisions may be structurally shared
+because they obey the same trusted immutability contract. The mount performs no
+semantic projection and owns no second persistence authority. A Chord adapter
+assigns a contiguous in-memory delivery sequence per view source lifetime.
 
-`Conversation.watch()` exposes that mount through the same immutable acquisition
-snapshot, serialized asynchronous listener, and reset-compacted pending queue as
-`watchDoc()`. Each non-empty operation batch represents one complete Session
-commit; a commit that does not change the mounted view emits no watch batch. Chord
-Session facets may forward the captured value and committed operations through
-services, but that product wiring is not part of the Harness facade and must not
-add another tracker or semantic event envelope.
+`Conversation.watch()` exposes that mount through the same O(1) immutable
+acquisition, serialized asynchronous listener, and latest-revision coalescing as
+`watchDoc()`. An empty mounted operation batch creates no revision; a redundant
+nonempty batch may create a distinct but deeply equal revision. A slow watch may
+skip intermediate revisions and receives a derived diff from its last delivered
+revision directly to the newest one. Chord Session facets may
+forward the captured revision and committed operations through services, but
+that product wiring is not part of the Harness facade and must not add another
+tracker or semantic event envelope.
 
 ### 9.4 Agent-mode notifications
 
 The Session kernel and Chord structural sources do not maintain a semantic event
 journal. Coding-agent JSON/RPC compatibility uses a thin agent-mode adapter
-derived from each uncoalesced committed publication before per-watch queue
-compaction. It owns no tracker or persistence and emits notifications only after
+derived from each uncoalesced committed publication before per-watch
+latest-revision coalescing. It owns no tracker or persistence and emits notifications only after
 the commit that makes them true.
 
 The adapter protocol covers run start/settlement, committed assistant progress,
@@ -1920,7 +2109,7 @@ these rules:
   adapter.
 
 This adapter is allowed even though a public Session-kernel semantic stream is a
-non-goal. It must not derive notifications from a lossy, reset-compacted watch
+non-goal. It must not derive notifications from a lossy, latest-revision watch
 when complete subscribed lifecycle delivery is promised.
 
 ## 10. Storage contract
@@ -1935,14 +2124,19 @@ type Page<T, C> = {
 
 type Cursor = Readonly<Record<string, JsonValue>>;
 
+type ConversationQuery = {
+  readonly ownerConversationId?: ConversationId;
+  readonly ownerTaskId?: TaskId;
+};
+
 type EntryQuery = {
-  readonly conversationId: Id;
-  readonly minEntryId?: Id; // inclusive
-  readonly maxEntryId?: Id; // inclusive
+  readonly conversationId: ConversationId;
+  readonly minEntryId?: EntryId; // inclusive
+  readonly maxEntryId?: EntryId; // inclusive
 };
 
 type TaskQuery = {
-  readonly conversationId?: Id;
+  readonly conversationId?: ConversationId;
   readonly kind?: string;
   readonly status?: "pending" | "running" | "terminal";
   readonly abortRequested?: boolean;
@@ -1984,11 +2178,16 @@ type StorageWrite =
       readonly content: Extract<DocumentContent, { kind: "base" }>;
     }
   | {
+      readonly type: "document.copy";
+      readonly record: DocumentCreate;
+      readonly source: { readonly id: DocumentId; readonly at: DocumentPoint };
+    }
+  | {
       readonly type: "document.change";
-      readonly id: Id;
+      readonly id: DocumentId;
       readonly content: DocumentContent;
     }
-  | { readonly type: "document.retire"; readonly id: Id };
+  | { readonly type: "document.retire"; readonly id: DocumentId };
 
 /**
  * Trusts the owning Session to supply semantically valid records, references,
@@ -1999,28 +2198,43 @@ type StorageWrite =
  */
 interface Storage {
   commit(writes: readonly StorageWrite[], context: Context): Promise<Seq>;
-  mintId(): Promise<Id>;
+  /** Allocate from the one global numeric namespace; the generic brand is compile-time only. */
+  mintId<I extends Id<string>>(): Promise<I>;
 
-  conversation(id: Id, context: Context): Promise<ConversationRecord | undefined>;
-  scanConversations(cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<ConversationRecord, Cursor>>;
+  conversation(id: ConversationId, context: Context): Promise<ConversationRecord | undefined>;
+  scanConversations(query: ConversationQuery, limit: number, cursor: Cursor | undefined, context: Context): Promise<Page<ConversationRecord, Cursor>>;
 
-  entry(id: Id, context: Context): Promise<{ readonly entry: EntryRecord; readonly commitSeq: Seq } | undefined>;
-  findLatestHeadMarker(conversationId: Id, atOrBeforeEntryId: Id | undefined, context: Context): Promise<(EntryRecord & { readonly head: Id }) | undefined>;
-  scanEntries(query: EntryQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<EntryRecord, Cursor>>;
+  entry(id: EntryId, context: Context): Promise<{ readonly entry: EntryRecord; readonly commitSeq: Seq } | undefined>;
+  entry(conversationId: ConversationId, id: EntryId, context: Context): Promise<{ readonly entry: EntryRecord; readonly commitSeq: Seq } | undefined>;
+  findLatestHeadMarker(conversationId: ConversationId, atOrBeforeEntryId: EntryId | undefined, context: Context): Promise<(EntryRecord & { readonly head: EntryId }) | undefined>;
+  scanEntries(query: EntryQuery, limit: number, cursor: Cursor | undefined, context: Context): Promise<Page<EntryRecord, Cursor>>;
 
-  task(id: Id, context: Context): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
-  scanTasks(query: TaskQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<TaskRecord<JsonValue, JsonValue, JsonValue>, Cursor>>;
+  task(id: TaskId, context: Context): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
+  scanTasks(query: TaskQuery, limit: number, cursor: Cursor | undefined, context: Context): Promise<Page<TaskRecord<JsonValue, JsonValue, JsonValue>, Cursor>>;
 
-  submission(id: Id, context: Context): Promise<SubmissionRecord | undefined>;
-  submissionByRequest(conversationId: Id, requestId: string, context: Context): Promise<SubmissionRecord | undefined>;
+  submission(id: SubmissionId, context: Context): Promise<SubmissionRecord | undefined>;
+  submissionByRequest(conversationId: ConversationId, requestId: string, context: Context): Promise<SubmissionRecord | undefined>;
 
   findDocument(address: DocumentAddress, at: DocumentPoint, context: Context): Promise<DocumentRecord | undefined>;
-  document(id: Id, at: DocumentPoint, context: Context): Promise<StoredDocument | undefined>;
-  scanDocuments(query: DocumentQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<DocumentRecord, Cursor>>;
+  document(id: DocumentId, at: DocumentPoint, context: Context): Promise<StoredDocument | undefined>;
+  scanDocuments(query: DocumentQuery, limit: number, cursor: Cursor | undefined, context: Context): Promise<Page<DocumentRecord, Cursor>>;
 
   close(context: Context): Promise<void>;
 }
 ```
+
+`StorageRejected` means a batch was rejected before any durable effect and is
+guaranteed not to have committed. Session rolls such a batch back normally;
+unknown failures after Storage admission remain fatal because their commit state
+is uncertain. Backends use `StorageRejected` for deterministic `document.copy`
+source, replay, and consistency failures only when rollback is guaranteed.
+
+A `document.copy` reads committed pre-batch source state independent of command
+order. The source must be an alive conversation document at the selected point,
+and kind/key/history/fork must match the child create record. Storage persists
+one independent complete child base at the source's stored version. A batch may
+not create, change, or retire a selected source. Later source changes,
+reclamation, retirement, or backend reopen cannot affect the child.
 
 Cursors are backend-owned JSON objects. Callers only round-trip them to the same
 scan on the same storage; cross-storage or cross-query use is unsupported. The
@@ -2034,8 +2248,14 @@ inclusive ID range in newest-first order while applying every conversation
 ancestry cap. With no bounds it pages complete visible history. To read context
 through entry `E`, find the marker at or before `E`, then scan from
 `marker?.head` through `E`. For current context the upper bound is omitted.
-`entry()` combines exact global lookup with the commit sequence required by
-historical document reads. `limit` is always the maximum page size.
+Conversation owner filters are indexed and conjunctive. They support ownership
+traversal without an all-conversation scan; application-maintained registries
+are not a substitute for these kernel indexes.
+
+`entry(id)` combines exact global lookup with the commit sequence required by
+historical document reads. `entry(conversationId, id)` returns that pair only
+when the entry is visible through the requested conversation's ancestry. `limit`
+is always the maximum page size.
 `findDocument()` resolves one exact logical kind/scope/key address at current or
 historical membership. A missing key means the singleton, not every family
 member. `scanDocuments()` enumerates only the incarnations alive in one exact
@@ -2120,10 +2340,14 @@ JSONL creation accepts an `fsync` option that defaults to `false`. Without
 `fsync`, it guarantees ordinary process-crash consistency, not survival of
 power, host, kernel, or filesystem failure. With `fsync: true`, the backend
 appends all affected sidecar records, flushes each affected sidecar, and only
-then appends the main marker. It does not explicitly flush `main.jsonl`; an
-acknowledged tail commit may therefore still disappear, but a marker that
-survives should not overtake its sidecar data. A main-only commit has no
-sidecars to flush.
+then appends the main marker. Ordinary publication does not explicitly flush
+`main.jsonl`; an acknowledged tail commit may therefore still disappear, but a
+marker that survives should not overtake its sidecar data. A main-only commit has
+no sidecars to flush. Before destructive reclamation with `fsync: true`, the
+backend flushes `main.jsonl` once so the authorizing marker cannot disappear
+while its replacement or removal survives. If that flush fails, the committed
+state remains published and reclamation is deferred. A non-empty temporary
+replacement is also flushed before rename.
 
 Recovery:
 
@@ -2135,18 +2359,21 @@ Recovery:
   record unnecessary.
 - Any uncertain append failure poisons the open backend.
 
-Reclamation starts only after the authorizing base/retirement commits. It writes
-a temporary replacement, renames it, and invalidates cached file descriptors so
-future appends cannot target an unlinked inode. `main.jsonl` is not compacted in
-the initial implementation.
+Reclamation starts only after the authorizing base/retirement commits. When no
+sidecar records remain, it removes the sidecar directly. Otherwise, it writes a
+temporary replacement, renames it, and invalidates cached file descriptors so
+future appends cannot target an unlinked inode. Flushing `main.jsonl` to
+authorize reclamation does not compact it. `main.jsonl` is not compacted in the
+initial implementation.
 
 ## 12. API footguns
 
 These are contracts, not invitations to add defensive machinery:
 
-- **Detached draft work:** drafts and bound array methods are revoked after the
-  Session callback settles. Fire-and-forget work that runs before settlement can
-  still mutate the active transaction and is unsupported.
+- **Detached draft work:** draft reads, draft writes, and all `Tx` operations
+  reject after the Session callback settles. Fire-and-forget work that runs
+  before callback settlement can still mutate the active transaction and is
+  unsupported.
 - **Read after write:** read every required table row before the first table
   write. Document drafts remain usable afterward; table reads do not.
 - **Long transactions:** an async commit callback holds the Session mutation
@@ -2167,13 +2394,17 @@ These are contracts, not invitations to add defensive machinery:
   change requires explicit copy and retirement. Passing incompatible definition
   tokens that claim the same kind is unsupported caller misuse; Session does not
   maintain a document-definition registry to detect it.
-- **Watch activation:** `watch.value` is the immutable acquisition snapshot.
-  Initialize the consumer from it before `start()`; queued operations are based
-  on exactly that value.
-- **Coalesced watches:** slow or unstarted watches may replace an undelivered
-  suffix with a complete reset, omitting intermediate committed states. A facet
-  that must audit every transition must persist each fact as an immutable entry
-  or in its own journal and scan that history explicitly.
+- **Trusted immutable revisions:** `snapshot()`, source values, watch values, and
+  their descendants may share tracker-owned containers. Never mutate them; copy
+  first when mutable ownership is required. Runtime freezing is not provided.
+- **Watch activation:** before `start()`, `watch.value` remains the immutable
+  acquisition revision. Initialize the consumer from it first. After start, the
+  property advances to the newest delivered immutable revision before each
+  callback; every earlier reference remains stable.
+- **Coalesced watches:** slow or unstarted watches retain only their last
+  delivered and newest revisions. Intermediate committed states may be omitted.
+  A facet that must audit every transition must persist each fact as an immutable
+  entry or in its own journal and scan that history explicitly.
 - **Watch self-join:** a listener may call `stop()`, but must not await its own
   `closed` promise or a Session close that joins that listener.
 - **Durable progress cadence:** clients see only committed progress. A crash may

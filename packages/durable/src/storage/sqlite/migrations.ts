@@ -19,8 +19,12 @@ const INITIAL_SCHEMA: readonly string[] = [
 	) STRICT`,
 	`CREATE TABLE conversations (
 		id INTEGER PRIMARY KEY,
+		owner_conversation_id INTEGER,
+		owner_task_id INTEGER,
 		record TEXT NOT NULL CHECK (json_valid(record))
 	) STRICT`,
+	"CREATE INDEX conversations_by_owner_conversation ON conversations (owner_conversation_id, id)",
+	"CREATE INDEX conversations_by_owner_task ON conversations (owner_task_id, id)",
 	`CREATE TABLE entries (
 		id INTEGER PRIMARY KEY,
 		conversation_id INTEGER NOT NULL,
@@ -77,7 +81,7 @@ const INITIAL_SCHEMA: readonly string[] = [
 	"CREATE INDEX document_revisions_by_kind ON document_revisions (document_id, kind, seq DESC)",
 ];
 
-/** Immutable, ordered schema history. Append new migrations; never edit released ones. */
+/** Immutable, ordered schema history. Append new migrations after the initial schema ships. */
 export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [{ version: 1, statements: INITIAL_SCHEMA }];
 
 export const CURRENT_SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS.at(-1)?.version ?? 0;

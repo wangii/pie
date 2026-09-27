@@ -48,10 +48,10 @@
 		"clean": "shx rm -rf dist",
 		"generate-telemetry-docs": "node scripts/generate-telemetry-docs.ts",
 		"check:telemetry-docs": "node scripts/generate-telemetry-docs.ts --check",
-		"build": "tsgo -p tsconfig.build.json",
+		"build": "tsc -p tsconfig.build.json",
 		"bench:session:timing": "vitest bench --config vitest.benchmark.config.ts",
-		"bench:session:memory": "tsx --tsconfig benchmark/tsconfig.json benchmark/session/loaded-footprint.ts",
-		"bench:session:allocations": "tsx --tsconfig benchmark/tsconfig.json benchmark/session/allocation-profile.ts",
+		"bench:session:memory": "node --import ../coding-agent/src/experimental/source-resolver.ts benchmark/session/loaded-footprint.ts",
+		"bench:session:allocations": "node --import ../coding-agent/src/experimental/source-resolver.ts benchmark/session/allocation-profile.ts",
 		"test": "vitest --run",
 		"test:harness": "vitest --run --config vitest.harness.config.ts",
 		"test:session:conformance": "vitest --run --config vitest.harness.config.ts test/harness/memory-conformance.test.ts",
@@ -87,7 +87,6 @@
 	"devDependencies": {
 		"@types/node": "22.19.19",
 		"@vitest/coverage-v8": "4.1.9",
-		"typescript": "5.9.3",
 		"vitest": "4.1.9"
 	}
 }

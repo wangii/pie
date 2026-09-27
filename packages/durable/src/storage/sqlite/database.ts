@@ -17,7 +17,11 @@ export interface SqliteStatement {
  * Queries and transaction callbacks are synchronous so the same storage core can
  * run on Node, Bun, and Cloudflare Durable Object SQLite. An adapter may return a
  * promise from `transaction` while it waits for the transaction to settle.
- * Callers must not close the database while a returned settlement is pending.
+ * When the callback throws, the adapter must roll the transaction back before
+ * rethrowing that same error. If rollback fails, it must throw a different error
+ * (for example an `AggregateError`) so callers cannot mistake the callback error
+ * for a guaranteed rollback. Callers must not close the database while a
+ * returned settlement is pending.
  */
 export interface SqliteDatabase {
 	exec(sql: string): void;

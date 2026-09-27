@@ -46,6 +46,11 @@
 			"types": "./dist/storage/sqlite/node.d.ts",
 			"import": "./dist/storage/sqlite/node.js"
 		},
+		"./testing": {
+			"source": "./src/testing/index.ts",
+			"types": "./dist/testing/index.d.ts",
+			"import": "./dist/testing/index.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"sideEffects": false,
@@ -56,7 +61,7 @@
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json",
+		"build": "tsc -p tsconfig.build.json",
 		"test": "vitest --run",
 		"bench:storage": "vitest bench --config vitest.benchmark.config.ts",
 		"bench:storage:memory": "node --conditions=source --experimental-strip-types test/storage-memory.ts",
