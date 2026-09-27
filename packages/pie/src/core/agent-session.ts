@@ -277,6 +277,9 @@ export interface ExtensionBindings {
 	onError?: ExtensionErrorListener;
 }
 
+export type QueuedInputDisposition = "handled" | "queued";
+export type PromptDisposition = QueuedInputDisposition | "started";
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
@@ -287,8 +290,8 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
-	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
-	preflightResult?: (success: boolean) => void;
+	/** Internal hook used by RPC mode to observe how an accepted prompt was dispatched. Not called if the prompt is rejected. */
+	preflightResult?: (disposition: PromptDisposition) => void;
 }
 
 /** Options for model/thinking mutations. */
@@ -1552,7 +1555,7 @@ export class AgentSession {
 				const handled = await this._tryExecuteExtensionCommand(text);
 				if (handled) {
 					// Extension command executed, no prompt to send
-					preflightResult?.(true);
+					preflightResult?.("handled");
 					return;
 				}
 			}
@@ -1574,7 +1577,7 @@ export class AgentSession {
 					this.isStreaming ? options?.streamingBehavior : undefined,
 				);
 				if (inputResult.action === "handled") {
-					preflightResult?.(true);
+					preflightResult?.("handled");
 					return;
 				}
 				if (inputResult.action === "transform") {
@@ -1616,7 +1619,7 @@ export class AgentSession {
 					this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
 					await this._queueSteer(expandedText, currentImages);
 				}
-				preflightResult?.(true);
+				preflightResult?.("queued");
 				return;
 			}
 
@@ -1713,7 +1716,6 @@ export class AgentSession {
 			}
 			this._beliefLoop.applyRoleSurface();
 		} catch (error) {
-			preflightResult?.(false);
 			throw error;
 		}
 
@@ -1721,7 +1723,7 @@ export class AgentSession {
 			return;
 		}
 
-		preflightResult?.(true);
+		preflightResult?.("started");
 		await this._runAgentPrompt(messages);
 	}
 
@@ -1793,7 +1795,7 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[]): Promise<QueuedInputDisposition> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -1806,6 +1808,7 @@ export class AgentSession {
 		// A steering message is input, not consent: it never releases the Frame wait. Approval and
 		// objection are explicit acts (see `approveFormulation` / `submitFormulationCorrection`).
 		await this._queueSteer(expandedText, images);
+		return "queued";
 	}
 
 	/**
@@ -1815,7 +1818,7 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+	async followUp(text: string, images?: ImageContent[]): Promise<QueuedInputDisposition> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -1826,6 +1829,7 @@ export class AgentSession {
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueFollowUp(expandedText, images);
+		return "queued";
 	}
 
 	/**

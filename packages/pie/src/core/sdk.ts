@@ -6,6 +6,7 @@ import {
 	setDefaultStreamFn,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
+import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -375,6 +376,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
+	const handleProviderStreamEvent: NonNullable<ModelsSimpleStreamOptions["onProviderStreamEvent"]> = async (
+		data,
+		model,
+	) => {
+		const runner = extensionRunnerRef.current;
+		if (!runner?.hasHandlers("provider_stream_event")) return;
+		await runner.emit({
+			data,
+			type: "provider_stream_event",
+			provider: model.provider,
+			api: model.api,
+			model: model.id,
+		});
+	};
+
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	agent = new Agent({
@@ -432,6 +448,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				headers: response.headers,
 			});
 		},
+		onProviderStreamEvent: handleProviderStreamEvent,
 		sessionId: sessionManager.getSessionId(),
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;

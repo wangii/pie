@@ -7,7 +7,7 @@
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { PromptDisposition, QueuedInputDisposition, SessionStats } from "../../core/agent-session.ts";
 import type {
 	AgentSessionCursor,
 	Belief,
@@ -153,10 +153,16 @@ export interface RpcDomainSnapshot {
 
 // Success responses with data
 export type RpcResponse =
-	// Prompting (async - events follow)
-	| { id?: string; type: "response"; command: "prompt"; success: true }
-	| { id?: string; type: "response"; command: "steer"; success: true }
-	| { id?: string; type: "response"; command: "follow_up"; success: true }
+	// Prompting
+	| { id?: string; type: "response"; command: "prompt"; success: true; data: { disposition: PromptDisposition } }
+	| { id?: string; type: "response"; command: "steer"; success: true; data: { disposition: QueuedInputDisposition } }
+	| {
+			id?: string;
+			type: "response";
+			command: "follow_up";
+			success: true;
+			data: { disposition: QueuedInputDisposition };
+	  }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| {
 			id?: string;
