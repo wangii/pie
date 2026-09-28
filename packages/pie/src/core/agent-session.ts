@@ -47,6 +47,7 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
+import { processImage } from "../utils/image-process.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
@@ -406,6 +407,7 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _agentRunAbortRequested = false;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -646,8 +648,10 @@ export class AgentSession {
 
 			const content = hookResult?.content ?? result.content ?? [];
 			// Runs after the extension hook so images injected or replaced by extensions are normalized too.
+			const resizeOptions = this.model?.inputLimits?.images?.resize;
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				...(resizeOptions ? { resizeOptions } : {}),
 			});
 			this._recordProbeExecutionEnd(toolCall.id, toolCall.name, hookResult, normalizedContent, isError);
 
@@ -1543,13 +1547,16 @@ export class AgentSession {
 		if (this._beliefLoop.awaitingFormulationResponse()) {
 			throw new Error(TRANSITION_STEERS.awaitFormulationResponse);
 		}
+		this._agentRunAbortRequested = false;
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
+			while (!this._agentRunAbortRequested && (await this._handlePostAgentRun())) {
+				if (this._agentRunAbortRequested) break;
 				await this.agent.continue();
 			}
 		} finally {
+			if (this._agentRunAbortRequested) this._finishCancelledRetry();
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
@@ -1583,12 +1590,22 @@ export class AgentSession {
 		}
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
+		if (this._agentRunAbortRequested) {
+			this._finishCancelledRetry();
+			return false;
+		}
 		if (!msg) {
 			return false;
 		}
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
-			return true;
+			if (this._agentRunAbortRequested) this._finishCancelledRetry();
+			return !this._agentRunAbortRequested;
+		}
+
+		if (this._agentRunAbortRequested) {
+			this._finishCancelledRetry();
+			return false;
 		}
 
 		if (await this._degradeModelAfterFailure(msg)) {
@@ -1619,7 +1636,23 @@ export class AgentSession {
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
-		return this.agent.hasQueuedMessages();
+		return !this._agentRunAbortRequested && this.agent.hasQueuedMessages();
+	}
+
+	/**
+	 * Close out an in-flight retry when the run was aborted, so the retry loop cannot
+	 * resume after the user cancelled and `auto_retry_end` is not left unreported.
+	 */
+	private _finishCancelledRetry(): void {
+		if (this._retryAttempt === 0) return;
+		const attempt = this._retryAttempt;
+		this._retryAttempt = 0;
+		this._emit({
+			type: "auto_retry_end",
+			success: false,
+			attempt,
+			finalError: "Retry cancelled",
+		});
 	}
 
 	/** Whether a failed turn should fall back to the configured default model. */
@@ -1847,18 +1880,50 @@ export class AgentSession {
 	 * and the custom messages `before_agent_start` handlers returned. Applying an extension's
 	 * system-prompt override happens here too, since it belongs to the same request.
 	 */
+	private async _normalizePromptImages(
+		images: ImageContent[] | undefined,
+	): Promise<{ images: ImageContent[]; hints: string[] }> {
+		if (!images) return { images: [], hints: [] };
+
+		const normalizedImages: ImageContent[] = [];
+		const hints: string[] = [];
+		for (const image of images) {
+			const processed = await processImage(Buffer.from(image.data, "base64"), image.mimeType, {
+				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				resizeOptions: this.model?.inputLimits?.images?.resize,
+			});
+			if (!processed.ok) {
+				hints.push(processed.message);
+				continue;
+			}
+			normalizedImages.push({ type: "image", data: processed.data, mimeType: processed.mimeType });
+			hints.push(...processed.hints);
+		}
+		return { images: normalizedImages, hints };
+	}
+
 	private async _buildPromptMessages(
 		expandedText: string,
 		currentImages: ImageContent[] | undefined,
 	): Promise<AgentMessage[]> {
-		// Build messages array (custom message if any, then user message)
+		// Emit before_agent_start extension event first: handlers run before image normalization so a
+		// handler-selected model determines the resize profile the prompt images are normalized against.
+		const result = await this._extensionRunner.emitBeforeAgentStart(
+			expandedText,
+			currentImages,
+			this._baseSystemPrompt,
+			this._baseSystemPromptOptions,
+		);
+
+		const normalized = await this._normalizePromptImages(currentImages);
+		const userText = normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
+
+		// Build messages array (user message, then any custom messages from extensions)
 		const messages: AgentMessage[] = [];
 
 		// Add user message
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-		if (currentImages) {
-			userContent.push(...currentImages);
-		}
+		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: userText }];
+		userContent.push(...normalized.images);
 		messages.push({
 			role: "user",
 			content: userContent,
@@ -1871,13 +1936,6 @@ export class AgentSession {
 		}
 		this._pendingNextTurnMessages = [];
 
-		// Emit before_agent_start extension event
-		const result = await this._extensionRunner.emitBeforeAgentStart(
-			expandedText,
-			currentImages,
-			this._baseSystemPrompt,
-			this._baseSystemPromptOptions,
-		);
 		// Add all custom messages from extensions
 		if (result?.messages) {
 			for (const msg of result.messages) {
@@ -2232,7 +2290,12 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		if (this._isAgentRunActive) {
+			this._agentRunAbortRequested = true;
+		}
 		this.abortRetry();
+		this.abortCompaction();
+		this.abortBranchSummary();
 		this.agent.abort();
 		await this.waitForIdle();
 	}
@@ -2561,6 +2624,7 @@ export class AgentSession {
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
+		let cancelledByExtension = false;
 
 		try {
 			const model = this.model;
@@ -2597,6 +2661,7 @@ export class AgentSession {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
+					cancelledByExtension = true;
 					throw new Error("Compaction cancelled");
 				}
 
@@ -2646,7 +2711,7 @@ export class AgentSession {
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			const aborted = this._compactionAbortController?.signal.aborted === true || cancelledByExtension;
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
 			this._compactionAbortController = undefined;
 			this._emit({
@@ -2928,6 +2993,7 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let started = false;
 		let fromExtension = false;
+		let abortController: AbortController | undefined;
 
 		try {
 			if (!model) {
@@ -2944,7 +3010,8 @@ export class AgentSession {
 			}
 
 			this._emit({ type: "compaction_start", reason });
-			this._autoCompactionAbortController = new AbortController();
+			abortController = new AbortController();
+			this._autoCompactionAbortController = abortController;
 			started = true;
 
 			let extensionCompaction: CompactionResult | undefined;
@@ -2957,7 +3024,7 @@ export class AgentSession {
 					customInstructions: undefined,
 					reason,
 					willRetry,
-					signal: this._autoCompactionAbortController.signal,
+					signal: abortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
@@ -2988,11 +3055,11 @@ export class AgentSession {
 				extensionCompaction,
 				{ model: requestModel, apiKey, headers, env },
 				undefined,
-				this._autoCompactionAbortController.signal,
+				abortController.signal,
 				reason,
 			);
 
-			if (this._autoCompactionAbortController.signal.aborted) {
+			if (abortController.signal.aborted) {
 				this._emit({
 					type: "compaction_end",
 					reason,
@@ -3067,7 +3134,10 @@ export class AgentSession {
 			}
 			return false;
 		} finally {
-			this._autoCompactionAbortController = undefined;
+			// Only clear our own controller: a newer compaction may already own the field.
+			if (this._autoCompactionAbortController === abortController) {
+				this._autoCompactionAbortController = undefined;
+			}
 		}
 	}
 

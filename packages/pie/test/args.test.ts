@@ -125,6 +125,61 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("rpc");
 		});
 
+		// Issue #9045: an invalid or missing --mode value must be reported rather than ignored.
+		test.each(["yaml", ""])("rejects invalid --mode value %j", (mode) => {
+			const result = parseArgs(["--mode", mode, "--version"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.version).toBe(true);
+			expect(result.messages).toEqual([]);
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: `Invalid mode "${mode}". Valid values: text, json, rpc` },
+			]);
+		});
+
+		test("reports a missing --mode value", () => {
+			const result = parseArgs(["--mode"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--mode requires text, json, or rpc" }]);
+		});
+
+		test("does not consume another option as a --mode value", () => {
+			const result = parseArgs(["--mode", "--version"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.version).toBe(true);
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--mode requires text, json, or rpc" }]);
+		});
+
+		test("reports an invalid --mode value after a valid one", () => {
+			const result = parseArgs(["--mode", "json", "--mode", "yaml"]);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid mode "yaml". Valid values: text, json, rpc' },
+			]);
+		});
+
+		// Issue #7269: `--` ends option parsing so a prompt may begin with a dash.
+		test("treats arguments after -- as messages", () => {
+			const result = parseArgs(["--", "- Summarize these points"]);
+			expect(result.messages).toEqual(["- Summarize these points"]);
+			expect(result.fileArgs).toEqual([]);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("treats @arguments after -- as files", () => {
+			const result = parseArgs(["--", "@notes.md", "hello"]);
+			expect(result.fileArgs).toEqual(["notes.md"]);
+			expect(result.messages).toEqual(["hello"]);
+		});
+
+		test("stops parsing options at --", () => {
+			const result = parseArgs(["--", "--version"]);
+			expect(result.version).toBeUndefined();
+			expect(result.messages).toEqual(["--version"]);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
 		test("parses --session", () => {
 			const result = parseArgs(["--session", "/path/to/session.jsonl"]);
 			expect(result.session).toBe("/path/to/session.jsonl");

@@ -47,6 +47,7 @@ export type {
 	// Event Results
 	ContextEventResult,
 	ContextUsage,
+	ContextWithSystemEvent,
 	CustomToolCallEvent,
 	CustomToolResultEvent,
 	EditorFactory,

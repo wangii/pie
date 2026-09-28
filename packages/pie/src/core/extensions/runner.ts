@@ -3,7 +3,13 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
+import {
+	getCurrentSystemMessage,
+	type ImageContent,
+	type Model,
+	type Provider,
+	type ProviderHeaders,
+} from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -21,6 +27,7 @@ import type {
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
+	ContextWithSystemEvent,
 	EntryRenderer,
 	Extension,
 	ExtensionActions,
@@ -113,6 +120,54 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 	}
 	return builtinKeybindings;
 };
+
+function isUserBashEventResult(value: unknown): value is UserBashEventResult {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Record<string, unknown>;
+	const hasOperations = candidate.operations !== undefined;
+	const hasResult = candidate.result !== undefined;
+	if (hasOperations === hasResult) return false;
+
+	if (hasOperations) {
+		const operations = candidate.operations;
+		if (typeof operations !== "object" || operations === null) return false;
+		return typeof (operations as Record<string, unknown>).exec === "function";
+	}
+
+	const result = candidate.result;
+	if (typeof result !== "object" || result === null) return false;
+	const resultRecord = result as Record<string, unknown>;
+	return (
+		typeof resultRecord.output === "string" &&
+		"exitCode" in resultRecord &&
+		(resultRecord.exitCode === undefined || typeof resultRecord.exitCode === "number") &&
+		typeof resultRecord.cancelled === "boolean" &&
+		typeof resultRecord.truncated === "boolean" &&
+		(resultRecord.fullOutputPath === undefined || typeof resultRecord.fullOutputPath === "string")
+	);
+}
+
+function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
+	return left.length === right.length && left.every((message, index) => message === right[index]);
+}
+
+/**
+ * Re-attach the prompt and tool state after a `context` handler. Handlers only see the
+ * conversation; the system messages belong to Pi. An unchanged conversation keeps every
+ * system message in place, so models with mid-conversation support keep their cached
+ * prefix. A changed one gets the replayed prompt sections and tool declarations as one
+ * leading system message, so pruning, windowing, or slicing from a compaction summary
+ * cannot drop them.
+ */
+function restoreSystemMessages(
+	current: AgentMessage[],
+	visible: AgentMessage[],
+	returned: AgentMessage[],
+): AgentMessage[] {
+	if (sameMessages(returned, visible)) return current;
+	const head = getCurrentSystemMessage(current);
+	return head ? [head, ...returned] : returned;
+}
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -1013,9 +1068,13 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const handlerResult = await handler(event, ctx);
-					if (handlerResult) {
-						return handlerResult as UserBashEventResult;
+					if (handlerResult === undefined) continue;
+					if (!isUserBashEventResult(handlerResult)) {
+						throw new Error(
+							"Invalid user_bash handler result: return undefined for local execution or exactly one valid { operations } or { result } object",
+						);
 					}
+					return handlerResult;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
@@ -1025,6 +1084,7 @@ export class ExtensionRunner {
 						error: message,
 						stack,
 					});
+					throw err;
 				}
 			}
 		}
@@ -1032,6 +1092,11 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
+	/**
+	 * Run the request-time transforms in two phases. `context` handlers see the conversation
+	 * only and Pi restores the prompt and tool state after each; `context_with_system`
+	 * handlers then see the full transcript and their output is used as returned.
+	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
@@ -1042,18 +1107,55 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
+					const visibleMessages = currentMessages.filter((message) => message.role !== "system");
+					const visibleSnapshot = visibleMessages.slice();
+					const event: ContextEvent = { type: "context", messages: visibleMessages };
+					const handlerResult = (await handler(event, ctx)) as ContextEventResult | undefined;
 
-					if (handlerResult && (handlerResult as ContextEventResult).messages) {
-						currentMessages = (handlerResult as ContextEventResult).messages!;
-					}
+					// Handlers may return a new list or edit event.messages in place.
+					const returned =
+						handlerResult?.messages ??
+						(sameMessages(visibleMessages, visibleSnapshot) ? undefined : visibleMessages);
+					if (!returned) continue;
+					currentMessages = restoreSystemMessages(currentMessages, visibleSnapshot, returned);
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
 						extensionPath: ext.path,
 						event: "context",
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("context_with_system");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const hadLeadingSystemMessage = currentMessages[0]?.role === "system";
+					const event: ContextWithSystemEvent = { type: "context_with_system", messages: currentMessages };
+					const handlerResult = (await handler(event, ctx)) as ContextEventResult | undefined;
+					currentMessages = handlerResult?.messages ?? currentMessages;
+					// Providers read the prompt and initial tools from the leading system message.
+					// Losing it is never intended; report it but honor the handler's output.
+					if (hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
+						this.emitError({
+							extensionPath: ext.path,
+							event: "context_with_system",
+							error: "Handler removed the leading system message; the request has no prompt or initial tool declarations. Keep it at index 0 or replace a dropped prefix with getCurrentSystemMessage().",
+						});
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "context_with_system",
 						error: message,
 						stack,
 					});
