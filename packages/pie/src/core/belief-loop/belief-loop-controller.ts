@@ -62,6 +62,7 @@ import {
 	WITHDRAWN,
 } from "../belief-set.ts";
 
+import { estimateContextTokens } from "../compaction/index.ts";
 import type { ContextUsage } from "../extensions/index.ts";
 import { resolveCliModel } from "../model-resolver.ts";
 import { type LoopRole, ROLE_SPECS, TRANSITION_STEERS } from "../role-specs.ts";
@@ -1809,10 +1810,18 @@ export class BeliefLoopController {
 				if (this.pendingCorrections().length > 0) {
 					return { state: { role: "propose" }, steer: this.correctionHandoff() };
 				}
+				const contextExhausted = this.executionContextBudgetExhausted();
+				const budgetExhausted = episodeHorizon <= 0 || contextExhausted;
+				const exhaustedSteer = contextExhausted
+					? TRANSITION_STEERS.adjudicateContextBudgetExhausted
+					: TRANSITION_STEERS.adjudicateBudgetExhausted;
 				if (state.fastPath) {
 					if (turn.toolResults.some((result) => result.isError)) this.fastPathFailure = true;
-					if (!ranTools || episodeHorizon <= 0) {
-						if (ranTools && episodeHorizon <= 0 && !state.leaseReportNudged) {
+					// The context budget is checked before the fast-path's own horizon: a fast path whose
+					// trajectory grows past half the window settles now, so `distillFastPath` runs on the
+					// evidence gathered instead of the trajectory growing further unchecked.
+					if (!ranTools || budgetExhausted) {
+						if (ranTools && budgetExhausted && !state.leaseReportNudged) {
 							return {
 								state: { role: "execution", episodeHorizon, leaseReportNudged: true, fastPath: true },
 								steer: TRANSITION_STEERS.leaseNudge,
@@ -1837,11 +1846,10 @@ export class BeliefLoopController {
 						},
 					};
 				}
-				const budgetExhausted = episodeHorizon <= 0;
 				if (!ranTools) {
 					return {
 						state: { role: "distill" },
-						steer: budgetExhausted ? TRANSITION_STEERS.adjudicateBudgetExhausted : TRANSITION_STEERS.adjudicate,
+						steer: budgetExhausted ? exhaustedSteer : TRANSITION_STEERS.adjudicate,
 					};
 				}
 				if (budgetExhausted && !state.leaseReportNudged) {
@@ -1851,7 +1859,7 @@ export class BeliefLoopController {
 					};
 				}
 				if (budgetExhausted) {
-					return { state: { role: "distill" }, steer: TRANSITION_STEERS.adjudicateBudgetExhausted };
+					return { state: { role: "distill" }, steer: exhaustedSteer };
 				}
 				return {
 					state: { role: "execution", episodeHorizon, leaseReportNudged: state.leaseReportNudged },
@@ -3022,6 +3030,34 @@ export class BeliefLoopController {
 				latestCacheHitRate: this.roleCacheHitRate.execution,
 			},
 		};
+	}
+
+	/**
+	 * Whether the execution trajectory has grown past half the execution role model's context
+	 * window, the hard budget the round is distilled by.
+	 *
+	 * The window is read off the execution role's own model: `pie.executionModel` is the one role
+	 * setting with no default fallback, so when it is configured the role runs on a model whose
+	 * window can differ from `agent.state.model`. Sizing the trajectory against the session model
+	 * there would enforce the limit on the wrong window. `roleModelFor` already returns the session
+	 * model when the role has no model of its own to resolve.
+	 *
+	 * The estimate uses the same execution projection the role is sent. `_estimateContextUsage`
+	 * reports `null` tokens only when it distrusts usage captured before a compaction; the fallback
+	 * estimates every projected message so that state cannot bypass the budget.
+	 */
+	private executionContextBudgetExhausted(): boolean {
+		const contextWindow = this.roleModelFor("execution")?.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		const projected = projectMessagesFor(
+			this.host.agent.state.messages,
+			"execution",
+			this.evidenceWatermark,
+			this.taskStartIndex,
+		);
+		const usage = this.host._estimateContextUsage(projected, contextWindow);
+		const tokens = usage.tokens ?? estimateContextTokens(projected).tokens;
+		return tokens * 2 > contextWindow;
 	}
 
 	getRoleContextUsage(): { epistemic: ContextUsage; execution: ContextUsage } | undefined {

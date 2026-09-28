@@ -301,6 +301,13 @@ export const TRANSITION_STEERS = {
 		"refute, or inconclusive based on whether that evidence settles it, and prefer inconclusive when the evidence is " +
 		"insufficient. Then inspect the residual for missing beliefs or a task-relevant reframing. Do not infer whether the " +
 		"experiment was complete or incomplete from the budget alone.",
+	adjudicateContextBudgetExhausted:
+		"The execution trajectory reached half the execution model's context window, so this round distills before the " +
+		"trajectory grows further. This is a resource limit statement, not a claim that the experiment was complete or " +
+		"incomplete. Adjudicate the tested beliefs only from the evidence actually gathered: mark each support, refute, or " +
+		"inconclusive based on whether that evidence settles it, and prefer inconclusive when the evidence is insufficient. " +
+		"Then inspect the residual for missing beliefs or a task-relevant reframing. Do not infer whether the experiment was " +
+		"complete or incomplete from the budget alone.",
 	leaseNudge:
 		"Your execution budget for this experiment is exhausted. This states the budget was spent, not that the experiment " +
 		"is done or undone. Report every materially distinct observation you did gather with its source, location, or command " +
