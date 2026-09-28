@@ -19,7 +19,7 @@ struct AppConfig {
     int width = 1440;
     int height = 900;
     std::string title = "PIE Native GUI";
-    int minWidth = 0;   // layout-derived minimum (see LayoutMetrics.h)
+    int minWidth = 0;   // layout-derived minimum (see ShellLayout.h)
     int minHeight = 0;
     int live = 1;       // 1 = spawn the RPC runtime child; 0 = use demo events
 };

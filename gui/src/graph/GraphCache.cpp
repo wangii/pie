@@ -1,6 +1,11 @@
-// GraphCache.cpp: Phase 2 M8 cache implementation (headless). Invalidates by a
-// content fingerprint of the task state (and, for routes, the layout geometry);
-// when unchanged, the previous result is reused.
+// GraphCache.cpp: cache implementation (headless). Invalidates by a content
+// fingerprint of the task state (and, for routes, the layout geometry); when
+// unchanged, the previous result is reused.
+//
+// The fingerprint must cover everything the downstream computation reads, and
+// nothing else. Too narrow and a change is served stale; too wide and the cache
+// recomputes on every frame, which is the same as not having one. The v7 fields
+// folded below are exactly the ones the projection and the layout consume.
 
 #include "graph/GraphCache.h"
 
@@ -32,14 +37,20 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
     uint64_t h = 14695981039346656037ULL;  // FNV offset basis
     h = hashMix(h, state.nodes.size());
     for (const GraphNode& n : state.nodes) {
-        // Fold the id and the fractionally-relevant fields.
-        for (unsigned char c : n.id.value) h = hashMix(h, c);
+        // Fold the id and every field that changes what is drawn or where.
+        h = hashMixStr(h, n.id.value);
         h = hashMix(h, static_cast<uint64_t>(n.family));
-        h = hashMixStr(h, n.frameId.has_value() ? *n.frameId : std::string());
-        h = hashMixStr(h, n.createdInFrame.has_value() ? *n.createdInFrame : std::string());
-        h = hashMix(h, n.creationOrder);
-        h = hashMix(h, n.executionOrder.value_or(0));
-        h = hashMix(h, n.displayType.empty() ? 0 : static_cast<unsigned char>(n.displayType[0]));
+        h = hashMixStr(h, n.episodeId);
+        h = hashMix(h, n.order);
+        h = hashMix(h, n.ordinal);
+        h = hashMix(h, static_cast<uint64_t>(n.state));
+        h = hashMix(h, static_cast<uint64_t>(n.executionStatus));
+        h = hashMix(h, static_cast<uint64_t>(n.routingDecision));
+        h = hashMix(h, static_cast<uint64_t>(n.beliefOperation));
+        h = hashMix(h, static_cast<uint64_t>(n.deltaPhase));
+        h = hashMix(h, static_cast<uint64_t>(n.beliefStatus));
+        h = hashMix(h, n.beliefWithdrawn ? 1 : 0);
+        h = hashMix(h, n.superseded ? 1 : 0);
         h = hashMix(h, n.inFocus ? 1 : 0);
     }
     // The outcome band changes derived geometry (it advances the canvas height), so it is part of
@@ -57,34 +68,53 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
         for (unsigned char c : e.target.value) h = hashMix(h, c);
         h = hashMix(h, static_cast<uint64_t>(e.type));
         h = hashMix(h, e.beliefOperation.has_value() ? static_cast<uint64_t>(*e.beliefOperation) : 0);
+        h = hashMix(h, e.dashed ? 1 : 0);
     }
-    h = hashMix(h, state.frames.size());
-    for (const LoopFrameInfo& frame : state.frames) {
-        h = hashMixStr(h, frame.id);
-        h = hashMix(h, frame.closed ? 1 : 0);
-        h = hashMix(h, frame.executing ? 1 : 0);
+    h = hashMix(h, state.rows.size());
+    for (const EpisodeGutter& row : state.rows) {
+        h = hashMixStr(h, row.id);
+        h = hashMix(h, row.ordinal);
+        h = hashMix(h, static_cast<uint64_t>(row.status));
+        h = hashMix(h, static_cast<uint64_t>(row.stage));
+        h = hashMixStr(h, row.routingDecision);
+        h = hashMixStr(h, row.bodyKind);
+        h = hashMix(h, row.current ? 1 : 0);
     }
+    h = hashMix(h, state.versions.size());
+    for (const GraphRailVersion& version : state.versions) {
+        h = hashMixStr(h, version.id);
+        h = hashMix(h, version.ordinal);
+        h = hashMix(h, version.current ? 1 : 0);
+        h = hashMix(h, version.approved ? 1 : 0);
+    }
+    h = hashMix(h, state.currentNode.has_value() ? 1 : 0);
+    if (state.currentNode.has_value()) h = hashMixStr(h, state.currentNode->value);
+    h = hashMix(h, static_cast<uint64_t>(state.cursorStage));
     return h;
 }
 
 uint64_t GraphCache::layoutFingerprint(const PieGraphLayout& layout) const {
     uint64_t h = 14695981039346656037ULL;
-    h = hashMix(h, layout.nodeRects.size());
-    for (const auto& [id, r] : layout.nodeRects) {
-        for (unsigned char c : id) h = hashMix(h, c);
-        h = hashMix(h, static_cast<uint64_t>(r.x * 100.0f));
-        h = hashMix(h, static_cast<uint64_t>(r.y * 100.0f));
-        h = hashMix(h, static_cast<uint64_t>(r.w * 100.0f));
-        h = hashMix(h, static_cast<uint64_t>(r.h * 100.0f));
+    h = hashMix(h, layout.nodes.size());
+    for (const auto& [id, dot] : layout.nodes) {
+        h = hashMixStr(h, id);
+        // Centimetre precision is far below a pixel: a sub-0.01 change is not a
+        // layout change, and hashing floats' exact bits would invalidate on
+        // rounding noise.
+        h = hashMix(h, static_cast<uint64_t>(dot.x * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(dot.y * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(dot.r * 100.0f));
     }
-    h = hashMix(h, layout.frameRects.size());
-    for (const auto& [fid, r] : layout.frameRects) {
-        h = hashMixStr(h, fid);
-        h = hashMix(h, static_cast<uint64_t>(r.x * 100.0f));
-        h = hashMix(h, static_cast<uint64_t>(r.y * 100.0f));
-        h = hashMix(h, static_cast<uint64_t>(r.w * 100.0f));
-        h = hashMix(h, static_cast<uint64_t>(r.h * 100.0f));
+    h = hashMix(h, layout.gutters.size());
+    for (const EpisodeGutter& gutter : layout.gutters) {
+        h = hashMixStr(h, gutter.id);
+        h = hashMix(h, static_cast<uint64_t>(gutter.rect.x * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(gutter.rect.y * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(gutter.rect.w * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(gutter.rect.h * 100.0f));
     }
+    h = hashMix(h, static_cast<uint64_t>(layout.canvasWidth * 100.0f));
+    h = hashMix(h, static_cast<uint64_t>(layout.canvasHeight * 100.0f));
     return h;
 }
 

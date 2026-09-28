@@ -1,10 +1,20 @@
-// PIE Native GUI - floating user-prompt palette (opened with ':', closed with Esc).
+// PIE Native GUI - the Frame's floating prompt window (opened with ':', closed
+// with Esc).
 //
-// Standalone undecorated window for entering a user prompt (submitted via
-// Cmd/Ctrl+Enter) and showing the assistant's streaming reply. Interaction
-// state is held in a PromptPaletteState owned by the caller, so the
+// The half of the FramePane that carries what the user wants to SAY. The content
+// half (what the reading IS) is `renderFramePaneContent` below, rendered into the
+// shell's frame child.
+//
+// Untouched from the v1 palette, because these are orthogonal to the Frame and
+// already tested: multiline input submitted with Cmd/Ctrl+Enter, `@` mention
+// completion, prompt history on Up/Down, archived-reply paging, and the streaming
+// markdown reply. What changed is the submit button, whose label now says what
+// sending does NOT do (docs/milestones.md §7.2): a plain prompt never releases the
+// pause, and the user must not be able to mistake it for consent.
+//
+// Interaction state is held in a FramePaneState owned by the caller, so the
 // render function is otherwise pure (no function-local statics).
-#include "PromptPalette.h"
+#include "FramePane.h"
 
 #include <algorithm>
 #include <string>
@@ -35,7 +45,7 @@ namespace pie::gui {
 // Tab insertion we sync promptText back from the callback buffer so the render
 // height calc and the submit read the current text.
 static int promptInputCallback(ImGuiInputTextCallbackData* data) {
-    auto* state = static_cast<PromptPaletteState*>(data->UserData);
+    auto* state = static_cast<FramePaneState*>(data->UserData);
 
     if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
         state->promptText.resize(static_cast<size_t>(data->BufTextLen));
@@ -89,7 +99,7 @@ static int promptInputCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
-void renderPromptPalette(bool& open, PromptPaletteState& state,
+void renderFramePane(bool& open, FramePaneState& state,
                           const pie::gui::NativeGuiModel& m, bool canSend,
                           bool historyNavigationEnabled, PromptSender send) {
     if (!open) return;
@@ -214,7 +224,15 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
         // the widget as a newline while the Cmd/Ctrl+Enter chord is not, so this
         // check cannot hijack newline input. In live mode this goes through
         // serializePromptCommand, which keeps the newline in the JSON.
-        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+        bool submit = (io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+        // The visible button, so the rule is readable rather than only discoverable:
+        // §7.2 requires the submit control to say that sending is NOT approving the
+        // Frame. The label is the whole reason this button exists next to a working
+        // keyboard chord.
+        ImGui::BeginDisabled(!canSend || promptBuf.empty());
+        if (ImGui::Button("Send (does not approve the Frame)")) submit = true;
+        ImGui::EndDisabled();
+        if (submit) {
             std::string prompt = promptBuf;
             promptBuf.clear();
             state.promptHistoryIndex = -1;
@@ -338,6 +356,280 @@ void renderPromptPalette(bool& open, PromptPaletteState& state,
 
     if (close) { open = false; }
     ImGui::SetNextFrameWantCaptureKeyboard(true);
+}
+
+// ---------------------------------------------------------------------------
+// The Frame's content half (§7.2)
+// ---------------------------------------------------------------------------
+namespace {
+
+// The correction box's buffer is a std::string, so it needs the same
+// CallbackResize contract the prompt box uses: ImGui asks for a buffer of the
+// length it wants and the callback re-points it. A fixed char array would cap the
+// objection at an arbitrary size, which is exactly the wrong thing to cap.
+int correctionResizeCallback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+        auto* text = static_cast<std::string*>(data->UserData);
+        text->resize(static_cast<size_t>(data->BufTextLen));
+        data->Buf = const_cast<char*>(text->data());
+        data->BufSize = static_cast<int>(text->size()) + 1;
+    }
+    return 0;
+}
+
+// A source chip. Clickable only where the pane has somewhere to send the click: a
+// belief opens the belief pane and an execution or a distillation centres the
+// canvas, while a prompt or an intervention has no node to point at and is
+// rendered as plain text rather than as a link that does nothing.
+void renderChips(const ProblemFormulationVersion& version, const NativeGuiModel& m,
+                 const FrameChipHandler& onChip) {
+    const std::vector<FormulationChip> chips = formulationChips(m, version);
+    if (chips.empty()) return;
+    ImGui::TextDisabled("sources");
+    ImGui::SameLine();
+    for (size_t i = 0; i < chips.size(); ++i) {
+        const FormulationChip& chip = chips[i];
+        if (i != 0) ImGui::SameLine();
+        const bool clickable = chip.opensBeliefs || chip.centresCanvas;
+        if (!clickable) {
+            ImGui::TextDisabled("%s", chip.label.c_str());
+            continue;
+        }
+        ImGui::PushID(static_cast<int>(i));
+        if (ImGui::SmallButton(chip.label.c_str()) && onChip) onChip(chip);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(chip.opensBeliefs ? "open %s in the belief list" : "centre the canvas on %s",
+                              chip.label.c_str());
+        }
+        ImGui::PopID();
+    }
+}
+
+// One labelled paragraph. The optional fields (alternative, tension) are rendered
+// ONLY when present: §7.2 asks for them in a grey block, and a heading with
+// nothing under it would read as an empty field rather than an absent one.
+void fieldBlock(const char* label, const std::string& text, bool dim = false) {
+    if (text.empty()) return;
+    if (dim) ImGui::PushStyleColor(ImGuiCol_Text, kGray);
+    ImGui::TextDisabled("%s", label);
+    ImGui::TextWrapped("%s", text.c_str());
+    if (dim) ImGui::PopStyleColor();
+}
+
+void renderVersionBody(const ProblemFormulationVersion& version, const NativeGuiModel& m,
+                       const FrameChipHandler& onChip) {
+    ImGui::Text("v%llu", static_cast<unsigned long long>(version.ordinal));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s  %s", version.recordedAt.c_str(), version.origin.c_str());
+    fieldBlock("interpretation", version.content.interpretation);
+    fieldBlock("focus", version.content.focus);
+    fieldBlock("implication", version.content.implication);
+    // Optional and, when present, deliberately quieter: an alternative the agent
+    // considered is not part of the position it is taking.
+    fieldBlock("alternative", version.content.alternative.value_or(std::string{}), true);
+    fieldBlock("tension", version.content.tension.value_or(std::string{}), true);
+    fieldBlock("reason", version.reason);
+    renderChips(version, m, onChip);
+}
+
+void renderBanner(const FormulationView& view, FramePaneState& state, bool canAct,
+                  const FrameApprover& approve, const FrameCorrector& correct) {
+    if (view.banner == FrameBanner::None) return;
+
+    // The paused case is the only one where the user has an act to perform, so it
+    // is the only one that gets a colour of its own. Everything else is
+    // informational, and colouring it the same way would make every round look
+    // like it needs an answer.
+    const bool actionable = view.banner == FrameBanner::AwaitingResponse;
+    const ImVec4 colour = actionable ? kAccent : kGray;
+    ImGui::PushStyleColor(ImGuiCol_Text, colour);
+    if (view.banner == FrameBanner::ApprovalFailed) {
+        ImGui::TextWrapped("%s: %s", frameBannerText(view.banner),
+                           view.bannerDetail.empty() ? "(no reason given)" : view.bannerDetail.c_str());
+    } else if (view.banner == FrameBanner::RecheckOwed) {
+        if (view.recheckEpisodeOrdinal.has_value()) {
+            ImGui::Text("%s of episode #%llu", frameBannerText(view.banner),
+                        static_cast<unsigned long long>(*view.recheckEpisodeOrdinal));
+        } else {
+            ImGui::TextUnformatted(frameBannerText(view.banner));
+        }
+    } else {
+        ImGui::TextUnformatted(frameBannerText(view.banner));
+    }
+    ImGui::PopStyleColor();
+
+    if (!actionable) return;
+
+    // Approve is the ONLY primary button in the GUI, and it is offered only while
+    // the run is paused on this version. Its id is the review's: `approve_frame`
+    // validates the version, and sending anything else would be refused.
+    ImGui::BeginDisabled(!canAct);
+    if (ImGui::Button("Approve") && approve) approve(view.reviewVersionId);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Approve the reading under review (%s) and let the run continue.\n"
+            "This is the only action that releases the pause. A prompt does not.",
+            view.reviewVersionId.c_str());
+    }
+
+    // Correct: its own input, because an objection is not an approval and must not
+    // be typed into the same box as a prompt.
+    ImGui::SameLine();
+    ImGui::TextDisabled("or object:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-90.0f);
+    ImGui::InputTextWithHint("##correction", "what the reading gets wrong", state.correctionText.data(),
+                             state.correctionText.size() + 1, ImGuiInputTextFlags_CallbackResize,
+                             correctionResizeCallback, &state.correctionText);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!canAct || state.correctionText.empty());
+    if (ImGui::Button("Submit objection")) {
+        if (correct) correct(state.correctionText);
+        state.correctionText.clear();
+    }
+    ImGui::EndDisabled();
+}
+
+} // namespace
+
+void renderFramePaneContent(const FormulationView& view, const NativeGuiModel& m,
+                            FramePaneState& state, bool canAct, FrameApprover approve,
+                            FrameCorrector correct, FrameChipHandler onChip) {
+    if (!view.hasTask) {
+        ImGui::TextDisabled("no task: there is no Frame to show");
+        return;
+    }
+
+    renderBanner(view, state, canAct, approve, correct);
+    ImGui::Separator();
+
+    // --- the current Frame -------------------------------------------------
+    // The version being read is the one the history list selected, or the current
+    // one. A historical version is shown by the SAME renderer, so what the user
+    // compares is one layout rather than two.
+    const ProblemFormulationVersion* shown = view.current;
+    bool showingHistory = false;
+    if (!state.viewedVersionId.empty() && view.current != nullptr &&
+        state.viewedVersionId != view.current->id) {
+        for (const ProblemFormulationVersion* version : view.history) {
+            if (version->id == state.viewedVersionId) {
+                shown = version;
+                showingHistory = true;
+            }
+        }
+    }
+    if (shown == nullptr) {
+        ImGui::TextDisabled("no reading published yet");
+    } else {
+        if (showingHistory) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+            ImGui::TextUnformatted("reading a previous version (read-only)");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("back to current")) state.viewedVersionId.clear();
+        }
+        renderVersionBody(*shown, m, onChip);
+    }
+
+    // --- the deferral ------------------------------------------------------
+    if (view.deferral != nullptr && state.showDeferral) {
+        ImGui::Separator();
+        ImGui::TextDisabled("deferred");
+        fieldBlock("missing", view.deferral->missingInformation);
+        fieldBlock("reason", view.deferral->reason);
+        ImGui::TextDisabled("deferred at %s", view.deferral->deferredAt.c_str());
+    }
+
+    // --- corrections -------------------------------------------------------
+    if (!view.corrections.empty() && state.showCorrections) {
+        ImGui::Separator();
+        ImGui::TextDisabled("your corrections");
+        for (const FormulationCorrection* correction : view.corrections) {
+            const bool pending = correction->status == FormulationCorrectionStatus::Pending;
+            // Pending first, and marked: an objection nobody has answered is the
+            // one the user is waiting on.
+            if (pending) ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+            ImGui::TextWrapped("[%s] %s", toString(correction->status), correction->original.c_str());
+            if (pending) ImGui::PopStyleColor();
+            if (correction->response.has_value()) {
+                ImGui::Indent();
+                ImGui::PushStyleColor(ImGuiCol_Text, kGray);
+                ImGui::TextWrapped("answered: %s", correction->response->c_str());
+                ImGui::PopStyleColor();
+                if (correction->recordedVersionId.has_value()) {
+                    ImGui::TextDisabled("recorded as %s", correction->recordedVersionId->c_str());
+                }
+                ImGui::Unindent();
+            }
+        }
+    }
+
+    // --- the review's outstanding beliefs ----------------------------------
+    // These block the conclusion, and no other surface shows them (§7.2 item 5).
+    if (!view.pendingApplicability.empty() || !view.unrevalidated.empty()) {
+        ImGui::Separator();
+        ImGui::TextDisabled("review obligations");
+        for (const BeliefId& id : view.pendingApplicability) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+            ImGui::Text("needs a decision: %s", m.beliefLabel(id).c_str());
+            ImGui::PopStyleColor();
+        }
+        for (const BeliefId& id : view.unrevalidated) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kGray);
+            ImGui::Text("awaiting revalidation: %s", m.beliefLabel(id).c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    // --- the last reconsideration ------------------------------------------
+    if (view.recheck != nullptr) {
+        ImGui::Separator();
+        ImGui::Text("recheck: %s", toString(view.recheck->verdict));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s  episode %s", view.recheck->recordedAt.c_str(),
+                            view.recheck->episodeId.c_str());
+        fieldBlock("why", view.recheck->reason);
+        if (view.recheck->versionId.has_value()) {
+            ImGui::TextDisabled("revised as %s", view.recheck->versionId->c_str());
+        }
+    }
+
+    // --- the version history -----------------------------------------------
+    if (view.history.size() > 1) {
+        ImGui::Separator();
+        ImGui::TextDisabled("history");
+        for (size_t i = 0; i < view.history.size(); ++i) {
+            const ProblemFormulationVersion& version = *view.history[i];
+            ImGui::PushID(static_cast<int>(i));
+            const bool selected = shown == &version;
+            if (ImGui::Selectable(("v" + std::to_string(version.ordinal) + "  " + version.recordedAt + "  " +
+                                   version.reason)
+                                      .c_str(),
+                                  selected)) {
+                state.viewedVersionId = (view.current == &version) ? std::string{} : version.id;
+            }
+            // The CHANGED FIELDS, not a text diff: §7.2 rules the diff out as
+            // inference and asks for the field markers instead. The first version
+            // has no predecessor, so the marker line belongs to the revisions.
+            if (i > 0) {
+                const std::vector<std::string> changed =
+                    formulationChangedFields(*view.history[i - 1], version);
+                ImGui::SameLine();
+                if (changed.empty()) {
+                    ImGui::TextDisabled("(same fields)");
+                } else {
+                    std::string joined;
+                    for (size_t k = 0; k < changed.size(); ++k) {
+                        if (k != 0) joined += ", ";
+                        joined += changed[k];
+                    }
+                    ImGui::TextDisabled("\xce\x94 %s", joined.c_str());  // Δ
+                }
+            }
+            ImGui::PopID();
+        }
+    }
 }
 
 } // namespace pie::gui

@@ -16,6 +16,12 @@
 // instead of rejecting it as a concurrent user-prompt. When idle, the runtime
 // ignores streamingBehavior and starts a normal user-prompt; when running it
 // queues the message via steer. This matches the documented rpc.md contract.
+//
+// The four domain-state commands below (bootstrap and the Frame pane's two
+// acts) live here so that every command the GUI sends is serialized by one
+// unit-testable file. They are deliberately separate functions from
+// serializePromptCommand: `approve_frame` is the only command that means
+// consent, and the way that stays true is that it is not reachable by typing.
 
 #pragma once
 
@@ -34,10 +40,12 @@ inline std::string nextPromptId() {
     return "req_" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
 }
 
-inline std::string serializePromptCommand(const std::string& id, const std::string& message) {
+// One JSON string literal body (no surrounding quotes). Shared by every
+// serializer below so a new command cannot accidentally ship a weaker escaper.
+inline std::string escapeJsonString(const std::string& text) {
     std::string escaped;
-    escaped.reserve(message.size() + 16);
-    for (char c : message) {
+    escaped.reserve(text.size() + 16);
+    for (char c : text) {
         switch (c) {
             case '"':  escaped += "\\\""; break;
             case '\\': escaped += "\\\\"; break;
@@ -56,8 +64,51 @@ inline std::string serializePromptCommand(const std::string& id, const std::stri
                 }
         }
     }
-    return "{\"type\":\"prompt\",\"id\":\"" + id +
-           "\",\"message\":\"" + escaped + "\",\"streamingBehavior\":\"steer\"}";
+    return escaped;
+}
+
+inline std::string serializePromptCommand(const std::string& id, const std::string& message) {
+    return "{\"type\":\"prompt\",\"id\":\"" + escapeJsonString(id) +
+           "\",\"message\":\"" + escapeJsonString(message) + "\",\"streamingBehavior\":\"steer\"}";
+}
+
+// ---------------------------------------------------------------------------
+// Domain-state commands (docs/milestones.md §3.4, §5.3)
+// ---------------------------------------------------------------------------
+//
+// The bootstrap writes these two on connect, snapshot first. Both are
+// id-carrying request/response commands; the ids are what let the bootstrap
+// recognise its own answers, since a `response` line names the command it
+// answers but a client may also match on the id it chose.
+
+inline std::string serializeGetSnapshotCommand(const std::string& id) {
+    return "{\"type\":\"get_domain_snapshot\",\"id\":\"" + escapeJsonString(id) + "\"}";
+}
+
+inline std::string serializeGetStateCommand(const std::string& id) {
+    return "{\"type\":\"get_state\",\"id\":\"" + escapeJsonString(id) + "\"}";
+}
+
+// `approve_frame` is THE ONLY command that releases the pause on a reading
+// (docs/milestones.md §3.4). A plain prompt never does — so this is deliberately
+// a separate function from serializePromptCommand and never shares its call site.
+//
+// `versionId` is optional on the wire: an empty one is omitted rather than sent
+// as "", which the runtime would read as a version literally named "". Omitting
+// it asks the runtime to act on whatever version is currently awaiting a
+// response, which is exactly the case the Frame pane has no version for.
+inline std::string serializeApproveFrameCommand(const std::string& id, const std::string& versionId) {
+    std::string cmd = "{\"type\":\"approve_frame\",\"id\":\"" + escapeJsonString(id) + "\"";
+    if (!versionId.empty()) cmd += ",\"versionId\":\"" + escapeJsonString(versionId) + "\"";
+    cmd += "}";
+    return cmd;
+}
+
+// The user's objection to a published reading. Its own command and its own input
+// box in the UI: an objection is not a prompt and must not be typed into one.
+inline std::string serializeFrameCorrectCommand(const std::string& id, const std::string& message) {
+    return "{\"type\":\"frame_correct\",\"id\":\"" + escapeJsonString(id) +
+           "\",\"message\":\"" + escapeJsonString(message) + "\"}";
 }
 
 } // namespace pie::gui

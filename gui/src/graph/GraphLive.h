@@ -1,18 +1,26 @@
-// GraphLive: Phase 2 M6 live-layout stability.
+// GraphLive: layout stability for a live session (§6.2).
 //
-// Headless, ImGui-free, unit-testable. In live mode the runtime streams
-// node/edge additions and belief updates across the task, and the model
-// recomputes a fresh auto-layout each frame. Completed frames are the stable
-// unit: once a frame closes, its node rectangles, frame boundary, and semantic
-// region surfaces are cached together. Open and pending frames always use the
-// fresh layout, so a Propose node can move from its provisional current-frame
-// position into the successor frame when DistillationProduced supplies its
-// provenance. Global Beliefs have no owning frame and keep a stable position.
+// The projection recomputes from scratch every frame, and a live session keeps
+// appending to it: a new execution lands, a new delta arrives, a new row opens.
+// Re-laying the WHOLE canvas each time makes nodes jump under the user's cursor,
+// which is unreadable in exactly the situation the canvas exists for.
+//
+// The v1 rule was "a closed LoopFrame is the stable unit". The v7 rule is the same
+// idea with the right unit: **a closed ExecutionEpisode**, plus (task scope) a
+// closed Task. Once a row's episode is closed, nothing may be appended to it —
+// the fold enforces that — so its positions cannot legitimately change, and
+// freezing them is not a heuristic but a consequence of the invariant.
+//
+// The belief rail is frozen differently, and more simply than in v1: a belief's
+// position is now decided by the belief rail's own order (record order), not by
+// the round that first wrote it. The v1 `stableBeliefAnchors` / `createdInFrame`
+// machinery existed to keep a belief next to its creating frame; with the delta ->
+// belief edge expressing that relation explicitly, a belief has no anchor to
+// track, and the whole re-anchoring path is gone.
 
 #pragma once
 
 #include <map>
-#include <optional>
 #include <string>
 
 #include "graph/GraphModel.h"
@@ -20,40 +28,27 @@
 
 namespace pie::gui {
 
-// One completed-frame cache entry. Region rectangles are optional because an
-// empty phase has no surface in PieGraphLayout.
-struct CompletedFrameLayout {
-    std::map<std::string, GraphRect> nodeRects;
-    GraphRect frameRect;
-    std::optional<GraphRect> beliefRegionRect;
-    std::optional<GraphRect> planRegionRect;
-    std::optional<GraphRect> proposeRegionRect;
-    std::optional<GraphRect> distillRegionRect;
-    std::optional<GraphRect> executionRegionRect;
+// The frozen geometry of one completed row.
+struct CompletedEpisodeLayout {
+    // Every node of the row, by NodeId. The row anchor is in here too.
+    std::map<std::string, Dot> nodes;
+    GraphRect rect;
 };
 
-// Persistent per-session live-layout cache. Completed frames are cached as
-// complete geometry groups; global Beliefs are cached separately because they
-// intentionally have no owning frame.
 struct GraphLiveState {
-    std::map<std::string, CompletedFrameLayout> completedFrames;
-    std::map<std::string, GraphRect> stableBeliefRects;
-    // The display-anchor frame (createdInFrame) each cached stable Belief was
-    // positioned for. A Belief's anchor can change when its producing Propose is
-    // reparented to a successor frame; a stale rect for an old anchor must be
-    // invalidated so the Belief moves to the new row instead of staying put.
-    std::map<std::string, std::string> stableBeliefAnchors;
+    // Rows whose episode has closed, frozen. Keyed by episode id.
+    std::map<std::string, CompletedEpisodeLayout> completedEpisodes;
+    // The Frame rail and the belief rail, frozen as bands. Both are append-only:
+    // a version is never edited and a belief is never re-ordered, so a rail entry
+    // that was drawn once stays where it was drawn.
+    std::map<std::string, Dot> stableRailNodes;
 };
 
-// Produce a stable layout for `state` given a `fresh` layout computed from the
-// same state. Previously cached closed frames are restored as complete geometry
-// groups. A newly closed or structurally changed frame is captured from fresh
-// geometry. Open/pending frames always remain fresh. Non-framing Beliefs keep
-// their first position; a framing Belief remains fresh while its display type
-// is "proposed", then becomes stable. Stores updated frame and Belief entries
-// back in `live`.
-PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state,
-                                   const PieGraphLayout& fresh,
+// Merge a freshly computed layout with the frozen rows in `live`. Rows whose
+// episode is closed keep their cached positions; every other node takes the fresh
+// one. `live` is updated in place. The returned layout has the same canvas extent
+// as `fresh`, so the scrollable area still grows with the session.
+PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state, const PieGraphLayout& fresh,
                                    GraphLiveState& live);
 
 } // namespace pie::gui

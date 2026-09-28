@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -56,25 +57,23 @@ void writeCommand(SdkProcess& sp, const std::string& cmd) {
 }
 
 void readerThread(SdkProcess& sp, EventQueue& q, std::atomic<bool>& stop) {
-    std::string buf;
+    LineFramer framer;
     char chunk[4096];
+    // One line is parsed here, on this thread: the frame loop never sees a
+    // multi-megabyte snapshot as work it has to do (§5.3).
+    auto push = [&q](std::string line) {
+        if (line.empty()) return;
+        q.push(parseInboundLine(std::move(line)));
+    };
     while (!stop.load()) {
         ssize_t n = read(sp.outFd, chunk, sizeof(chunk));
         if (n < 0) { if (errno == EINTR) continue; break; }
         if (n == 0) break;
-        buf.append(chunk, static_cast<size_t>(n));
-        size_t pos;
-        while ((pos = buf.find('\n')) != std::string::npos) {
-            std::string line = buf.substr(0, pos);
-            buf.erase(0, pos + 1);
-            if (!line.empty()) {
-                // // Trace RPC -> GUI on pie_gui's stdout.
-                // std::printf("RPC -> GUI: %s\n", line.c_str());
-                // std::fflush(stdout);
-                q.push(std::move(line));
-            }
-        }
+        framer.feed(std::string_view(chunk, static_cast<size_t>(n)), push);
     }
+    // A final line with no trailing newline is still a line — a stream that ended
+    // mid-write would otherwise lose the last event without a trace.
+    framer.flush(push);
     sp.running.store(false);
 }
 

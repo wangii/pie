@@ -1,12 +1,14 @@
-// GraphRouting: Phase 2 M4 edge routing.
+// GraphRouting: link geometry for the dot canvas (docs/milestones.md §6).
 //
 // Headless, ImGui-free, unit-testable. It turns a GraphTaskState + a
-// PieGraphLayout into a polyline route per edge. Belief -> Plan and Distill ->
-// Belief use a direct single-segment line; Plan -> Execution, Execution ->
-// Distill, and Distill -> Propose edges keep a short curve. A Distill -> Propose
-// curve may connect adjacent frame rows; "short" describes its routing style,
-// not shared frame ownership. The GUI never infers cognition: routing only uses
-// the runtime-supplied edge semantic type and layout geometry.
+// PieGraphLayout into a polyline per edge. Station-to-station links inside a row
+// get a short 3-point dogleg; links that cross rows or reach a rail get a single
+// straight segment. "Direct" describes the routing style, not ownership: a link
+// may connect two different rows, which is the point of a rail.
+//
+// The anchors are ON the circles, not at their centres and not at a bounding box:
+// a dot has no left edge for the v1 rule to use. The GUI never infers cognition:
+// routing reads only the edge's own semantic type and the layout geometry.
 //
 // Determinism: an identical GraphTaskState + PieGraphLayout yields identical
 // routes (pure function of the two inputs).
@@ -25,19 +27,22 @@ namespace pie::gui {
 struct EdgeRoute {
     NodeId source;
     NodeId target;
-    EdgeSemanticType type = EdgeSemanticType::BeliefToPlan;
-    std::optional<BeliefOperation> beliefOperation;  // Distill->Belief result glyph
-    // The routed path, first = source anchor, last = target anchor. The viewer
-    // draws it as straight segments (cross-region) or as a curve (local).
+    EdgeSemanticType type = EdgeSemanticType::PlanToExecution;
+    std::optional<BeliefOperation> beliefOperation;  // delta -> belief result glyph
+    // The routed path, first = source anchor, last = target anchor. Both anchors
+    // lie on their dot's circle, pulled back by kGraphStyle.linkGapFromDot.
     std::vector<std::pair<float, float>> points;
-    // True for cross-region Belief read/write routes. Such edges default to
-    // subdued in the viewer.
+    // True for a link that crosses rows or reaches a rail. Such links default to
+    // subdued in the viewer, because they are context rather than the local step.
     bool longRoute = false;
+    // A link to a belief record this delta introduced (§6.1). Drawn dashed.
+    bool dashed = false;
 };
 
-// Compute a routed polyline for every edge in the state, anchored on the node
-// rectangles in `layout`. Produces exactly one EdgeRoute per state edge whose
-// source and target both have a rect; edges with a missing endpoint are skipped.
+// Compute a routed polyline for every edge in the state, anchored on the dots in
+// `layout`. Produces exactly one EdgeRoute per state edge whose source and target
+// both have a dot; an edge with a missing endpoint is skipped rather than drawn
+// to the origin.
 std::vector<EdgeRoute> computeEdgeRoutes(const GraphTaskState& state, const PieGraphLayout& layout);
 
 } // namespace pie::gui

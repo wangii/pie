@@ -1,6 +1,6 @@
-// GraphNavigation.cpp: Phase 2 M7 Focus Current navigation implementation (headless).
-// The M7 minimap overlay was removed (replaced by the Stage indicator); only the
-// Focus Current pan geometry survives.
+// GraphNavigation.cpp: Focus Current navigation geometry (headless).
+// The minimap overlay was removed (replaced by the Stage indicator); only the
+// Focus Current pan survives.
 
 #include "graph/GraphNavigation.h"
 
@@ -9,12 +9,12 @@ namespace pie::gui {
 PanResult computeFocusPan(const PieGraphLayout& layout, const std::string& nodeId,
                           float viewW, float viewH, float zoom) {
     PanResult p;
-    auto it = layout.nodeRects.find(nodeId);
-    if (it == layout.nodeRects.end()) return p;
-    const GraphRect& r = it->second;
-    float cx = r.x + r.w * 0.5f;
-    float cy = r.y + r.h * 0.5f;
-    // Center the node at the viewport center: pan = viewportCenter - node*zoom.
+    const Dot* dot = layout.dot(nodeId);
+    if (dot == nullptr) return p;
+    // The dot's centre IS the node's centre: there is no box to take a midpoint of.
+    float cx = dot->x;
+    float cy = dot->y;
+    // Center the node at the viewport centre: pan = viewportCentre - node*zoom.
     p.x = viewW * 0.5f - cx * zoom;
     p.y = viewH * 0.5f - cy * zoom;
     return p;

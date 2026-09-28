@@ -1,590 +1,233 @@
+// NativeGuiModel — the v7 fold.
+//
+// This is a C++ mirror of `applyAgentSessionDomainEvent` and the free functions
+// around it in packages/pie/src/core/agent-session-domain.ts. Read the APPLIER
+// CONTRACT at the top of Model.h before changing anything here: every applier is
+// a pure f(state, event) keyed on the record id it writes, and the division
+// between "invariant violation" (issue + no-op) and "dangling citation"
+// (issue + still apply) is load-bearing.
+
 #include "Model.h"
 
-#include <cctype>
+#include "DomainEvents.h"
+
+#include <algorithm>
 #include <cstddef>
-#include <cstring>
-#include <string_view>
+#include <utility>
 
 namespace pie::gui {
 
 // ---------------------------------------------------------------------------
-// Minimal JSON helpers (only enough to read the few known fields).
+// Belief status derivation (TS: statusOfDomainBelief)
 // ---------------------------------------------------------------------------
+BeliefStatus Belief::status() const {
+    if (supersededBy.has_value() || withdrawn) return BeliefStatus::Superseded;
+    if (!refutedBy.empty()) return BeliefStatus::Refuted;
+    if (!supportedBy.empty()) return BeliefStatus::Supported;
+    if (!inconclusiveBy.empty()) return BeliefStatus::Inconclusive;
+    return BeliefStatus::Proposed;
+}
+
+// ---------------------------------------------------------------------------
+// Record lookups
+// ---------------------------------------------------------------------------
+const Execution* ExecutionEpisode::execution(const ExecutionId& id) const {
+    for (const Execution& e : body.trajectory) {
+        if (e.id == id) return &e;
+    }
+    return nullptr;
+}
+
+const BeliefDelta* ExecutionEpisode::beliefDelta(const BeliefDeltaId& id) const {
+    for (const BeliefDelta& d : body.beliefDeltas) {
+        if (d.id == id) return &d;
+    }
+    return nullptr;
+}
+
+const ExecutionEpisode* Task::episode(const EpisodeId& id) const {
+    for (const ExecutionEpisode& e : episodes) {
+        if (e.id == id) return &e;
+    }
+    return nullptr;
+}
+
+bool Task::inFocus(const BeliefId& id) const {
+    return std::find(focus.begin(), focus.end(), id) != focus.end();
+}
+
+bool Task::hasIntroduced(const BeliefId& id) const {
+    return std::find(introducedBeliefs.begin(), introducedBeliefs.end(), id) != introducedBeliefs.end();
+}
+
+const Task* AgentSessionSnapshot::task(const TaskId& id) const {
+    auto it = tasks.find(id);
+    return it == tasks.end() ? nullptr : &it->second;
+}
+
+const Belief* AgentSessionSnapshot::belief(const BeliefId& id) const {
+    auto it = beliefs.find(id);
+    return it == beliefs.end() ? nullptr : &it->second;
+}
+
+size_t AgentSessionSnapshot::beliefIndex(const BeliefId& id) const {
+    for (size_t i = 0; i < beliefOrder.size(); ++i) {
+        if (beliefOrder[i] == id) return i;
+    }
+    return npos;
+}
+
+// ---------------------------------------------------------------------------
+// Derivations (TS: the free functions in agent-session-domain.ts)
+// ---------------------------------------------------------------------------
+const ProblemFormulationVersion* currentFormulation(const Task& task) {
+    if (task.formulations.empty()) return nullptr;
+    return &task.formulations.back();
+}
+
+std::vector<const FormulationCorrection*> pendingFormulationCorrections(const Task& task) {
+    std::vector<const FormulationCorrection*> out;
+    for (const FormulationCorrection& correction : task.formulationCorrections) {
+        if (correction.status == FormulationCorrectionStatus::Pending) out.push_back(&correction);
+    }
+    return out;
+}
+
+std::optional<uint64_t> latestDispatchedEpisodeOrdinal(const Task& task) {
+    std::optional<uint64_t> latest;
+    for (const ExecutionEpisode& episode : task.episodes) {
+        // "Dispatched" is read off durable records: a belief-loop episode records
+        // it in its Plan, a fast-path episode in its body selection. Routing alone
+        // does not count, because selecting a body and then waiting to choose an
+        // experiment is not an investigation.
+        const bool dispatched = episode.body.kind == EpisodeBodyKind::FastPath ||
+                                (episode.body.kind == EpisodeBodyKind::BeliefLoop && episode.body.plan.has_value());
+        if (dispatched) latest = episode.ordinal;
+    }
+    return latest;
+}
+
+std::optional<FormulationAdoption> latestFormulationAdoption(const Task& task) {
+    const std::optional<uint64_t> ordinal = latestDispatchedEpisodeOrdinal(task);
+    if (!ordinal.has_value()) return std::nullopt;
+    for (const ExecutionEpisode& episode : task.episodes) {
+        if (episode.ordinal != *ordinal) continue;
+        if (episode.body.kind == EpisodeBodyKind::BeliefLoop && episode.body.plan.has_value()) {
+            return episode.body.plan->formulation;
+        }
+        if (episode.body.kind == EpisodeBodyKind::FastPath) return episode.body.formulation;
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+const ExecutionEpisode* latestDistilledEpisode(const Task& task) {
+    const ExecutionEpisode* latest = nullptr;
+    for (const ExecutionEpisode& episode : task.episodes) {
+        // Distillation is the marker rather than dispatch: a round whose
+        // experiment was interrupted before distill never produced evidence to
+        // reconsider. The body kind is part of the test on purpose — a fast path
+        // has no distill role and no adjudication to reconsider, so its round
+        // must not be pulled under the per-round gate.
+        if (episode.body.kind == EpisodeBodyKind::BeliefLoop && episode.body.distillation.has_value()) {
+            latest = &episode;
+        }
+    }
+    return latest;
+}
+
 namespace {
 
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && (s[a] == ' ' || s[a] == '\t')) ++a;
-    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t')) --b;
-    return s.substr(a, b - a);
-}
-
-// Raw substring following the first occurrence of "key": in s.
-bool findKey(const std::string& s, const std::string& key, std::string& raw) {
-    const std::string pat = "\"" + key + "\"";
-    size_t p = s.find(pat);
-    if (p == std::string::npos) return false;
-    size_t colon = s.find(':', p + pat.size());
-    if (colon == std::string::npos) return false;
-    size_t i = colon + 1;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-    if (i >= s.size()) return false;
-    raw = trim(s.substr(i));
-    return true;
-}
-
-// Encode a code point as UTF-8. Surrogate values must not reach here: JSON
-// surrogate pairs are combined by decodeEscapes before encoding.
-void appendUtf8(std::string& out, unsigned cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
+// The decision that still counts for a belief: a stale one counts for nothing.
+const FormulationApplicabilityEntry* liveApplicability(const FormulationReview& review, const BeliefId& beliefId) {
+    for (const FormulationApplicabilityEntry& entry : review.applicability) {
+        if (entry.beliefId == beliefId && !entry.stale) return &entry;
     }
-}
-
-// Decode JSON escape sequences in a raw (unquoted) string body.
-std::string decodeEscapes(const std::string& body) {
-    std::string out;
-    for (size_t i = 0; i < body.size(); ++i) {
-        char c = body[i];
-        if (c == '\\' && i + 1 < body.size()) {
-            char e = body[++i];
-            switch (e) {
-                case 'n': out += '\n'; break;
-                case 't': out += '\t'; break;
-                case 'r': out += '\r'; break;
-                case 'b': out += '\b'; break;
-                case 'f': out += '\f'; break;
-                case '\\': out += '\\'; break;
-                case '/': out += '/'; break;
-                case '"': out += '"'; break;
-                case 'u': {
-                    auto hex4 = [&](size_t start, unsigned& out4) -> bool {
-                        if (start + 4 > body.size()) return false;
-                        out4 = 0;
-                        for (int k = 0; k < 4; ++k) {
-                            char h = body[start + k];
-                            int d;
-                            if (h >= '0' && h <= '9') d = h - '0';
-                            else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
-                            else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
-                            else return false;
-                            out4 = out4 * 16 + d;
-                        }
-                        return true;
-                    };
-                    unsigned first = 0;
-                    if (!hex4(i + 1, first)) { out += '\\'; out += 'u'; break; }
-                    i += 4;
-                    if (first >= 0xD800 && first <= 0xDBFF) {
-                        unsigned second = 0;
-                        if (i + 6 < body.size() && body[i + 1] == '\\' && body[i + 2] == 'u' &&
-                            hex4(i + 3, second) && second >= 0xDC00 && second <= 0xDFFF) {
-                            i += 6;
-                            unsigned cp = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
-                            appendUtf8(out, cp);
-                        } else {
-                            out += '\\'; out += 'u';
-                            for (int k = 3; k >= 0; --k) out += body[i - k];
-                        }
-                    } else if (first >= 0xDC00 && first <= 0xDFFF) {
-                        out += '\\'; out += 'u';
-                        for (int k = 3; k >= 0; --k) out += body[i - k];
-                    } else {
-                        appendUtf8(out, first);
-                    }
-                    break;
-                }
-                default: out += '\\'; out += e; break;
-            }
-            continue;
-        }
-        out += c;
-    }
-    return out;
-}
-
-std::string stringValue(const std::string& v) {
-    if (v.size() < 2 || v[0] != '"') return {};
-    size_t q = 1;
-    while (q < v.size() && v[q] != '"') {
-        if (v[q] == '\\') ++q;
-        ++q;
-    }
-    if (q >= v.size()) return {};
-    return decodeEscapes(v.substr(1, q - 1));
-}
-
-// Extract the value of a top-level member of a JSON object string, scanning
-// only the object's direct members and skipping nested objects/arrays. Unlike
-// findKey (which matches the first occurrence anywhere in the string), a
-// nested member with the same name never shadows the direct member. Returns
-// the raw value substring (starting after the member's colon) and true, or
-// false if the member is absent or `obj` is not an object.
-bool directMember(const std::string& obj, const std::string& key, std::string& out) {
-    size_t i = 0;
-    auto skipWs = [&](size_t& p) {
-        while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t' || obj[p] == '\n' || obj[p] == '\r')) ++p;
-    };
-    skipWs(i);
-    if (i >= obj.size() || obj[i] != '{') return false;
-    ++i;
-    while (i < obj.size()) {
-        size_t j = i;
-        size_t colon = std::string::npos;
-        bool inString = false;
-        int depth = 0;
-        while (j < obj.size()) {
-            char c = obj[j];
-            if (c == '"') {
-                if (inString && j > 0 && obj[j - 1] == '\\') { ++j; continue; }
-                inString = !inString;
-                ++j; continue;
-            }
-            if (!inString) {
-                if (c == '{' || c == '[') { ++depth; ++j; continue; }
-                if (c == '}' || c == ']') { if (depth == 0) break; --depth; ++j; continue; }
-                if (c == ':' && depth == 0 && colon == std::string::npos) { colon = j; ++j; continue; }
-                if (c == ',' && depth == 0) break;
-            }
-            ++j;
-        }
-        // The member key is the first quoted token in obj[i, j).
-        const std::string member = obj.substr(i, j - i);
-        const size_t kp = member.find('"');
-        if (kp != std::string::npos && colon != std::string::npos) {
-            size_t kq = kp + 1;
-            while (kq < member.size() && member[kq] != '"') { if (member[kq] == '\\') ++kq; ++kq; }
-            const std::string mkey = member.substr(kp + 1, kq - kp - 1);
-            if (mkey == key) {
-                size_t vs = colon + 1;
-                while (vs < obj.size() && (obj[vs] == ' ' || obj[vs] == '\t' || obj[vs] == '\n' || obj[vs] == '\r')) ++vs;
-                // String members decode to unquoted text; object/array members
-                // return the raw substring so they can be re-parsed.
-                out = (vs < obj.size() && obj[vs] == '"') ? stringValue(obj.substr(vs)) : trim(obj.substr(vs));
-                return true;
-            }
-        }
-        i = j;
-        if (i < obj.size() && obj[i] == '}') return false;
-        if (i < obj.size() && obj[i] == ',') ++i;
-        else ++i;
-    }
-    return false;
-}
-
-std::string str(const std::string& s, const std::string& key, const std::string& def = {}) {
-    std::string raw;
-    if (!findKey(s, key, raw)) return def;
-    return stringValue(raw);
-}
-
-int intVal(const std::string& s, const std::string& key, int def = -1) {
-    std::string raw;
-    if (!findKey(s, key, raw)) return def;
-    return static_cast<int>(std::strtol(raw.c_str(), nullptr, 10));
-}
-
-double doubleVal(const std::string& s, const std::string& key, double def = -1.0) {
-    std::string raw;
-    if (!findKey(s, key, raw)) return def;
-    return std::strtod(raw.c_str(), nullptr);
-}
-
-double nullableDoubleVal(const std::string& s, const std::string& key, double def = -1.0) {
-    std::string raw;
-    if (!findKey(s, key, raw)) return def;
-    std::string t = trim(raw);
-    if (t.empty()) return def;
-    if (t[0] == '\"') return doubleVal(s, key, def);
-    if (std::strncmp(t.c_str(), "null", 4) == 0) return def;
-    return std::strtod(t.c_str(), nullptr);
-}
-
-// Split a top-level array substring "[a,b,c]" into trimmed element substrings.
-std::vector<std::string> arrayElements(const std::string& v) {
-    std::vector<std::string> out;
-    if (v.size() < 2 || v[0] != '[') return out;
-    size_t depth = 0;
-    bool inStr = false;
-    size_t start = 1;
-    // Index of the ']' that closes this array. Bounding the last element by it (rather than by
-    // the end of the raw value) keeps trailing structure out of the element: a raw value can be
-    // followed by the enclosing object's '}', and an empty array must yield no elements at all.
-    size_t end = v.size();
-    for (size_t i = 1; i < v.size(); ++i) {
-        char c = v[i];
-        if (inStr) {
-            if (c == '\\') { ++i; continue; }
-            if (c == '"') inStr = false;
-            continue;
-        }
-        if (c == '"') inStr = true;
-        else if (c == '[' || c == '{') ++depth;
-        else if (c == ']' || c == '}') { if (depth == 0) { end = i; break; } --depth; }
-        else if (c == ',' && depth == 0) { out.push_back(trim(v.substr(start, i - start))); start = i + 1; }
-    }
-    if (start < end) {
-        std::string last = trim(v.substr(start, end - start));
-        if (!last.empty()) out.push_back(last);
-    }
-    return out;
-}
-
-std::vector<std::string> strArray(const std::string& v) {
-    std::vector<std::string> out;
-    for (auto& e : arrayElements(v)) out.push_back(stringValue(e));
-    return out;
-}
-
-// Read a top-level string-array field (["a","b"]).
-std::vector<std::string> strArrayField(const std::string& s, const std::string& key) {
-    std::string raw;
-    if (!findKey(s, key, raw)) return {};
-    return strArray(raw);
-}
-
-FrameStage parseStage(const std::string& s) {
-    if (s == "routing" || s == "ROUTING") return FrameStage::ROUTING;
-    if (s == "executing" || s == "EXECUTING") return FrameStage::EXECUTING;
-    if (s == "distilling" || s == "DISTILLING") return FrameStage::DISTILLING;
-    if (s == "proposing" || s == "PROPOSING") return FrameStage::PROPOSING;
-    if (s == "closed" || s == "CLOSED") return FrameStage::CLOSED;
-    return FrameStage::NONE;
-}
-
-// Case-insensitive substring test. An empty needle matches anything.
-bool containsFold(const std::string& hay, std::string_view needle) {
-    if (needle.empty()) return true;
-    std::string hl;
-    hl.reserve(hay.size());
-    for (char c : hay)
-        hl.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    std::string nl;
-    nl.reserve(needle.size());
-    for (char c : needle)
-        nl.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    return hl.find(nl) != std::string::npos;
-}
-
-// Extract the raw value (object/array/string/number) for a top-level key.
-bool rawValue(const std::string& s, const std::string& key, std::string& out) {
-    const std::string pat = "\"" + key + "\"";
-    size_t p = s.find(pat);
-    if (p == std::string::npos) return false;
-    size_t colon = s.find(':', p + pat.size());
-    if (colon == std::string::npos) return false;
-    size_t i = colon + 1;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-    if (i >= s.size()) return false;
-    size_t start = i;
-    bool inStr = false;
-    int depth = 0;
-    for (; i < s.size(); ++i) {
-        char c = s[i];
-        if (inStr) {
-            if (c == '\\') { ++i; continue; }
-            if (c == '"') inStr = false;
-            continue;
-        }
-        if (c == '"') inStr = true;
-        else if (c == '{' || c == '[') ++depth;
-        else if (c == '}' || c == ']') {
-            if (depth == 0) { out = trim(s.substr(start, i - start + 1)); return true; }
-            --depth;
-        } else if (c == ',' && depth == 0) {
-            out = trim(s.substr(start, i - start));
-            return true;
-        }
-    }
-    out = trim(s.substr(start));
-    return true;
-}
-
-// Join all `"text":"..."` and `"thinking":"..."` string values found within a
-// raw value (string or content array) so tool output / intervention content is
-// reduced to a readable single line.
-std::string extractTextFromValue(const std::string& raw) {
-    std::string t = trim(raw);
-    if (t.empty()) return {};
-    if (t[0] == '"') return stringValue(t);
-    std::string out;
-    auto extractKey = [&](const std::string& keyLiteral) {
-        size_t p = 0;
-        while ((p = t.find(keyLiteral, p)) != std::string::npos) {
-            p += keyLiteral.size();
-            size_t q = p;
-            while (q < t.size() && t[q] != '"') {
-                if (t[q] == '\\') ++q;
-                ++q;
-            }
-            std::string v = decodeEscapes(t.substr(p, q - p));
-            if (!v.empty()) { if (!out.empty()) out += " "; out += v; }
-            p = q + 1;
-        }
-    };
-    extractKey("\"text\":\"");
-    extractKey("\"thinking\":\"");
-    return out;
-}
-
-// Extract a readable tool-input summary from an ExecutionStarted `input` value:
-// prefer `command`, then `path`/`file_path`, else the raw text.
-std::string inputToSummary(const std::string& raw) {
-    std::string t = trim(raw);
-    if (t.empty()) return {};
-    if (t[0] == '"') return stringValue(t);
-    std::string command = str(raw, "command");
-    if (!command.empty()) return command;
-    std::string path = str(raw, "path");
-    if (!path.empty()) return path;
-    std::string filePath = str(raw, "file_path");
-    if (!filePath.empty()) return filePath;
-    return extractTextFromValue(t);
-}
-
-// Derive the Belief status from append-only provenance (domain-model.md).
-std::string deriveBeliefStatus(const Belief& b) {
-    if (b.withdrawn || !b.supersededBy.empty()) return "superseded";
-    if (!b.refutedBy.empty()) return "refuted";
-    if (!b.supportedBy.empty()) return "supported";
-    if (!b.inconclusiveBy.empty()) return "inconclusive";
-    return "proposed";
-}
-
-// Fill a Belief record from a raw JSON belief object. Does not touch `label`
-// (set by upsertBelief) or `createdInFrame` (set from the delta's frameId).
-void parseBeliefRecord(const std::string& raw, Belief& b) {
-    b.id = str(raw, "id", b.id);
-    b.statement = str(raw, "statement", b.statement);
-    b.domain = str(raw, "domain", b.domain);
-    b.expectation = str(raw, "expectation", b.expectation);
-    b.evidenceRounds = intVal(raw, "evidenceRounds", b.evidenceRounds);
-    b.supersededBy = str(raw, "supersededBy", "");
-    b.withdrawn = str(raw, "withdrawn") == "true";
-    b.skillRefs = strArrayField(raw, "skillRefs");
-
-    b.supportedBy.clear();
-    std::string supRaw;
-    if (rawValue(raw, "supportedBy", supRaw)) {
-        for (auto& e : arrayElements(supRaw)) {
-            std::string ev = str(e, "evidence");
-            if (!ev.empty()) b.supportedBy.push_back(ev);
-        }
-    }
-    b.refutedBy.clear();
-    std::string refRaw;
-    if (rawValue(raw, "refutedBy", refRaw)) {
-        for (auto& e : arrayElements(refRaw)) {
-            std::string ev = str(e, "evidence");
-            if (!ev.empty()) b.refutedBy.push_back(ev);
-        }
-    }
-    b.inconclusiveBy.clear();
-    std::string incRaw;
-    if (rawValue(raw, "inconclusiveBy", incRaw)) {
-        for (auto& e : arrayElements(incRaw)) {
-            std::string ev = str(e, "evidence");
-            if (!ev.empty()) b.inconclusiveBy.push_back(ev);
-        }
-    }
-    b.status = deriveBeliefStatus(b);
-}
-
-// Derive the navigator history flag from a frame's belief deltas (display only).
-LoopFrame::History deriveHistory(const LoopFrame& f) {
-    bool hasAdd = false, hasRevise = false, hasRemove = false;
-    for (const BeliefDelta& d : f.beliefDeltas) {
-        if (d.operation == "retract") hasRemove = true;
-        else if (d.operation == "refine") hasRevise = true;
-        else if (d.operation == "propose") hasAdd = true;
-    }
-    if (hasRemove) return LoopFrame::History::Falsified;
-    if (hasAdd && hasRevise) return LoopFrame::History::Revised;
-    if (hasAdd) return LoopFrame::History::NewBelief;
-    return LoopFrame::History::Closed;
+    return nullptr;
 }
 
 } // namespace
 
-const char* frameStageToString(FrameStage s) {
-    switch (s) {
-        case FrameStage::ROUTING: return "ROUTING";
-        case FrameStage::EXECUTING: return "EXECUTING";
-        case FrameStage::DISTILLING: return "DISTILLING";
-        case FrameStage::PROPOSING: return "PROPOSING";
-        case FrameStage::CLOSED: return "CLOSED";
-        case FrameStage::NONE: break;
+bool applicabilityComplete(const FormulationReview& review) {
+    for (const BeliefId& beliefId : review.scopedBeliefIds) {
+        if (liveApplicability(review, beliefId) == nullptr) return false;
     }
-    return "NONE";
+    return true;
 }
 
-bool frameMatchesQuery(const LoopFrame& f, std::string_view query) {
-    if (query.empty()) return true;
-    if (containsFold(f.id, query)) return true;
-    if (containsFold(f.summary, query)) return true;
-    if (containsFold(f.plan.intent, query)) return true;
-    for (auto& id : f.plan.selectedToExplore) if (containsFold(id, query)) return true;
-    for (auto& t : f.trajectory) {
-        if (containsFold(t.tool, query)) return true;
-        if (containsFold(t.command, query)) return true;
-        if (containsFold(t.result, query)) return true;
-        if (containsFold(t.status, query)) return true;
-    }
-    if (containsFold(f.distillation.contents, query)) return true;
-    for (auto& id : f.distillation.inputs) if (containsFold(id, query)) return true;
-    for (auto& d : f.beliefDeltas) {
-        if (containsFold(d.operation, query)) return true;
-        if (containsFold(d.beliefId, query)) return true;
-        if (containsFold(d.evidence, query)) return true;
-    }
-    return false;
-}
-
-// ---------------------------------------------------------------------------
-// Frame / belief / task accessors
-// ---------------------------------------------------------------------------
-void NativeGuiModel::reset() {
-    frames_.clear();
-    frameOrder_.clear();
-    tasks_.clear();
-    taskOrder_.clear();
-    activeTaskId_.clear();
-    selectedTaskId_.clear();
-    beliefById_.clear();
-    beliefs_.clear();
-    activeBeliefs_.clear();
-    pendingDeltas_.clear();
-    seenDeltaIds_.clear();
-    cursor_ = FrameCursor{};
-    nextBeliefOrdinal_ = 0;
-    nextPlanOrdinal_ = 0;
-    nextDistillOrdinal_ = 0;
-    roleContext_ = RoleContextUsagePair{};
-    clearFileList();
-}
-
-LoopFrame* NativeGuiModel::frame(FrameId id) {
-    auto it = frames_.find(id);
-    return it == frames_.end() ? nullptr : &it->second;
-}
-const LoopFrame* NativeGuiModel::frame(FrameId id) const {
-    auto it = frames_.find(id);
-    return it == frames_.end() ? nullptr : &it->second;
-}
-
-const LoopFrame* NativeGuiModel::activeFrame() const {
-    return cursor_.frameId.empty() ? nullptr : frame(cursor_.frameId);
-}
-const LoopFrame* NativeGuiModel::frameById(FrameId id) const { return frame(id); }
-
-std::vector<LoopFrame> NativeGuiModel::frames() const {
-    std::vector<LoopFrame> out;
-    out.reserve(frameOrder_.size());
-    for (const FrameId& id : frameOrder_) {
-        auto it = frames_.find(id);
-        if (it != frames_.end()) out.push_back(it->second);
+std::vector<BeliefId> pendingApplicabilityBeliefs(const Task& task) {
+    std::vector<BeliefId> out;
+    if (!task.formulationReview.has_value()) return out;
+    const FormulationReview& review = *task.formulationReview;
+    for (const BeliefId& beliefId : review.scopedBeliefIds) {
+        if (liveApplicability(review, beliefId) == nullptr) out.push_back(beliefId);
     }
     return out;
 }
 
-const Task* NativeGuiModel::taskById(TaskId id) const {
-    auto it = tasks_.find(id);
-    return it == tasks_.end() ? nullptr : &it->second;
-}
-
-std::vector<Task> NativeGuiModel::tasks() const {
-    std::vector<Task> out;
-    out.reserve(taskOrder_.size());
-    for (const TaskId& id : taskOrder_) {
-        auto it = tasks_.find(id);
-        if (it != tasks_.end()) out.push_back(it->second);
+std::vector<const FormulationApplicabilityEntry*> unrevalidatedApplicability(const Task& task) {
+    std::vector<const FormulationApplicabilityEntry*> out;
+    if (!task.formulationReview.has_value()) return out;
+    for (const FormulationApplicabilityEntry& entry : task.formulationReview->applicability) {
+        if (!entry.stale && entry.decision == FormulationApplicabilityDecision::NeedsRevalidation &&
+            !entry.revalidatedByDeltaId.has_value()) {
+            out.push_back(&entry);
+        }
     }
     return out;
 }
 
-const Task* NativeGuiModel::activeTask() const {
-    return activeTaskId_.empty() ? nullptr : taskById(activeTaskId_);
+bool firstFormulationDecisionOwed(const Task& task) {
+    const std::optional<uint64_t> investigated = latestDispatchedEpisodeOrdinal(task);
+    if (!investigated.has_value()) return false;
+    if (currentFormulation(task) != nullptr) return false;
+    const FormulationDeferral* deferral = task.formulationDeferral.has_value() ? &*task.formulationDeferral : nullptr;
+    return deferral == nullptr || deferral->answeredThroughEpisodeOrdinal < *investigated;
 }
 
-const Task* NativeGuiModel::selectedTask() const {
-    const TaskId& id = selectedTaskId_.empty() ? activeTaskId_ : selectedTaskId_;
-    return taskById(id);
+bool formulationRecheckOwed(const Task& task) {
+    const ExecutionEpisode* distilled = latestDistilledEpisode(task);
+    if (distilled == nullptr) return false;
+    if (currentFormulation(task) == nullptr) return false;
+    return !task.formulationRecheck.has_value() || task.formulationRecheck->episodeId != distilled->id;
 }
 
-const Belief* NativeGuiModel::belief(BeliefId id) const {
-    auto it = beliefById_.find(id);
-    if (it == beliefById_.end()) return nullptr;
-    return &beliefs_[static_cast<size_t>(it->second)];
-}
-
-Belief& NativeGuiModel::upsertBelief(const BeliefId& id) {
-    auto it = beliefById_.find(id);
-    if (it != beliefById_.end()) return beliefs_[static_cast<size_t>(it->second)];
-    Belief b;
-    b.id = id;
-    b.label = "B" + std::to_string(++nextBeliefOrdinal_);
-    b.status = "proposed";
-    const int idx = static_cast<int>(beliefs_.size());
-    beliefs_.push_back(std::move(b));
-    beliefById_[id] = idx;
-    return beliefs_[static_cast<size_t>(idx)];
-}
-
-bool NativeGuiModel::isSelectedInCurrentFrame(const BeliefId& b) const {
-    const LoopFrame* f = activeFrame();
-    if (!f) return false;
-    for (const BeliefId& s : f->plan.selectedToExplore)
-        if (s == b) return true;
-    return false;
-}
-
-const TaskFocus* NativeGuiModel::selectedTaskFocus() const {
-    const Task* task = selectedTask();
-    return task ? &task->focus : nullptr;
-}
-
-bool NativeGuiModel::beliefInSelectedTaskFocus(const BeliefId& id) const {
-    const TaskFocus* focus = selectedTaskFocus();
-    return focus != nullptr && focus->has(id);
-}
-
-std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
-    const Belief* b = belief(id);
-    return b && !b->label.empty() ? b->label : id;
+bool formulationDecisionOwed(const Task& task) {
+    return firstFormulationDecisionOwed(task) || formulationRecheckOwed(task);
 }
 
 // ---------------------------------------------------------------------------
-// Live in-message stream (':' pane)
+// Model: telemetry and session-scoped state
 // ---------------------------------------------------------------------------
+void NativeGuiModel::recordFileOp(const std::string& op, const std::string& rawPath) {
+    if (rawPath.empty()) return;
+    const std::string display = normalizeDisplayPath(session_, rawPath);
+    const std::string key = op + "\n" + display;
+    if (fileOpSeen_.insert(key).second) fileList_.push_back(FileEntry{display, op});
+}
+
+void NativeGuiModel::clearFileList() {
+    fileList_.clear();
+    fileOpSeen_.clear();
+}
+
 void NativeGuiModel::beginInMessage(const std::string& text) {
-    // Archive the reply being replaced so the palette can page back through it.
-    // This is the replacement point: capturing history at render time would miss
-    // earlier replacements in the same drained event batch.
+    // Archive the reply being replaced so the pane can page back through it.
+    // Capturing at the replacement point (not at render time) is what keeps every
+    // replacement in a single drained batch.
     if (!inMessage_.empty()) inMessageHistory_.push_back(ArchivedInMessage{inMessage_, inMessageError_});
     inMessage_ = text;
     inMessageError_ = false;
 }
-void NativeGuiModel::appendInMessage(const std::string& delta) {
-    inMessage_ += delta;
-}
+
+void NativeGuiModel::appendInMessage(const std::string& delta) { inMessage_ += delta; }
+
 void NativeGuiModel::endInMessage() {
     // The buffer already holds the accumulated text; nothing more to do.
 }
-void NativeGuiModel::setInMessageThinking(bool thinking) {
-    inMessageThinking_ = thinking;
-}
+
+void NativeGuiModel::setInMessageThinking(bool thinking) { inMessageThinking_ = thinking; }
+
 void NativeGuiModel::setInMessageError(const std::string& message) {
     if (!inMessage_.empty()) inMessageHistory_.push_back(ArchivedInMessage{inMessage_, inMessageError_});
     inMessage_ = message;
@@ -592,447 +235,1699 @@ void NativeGuiModel::setInMessageError(const std::string& message) {
     inMessageError_ = true;
 }
 
+void NativeGuiModel::recordIssue(std::string eventType, std::string eventId, std::string message) {
+    issues_.push_back(ReplayIssue{std::move(eventType), std::move(eventId), std::move(message)});
+}
+
 // ---------------------------------------------------------------------------
-// Domain event application
+// Dispatch telemetry
 // ---------------------------------------------------------------------------
-void NativeGuiModel::openTask(TaskId id, TaskId parentTaskId, const std::string& prompt) {
-    if (tasks_.count(id)) return;
-    Task t;
-    t.id = id;
-    t.parentTaskId = parentTaskId;
-    t.status = "active";
-    t.prompt = prompt;
-    tasks_[id] = std::move(t);
-    taskOrder_.push_back(id);
-    activeTaskId_ = id;
-    if (selectedTaskId_.empty()) selectedTaskId_ = id;
+float TurnUsage::cacheHitRate() const {
+    // The SAME derivation the runtime uses for `roleStatus.<slot>.latestCacheHitRate`
+    // (agent-session.ts: `promptTokens = input + cacheRead + cacheWrite`, then
+    // `cacheRead / promptTokens * 100`). Deliberately identical: §7.3 offers this
+    // as the fallback for when the telemetry has not caught up, and a fallback
+    // that computes a different number from the value it stands in for would be
+    // worse than showing nothing.
+    const long promptTokens = input + cacheRead + cacheWrite;
+    if (input < 0 || cacheRead < 0 || cacheWrite < 0 || promptTokens <= 0) return -1.0f;
+    return 100.0f * static_cast<float>(cacheRead) / static_cast<float>(promptTokens);
 }
 
-void NativeGuiModel::openFrame(FrameId id, TaskId taskId, uint64_t ordinal, const std::string& openedAt) {
-    // Idempotent reopen: a repeated FrameOpened for an already-open frame must
-    // not clobber its existing contents (plan, executions, deltas, etc.). Point
-    // the cursor at it and preserve what the runtime already gave us.
-    if (frames_.count(id)) {
-        cursor_.taskId = taskId;
-        cursor_.frameId = id;
-        cursor_.stage = FrameStage::ROUTING;
-        cursor_.item.clear();
-        return;
-    }
-    LoopFrame f;
-    f.id = id;
-    f.taskId = taskId;
-    f.ordinal = ordinal;
-    f.openedAt = openedAt;
-    f.stage = FrameStage::ROUTING;
-    f.history = LoopFrame::History::Current;
-    frames_[id] = std::move(f);
-    frameOrder_.push_back(id);
-    cursor_.taskId = taskId;
-    cursor_.frameId = id;
-    cursor_.stage = FrameStage::ROUTING;
-    cursor_.item.clear();
-    auto* task = taskById(taskId);
-    if (task) {
-        auto& frames = const_cast<std::vector<FrameId>&>(task->frames);
-        frames.push_back(id);
-    }
-    // A new frame supersedes any pending terminal-close signal from a prior
-    // mid-loop FrameClosed (only the final close is not followed by FrameOpened).
-    finalReportPending_ = false;
+void NativeGuiModel::recordTrace(TraceEntry entry) {
+    trace_.push_back(std::move(entry));
 }
 
-void NativeGuiModel::closeFrame(FrameId id, bool failed) {
-    LoopFrame* f = frame(id);
-    if (!f || f->closed) return;
-    f->closed = true;
-    f->failed = failed;
-    f->stage = FrameStage::CLOSED;
-    f->history = deriveHistory(*f);
-    // A frame close is the belief loop's terminal boundary (finalReport). The
-    // flag is cleared on the next FrameOpened, so only the terminal close keeps
-    // it until the conclusion message_end.
-    finalReportPending_ = true;
+void NativeGuiModel::beginTraceTurn(TraceEntry turn) {
+    turn.kind = TraceEntry::Kind::Turn;
+    openTurn_ = trace_.size();
+    trace_.push_back(std::move(turn));
 }
 
-bool NativeGuiModel::applyDomainLine(const std::string& line) {
-    if (line.empty() || line[0] != '{') return false;
-    const std::string type = str(line, "type");
-    if (type.empty()) return false;
+bool NativeGuiModel::endTraceTurn(TraceEntry closing) {
+    if (!openTurn_.has_value() || *openTurn_ >= trace_.size()) return false;
+    TraceEntry& turn = trace_[*openTurn_];
+    turn.ended = true;
+    turn.endedAt = std::move(closing.endedAt);
+    turn.endedAtMs = closing.endedAtMs;
+    turn.stopReason = std::move(closing.stopReason);
+    turn.errorMessage = std::move(closing.errorMessage);
+    // Only when the end actually carried token accounting: a `message_end` with no
+    // `usage` must not erase the counts `message_start` already reported.
+    if (closing.usage.any()) turn.usage = closing.usage;
+    openTurn_.reset();
+    return true;
+}
 
-    if (type == "TaskOpened") {
-        const std::string taskId = str(line, "taskId");
-        const std::string parent = str(line, "parentTaskId");
-        if (taskId.empty()) return true;
-        openTask(taskId, parent, "");
-        auto* task = const_cast<Task*>(taskById(taskId));
-        if (task) task->inheritedBeliefs = strArrayField(line, "inheritedBeliefs");
-        return true;
-    }
-    if (type == "TargetDefined") {
-        const std::string taskId = str(line, "taskId");
-        auto* task = const_cast<Task*>(taskById(taskId));
-        std::string targetRaw;
-        if (task && rawValue(line, "target", targetRaw)) {
-            task->targetStatement = str(targetRaw, "statement");
-            if (task->prompt.empty()) task->prompt = task->targetStatement;
-        }
-        return true;
-    }
-    if (type == "FocusDeclared") {
-        auto* task = const_cast<Task*>(taskById(str(line, "taskId")));
-        if (task) {
-            // The event's presence IS the declaration, so an empty array means "declared and
-            // empty" (nothing in scope), not "undeclared".
-            task->focus.declared = true;
-            task->focus.beliefIds = strArrayField(line, "beliefIds");
-        }
-        return true;
-    }
-    if (type == "TaskOutcomeRecorded") {
-        auto* task = const_cast<Task*>(taskById(str(line, "taskId")));
-        std::string outcomeRaw;
-        if (task && rawValue(line, "outcome", outcomeRaw)) {
-            task->outcome.result = str(outcomeRaw, "result");
-            task->outcome.evidence = str(outcomeRaw, "evidence");
-            task->outcome.blockers = str(outcomeRaw, "blockers");
-            // Derive presence from a non-empty result so a malformed line cannot produce a band
-            // with nothing in it.
-            task->outcome.present = !task->outcome.result.empty();
-        }
-        return true;
-    }
-    if (type == "FrameOpened") {
-        const std::string taskId = str(line, "taskId");
-        const std::string frameId = str(line, "frameId");
-        if (frameId.empty()) return true;
-        openFrame(frameId, taskId, static_cast<uint64_t>(intVal(line, "ordinal", 0)), "");
-        // Backfill belief-deltas that arrived before this frame was opened, so
-        // a belief creation keeps its corresponding Propose node even when the
-        // runtime emits the delta out of order.
-        if (!pendingDeltas_.empty()) {
-            LoopFrame* opened = frame(frameId);
-            std::vector<BeliefDelta> remaining;
-            for (auto& pd : pendingDeltas_) {
-                if (pd.frameId == frameId && opened) opened->beliefDeltas.push_back(std::move(pd));
-                else remaining.push_back(std::move(pd));
-            }
-            pendingDeltas_ = std::move(remaining);
-        }
-        // Seed the display summary from the task's target statement.
-        if (const Task* task = taskById(taskId); task && !task->targetStatement.empty()) {
-            frame(frameId)->summary = task->targetStatement;
-        }
-        return true;
-    }
-    if (type == "RoutingDecided") {
-        LoopFrame* f = frame(str(line, "frameId"));
-        std::string routingRaw;
-        if (f && rawValue(line, "routing", routingRaw)) {
-            f->routingDecision = str(routingRaw, "decision");
-            f->routingReason = str(routingRaw, "reason");
-        }
-        return true;
-    }
-    if (type == "FrameBodySelected") {
-        LoopFrame* f = frame(str(line, "frameId"));
-        if (f) {
-            f->bodyKind = str(line, "body");
-            f->openBeliefsAtStart = strArrayField(line, "openBeliefsAtStart");
-        }
-        return true;
-    }
-    if (type == "CursorChanged") {
-        const FrameStage st = parseStage(str(line, "stage"));
-        cursor_.taskId = str(line, "taskId", cursor_.taskId);
-        cursor_.frameId = str(line, "frameId", cursor_.frameId);
-        cursor_.stage = st;
-        LoopFrame* f = frame(cursor_.frameId);
-        if (f && st != FrameStage::NONE) f->stage = st;
-        return true;
-    }
-    if (type == "InterventionAdded") {
-        LoopFrame* f = frame(str(line, "frameId"));
-        std::string raw;
-        if (f && rawValue(line, "intervention", raw)) {
-            Intervention iv;
-            iv.id = str(raw, "id");
-            iv.stage = str(raw, "stage");
-            iv.createdAt = str(raw, "createdAt");
-            std::string contents;
-            if (rawValue(raw, "contents", contents)) iv.contents = extractTextFromValue(contents);
-            f->steering.push_back(std::move(iv));
-        }
-        return true;
-    }
-    if (type == "BeliefDeltaApplied") {
-        const std::string frameId = str(line, "frameId");
-        LoopFrame* f = frame(frameId);
-        std::string deltaRaw;
-        if (!rawValue(line, "delta", deltaRaw)) return true;
+// ---------------------------------------------------------------------------
+// Model: state access
+// ---------------------------------------------------------------------------
+void NativeGuiModel::reset() {
+    snapshot_ = AgentSessionSnapshot{};
+    cursor_ = AgentSessionCursor{};
+    issues_.clear();
+    footer_ = Footer{};
+    roleContext_ = RoleContextUsagePair{};
+    inMessage_.clear();
+    inMessageThinking_ = false;
+    inMessageError_ = false;
+    inMessageHistory_.clear();
+    trace_.clear();
+    openTurn_.reset();
+    lastRoleStatus_ = Footer{};
+    clearFileList();
+}
 
-        BeliefDelta d;
-        d.id = str(deltaRaw, "id");
-        // Ignore a replayed mutation (same id) so it cannot create a duplicate
-        // Propose node; only dedup when the id is non-empty.
-        if (!d.id.empty() && !seenDeltaIds_.insert(d.id).second) return true;
-        d.frameId = str(deltaRaw, "frameId", frameId);
-        d.distillationId = str(deltaRaw, "distillationId");
-        d.producerPhase = str(deltaRaw, "producerPhase");
-        d.operation = str(deltaRaw, "operation");
-        d.beliefId = str(deltaRaw, "beliefId");
-        d.sourceBeliefId = str(deltaRaw, "sourceBeliefId");
-        d.resultBeliefId = str(deltaRaw, "resultBeliefId");
-        d.evidence = str(deltaRaw, "evidence");
+void NativeGuiModel::applyDomainSnapshot(const AgentSessionSnapshot& snapshot) {
+    snapshot_ = snapshot;
+    cursor_ = snapshot.cursor.has_value() ? *snapshot.cursor : AgentSessionCursor{};
+    // The snapshot is an integral replacement of what the state IS, so issues
+    // raised against the state it replaces no longer describe anything.
+    issues_.clear();
+}
 
-        std::string resultingRaw;
-        if (rawValue(deltaRaw, "resultingBeliefs", resultingRaw)) {
-            for (auto& e : arrayElements(resultingRaw)) {
-                Belief parsed;
-                parseBeliefRecord(e, parsed);
-                if (parsed.id.empty()) continue;
-                const bool isNew = beliefById_.find(parsed.id) == beliefById_.end();
-                Belief& stored = upsertBelief(parsed.id);
-                stored.statement = parsed.statement;
-                stored.domain = parsed.domain;
-                stored.expectation = parsed.expectation;
-                stored.evidenceRounds = parsed.evidenceRounds;
-                stored.skillRefs = std::move(parsed.skillRefs);
-                stored.supportedBy = std::move(parsed.supportedBy);
-                stored.refutedBy = std::move(parsed.refutedBy);
-                stored.inconclusiveBy = std::move(parsed.inconclusiveBy);
-                stored.supersededBy = std::move(parsed.supersededBy);
-                stored.withdrawn = parsed.withdrawn;
-                stored.status = parsed.status;
-                if (isNew || stored.createdInFrame.empty()) stored.createdInFrame = frameId;
+void NativeGuiModel::applySessionState(SessionState state) {
+    sessionState_ = std::move(state);
+}
+
+std::vector<const Task*> NativeGuiModel::tasks() const {
+    std::vector<const Task*> out;
+    out.reserve(snapshot_.taskOrder.size());
+    for (const TaskId& id : snapshot_.taskOrder) {
+        if (const Task* task = snapshot_.task(id)) out.push_back(task);
+    }
+    return out;
+}
+
+std::vector<const Belief*> NativeGuiModel::beliefs() const {
+    std::vector<const Belief*> out;
+    out.reserve(snapshot_.beliefOrder.size());
+    for (const BeliefId& id : snapshot_.beliefOrder) {
+        if (const Belief* belief = snapshot_.belief(id)) out.push_back(belief);
+    }
+    return out;
+}
+
+const ExecutionEpisode* NativeGuiModel::episode(const TaskId& taskId, const EpisodeId& episodeId) const {
+    const Task* task = snapshot_.task(taskId);
+    return task == nullptr ? nullptr : task->episode(episodeId);
+}
+
+std::string NativeGuiModel::beliefLabel(const BeliefId& id) const {
+    // DERIVED AT RENDER TIME from record order (docs/milestones.md §5.3). Never
+    // stored: an accumulated ordinal drifts on reconnect, when the registry is
+    // re-applied from a snapshot the events around it also describe.
+    const size_t index = snapshot_.beliefIndex(id);
+    if (index == AgentSessionSnapshot::npos) return id;
+    return "B" + std::to_string(index + 1);
+}
+
+Task* NativeGuiModel::mutableTask(const TaskId& id) {
+    auto it = snapshot_.tasks.find(id);
+    return it == snapshot_.tasks.end() ? nullptr : &it->second;
+}
+
+ExecutionEpisode* NativeGuiModel::mutableEpisode(const TaskId& taskId, const EpisodeId& episodeId) {
+    Task* task = mutableTask(taskId);
+    if (task == nullptr) return nullptr;
+    for (ExecutionEpisode& episode : task->episodes) {
+        if (episode.id == episodeId) return &episode;
+    }
+    return nullptr;
+}
+
+Belief* NativeGuiModel::mutableBelief(const BeliefId& id) {
+    auto it = snapshot_.beliefs.find(id);
+    return it == snapshot_.beliefs.end() ? nullptr : &it->second;
+}
+
+Belief& NativeGuiModel::upsertBelief(const BeliefId& id) {
+    auto it = snapshot_.beliefs.find(id);
+    if (it != snapshot_.beliefs.end()) return it->second;
+    Belief belief;
+    belief.id = id;
+    auto inserted = snapshot_.beliefs.emplace(id, std::move(belief));
+    // Record order is what beliefLabel() counts, so appending on first sight
+    // keeps the label aligned with the order the runtime registered them in.
+    snapshot_.beliefOrder.push_back(id);
+    return inserted.first->second;
+}
+
+// ---------------------------------------------------------------------------
+// Identity-level comparisons
+//
+// The applier's job is to notice a GENUINE conflict (so it can raise an issue),
+// not to be a diff. These compare the fields that carry a record's identity.
+// ---------------------------------------------------------------------------
+namespace {
+
+bool sameRouting(const Routing& a, const Routing& b) {
+    return a.id == b.id && a.decision == b.decision && a.reason == b.reason;
+}
+
+bool samePlan(const Plan& a, const Plan& b) {
+    return a.id == b.id && a.selectedToExplore == b.selectedToExplore && a.intent == b.intent;
+}
+
+bool sameDistillation(const Distillation& a, const Distillation& b) {
+    return a.id == b.id && a.inputs == b.inputs && a.outputs == b.outputs && a.contents == b.contents;
+}
+
+bool sameIntervention(const Intervention& a, const Intervention& b) {
+    return a.id == b.id && a.contents == b.contents && a.stage == b.stage;
+}
+
+bool sameDeferral(const FormulationDeferral& a, const FormulationDeferral& b) {
+    return a.missingInformation == b.missingInformation && a.reason == b.reason && a.deferredAt == b.deferredAt;
+}
+
+bool sameTarget(const Target& a, const Target& b) { return a.id == b.id && a.statement == b.statement; }
+
+bool sameCorrection(const FormulationCorrection& a, const FormulationCorrection& b) {
+    return a.id == b.id && a.original == b.original && a.receivedAt == b.receivedAt &&
+           a.targetVersionId == b.targetVersionId;
+}
+
+// TS: reviewScopeAfterFocus — a belief brought back into focus while a review is
+// owed also has to be accounted for, unless it was first introduced after the
+// revision: the reading that produced it is the one being reviewed.
+//
+// "Pre-existing" is read off the durable registry as well as off the index. A
+// belief declared in the turn that focuses it has no record yet — its delta is
+// still in flight, because the round that carries it is not dispatched until the
+// turn ends — so it did not exist when the version was published either.
+// Counting it as pre-existing would owe it a decision that
+// FormulationApplicabilityRecorded then refuses, and the review could never be
+// completed.
+std::vector<BeliefId> reviewScopeAfterFocus(const Task& task, const FormulationReview& review,
+                                            const std::vector<BeliefId>& focused,
+                                            const AgentSessionSnapshot& snapshot) {
+    std::vector<BeliefId> scoped = review.scopedBeliefIds;
+    for (const BeliefId& beliefId : focused) {
+        if (std::find(scoped.begin(), scoped.end(), beliefId) != scoped.end()) continue;
+        if (snapshot.belief(beliefId) == nullptr) continue;
+        const size_t introduced = [&]() -> size_t {
+            for (size_t i = 0; i < task.introducedBeliefs.size(); ++i) {
+                if (task.introducedBeliefs[i] == beliefId) return i;
             }
-        }
-        if (f) f->beliefDeltas.push_back(std::move(d));
-        else pendingDeltas_.push_back(std::move(d));
-        activeBeliefs_ = strArrayField(line, "activeBeliefs");
-        return true;
+            return AgentSessionSnapshot::npos;
+        }();
+        if (introduced != AgentSessionSnapshot::npos && introduced >= review.introducedAtRevision) continue;
+        scoped.push_back(beliefId);
     }
-    if (type == "PlanProduced") {
-        LoopFrame* f = frame(str(line, "frameId"));
-        std::string planRaw;
-        if (f && rawValue(line, "plan", planRaw)) {
-            Plan p;
-            p.id = str(planRaw, "id");
-            p.selectedToExplore = strArrayField(planRaw, "selectedToExplore");
-            p.intent = str(planRaw, "intent");
-            p.label = "P-" + std::to_string(++nextPlanOrdinal_);
-            f->plan = std::move(p);
-        }
-        return true;
+    return scoped;
+}
+
+// TS: deltaAnswersBelief — a delta answers a review's request when it touches the
+// belief itself or a belief that now stands in its place after a refinement (or a
+// retraction). The chain is followed one predecessor at a time, so refining twice
+// still answers the original.
+bool deltaAnswersBelief(const BeliefDelta& delta, const BeliefId& beliefId, const AgentSessionSnapshot& snapshot) {
+    std::vector<BeliefId> touched{delta.resultBeliefId};
+    if (delta.beliefId.has_value()) touched.push_back(*delta.beliefId);
+    if (delta.sourceBeliefId.has_value()) touched.push_back(*delta.sourceBeliefId);
+
+    std::vector<BeliefId> seen;
+    const BeliefId* current = &beliefId;
+    BeliefId next;
+    while (current != nullptr) {
+        if (std::find(touched.begin(), touched.end(), *current) != touched.end()) return true;
+        if (std::find(seen.begin(), seen.end(), *current) != seen.end()) return false;
+        seen.push_back(*current);
+        const Belief* belief = snapshot.belief(*current);
+        if (belief == nullptr || !belief->supersededBy.has_value()) return false;
+        next = *belief->supersededBy;
+        current = &next;
     }
-    if (type == "ExecutionStarted") {
-        const std::string frameId = str(line, "frameId");
-        LoopFrame* f = frame(frameId);
-        std::string execRaw;
-        if (!f || !rawValue(line, "execution", execRaw)) return true;
-        Execution ex;
-        ex.id = str(execRaw, "id");
-        ex.planId = str(execRaw, "planId");
-        ex.tool = str(execRaw, "tool");
-        ex.status = "running";
-        std::string input;
-        if (rawValue(execRaw, "input", input)) ex.command = inputToSummary(input);
-        std::string filePath = str(execRaw, "filePath");
-        f->trajectory.push_back(std::move(ex));
-        // Session file list: read/write/edit tools carry a path (or file_path).
-        if (f->trajectory.back().tool == "read" || f->trajectory.back().tool == "write" ||
-            f->trajectory.back().tool == "edit") {
-            std::string p;
-            if (rawValue(execRaw, "input", input)) {
-                p = str(input, "path");
-                if (p.empty()) p = str(input, "file_path");
-            }
-            if (p.empty()) p = filePath;
-            recordFileOp(f->trajectory.back().tool, p);
-        }
-        return true;
-    }
-    if (type == "ExecutionCompleted") {
-        const std::string frameId = str(line, "frameId");
-        LoopFrame* f = frame(frameId);
-        if (!f) return true;
-        const std::string execId = str(line, "executionId");
-        const std::string status = str(line, "status");
-        std::string output;
-        rawValue(line, "output", output);
-        for (Execution& t : f->trajectory) {
-            if (t.id == execId) {
-                t.result = extractTextFromValue(output);
-                if (status == "succeeded") t.status = "ok";
-                else if (status == "cancelled") t.status = "cancelled";
-                else t.status = "failed"; // "failed"
-                t.warning = str(line, "error");
-                // Surface execution failures in the ':' prompt palette in-message
-                // area (graphview and text view share it). Only a real failure with
-                // non-empty error text is shown; success/cancelled or error-less
-                // events never overwrite the current message. A subsequent
-                // message_start resets the error state via beginInMessage.
-                if (t.status == "failed" && !t.warning.empty()) setInMessageError(t.warning);
-                break;
-            }
-        }
-        return true;
-    }
-    if (type == "DistillationProduced") {
-        LoopFrame* f = frame(str(line, "frameId"));
-        std::string distRaw;
-        if (f && rawValue(line, "distillation", distRaw)) {
-            Distillation d;
-            d.id = str(distRaw, "id");
-            d.inputs = strArrayField(distRaw, "inputs");
-            d.contents = str(distRaw, "contents");
-            d.outputs = strArrayField(distRaw, "outputs");
-            d.label = "D-" + std::to_string(++nextDistillOrdinal_);
-            f->distillation = std::move(d);
-        }
-        return true;
-    }
-    if (type == "FrameClosed") {
-        closeFrame(str(line, "frameId"), false);
-        return true;
-    }
-    if (type == "TaskClosed") {
-        const std::string taskId = str(line, "taskId");
-        auto* task = const_cast<Task*>(taskById(taskId));
-        if (task) task->status = str(line, "status", "completed");
-        if (taskId == activeTaskId_) {
-            activeTaskId_.clear();
-            cursor_ = FrameCursor{};
-        }
-        // Bound the pending-delta buffer: once a task closes its frames will not
-        // reopen, so drop any still-unattached deltas rather than leaking them.
-        pendingDeltas_.clear();
-        return true;
-    }
-    // Not a domain event.
     return false;
 }
 
-void NativeGuiModel::applyLine(const std::string& line) {
-    applyDomainLine(line);
+} // namespace
+
+// ---------------------------------------------------------------------------
+// applyDomainEvent
+// ---------------------------------------------------------------------------
+bool NativeGuiModel::applyDomainEvent(const DomainEvent& event) {
+    if (event.kind == DomainEventKind::Unknown) return false;
+    // Every bump so far has been breaking with no migration path (v2 renamed
+    // TaskFrame to ExecutionEpisode; v3 added the formulation records; v4 the
+    // experiment selection; v5 revision response and focus review; v6 the
+    // per-round recheck; v7 explicit Frame approval). Replaying an older log
+    // would either miss records or misread them, so it is refused loudly instead
+    // of being reinterpreted — the same choice the runtime makes.
+    if (event.schemaVersion != kAgentSessionDomainSchemaVersion) {
+        recordIssue(event.type, event.eventId,
+                    "unsupported schema version " + std::to_string(event.schemaVersion) + " (this build requires v" +
+                        std::to_string(kAgentSessionDomainSchemaVersion) + ")");
+        return true;
+    }
+    switch (domainEventCategory(event.kind)) {
+        case DomainEventCategory::Task: return applyTaskEvent(event);
+        case DomainEventCategory::Formulation: return applyFormulationEvent(event);
+        case DomainEventCategory::Episode: return applyEpisodeEvent(event);
+        case DomainEventCategory::Loop: return applyLoopEvent(event);
+        case DomainEventCategory::Unknown: break;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Task applier (TS: applyTaskEvent)
+// ---------------------------------------------------------------------------
+bool NativeGuiModel::applyTaskEvent(const DomainEvent& event) {
+    switch (event.kind) {
+        case DomainEventKind::TaskOpened: {
+            const std::string parent = event.json.string("parentTaskId");
+            if (Task* existing = mutableTask(event.taskId)) {
+                // Snapshot/stream overlap: the task is already here. Silent when
+                // the replay agrees, an issue when it contradicts.
+                const std::string existingParent = existing->parentTaskId.value_or("");
+                const std::string replayedPrompt = event.json.object("initialPrompt") != nullptr
+                                                       ? event.json.object("initialPrompt")->string("id")
+                                                       : std::string{};
+                if (existingParent != parent ||
+                    (!replayedPrompt.empty() && existing->initialPrompt.id != replayedPrompt)) {
+                    recordIssue(event.type, event.eventId,
+                                "task " + event.taskId + " already exists with different content");
+                }
+                return true;
+            }
+            if (event.taskId.empty()) {
+                recordIssue(event.type, event.eventId, "TaskOpened has no taskId");
+                return true;
+            }
+            Task task;
+            task.id = event.taskId;
+            if (!parent.empty()) {
+                if (snapshot_.task(parent) == nullptr) {
+                    // Dangling citation: keep the task (dropping it would hide the
+                    // whole subtree) but do not record a parent that isn't there.
+                    recordIssue(event.type, event.eventId, "unknown parent task " + parent);
+                } else {
+                    task.parentTaskId = parent;
+                }
+            }
+            if (const json::Value* prompt = event.json.object("initialPrompt")) {
+                readInitialPrompt(*prompt, task.initialPrompt);
+            }
+            task.status = TaskStatus::Active;
+            task.inheritedBeliefs = event.json.stringArray("inheritedBeliefs");
+            for (const BeliefId& beliefId : task.inheritedBeliefs) {
+                if (snapshot_.belief(beliefId) == nullptr) {
+                    recordIssue(event.type, event.eventId, "unknown inherited belief " + beliefId);
+                }
+            }
+            // A new task inherits beliefs, never scope or understanding: it starts
+            // undeclared with an empty formulation history.
+            snapshot_.taskOrder.push_back(task.id);
+            snapshot_.tasks.emplace(task.id, std::move(task));
+            snapshot_.activeBranchTasks.push_back(event.taskId);
+            snapshot_.activeBeliefs = snapshot_.task(event.taskId)->inheritedBeliefs;
+            return true;
+        }
+        case DomainEventKind::TaskClosed: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            const TaskStatus status = parseTaskStatus(event.json.string("status"));
+            if (task->status != TaskStatus::Active) {
+                // Already closed: closing again is the same state, so this is the
+                // idempotent case rather than a conflict.
+                if (task->status != status) {
+                    recordIssue(event.type, event.eventId,
+                                "task " + task->id + " is already " + toString(task->status));
+                }
+                return true;
+            }
+            if (status == TaskStatus::Active || status == TaskStatus::Unknown) {
+                recordIssue(event.type, event.eventId, "TaskClosed carries no terminal status");
+            }
+            if (!task->initialTarget.has_value()) {
+                recordIssue(event.type, event.eventId, "task " + task->id + " has no target");
+            }
+            for (const ExecutionEpisode& episode : task->episodes) {
+                if (episode.status != EpisodeStatus::Closed) {
+                    recordIssue(event.type, event.eventId, "task " + task->id + " has an open episode");
+                    break;
+                }
+            }
+            if (status != TaskStatus::Active && status != TaskStatus::Unknown) task->status = status;
+            return true;
+        }
+        case DomainEventKind::TargetDefined: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            Target target;
+            const json::Value* raw = event.json.object("target");
+            if (raw == nullptr || !readTarget(*raw, target)) {
+                recordIssue(event.type, event.eventId, "TargetDefined carries no target");
+                return true;
+            }
+            if (task->initialTarget.has_value()) {
+                // The target is immutable: an identical replay is the overlap
+                // case, a different one is a contradiction.
+                if (!sameTarget(*task->initialTarget, target)) {
+                    recordIssue(event.type, event.eventId, "task " + task->id + " target is immutable");
+                }
+                return true;
+            }
+            task->initialTarget = std::move(target);
+            return true;
+        }
+        case DomainEventKind::FocusDeclared: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            // No activity check: the declared slice is a last-write-wins field, so
+            // a replay onto a task that has since closed is indistinguishable from
+            // a late declaration, and the write is idempotent either way.
+            const std::vector<BeliefId> declared = event.json.stringArray("beliefIds");
+            // Re-declaration replaces: a task may restate or narrow its scope and
+            // the last declaration wins. No belief-existence check — a focus id
+            // can name a belief whose delta is still in flight.
+            if (task->formulationReview.has_value()) {
+                FormulationReview& review = *task->formulationReview;
+                // `sameVersion` gates the review update: a focus declaration made
+                // under a later reading says nothing about the reading being
+                // reviewed.
+                const json::Value* adoption = event.json.find("formulation");
+                const bool sameVersion = adoption != nullptr && adoption->isObject() &&
+                                         adoption->string("kind") == "version" &&
+                                         adoption->string("versionId") == review.versionId;
+                if (sameVersion) {
+                    // Putting a belief the review called `not-applicable` back in
+                    // scope makes that decision a statement about a scope the task
+                    // no longer holds: it stops counting, so the belief is owed a
+                    // fresh one. Without this, "classify it away, then put it back"
+                    // would be a way around the review.
+                    for (FormulationApplicabilityEntry& entry : review.applicability) {
+                        if (entry.decision == FormulationApplicabilityDecision::NotApplicable &&
+                            std::find(declared.begin(), declared.end(), entry.beliefId) != declared.end()) {
+                            entry.stale = true;
+                        }
+                    }
+                    review.scopedBeliefIds = reviewScopeAfterFocus(*task, review, declared, snapshot_);
+                    // The reading is reviewed only once the user has acted on that
+                    // version — approval and objection both count, neither is
+                    // reachable from a plain message — and every belief it has to
+                    // account for has a decision that still counts.
+                    const bool readingReviewed =
+                        applicabilityComplete(review) &&
+                        (review.responseCorrectionId.has_value() || review.approval.has_value()) &&
+                        pendingFormulationCorrections(*task).empty();
+                    review.focusReviewed = review.focusReviewed || readingReviewed;
+                }
+            }
+            task->focus = declared;
+            task->focusDeclared = true;
+            return true;
+        }
+        case DomainEventKind::TaskOutcomeRecorded: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            TaskOutcome outcome;
+            const json::Value* raw = event.json.object("outcome");
+            if (raw == nullptr || !readTaskOutcome(*raw, outcome)) {
+                recordIssue(event.type, event.eventId, "TaskOutcomeRecorded carries no outcome");
+                return true;
+            }
+            if (outcome.result.empty()) {
+                recordIssue(event.type, event.eventId, "task outcome has no result");
+                return true;
+            }
+            if (outcome.evidence.empty()) {
+                recordIssue(event.type, event.eventId, "task outcome has no evidence");
+            }
+            // Last-wins: the loop can refuse a `conclude` after the tool recorded
+            // its outcome, and the model may conclude again with a correction.
+            task->taskOutcome = std::move(outcome);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Formulation applier (TS: applyFormulationEvent)
+// ---------------------------------------------------------------------------
+bool NativeGuiModel::applyFormulationEvent(const DomainEvent& event) {
+    switch (event.kind) {
+        case DomainEventKind::ProblemFormulationRecorded: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            ProblemFormulationVersion version;
+            const json::Value* raw = event.json.object("version");
+            if (raw == nullptr || !readFormulationVersion(*raw, version)) {
+                recordIssue(event.type, event.eventId, "ProblemFormulationRecorded carries no version");
+                return true;
+            }
+            const std::string versionId = version.id;
+            // Snapshot/stream overlap: the version is already in the history.
+            for (const ProblemFormulationVersion& existing : task->formulations) {
+                if (existing.id == versionId) return true;
+            }
+            if (version.taskId != task->id) {
+                recordIssue(event.type, event.eventId,
+                            "formulation version " + versionId + " names task " + version.taskId);
+            }
+            if (version.origin != kFormulationOriginPropose) {
+                recordIssue(event.type, event.eventId, "formulation version " + versionId + " is not published by propose");
+            }
+            if (version.reason.empty()) {
+                recordIssue(event.type, event.eventId, "formulation version " + versionId + " has no reason");
+            }
+            if (version.recordedAt.empty()) {
+                recordIssue(event.type, event.eventId, "formulation version " + versionId + " has no recorded time");
+            }
+            if (version.content.interpretation.empty() || version.content.focus.empty() ||
+                version.content.implication.empty()) {
+                recordIssue(event.type, event.eventId,
+                            "formulation version " + versionId + " is missing required content");
+            }
+            // The chain is what makes the history a history: a revision must name
+            // the version it revises, and a first version must not name one.
+            const ProblemFormulationVersion* current = currentFormulation(*task);
+            const bool firstVersion = current == nullptr;
+            if (firstVersion && version.previousVersionId.has_value()) {
+                recordIssue(event.type, event.eventId,
+                            "first formulation version " + versionId + " names a previous version");
+                return true;
+            }
+            if (!firstVersion && (!version.previousVersionId.has_value() ||
+                                  *version.previousVersionId != current->id)) {
+                recordIssue(event.type, event.eventId,
+                            "formulation version " + versionId + " does not follow " +
+                                (current != nullptr ? current->id : std::string("(none)")));
+                return true;
+            }
+            if (version.ordinal != task->formulations.size() + 1) {
+                recordIssue(event.type, event.eventId,
+                            "formulation ordinal " + std::to_string(version.ordinal) + " does not follow " +
+                                std::to_string(task->formulations.size()));
+                return true;
+            }
+            for (const FormulationSource& source : version.sources) {
+                if (source.kind == FormulationSourceKind::Unknown) {
+                    recordIssue(event.type, event.eventId, "formulation version " + versionId + " cites an unknown source kind");
+                }
+            }
+            task->formulations.push_back(std::move(version));
+            // Every publication waits for the user: the first reading is the one
+            // the investigation is about to be built on, so it is reviewed like a
+            // revision. Publishing also answers the deferral — the deferral record
+            // stays in the log, only the task's current state drops it.
+            FormulationReview review;
+            review.versionId = versionId;
+            review.focusReviewed = false;
+            review.scopedBeliefIds = task->focus;
+            review.introducedAtRevision = task->introducedBeliefs.size();
+            task->formulationReview = std::move(review);
+            task->formulationDeferral.reset();
+            return true;
+        }
+        case DomainEventKind::ProblemFormulationDeferred: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            FormulationDeferral deferral;
+            deferral.missingInformation = event.json.string("missingInformation");
+            deferral.reason = event.json.string("reason");
+            const json::Value* sources = event.json.find("sources");
+            if (sources != nullptr) deferral.sources = readFormulationSourceArray(*sources);
+            deferral.deferredAt = event.json.string("deferredAt");
+            if (deferral.missingInformation.empty()) {
+                recordIssue(event.type, event.eventId, "formulation deferral has no missing information");
+                return true;
+            }
+            if (deferral.reason.empty()) {
+                recordIssue(event.type, event.eventId, "formulation deferral has no reason");
+                return true;
+            }
+            // A deferral answers the investigation as it stood at this point in
+            // the log. Deriving the ordinal from the task (rather than reading it
+            // off the event) is what lets later evidence re-open the decision
+            // instead of the deferral standing forever as an exemption.
+            //
+            // Idempotence: the derived ordinal would MOVE if the same deferral
+            // were re-applied after a later dispatch, so an identical replay is
+            // keyed on the record and no-ops rather than recomputing.
+            if (task->formulationDeferral.has_value() && sameDeferral(*task->formulationDeferral, deferral)) {
+                return true;
+            }
+            deferral.answeredThroughEpisodeOrdinal = latestDispatchedEpisodeOrdinal(*task).value_or(0);
+            // Last-wins: a later deferral replaces the earlier one because it was
+            // made against newer evidence, and it never removes a version.
+            task->formulationDeferral = std::move(deferral);
+            return true;
+        }
+        case DomainEventKind::FormulationApproved: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            const std::string versionId = event.json.string("versionId");
+            const std::string approvedAt = event.json.string("approvedAt");
+            if (approvedAt.empty()) {
+                recordIssue(event.type, event.eventId, "formulation approval has no recorded time");
+            }
+            const bool known = std::any_of(
+                task->formulations.begin(), task->formulations.end(),
+                [&](const ProblemFormulationVersion& v) { return v.id == versionId; });
+            if (!known) {
+                // Dangling citation: an approval for a version this task never
+                // published is a real error, and a replay of the stream cannot
+                // produce one.
+                recordIssue(event.type, event.eventId, "formulation approval names unknown version " + versionId);
+                return true;
+            }
+            const ProblemFormulationVersion* current = currentFormulation(*task);
+            if (current == nullptr || current->id != versionId) {
+                // An approval is an act on the reading the user was shown, so
+                // approving a version a later publication replaced records nothing.
+                //
+                // The refusal is SILENT: a version that is no longer current is
+                // exactly what a full replay presents (the stream revisits the
+                // earlier reading after the state has moved to the revision), and
+                // raising an issue for it would make a clean replay look broken.
+                return true;
+            }
+            if (!task->formulationReview.has_value() || task->formulationReview->versionId != versionId) {
+                return true;
+            }
+            FormulationReview& review = *task->formulationReview;
+            for (const FormulationCorrection* correction : pendingFormulationCorrections(*task)) {
+                if (correction->targetVersionId == versionId) {
+                    // An objection the user has not yet had answered is not consent.
+                    recordIssue(event.type, event.eventId,
+                                "formulation " + versionId + " still has an unanswered objection");
+                    return true;
+                }
+            }
+            // Approving the same version again is a no-op rather than a second
+            // decision, so a client retrying after a reconnect cannot create a
+            // duplicate record of the same act.
+            if (review.approval.has_value()) return true;
+            FormulationApproval approval;
+            approval.versionId = versionId;
+            approval.approvedAt = approvedAt;
+            review.approval = std::move(approval);
+            return true;
+        }
+        case DomainEventKind::FormulationCorrectionSubmitted: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            FormulationCorrection correction;
+            const json::Value* raw = event.json.object("correction");
+            if (raw == nullptr || !readFormulationCorrection(*raw, correction)) {
+                recordIssue(event.type, event.eventId, "FormulationCorrectionSubmitted carries no correction");
+                return true;
+            }
+            for (const FormulationCorrection& existing : task->formulationCorrections) {
+                if (existing.id != correction.id) continue;
+                // Idempotent replay; an issue only when the replay contradicts.
+                if (!sameCorrection(existing, correction)) {
+                    recordIssue(event.type, event.eventId, "correction " + correction.id + " already exists");
+                }
+                return true;
+            }
+            if (correction.taskId != task->id) {
+                recordIssue(event.type, event.eventId,
+                            "correction " + correction.id + " names task " + correction.taskId);
+            }
+            if (correction.status != FormulationCorrectionStatus::Pending) {
+                recordIssue(event.type, event.eventId, "correction " + correction.id + " is not submitted as pending");
+                return true;
+            }
+            if (correction.receivedAt.empty()) {
+                recordIssue(event.type, event.eventId, "correction " + correction.id + " has no received time");
+            }
+            // A correction may target no version — the user can object before any
+            // version exists — but a target it names must be real, so "which
+            // version was the user looking at" is answerable later.
+            if (correction.targetVersionId.has_value() &&
+                !std::any_of(task->formulations.begin(), task->formulations.end(),
+                             [&](const ProblemFormulationVersion& v) { return v.id == *correction.targetVersionId; })) {
+                recordIssue(event.type, event.eventId,
+                            "correction " + correction.id + " targets unknown formulation " + *correction.targetVersionId);
+            }
+            task->formulationCorrections.push_back(std::move(correction));
+            if (task->formulationReview.has_value()) {
+                FormulationReview& review = *task->formulationReview;
+                review.focusReviewed = false;
+                const FormulationCorrection& added = task->formulationCorrections.back();
+                if (added.targetVersionId.has_value() && *added.targetVersionId == review.versionId) {
+                    review.responseCorrectionId = added.id;
+                }
+            }
+            return true;
+        }
+        case DomainEventKind::FormulationCorrectionResolved: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            const std::string correctionId = event.json.string("correctionId");
+            const std::string response = event.json.string("response");
+            FormulationCorrection* target = nullptr;
+            for (FormulationCorrection& correction : task->formulationCorrections) {
+                if (correction.id == correctionId) {
+                    target = &correction;
+                    break;
+                }
+            }
+            if (target == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown correction " + correctionId);
+                return true;
+            }
+            if (target->status == FormulationCorrectionStatus::Resolved) {
+                // Resolution is idempotent: the record is already in that state.
+                return true;
+            }
+            // Only a response that says something resolves a correction; an empty
+            // one would mark it handled without the user learning how.
+            if (response.empty()) {
+                recordIssue(event.type, event.eventId, "correction " + correctionId + " is resolved without a response");
+                return true;
+            }
+            const std::string recordedVersionId = event.json.string("recordedVersionId");
+            if (!recordedVersionId.empty() &&
+                !std::any_of(task->formulations.begin(), task->formulations.end(),
+                             [&](const ProblemFormulationVersion& v) { return v.id == recordedVersionId; })) {
+                recordIssue(event.type, event.eventId,
+                            "correction " + correctionId + " names unknown formulation " + recordedVersionId);
+            }
+            // Resolution is addressed to one correction id, so an answer to an
+            // older correction can never be recorded as the answer to a newer one
+            // that arrived while it was being handled.
+            target->status = FormulationCorrectionStatus::Resolved;
+            target->response = response;
+            if (!recordedVersionId.empty()) target->recordedVersionId = recordedVersionId;
+            return true;
+        }
+        case DomainEventKind::FormulationApplicabilityRecorded: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            if (!task->formulationReview.has_value()) {
+                recordIssue(event.type, event.eventId, "there is no formulation review to classify beliefs against");
+                return true;
+            }
+            FormulationReview& review = *task->formulationReview;
+            const std::string versionId = event.json.string("versionId");
+            if (versionId != review.versionId) {
+                recordIssue(event.type, event.eventId,
+                            "applicability names version " + versionId + ", not the reviewed " + review.versionId);
+                return true;
+            }
+            std::vector<FormulationApplicabilityEntry> entries;
+            const json::Value* raw = event.json.find("applicability");
+            if (raw == nullptr) raw = event.json.find("entries");
+            if (raw == nullptr || !raw->isArray() || raw->size() == 0) {
+                recordIssue(event.type, event.eventId, "an applicability review must classify at least one belief");
+                return true;
+            }
+            std::vector<BeliefId> classified;
+            bool invalid = false;
+            for (size_t i = 0; i < raw->size() && !invalid; ++i) {
+                FormulationApplicabilityEntry entry;
+                if (!readApplicabilityEntry(raw->at(i), entry)) {
+                    invalid = true;
+                    break;
+                }
+                if (std::find(classified.begin(), classified.end(), entry.beliefId) != classified.end()) {
+                    recordIssue(event.type, event.eventId,
+                                "belief " + entry.beliefId + " is classified twice in one record");
+                    invalid = true;
+                    break;
+                }
+                classified.push_back(entry.beliefId);
+                if (std::find(review.scopedBeliefIds.begin(), review.scopedBeliefIds.end(), entry.beliefId) ==
+                    review.scopedBeliefIds.end()) {
+                    recordIssue(event.type, event.eventId,
+                                "belief " + entry.beliefId + " was not in scope when version " + review.versionId +
+                                    " was published");
+                    invalid = true;
+                    break;
+                }
+                if (snapshot_.belief(entry.beliefId) == nullptr) {
+                    recordIssue(event.type, event.eventId, "unknown belief " + entry.beliefId);
+                    invalid = true;
+                    break;
+                }
+                if (entry.reason.empty()) {
+                    recordIssue(event.type, event.eventId, "belief " + entry.beliefId + " is classified without a reason");
+                    invalid = true;
+                    break;
+                }
+                if (entry.revalidatedByDeltaId.has_value()) {
+                    recordIssue(event.type, event.eventId,
+                                "belief " + entry.beliefId + " cannot name its re-examination as it is recorded");
+                    invalid = true;
+                    break;
+                }
+                if (entry.stale) {
+                    recordIssue(event.type, event.eventId,
+                                "belief " + entry.beliefId + " is stale by the fold's reckoning, not here");
+                    invalid = true;
+                    break;
+                }
+                entries.push_back(std::move(entry));
+            }
+            if (invalid) return true;
+            // A re-classification replaces the earlier decision for those beliefs
+            // and leaves the others alone.
+            std::vector<FormulationApplicabilityEntry> next;
+            for (const FormulationApplicabilityEntry& existing : review.applicability) {
+                if (std::find(classified.begin(), classified.end(), existing.beliefId) == classified.end()) {
+                    next.push_back(existing);
+                }
+            }
+            for (FormulationApplicabilityEntry& entry : entries) next.push_back(std::move(entry));
+            review.applicability = std::move(next);
+            return true;
+        }
+        case DomainEventKind::FormulationRecheckRecorded: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            FormulationRecheck recheck;
+            const json::Value* raw = event.json.object("recheck");
+            if (raw == nullptr || !readFormulationRecheck(*raw, recheck)) {
+                recordIssue(event.type, event.eventId, "FormulationRecheckRecorded carries no recheck");
+                return true;
+            }
+            const ExecutionEpisode* episode = task->episode(recheck.episodeId);
+            if (episode == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown episode " + recheck.episodeId);
+                return true;
+            }
+            // A recheck answers a round that actually reached distillation. A
+            // round whose experiment was interrupted before distill never
+            // distilled, and answering a correction owns that state instead — so a
+            // recheck naming it would claim a check that never happened.
+            if (episode->body.kind != EpisodeBodyKind::BeliefLoop || !episode->body.distillation.has_value()) {
+                recordIssue(event.type, event.eventId,
+                            "episode " + recheck.episodeId + " has no recorded distillation to reconsider");
+                return true;
+            }
+            if (recheck.reason.empty()) {
+                recordIssue(event.type, event.eventId,
+                            "a recheck of episode " + recheck.episodeId + " needs a reason");
+                return true;
+            }
+            if (recheck.verdict == FormulationRecheckVerdict::Revised) {
+                if (!recheck.versionId.has_value()) {
+                    recordIssue(event.type, event.eventId,
+                                "a revised recheck of episode " + recheck.episodeId +
+                                    " must name the version it published");
+                    return true;
+                }
+                if (!std::any_of(task->formulations.begin(), task->formulations.end(),
+                                 [&](const ProblemFormulationVersion& v) { return v.id == *recheck.versionId; })) {
+                    recordIssue(event.type, event.eventId,
+                                "recheck names version " + *recheck.versionId + ", which this task never published");
+                    return true;
+                }
+            } else if (recheck.versionId.has_value()) {
+                recordIssue(event.type, event.eventId,
+                            std::string("a ") + toString(recheck.verdict) + " recheck publishes no version");
+                return true;
+            }
+            // The recorded result is the latest one, so going backwards would
+            // re-open a settled round. Recording twice for the SAME round stays
+            // legal: a turn can say the reading holds and then publish a
+            // revision, and the publication answers the same round again.
+            //
+            // The refusal is SILENT, unlike the other invariant checks. A
+            // full-stream replay legitimately revisits earlier rounds onto a state
+            // that already holds a later result, so raising an issue here would
+            // make a clean replay look broken. The record is keyed on the round it
+            // answers, so refusing it is a no-op and the state still converges.
+            if (task->formulationRecheck.has_value()) {
+                const ExecutionEpisode* previous = task->episode(task->formulationRecheck->episodeId);
+                if (previous != nullptr && episode->ordinal < previous->ordinal) return true;
+            }
+            task->formulationRecheck = std::move(recheck);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Episode applier (TS: applyEpisodeEvent)
+// ---------------------------------------------------------------------------
+bool NativeGuiModel::applyEpisodeEvent(const DomainEvent& event) {
+    // TS: requireActiveEpisode / requireClassifiedEpisode, in mirrored form.
+    //
+    // Split in two on purpose. Locating is separate from judging activity,
+    // because the appliers must check "is this record already here?" BEFORE they
+    // judge activity: on a full replay the state has already moved past the
+    // event, so a precondition-first order would report a phantom problem for
+    // every line. Only an event that would actually WRITE gets the activity
+    // check, and failing it is a no-op — which is what makes a closed episode
+    // immutable instead of merely discouraged.
+    struct Located {
+        Task* task = nullptr;
+        ExecutionEpisode* episode = nullptr;
+        bool active = false;  // task active, episode active, body classified if required
+        bool found = false;   // both records exist
+    };
+    auto locate = [&](bool needClassifiedBody) -> Located {
+        Located out;
+        out.task = mutableTask(event.taskId);
+        if (out.task == nullptr) {
+            recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+            return out;
+        }
+        for (ExecutionEpisode& candidate : out.task->episodes) {
+            if (candidate.id == event.episodeId) {
+                out.episode = &candidate;
+                break;
+            }
+        }
+        if (out.episode == nullptr) {
+            recordIssue(event.type, event.eventId, "unknown episode " + event.episodeId);
+            return out;
+        }
+        out.found = true;
+        const bool bodyOk = !needClassifiedBody || out.episode->body.kind != EpisodeBodyKind::Pending;
+        out.active = out.task->status == TaskStatus::Active &&
+                     out.episode->status == EpisodeStatus::Active && bodyOk;
+        return out;
+    };
+    // Report why a write was refused, then let the caller no-op.
+    auto refuseInactive = [&](const Located& l) {
+        if (l.task->status != TaskStatus::Active) {
+            recordIssue(event.type, event.eventId, "task " + l.task->id + " is " + toString(l.task->status));
+        } else if (l.episode->status != EpisodeStatus::Active) {
+            recordIssue(event.type, event.eventId, "episode " + l.episode->id + " is closed");
+        } else {
+            recordIssue(event.type, event.eventId, "episode " + l.episode->id + " has no selected body");
+        }
+    };
+
+    switch (event.kind) {
+        case DomainEventKind::EpisodeOpened: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            if (event.episodeId.empty()) {
+                recordIssue(event.type, event.eventId, "EpisodeOpened has no episodeId");
+                return true;
+            }
+            // Snapshot/stream overlap.
+            if (task->episode(event.episodeId) != nullptr) return true;
+            if (task->status != TaskStatus::Active) {
+                recordIssue(event.type, event.eventId, "task " + task->id + " is " + toString(task->status));
+                return true;
+            }
+            for (const ExecutionEpisode& episode : task->episodes) {
+                if (episode.status == EpisodeStatus::Active) {
+                    recordIssue(event.type, event.eventId, "task " + task->id + " already has an open episode");
+                    return true;
+                }
+            }
+            const uint64_t ordinal = static_cast<uint64_t>(event.json.integer("ordinal", 0));
+            if (ordinal != task->episodes.size() + 1) {
+                recordIssue(event.type, event.eventId,
+                            "episode ordinal " + std::to_string(ordinal) + " does not follow " +
+                                std::to_string(task->episodes.size()));
+                return true;
+            }
+            ExecutionEpisode episode;
+            episode.id = event.episodeId;
+            episode.taskId = task->id;
+            episode.ordinal = ordinal;
+            episode.status = EpisodeStatus::Active;
+            episode.stage = EpisodeStage::Routing;
+            task->episodes.push_back(std::move(episode));
+            return true;
+        }
+        case DomainEventKind::RoutingDecided: {
+            const Located l = locate(false);
+            if (!l.found) return true;
+            Routing routing;
+            const json::Value* raw = event.json.object("routing");
+            if (raw == nullptr || !readRouting(*raw, routing)) {
+                recordIssue(event.type, event.eventId, "RoutingDecided carries no routing");
+                return true;
+            }
+            if (l.episode->routing.has_value()) {
+                // Routing is written once; an identical replay is the overlap case.
+                if (!sameRouting(*l.episode->routing, routing)) {
+                    recordIssue(event.type, event.eventId, "episode " + l.episode->id + " already has routing");
+                }
+                return true;
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            l.episode->routing = std::move(routing);
+            return true;
+        }
+        case DomainEventKind::EpisodeBodySelected: {
+            const Located l = locate(false);
+            if (!l.found) return true;
+            ExecutionEpisode* episode = l.episode;
+            const EpisodeBodyKind kind = parseEpisodeBodyKind(event.json.string("body"));
+            if (episode->body.kind != EpisodeBodyKind::Pending) {
+                if (episode->body.kind != kind) {
+                    recordIssue(event.type, event.eventId,
+                                "episode " + episode->id + " body is already " + toString(episode->body.kind));
+                }
+                return true;
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            // The body must be the one routing selected; a disagreement means the
+            // record contradicts itself.
+            if (episode->routing.has_value()) {
+                const RoutingDecision decided = episode->routing->decision;
+                const bool agrees = decided == RoutingDecision::Unknown ||
+                                    (decided == RoutingDecision::BeliefLoop && kind == EpisodeBodyKind::BeliefLoop) ||
+                                    (decided == RoutingDecision::FastPath && kind == EpisodeBodyKind::FastPath);
+                if (!agrees) {
+                    recordIssue(event.type, event.eventId,
+                                std::string("routing selected ") + toString(decided) + ", not " + toString(kind));
+                }
+            }
+            const json::Value* adoption = event.json.find("formulation");
+            EpisodeBody body;
+            body.kind = kind;
+            if (kind == EpisodeBodyKind::BeliefLoop) {
+                // A belief-loop episode never carries the adoption itself: its
+                // Plan does, so the selection and the dispatch cannot disagree
+                // about which version governed them.
+                if (adoption != nullptr && !adoption->isNull()) {
+                    recordIssue(event.type, event.eventId,
+                                "belief-loop episode " + episode->id +
+                                    " records its formulation on the plan, not the body");
+                }
+                body.openBeliefsAtStart = event.json.stringArray("openBeliefsAtStart");
+            } else if (kind == EpisodeBodyKind::FastPath) {
+                // The fast path has no Plan, so the episode is the only place this
+                // can be recorded. An absent field would be indistinguishable from
+                // "no version had been formed", which is the distinction that
+                // matters, so it is refused rather than defaulted.
+                if (adoption == nullptr || adoption->isNull()) {
+                    recordIssue(event.type, event.eventId,
+                                "fast-path episode " + episode->id +
+                                    " does not record which formulation it ran under");
+                    return true;
+                }
+                // A claim of `unformed` made after a version exists is a STALENESS
+                // anomaly, not a contradiction: it was true when the runtime
+                // emitted it, and a full replay legitimately revisits it. It is
+                // recorded as the runtime recorded it, without an issue.
+                body.formulation = readFormulationAdoption(*adoption);
+            }
+            episode->body = std::move(body);
+            return true;
+        }
+        case DomainEventKind::EpisodeClosed: {
+            const Located l = locate(false);
+            if (!l.found) return true;
+            ExecutionEpisode* episode = l.episode;
+            if (episode->status == EpisodeStatus::Closed) {
+                // Already closed: idempotent. The cursor is still reconciled,
+                // because a replay can arrive after a CursorChanged has moved the
+                // cursor back onto this episode, and a close must leave it closed.
+                if (cursor_.episodeId == episode->id) {
+                    cursor_.stage = EpisodeStage::Closed;
+                    snapshot_.cursor = cursor_;
+                }
+                return true;
+            }
+            if (episode->body.kind == EpisodeBodyKind::Pending) {
+                recordIssue(event.type, event.eventId, "episode " + episode->id + " has no selected body");
+                return true;
+            }
+            for (const Execution& execution : episode->body.trajectory) {
+                if (execution.status == ExecutionStatus::Running) {
+                    recordIssue(event.type, event.eventId, "episode " + episode->id + " has a running execution");
+                    return true;
+                }
+            }
+            if (episode->body.kind == EpisodeBodyKind::BeliefLoop && !episode->body.plan.has_value()) {
+                recordIssue(event.type, event.eventId, "belief-loop episode " + episode->id + " has no plan");
+                return true;
+            }
+            episode->status = EpisodeStatus::Closed;
+            episode->stage = EpisodeStage::Closed;
+            // The close mirrors onto the cursor, so the two cannot disagree about
+            // an episode that has ended.
+            if (cursor_.episodeId == episode->id) {
+                cursor_.stage = EpisodeStage::Closed;
+                snapshot_.cursor = cursor_;
+            }
+            return true;
+        }
+        case DomainEventKind::CursorChanged: {
+            Task* task = mutableTask(event.taskId);
+            if (task == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+                return true;
+            }
+            const ExecutionEpisode* episode = task->episode(event.episodeId);
+            if (episode == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown episode " + event.episodeId);
+                return true;
+            }
+            // Deliberately NO issue for an inactive task or a closed episode. The
+            // cursor is the runtime's own statement of where it is, and it is the
+            // one field a bootstrap replay routinely sets onto a state that has
+            // since moved past it (the snapshot is newer than every buffered
+            // line). Raising an issue there would flood the trace panel with
+            // phantom problems; the value itself is last-write-wins, so replaying
+            // the stream in order converges on the same cursor.
+            cursor_.taskId = event.taskId;
+            cursor_.episodeId = event.episodeId;
+            cursor_.stage = parseEpisodeStage(event.json.string("stage"));
+            snapshot_.cursor = cursor_;
+            return true;
+        }
+        case DomainEventKind::InterventionAdded: {
+            const Located l = locate(false);
+            if (!l.found) return true;
+            Intervention intervention;
+            const json::Value* raw = event.json.object("intervention");
+            if (raw == nullptr || !readIntervention(*raw, intervention)) {
+                recordIssue(event.type, event.eventId, "InterventionAdded carries no intervention");
+                return true;
+            }
+            for (const Intervention& existing : l.episode->steering) {
+                if (existing.id == intervention.id) {
+                    if (!sameIntervention(existing, intervention)) {
+                        recordIssue(event.type, event.eventId, "intervention " + intervention.id + " already exists");
+                    }
+                    return true;
+                }
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            l.episode->steering.push_back(std::move(intervention));
+            return true;
+        }
+        case DomainEventKind::ExperimentSelected: {
+            const Located l = locate(false);
+            if (!l.found) return true;
+            ExperimentSelectionRecord selection;
+            const json::Value* raw = event.json.object("selection");
+            if (raw == nullptr || !readExperimentSelection(*raw, selection)) {
+                recordIssue(event.type, event.eventId, "ExperimentSelected carries no selection");
+                return true;
+            }
+            if (selection.beliefIds.empty()) {
+                recordIssue(event.type, event.eventId, "experiment selection has no beliefs");
+                return true;
+            }
+            if (selection.intent.empty()) {
+                recordIssue(event.type, event.eventId, "experiment selection has no intent");
+                return true;
+            }
+            // A condition with no next step (or the reverse) is half an intention,
+            // which a reader would take for a promise the agent never made.
+            if (selection.advancementCondition.has_value() != selection.advancementNext.has_value()) {
+                recordIssue(event.type, event.eventId,
+                            "advancement must state the condition and the next step together, or neither");
+                return true;
+            }
+            // The belief ids are deliberately not checked against the registry: a
+            // selection is a choice, not a commitment. Rejecting one on replay
+            // would fail a log over a belief that never became anything. A claim of
+            // `unformed` after a version exists is likewise left alone: it was
+            // true when emitted, and a replay revisits it.
+            //
+            // The selection is last-write-wins and carries no id, so there is no
+            // way to tell a stale replay from a fresh re-selection; it is applied
+            // silently rather than judged.
+            l.episode->experimentSelection = std::move(selection);
+            return true;
+        }
+        case DomainEventKind::ExperimentSelectionVoided: {
+            const Located l = locate(false);
+            if (!l.found) return true;
+            if (!l.episode->experimentSelection.has_value()) {
+                // The selection is already gone. "Voided" and "never selected"
+                // are the same absence here, and an idempotent replay must not
+                // raise a phantom issue, so this is a silent no-op rather than the
+                // TypeScript fold's `fail`.
+                return true;
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            if (event.json.string("reason").empty()) {
+                recordIssue(event.type, event.eventId, "a voided experiment selection needs a reason");
+            }
+            l.episode->experimentSelection.reset();
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loop applier (TS: applyLoopEvent)
+// ---------------------------------------------------------------------------
+bool NativeGuiModel::applyLoopEvent(const DomainEvent& event) {
+    // TS: requireClassifiedEpisode, split the same way as the episode applier:
+    // locate first, judge activity only when the event would actually write.
+    struct Located {
+        Task* task = nullptr;
+        ExecutionEpisode* episode = nullptr;
+        bool active = false;
+        bool found = false;
+    };
+    auto locate = [&]() -> Located {
+        Located out;
+        out.task = mutableTask(event.taskId);
+        if (out.task == nullptr) {
+            recordIssue(event.type, event.eventId, "unknown task " + event.taskId);
+            return out;
+        }
+        for (ExecutionEpisode& candidate : out.task->episodes) {
+            if (candidate.id == event.episodeId) {
+                out.episode = &candidate;
+                break;
+            }
+        }
+        if (out.episode == nullptr) {
+            recordIssue(event.type, event.eventId, "unknown episode " + event.episodeId);
+            return out;
+        }
+        out.found = true;
+        out.active = out.task->status == TaskStatus::Active &&
+                     out.episode->status == EpisodeStatus::Active &&
+                     out.episode->body.kind != EpisodeBodyKind::Pending;
+        return out;
+    };
+    auto refuseInactive = [&](const Located& l) {
+        if (l.task->status != TaskStatus::Active) {
+            recordIssue(event.type, event.eventId, "task " + l.task->id + " is " + toString(l.task->status));
+        } else if (l.episode->status != EpisodeStatus::Active) {
+            recordIssue(event.type, event.eventId, "episode " + l.episode->id + " is closed");
+        } else {
+            recordIssue(event.type, event.eventId, "episode " + l.episode->id + " has no selected body");
+        }
+    };
+
+    switch (event.kind) {
+        case DomainEventKind::BeliefDeltaApplied: {
+            const Located l = locate();
+            if (!l.found) return true;
+            Task* task = l.task;
+            ExecutionEpisode* episode = l.episode;
+            if (episode->body.kind != EpisodeBodyKind::BeliefLoop) {
+                recordIssue(event.type, event.eventId,
+                            "fast-path episode " + episode->id + " cannot apply belief deltas");
+                return true;
+            }
+            BeliefDelta delta;
+            const json::Value* raw = event.json.object("delta");
+            if (raw == nullptr || !readBeliefDelta(*raw, delta)) {
+                recordIssue(event.type, event.eventId, "BeliefDeltaApplied carries no delta");
+                return true;
+            }
+            // Snapshot/stream overlap: this mutation is already recorded.
+            if (episode->beliefDelta(delta.id) != nullptr) return true;
+            if (delta.episodeId != episode->id) {
+                recordIssue(event.type, event.eventId,
+                            "belief delta " + delta.id + " names episode " + delta.episodeId);
+            }
+            if (delta.producerPhase != BeliefDeltaProducerPhase::Propose &&
+                delta.producerPhase != BeliefDeltaProducerPhase::Distill) {
+                recordIssue(event.type, event.eventId, "belief delta " + delta.id + " has invalid producer phase");
+            }
+            bool carriesResult = false;
+            for (const Belief& belief : delta.resultingBeliefs) {
+                if (belief.id == delta.resultBeliefId) carriesResult = true;
+            }
+            if (!carriesResult) {
+                recordIssue(event.type, event.eventId,
+                            "belief delta " + delta.id + " does not contain result " + delta.resultBeliefId);
+                return true;
+            }
+            if (delta.sourceBeliefId.has_value() && snapshot_.belief(*delta.sourceBeliefId) == nullptr) {
+                recordIssue(event.type, event.eventId,
+                            "belief delta " + delta.id + " names unknown source " + *delta.sourceBeliefId);
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            // The registry is the write target of this event and of nothing else.
+            for (const Belief& belief : delta.resultingBeliefs) {
+                if (belief.id.empty()) continue;
+                const bool isNew = snapshot_.belief(belief.id) == nullptr;
+                Belief& stored = upsertBelief(belief.id);
+                stored = belief;
+                stored.id = belief.id;
+                if (isNew && !task->hasIntroduced(belief.id)) task->introducedBeliefs.push_back(belief.id);
+            }
+            const std::vector<BeliefId> active = event.json.stringArray("activeBeliefs");
+            for (const BeliefId& beliefId : active) {
+                if (snapshot_.belief(beliefId) == nullptr) {
+                    recordIssue(event.type, event.eventId, "active belief " + beliefId + " has no record");
+                }
+            }
+            snapshot_.activeBeliefs = active;
+            episode->body.beliefDeltas.push_back(std::move(delta));
+            // A belief the revision sent back for re-examination is answered by
+            // the delta that re-states, replaces, or retracts it — following the
+            // refinement chain. Deriving this in the fold keeps "has it been
+            // re-examined" answerable from the log alone.
+            const BeliefDelta& applied = episode->body.beliefDeltas.back();
+            if (task->formulationReview.has_value() && !task->formulationReview->applicability.empty()) {
+                for (FormulationApplicabilityEntry& entry : task->formulationReview->applicability) {
+                    if (entry.decision != FormulationApplicabilityDecision::NeedsRevalidation) continue;
+                    if (entry.revalidatedByDeltaId.has_value()) continue;
+                    if (deltaAnswersBelief(applied, entry.beliefId, snapshot_)) {
+                        entry.revalidatedByDeltaId = applied.id;
+                    }
+                }
+            }
+            return true;
+        }
+        case DomainEventKind::PlanProduced: {
+            const Located l = locate();
+            if (!l.found) return true;
+            ExecutionEpisode* episode = l.episode;
+            if (episode->body.kind != EpisodeBodyKind::BeliefLoop) {
+                recordIssue(event.type, event.eventId, "fast-path episode " + episode->id + " cannot own a plan");
+                return true;
+            }
+            Plan plan;
+            const json::Value* raw = event.json.object("plan");
+            if (raw == nullptr || !readPlan(*raw, plan)) {
+                recordIssue(event.type, event.eventId, "PlanProduced carries no plan");
+                return true;
+            }
+            if (episode->body.plan.has_value()) {
+                if (!samePlan(*episode->body.plan, plan)) {
+                    recordIssue(event.type, event.eventId,
+                                "episode " + episode->id + " already has plan " + episode->body.plan->id);
+                }
+                // The duplicate still reconciles. "A plan exists" implies "no
+                // selection is pending" (the plan IS the dispatch that committed
+                // it), and the snapshot/stream overlap can reach this branch AFTER
+                // a replayed `ExperimentSelected` put the selection back. Skipping
+                // the reset here would leave the same log ending in two different
+                // states depending on what the snapshot happened to contain —
+                // exactly the order-dependence the bootstrap is built to avoid.
+                episode->experimentSelection.reset();
+                return true;
+            }
+            for (const BeliefId& beliefId : plan.selectedToExplore) {
+                if (snapshot_.belief(beliefId) == nullptr) {
+                    recordIssue(event.type, event.eventId, "plan selects unknown belief " + beliefId);
+                }
+            }
+            if (plan.advancementCondition.has_value() != plan.advancementNext.has_value()) {
+                recordIssue(event.type, event.eventId,
+                            "advancement must state the condition and the next step together, or neither");
+                return true;
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            episode->body.plan = std::move(plan);
+            // Dispatching commits the choice, so the selection stops being
+            // pending: what remains is the plan.
+            episode->experimentSelection.reset();
+            return true;
+        }
+        case DomainEventKind::ExecutionStarted: {
+            const Located l = locate();
+            if (!l.found) return true;
+            ExecutionEpisode* episode = l.episode;
+            Execution execution;
+            const json::Value* raw = event.json.object("execution");
+            if (raw == nullptr || !readExecutionStarted(*raw, execution)) {
+                recordIssue(event.type, event.eventId, "ExecutionStarted carries no execution");
+                return true;
+            }
+            for (const Execution& existing : episode->body.trajectory) {
+                if (existing.id == execution.id) return true;  // snapshot/stream overlap
+            }
+            if (episode->body.kind == EpisodeBodyKind::BeliefLoop) {
+                if (!episode->body.plan.has_value()) {
+                    recordIssue(event.type, event.eventId, "belief-loop episode " + episode->id + " has no plan");
+                    return true;
+                }
+                if (!execution.planId.has_value() || *execution.planId != episode->body.plan->id) {
+                    recordIssue(event.type, event.eventId, "execution does not name episode plan");
+                    return true;
+                }
+            } else if (execution.planId.has_value()) {
+                recordIssue(event.type, event.eventId, "fast-path execution must not name a plan");
+                return true;
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            // Session file list: read/write/edit carry a path. Kept here rather
+            // than in the RPC adapter so the file list follows the same record the
+            // graph renders.
+            if (execution.tool == "read" || execution.tool == "write" || execution.tool == "edit") {
+                std::string path = execution.filePath.value_or("");
+                if (path.empty() && raw->object("input") != nullptr) {
+                    path = raw->object("input")->string("path");
+                    if (path.empty()) path = raw->object("input")->string("file_path");
+                }
+                recordFileOp(execution.tool, path);
+            }
+            episode->body.trajectory.push_back(std::move(execution));
+            return true;
+        }
+        case DomainEventKind::ExecutionCompleted: {
+            const Located l = locate();
+            if (!l.found) return true;
+            ExecutionEpisode* episode = l.episode;
+            const std::string executionId = event.json.string("executionId");
+            Execution* execution = nullptr;
+            for (Execution& candidate : episode->body.trajectory) {
+                if (candidate.id == executionId) {
+                    execution = &candidate;
+                    break;
+                }
+            }
+            if (execution == nullptr) {
+                recordIssue(event.type, event.eventId, "unknown execution " + executionId);
+                return true;
+            }
+            if (execution->status != ExecutionStatus::Running) {
+                // Silent when the replay agrees with what is already recorded (the
+                // bootstrap overlap case); an issue only when it contradicts.
+                const ExecutionStatus replayed = parseExecutionStatus(event.json.string("status"));
+                if (replayed != execution->status) {
+                    recordIssue(event.type, event.eventId,
+                                "execution " + executionId + " is already " + toString(execution->status));
+                }
+                return true;
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            if (!readExecutionCompleted(event.json, *execution)) {
+                recordIssue(event.type, event.eventId, "ExecutionCompleted carries no status");
+                return true;
+            }
+            if (execution->status == ExecutionStatus::Failed && !execution->error.has_value()) {
+                recordIssue(event.type, event.eventId, "failed execution " + executionId + " has no error");
+            }
+            // A real execution failure with error text is surfaced in the live
+            // in-message area too, so the Frame pane shows why the round stopped.
+            if (execution->status == ExecutionStatus::Failed && execution->error.has_value() &&
+                !execution->error->empty()) {
+                setInMessageError(*execution->error);
+            }
+            return true;
+        }
+        case DomainEventKind::DistillationProduced: {
+            const Located l = locate();
+            if (!l.found) return true;
+            ExecutionEpisode* episode = l.episode;
+            Distillation distillation;
+            const json::Value* raw = event.json.object("distillation");
+            if (raw == nullptr || !readDistillation(*raw, distillation)) {
+                recordIssue(event.type, event.eventId, "DistillationProduced carries no distillation");
+                return true;
+            }
+            if (episode->body.distillation.has_value()) {
+                if (!sameDistillation(*episode->body.distillation, distillation)) {
+                    recordIssue(event.type, event.eventId, "episode " + episode->id + " already has distillation");
+                }
+                return true;
+            }
+            for (const ExecutionId& input : distillation.inputs) {
+                if (episode->execution(input) == nullptr) {
+                    recordIssue(event.type, event.eventId,
+                                "distillation input " + input + " is not in episode " + episode->id);
+                }
+            }
+            if (episode->body.kind == EpisodeBodyKind::BeliefLoop) {
+                // The outputs must be exactly the distill-produced deltas the
+                // episode already recorded, in order: a mismatch means the record
+                // disagrees with the mutations it claims to have produced.
+                std::vector<BeliefDeltaId> expected;
+                for (const BeliefDelta& delta : episode->body.beliefDeltas) {
+                    if (delta.producerPhase == BeliefDeltaProducerPhase::Distill) expected.push_back(delta.id);
+                }
+                if (expected != distillation.outputs) {
+                    recordIssue(event.type, event.eventId,
+                                "distillation outputs must exactly match distill-produced belief deltas");
+                }
+            } else if (!distillation.outputs.empty()) {
+                recordIssue(event.type, event.eventId, "fast-path distillation cannot produce belief deltas");
+            }
+            if (!l.active) {
+                refuseInactive(l);
+                return true;
+            }
+            episode->body.distillation = std::move(distillation);
+            return true;
+        }
+        default:
+            return false;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // RPC event adapter (live mode)
 // ---------------------------------------------------------------------------
+namespace {
+
+// TS: session_status.roleStatus.<slot> — model + latest cache hit rate. The
+// telemetry is deliberately thin: no thinking level, no timing, no degraded
+// flag, and no finalReport slot at all (docs/milestones.md §3.6).
+RoleFooterSlot readRoleSlot(const json::Value& roleStatus, const char* name) {
+    RoleFooterSlot slot;
+    const json::Value* raw = roleStatus.object(name);
+    if (raw == nullptr) return slot;
+    if (raw->has("latestCacheHitRate")) {
+        slot.cacheHitRate = static_cast<float>(raw->number("latestCacheHitRate", -1.0));
+    }
+    if (const json::Value* model = raw->object("model")) {
+        slot.model = model->string("id");
+    }
+    return slot;
+}
+
+RoleContextUsage readRoleUsage(const json::Value& roleUsage, const char* name) {
+    RoleContextUsage usage;
+    const json::Value* raw = roleUsage.object(name);
+    if (raw == nullptr) return usage;
+    if (raw->has("tokens")) usage.tokens = static_cast<long>(raw->number("tokens", -1.0));
+    if (raw->has("contextWindow")) usage.contextWindow = static_cast<long>(raw->number("contextWindow", 0.0));
+    if (raw->has("percent")) usage.percent = raw->number("percent", -1.0);
+    return usage;
+}
+
+// TS: AssistantMessage.usage — the token buckets, negative when unreported.
+TurnUsage readTurnUsage(const json::Value& message) {
+    TurnUsage usage;
+    const json::Value* raw = message.object("usage");
+    if (raw == nullptr) return usage;
+    if (raw->has("input")) usage.input = static_cast<long>(raw->number("input", -1.0));
+    if (raw->has("output")) usage.output = static_cast<long>(raw->number("output", -1.0));
+    if (raw->has("cacheRead")) usage.cacheRead = static_cast<long>(raw->number("cacheRead", -1.0));
+    if (raw->has("cacheWrite")) usage.cacheWrite = static_cast<long>(raw->number("cacheWrite", -1.0));
+    return usage;
+}
+
+bool sameSlot(const RoleFooterSlot& a, const RoleFooterSlot& b) {
+    return a.model == b.model && a.cacheHitRate == b.cacheHitRate;
+}
+
+// One domain event, as an observation. `describeDomainEvent` runs AFTER the event
+// was applied: the delta that introduces a belief is what gives that belief its
+// label, and describing first would print a raw id where the rest of the GUI says
+// "B4".
+void recordDomainTrace(NativeGuiModel& model, const DomainEvent& event) {
+    TraceEntry entry;
+    entry.kind = TraceEntry::Kind::Domain;
+    entry.type = event.type;
+    entry.at = event.timestamp;
+    entry.atMs = parseIso8601Millis(event.timestamp);
+    entry.taskId = event.taskId;
+    entry.episodeId = event.episodeId;
+
+    // A stage is claimed only when the cursor is ACTUALLY there now, and only for
+    // the two events that can move it: `CursorChanged` (by its own `stage`) and
+    // `EpisodeClosed` (which the fold applies as `closed` — the controller emits
+    // no CursorChanged for the final-report role). Reading the cursor back is what
+    // keeps an event the fold REFUSED, such as a CursorChanged on a closed
+    // episode, from opening a row for a stage that never happened.
+    const AgentSessionCursor& cursor = model.cursor();
+    if (cursor.valid() && cursor.taskId == event.taskId && cursor.episodeId == event.episodeId &&
+        (event.kind == DomainEventKind::CursorChanged || event.kind == DomainEventKind::EpisodeClosed)) {
+        entry.stage = cursor.stage;
+    }
+    entry.text = describeDomainEvent(model, event);
+    model.recordTrace(std::move(entry));
+}
+
+} // namespace
+
 RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
-    if (line.empty() || line[0] != '{') return RpcApplyResult::Error;
-    std::string type = str(line, "type");
+    json::Value parsed;
+    if (!json::parseLine(line, parsed, nullptr)) return RpcApplyResult::Error;
+    return applyRpcLine(model, parsed);
+}
+
+RpcApplyResult applyRpcLine(NativeGuiModel& model, const json::Value& parsed) {
+    if (!parsed.isObject()) return RpcApplyResult::Error;
+    const std::string type = parsed.string("type");
     if (type.empty()) return RpcApplyResult::Error;
 
-    // Successful acknowledgements are control events; surface failures in the
-    // prompt pane so the user can see why the request was rejected.
+    // A failed command surfaces in the Frame pane so the user can see why the
+    // request was rejected. This is exactly how a refused `approve_frame` — which
+    // the contract returns as an error rather than an approval — becomes visible
+    // instead of reading as consent (docs/milestones.md §3.4).
     if (type == "response") {
-        std::string success;
-        if (findKey(line, "success", success) && trim(success).rfind("false", 0) == 0) {
-            std::string message = str(line, "error");
+        if (parsed.has("success") && !parsed.boolean("success", true)) {
+            std::string message = parsed.string("error");
             if (message.empty()) message = "RPC request failed";
             model.setInMessageError(message);
         }
         return RpcApplyResult::Ignored;
     }
 
-    // Bottom-footer telemetry: per-role model + cache hit rate and session cost.
     if (type == "session_status") {
-        auto parseRole = [&](const std::string& roleName) -> RoleFooterSlot {
-            RoleFooterSlot slot;
-            std::string rawStatus;
-            if (rawValue(line, roleName, rawStatus)) {
-                slot.cacheHitRate = doubleVal(rawStatus, "latestCacheHitRate", -1.0f);
-                std::string rawModel;
-                if (rawValue(rawStatus, "model", rawModel)) {
-                    std::string id = str(rawModel, "id");
-                    if (!id.empty()) slot.model = id;
-                }
-            }
-            return slot;
-        };
-        Footer f;
-        std::string rawRoleStatus;
-        if (rawValue(line, "roleStatus", rawRoleStatus)) {
-            f.epistemic = parseRole("epistemic");
-            f.distillation = parseRole("distillation");
-            f.execution = parseRole("execution");
+        Footer footer;
+        if (const json::Value* roleStatus = parsed.object("roleStatus")) {
+            footer.epistemic = readRoleSlot(*roleStatus, "epistemic");
+            footer.distillation = readRoleSlot(*roleStatus, "distillation");
+            footer.execution = readRoleSlot(*roleStatus, "execution");
+            footer.hasData = true;
         }
-        if (rawRoleStatus.empty()) {
-            f.epistemic = parseRole("epistemic");
-            f.distillation = parseRole("distillation");
-            f.execution = parseRole("execution");
-        }
-        f.sessionCost = doubleVal(line, "cost", 0.0);
-        f.hasData = true;
-        model.setFooter(std::move(f));
+        footer.sessionCost = parsed.number("cost", 0.0);
+        model.setFooter(std::move(footer));
 
-        std::string rawRoleUsage;
-        if (rawValue(line, "roleUsage", rawRoleUsage)) {
-            auto parseUsage = [&](const std::string& role) -> RoleContextUsage {
-                RoleContextUsage u;
-                std::string raw;
-                if (rawValue(rawRoleUsage, role, raw)) {
-                    u.tokens = static_cast<long>(nullableDoubleVal(raw, "tokens", -1.0));
-                    u.contextWindow = static_cast<long>(nullableDoubleVal(raw, "contextWindow", 0.0));
-                    u.percent = nullableDoubleVal(raw, "percent", -1.0);
-                }
-                return u;
-            };
-            RoleContextUsagePair rcu;
-            rcu.epistemic = parseUsage("epistemic");
-            rcu.execution = parseUsage("execution");
-            rcu.hasData = true;
-            model.setRoleContext(std::move(rcu));
-        } else {
-            model.setRoleContext(RoleContextUsagePair{});
+        RoleContextUsagePair usagePair;
+        if (const json::Value* roleUsage = parsed.object("roleUsage")) {
+            usagePair.epistemic = readRoleUsage(*roleUsage, "epistemic");
+            usagePair.execution = readRoleUsage(*roleUsage, "execution");
+            usagePair.hasData = true;
+        }
+        model.setRoleContext(std::move(usagePair));
+
+        // Logged only when a slot CHANGES. This line is emitted after every single
+        // event, so recording each one would bury the trace under hundreds of
+        // identical rows while telling a row nothing it did not already know.
+        if (const Footer& now = model.footer(); now.hasData) {
+            const Footer& last = model.lastRoleStatus();
+            if (!last.hasData || !sameSlot(now.epistemic, last.epistemic) ||
+                !sameSlot(now.distillation, last.distillation) || !sameSlot(now.execution, last.execution)) {
+                TraceEntry entry;
+                entry.kind = TraceEntry::Kind::Status;
+                entry.type = type;
+                entry.at = parsed.string("timestamp");
+                entry.atMs = parseIso8601Millis(entry.at);
+                entry.epistemic = now.epistemic;
+                entry.distillation = now.distillation;
+                entry.execution = now.execution;
+                model.recordTrace(std::move(entry));
+                model.setLastRoleStatus(now);
+            }
         }
         return RpcApplyResult::Applied;
     }
 
-    // AgentEvent turn boundaries. The domain events (TaskOpened/FrameOpened/
-    // FrameClosed) are authoritative for frame lifecycles; these only mark a
-    // model turn and never open or close a belief-loop frame.
-    if (type == "agent_start" || type == "turn_start" || type == "turn_end" ||
-        type == "agent_settled") {
+    // AgentEvent turn boundaries. The domain events are authoritative for episode
+    // lifecycles; these only mark a model turn and never open or close one.
+    if (type == "agent_start" || type == "turn_start" || type == "turn_end" || type == "agent_settled") {
         return RpcApplyResult::Ignored;
     }
 
     if (type == "message_start") {
-        std::string role = str(line, "role");
-        std::string text;
-        std::string content;
-        if (rawValue(line, "content", content)) text = extractTextFromValue(content);
-        else text = extractTextFromValue(line);
+        const json::Value* message = parsed.object("message");
+        const std::string role = message != nullptr ? message->string("role") : parsed.string("role");
+        if (role == "assistant") {
+            const json::Value* content = message != nullptr ? message->find("content") : nullptr;
+            model.beginInMessage(content != nullptr ? domainContentText(*content) : std::string{});
 
-        // Fast-path distillation custom message (legacy): its content is the
-        // distillation summary. Surface it in the in-message stream rather than
-        // fabricating a Distillation occurrence.
-        std::string customType = str(line, "customType");
-        if (role == "custom" && customType == "fast_path_distillation") {
-            std::string distText;
-            if (rawValue(line, "content", content)) {
-                std::string v = stringValue(content);
-                if (!v.empty()) distText = v;
+            // The dispatch this turn represents: the model that ACTUALLY ran, which
+            // is the one column the trace can state without deriving anything. The
+            // stage is read from the cursor rather than guessed from the event
+            // order — the pane attributes the turn to the stage the cursor is in.
+            TraceEntry turn;
+            turn.type = type;
+            turn.at = parsed.string("timestamp");
+            turn.atMs = parseIso8601Millis(turn.at);
+            if (message != nullptr) {
+                if (const json::Value* modelObj = message->object("model")) {
+                    turn.model = modelObj->string("id");
+                    turn.provider = modelObj->string("provider");
+                }
+                turn.thinkingLevel = message->string("providerThinkingLevel");
+                turn.usage = readTurnUsage(*message);
+                if (turn.at.empty()) {
+                    // Some turns timestamp the message instead of the envelope.
+                    const json::Value* raw = message->find("timestamp");
+                    if (raw != nullptr && raw->isNumber()) {
+                        turn.atMs = raw->asInt(-1);
+                        turn.at = std::to_string(turn.atMs);
+                    }
+                }
             }
-            if (distText.empty()) distText = text;
-            model.beginInMessage(distText);
+            const AgentSessionCursor& cursor = model.cursor();
+            turn.taskId = cursor.taskId;
+            turn.episodeId = cursor.episodeId;
+            if (cursor.valid()) turn.stage = cursor.stage;
+            model.beginTraceTurn(std::move(turn));
             return RpcApplyResult::Applied;
         }
-        // Seed the ':' in-message stream on an assistant message; clear it on a
-        // user message so the previous reply does not linger.
-        if (role == "assistant") {
-            model.beginInMessage(text);
-        } else if (role == "user") {
+        if (role == "user") {
+            // Clear the previous reply so it does not linger behind the new turn.
             model.beginInMessage("");
+            return RpcApplyResult::Applied;
         }
-        return RpcApplyResult::Applied;
+        return RpcApplyResult::Ignored;
     }
     if (type == "message_update") {
-        std::string evt;
-        if (rawValue(line, "assistantMessageEvent", evt)) {
-            std::string deltaType = str(evt, "type");
+        if (const json::Value* delta = parsed.object("assistantMessageEvent")) {
+            const std::string deltaType = delta->string("type");
             if (deltaType == "thinking_start") {
                 model.setInMessageThinking(true);
                 return RpcApplyResult::Applied;
@@ -1042,56 +1937,72 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const std::string& line) {
                 return RpcApplyResult::Applied;
             }
             if (deltaType == "text_delta" || deltaType == "thinking_delta") {
-                model.appendInMessage(str(evt, "delta"));
+                model.appendInMessage(delta->string("delta"));
                 return RpcApplyResult::Applied;
             }
         }
         return RpcApplyResult::Ignored;
     }
     if (type == "message_end") {
-        // A model-stream failure surfaces as an assistant message whose
-        // stopReason is "error" with the failure text in errorMessage. Surface
-        // it in the ':' prompt palette as an error (red) so the failure is
-        // visible; a normal message_end leaves the in-message untouched. Reads
-        // are scoped to the message object and gated on role == "assistant"
-        // so same-named keys in other nested content cannot be misread.
-        // Reads are scoped to direct members of the message object so a same-named
-        // nested key inside content (e.g. a toolCall argument named stopReason)
-        // cannot shadow the message's own stopReason/errorMessage.
-        std::string msgRaw, role, stop;
-        if (directMember(line, "message", msgRaw) &&
-            directMember(msgRaw, "role", role) && role == "assistant" &&
-            directMember(msgRaw, "stopReason", stop) && stop == "error") {
-            std::string em;
-            if (!directMember(msgRaw, "errorMessage", em) || em.empty()) em = "Request failed";
-            model.setInMessageError(em);
+        // A model-stream failure arrives as an assistant message whose stopReason
+        // is "error". The DOM reads the message object's OWN members, so a
+        // same-named key nested inside content (a toolCall argument called
+        // stopReason, say) can never shadow it.
+        if (const json::Value* message = parsed.object("message")) {
+            if (message->string("role") == "assistant") {
+                TraceEntry closing;
+                closing.endedAt = parsed.string("timestamp");
+                closing.endedAtMs = parseIso8601Millis(closing.endedAt);
+                closing.stopReason = message->string("stopReason");
+                closing.errorMessage = message->string("errorMessage");
+                closing.usage = readTurnUsage(*message);
+                if (closing.endedAt.empty()) {
+                    const json::Value* raw = message->find("timestamp");
+                    if (raw != nullptr && raw->isNumber()) {
+                        closing.endedAtMs = raw->asInt(-1);
+                        closing.endedAt = std::to_string(closing.endedAtMs);
+                    }
+                }
+                model.endTraceTurn(std::move(closing));
+            }
+            if (message->string("role") == "assistant" && message->string("stopReason") == "error") {
+                std::string text = message->string("errorMessage");
+                if (text.empty()) text = "Request failed";
+                model.setInMessageError(text);
+            }
         }
         model.endInMessage();
-        if (model.finalReportPending()) model.requestAutoOpenPrompt();
         return RpcApplyResult::Applied;
     }
 
-    // Tool call/result telemetry: only feed the session file list here; the
-    // execution trajectory is built from the domain ExecutionStarted/Completed
-    // events so non-probe tools never appear as execution probes.
+    // Tool-call telemetry feeds the session file list only; the execution
+    // trajectory is built from the domain ExecutionStarted/Completed events, so a
+    // non-probe tool never appears as an execution.
     if (type == "tool_execution_start") {
-        std::string args;
-        rawValue(line, "args", args);
-        std::string tool = str(line, "toolName");
+        const std::string tool = parsed.string("toolName");
         if (tool == "read" || tool == "write" || tool == "edit") {
-            std::string p = str(args, "path");
-            if (p.empty()) p = str(args, "file_path");
-            model.recordFileOp(tool, p);
+            std::string path;
+            if (const json::Value* args = parsed.object("args")) {
+                path = args->string("path");
+                if (path.empty()) path = args->string("file_path");
+            }
+            model.recordFileOp(tool, path);
         }
         return RpcApplyResult::Applied;
     }
-    if (type == "tool_execution_end") {
-        return RpcApplyResult::Ignored;
+    if (type == "tool_execution_end") return RpcApplyResult::Ignored;
+
+    // Domain events. The line was already parsed once; reuse the DOM rather than
+    // re-parsing it.
+    DomainEvent event;
+    if (parseDomainEvent(parsed, event) == DomainParseResult::Parsed) {
+        model.applyDomainEvent(event);
+        // Recorded AFTER applying, because the detail line renders belief ids
+        // through the label the registry derives from record order — and a delta
+        // that introduces a belief is what puts that belief in the registry.
+        recordDomainTrace(model, event);
+        return RpcApplyResult::Applied;
     }
-
-    // Domain events (Task/Frame/Belief/Plan/Execution/Distillation lifecycle).
-    if (model.applyDomainLine(line)) return RpcApplyResult::Applied;
-
     return RpcApplyResult::Ignored;
 }
 

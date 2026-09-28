@@ -84,13 +84,13 @@ static bool jsonString(const std::string& s, std::size_t& i, std::string& out) {
     return false;  // unterminated
 }
 
-// Parse the serialized command object, extract and decode the "message" value.
+// Parse the serialized command object, extract and decode one string field.
 // Returns true iff the whole command is consumed as a well-formed object.
-static bool cmdMessage(const std::string& cmd, std::string& msg) {
+static bool cmdField(const std::string& cmd, const std::string& want, std::string& value) {
     std::size_t i = 0;
     if (i >= cmd.size() || cmd[i] != '{') return false;
     ++i;
-    bool sawMsg = false;
+    bool sawField = false;
     while (i < cmd.size()) {
         while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t' || cmd[i] == '\n' || cmd[i] == '\r')) ++i;
         if (i >= cmd.size()) return false;
@@ -103,10 +103,10 @@ static bool cmdMessage(const std::string& cmd, std::string& msg) {
         while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t')) ++i;
         if (i >= cmd.size()) return false;
         std::string val;
-        if (key == "message") {
+        if (key == want) {
             if (!jsonString(cmd, i, val)) return false;
-            msg = val;
-            sawMsg = true;
+            value = val;
+            sawField = true;
         } else if (cmd[i] == '"') {
             if (!jsonString(cmd, i, val)) return false;
         } else {
@@ -120,7 +120,16 @@ static bool cmdMessage(const std::string& cmd, std::string& msg) {
         if (i >= cmd.size()) return false;
     }
     while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t' || cmd[i] == '\n' || cmd[i] == '\r')) ++i;
-    return sawMsg && i == cmd.size();
+    return i == cmd.size() && (!sawField ? false : true);
+}
+
+// True when the command carries no member named `key` at all.
+static bool lacksField(const std::string& cmd, const std::string& key) {
+    return cmd.find("\"" + key + "\"") == std::string::npos;
+}
+
+static bool cmdMessage(const std::string& cmd, std::string& msg) {
+    return cmdField(cmd, "message", msg);
 }
 
 // Minimal replica of the runtime client's writeCommand: writes cmd + '\n' to
@@ -191,6 +200,80 @@ int main() {
         close(p[0]);
         std::string got(buf, buf + (n > 0 ? n : 0));
         check(got == cmd + "\n", "writeCommand bytes reach the pipe (outbound write)");
+    }
+
+    // --- domain-state commands (docs/milestones.md §3.4) ---
+    //
+    // These are the bootstrap pair and the Frame pane's two acts. What matters
+    // here is not the field order but that each is strict JSON, carries the right
+    // `type`, and escapes what it must: `frame_correct` takes free text from the
+    // user, exactly like a prompt.
+    {
+        std::string s = pie::gui::serializeGetSnapshotCommand("req_0");
+        check(s == "{\"type\":\"get_domain_snapshot\",\"id\":\"req_0\"}",
+              "get_domain_snapshot schema");
+        std::string id;
+        check(cmdField(s, "id", id) && id == "req_0", "get_domain_snapshot id round-trips");
+    }
+    {
+        std::string s = pie::gui::serializeGetStateCommand("req_1");
+        check(s == "{\"type\":\"get_state\",\"id\":\"req_1\"}", "get_state schema");
+    }
+    {
+        std::string s = pie::gui::serializeApproveFrameCommand("req_2", "formulation-1");
+        check(s == "{\"type\":\"approve_frame\",\"id\":\"req_2\",\"versionId\":\"formulation-1\"}",
+              "approve_frame schema with a version");
+        std::string version;
+        check(cmdField(s, "versionId", version) && version == "formulation-1",
+              "approve_frame versionId round-trips");
+    }
+    {
+        // An empty versionId must be OMITTED, not sent as "": the runtime would
+        // otherwise look for a version literally named "" rather than acting on
+        // whatever is awaiting a response.
+        std::string s = pie::gui::serializeApproveFrameCommand("req_3", "");
+        check(s == "{\"type\":\"approve_frame\",\"id\":\"req_3\"}",
+              "approve_frame omits an empty versionId");
+        check(lacksField(s, "versionId"), "no versionId member at all when it is empty");
+    }
+    {
+        std::string s = pie::gui::serializeFrameCorrectCommand("req_4", "that is not the point");
+        check(s == "{\"type\":\"frame_correct\",\"id\":\"req_4\",\"message\":\"that is not the point\"}",
+              "frame_correct schema");
+        std::string msg;
+        check(cmdMessage(s, msg) && msg == "that is not the point",
+              "the correction text round-trips");
+    }
+    {
+        // The correction box takes the same free text the prompt box does, so it
+        // needs the same escaping. A raw newline here would make the whole line
+        // invalid JSON and the runtime would reject the objection.
+        std::string msg = "line1\nline2 \"quoted\" \\ \x01 end";
+        std::string s = pie::gui::serializeFrameCorrectCommand("req_5", msg);
+        bool noRawCtrl = true;
+        for (char c : s) if (static_cast<unsigned char>(c) < 0x20u) { noRawCtrl = false; break; }
+        check(noRawCtrl, "no raw control byte in the serialized correction");
+        std::string decoded;
+        check(cmdMessage(s, decoded) && decoded == msg,
+              "correction text survives escaping byte-for-byte");
+    }
+    {
+        // A version id is an opaque runtime string; escaping it is not optional.
+        std::string s = pie::gui::serializeApproveFrameCommand("req_6", "v\"1\\2");
+        std::string version;
+        check(cmdField(s, "versionId", version) && version == "v\"1\\2",
+              "an id needing escapes round-trips");
+    }
+    {
+        // Every new command must be reachable by a strict parse, which is what
+        // the runtime's JSON.parse does to the whole line.
+        std::string parsedId;
+        check(cmdField(pie::gui::serializeGetSnapshotCommand("a"), "id", parsedId) && parsedId == "a",
+              "get_domain_snapshot is strict JSON");
+        std::string parsedStateId;
+        check(cmdField(pie::gui::serializeGetStateCommand("b"), "id", parsedStateId) &&
+                  parsedStateId == "b",
+              "get_state is strict JSON");
     }
 
     if (failures == 0) std::printf("ALL PASS\n");

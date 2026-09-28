@@ -1,20 +1,36 @@
-// PIE Native GUI - cognitive feedback loop workbench (P0).
+// PIE Native GUI - cognitive feedback loop debugger.
 //
 // Application orchestration only. Window/event/ImGui-backend/present lifecycle
 // is owned by the platform layer in `plats/` and driven through `runPlatform()`;
 // this file only provides the common ImGui setup, the app session/runtime, and
-// the per-frame UI callbacks (status bar / lanes / summary / user prompt
-// palette). Platform-specific types (GLFW, Cocoa, Metal, OpenGL) never appear
-// here.
+// the per-frame UI callbacks.
+//
+// M9: the workspace is a flat sequence of bands and panels (docs/milestones.md
+// §7.4). `computeShellLayout` decides every rectangle from the window size and the
+// open panels, and this file draws into them in order — header, canvas, the open
+// panels, footer. There is no early return and no `graphOpen` branch: opening a
+// panel changes a rectangle, not the code path, which is what makes "the panels
+// never overlap" a property of one function rather than of a set of ifs.
 //
 // Modes:
-//   default   --live: spawns `node <PI_CLI> -ne --mode rpc` and applies its JSONL.
-//   --demo    injects the formal DemoEvents.h scripted event stream.
+//   default   --live: spawns `node <PI_CLI> -ne --mode rpc`, runs the M3 connect
+//             sequence (see Bootstrap), and applies its JSONL.
+//   --demo    injects the DemoEvents.h scripted stream through the SAME bootstrap
+//             path, so the demo cannot pass while live mode fails. A scripted
+//             stream has no runtime to answer `get_domain_snapshot`, so the demo
+//             correctly reports itself event-only — and its trace, which needs
+//             message_start/session_status, correctly reports no telemetry.
 //   --live    explicit; wins if both --demo and --live are supplied.
+//
+// Panels: Cmd/Ctrl+B belief list, Cmd/Ctrl+T dispatch trace, Cmd/Ctrl+F file list,
+// and ':' or Enter opens the Frame pane's prompt window. Cmd/Ctrl+= / - zoom the
+// font. `Cmd/Ctrl+G` is gone with the text workspace it toggled (§4).
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -28,17 +44,21 @@
 #include <unistd.h>
 
 #include "Model.h"
+#include "Bootstrap.h"
 #include "DemoEvents.h"
 #include "PromptCmd.h"
-#include "LayoutMetrics.h"
+#include "ShellLayout.h"
 #include "StatusBar.h"
-#include "LogListBox.h"
-#include "Summary.h"
 #include "Footer.h"
-#include "PromptPalette.h"
+#include "FramePane.h"
 #include "FileListWindow.h"
+#include "BeliefListModel.h"
+#include "BeliefPane.h"
+#include "FormulationView.h"
 #include "Theme.h"
+#include "TracePane.h"
 #include "Paths.h"
+#include "ReplayTool.h"
 #include "RuntimeClient.h"
 #include "graph/GraphModel.h"
 #include "graph/PieGraphLayout.h"
@@ -52,49 +72,122 @@
 
 using namespace pie::gui;
 
+namespace {
+
+// A monotonic millisecond clock for the bootstrap's snapshot deadline. Injected
+// rather than read inside Bootstrap so the sequence is testable without a clock;
+// here it is a steady_clock read, which cannot go backwards when the wall clock
+// is adjusted mid-session.
+int64_t nowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
 // App session state threaded through the callbacks. Lives for the duration of
 // runPlatform().
 struct AppSession {
     NativeGuiModel model;
+    // The M3 connect sequence. Owns the snapshot buffering, the two-command
+    // handshake and the event-only degradation; App only drives it.
+    Bootstrap bootstrap;
     SdkProcess sdk;
     EventQueue queue;
     std::atomic<bool> stopReader{false};
     std::thread reader;
     bool live = true;
-    std::string viewId;  // empty = follow the active frame
+    // Which panels the user has open, and how much width each asks for. The
+    // geometry is derived from it every frame by computeShellLayout.
+    PanelState panels;
+    // The Frame pane's prompt window: opened by ':' or Enter, closed by Esc. Set
+    // by the auto-open edge below, which is the only thing that opens it without
+    // the user asking.
     bool promptOpen = false;
-    PromptPaletteState promptState;
-    bool fileListOpen = false;
+    FramePaneState frameState;
+    // The version the auto-open edge last fired for. §7.2's latch: a reconnect
+    // re-delivers `get_state`, and without it the pane would pop up again for a
+    // state the user has already seen.
+    FormulationVersionId frameLatchVersionId;
+    // The Frame view as of the previous frame, for the edge test. Held rather than
+    // recomputed so the comparison is against what the user actually saw.
+    FormulationView prevFormulation;
+    BeliefListModel beliefList;
+    BeliefSort beliefSort = BeliefSort::RecordOrder;
+    BeliefFilter beliefFilter;
+    TracePaneState tracePane;
     // Global font zoom (Cmd/Ctrl + plus/minus). Persisted across the session;
     // applied to style.FontScaleMain (the 1.92+ replacement for io.FontGlobalScale).
     float fontScale = 1.0f;
     static constexpr float kMinFontScale = 0.5f;
     static constexpr float kMaxFontScale = 4.0f;
-    // Phase 2 (M0) Graph View: a Text<->Graph switch beside the three-lane
-    // workspace. The graph session state (pan/zoom/selection) is preserved
-    // across toggles within a session.
-    bool graphOpen = true;  // default view: Node Graph View (Cmd/Ctrl+G toggles to Text View)
+    // Node graph session state (pan/zoom/selection), kept for the session.
     GraphViewState graphView;
-    // Phase 2 (M6): persistent live-layout state so closed-frame / belief nodes
-    // stay frozen while the active frame relays out.
+    // Persistent live-layout state, so a closed episode's row stays frozen while
+    // the active one relays out.
     GraphLiveState graphLive;
 };
 
+namespace {
+
+// The task the workspace is about: the runtime cursor's, or the most recently
+// recorded one when the cursor names none. Never a user selection — there is no
+// such thing in this GUI (the canvas follows the runtime).
+const Task* currentTask(const NativeGuiModel& model) {
+    if (const Task* task = model.task(model.cursor().taskId)) return task;
+    const std::vector<const Task*> tasks = model.tasks();
+    return tasks.empty() ? nullptr : tasks.back();
+}
+
+// Which panel a keystroke toggles, or nullopt. Cmd/Ctrl is the platform's primary
+// shortcut modifier on both macOS and the other platforms, matching the font-zoom
+// chords below.
+bool panelKeyPressed(PanelId& out) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!(io.KeySuper || io.KeyCtrl)) return false;
+    if (ImGui::IsKeyPressed(ImGuiKey_B, false)) {
+        out = PanelId::BeliefList;
+        return true;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_T, false)) {
+        out = PanelId::DispatchTrace;
+        return true;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        out = PanelId::FileList;
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
-    // Default: --live (spawn the RPC child). Pass --demo to opt into the
-    // formal DemoEvents.h fixture instead. --live is explicit and wins if both
-    // flags are supplied.
+    // Default: --live (spawn the RPC child). Pass --demo to opt into the formal
+    // DemoEvents.h fixture instead. `live` is the whole state: `--live` is
+    // explicit and wins if both flags are supplied, so there is nothing else for a
+    // separate `demo` flag to record.
     bool live = true;
-    bool demo = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--live") { live = true; demo = false; }
-        else if (std::string(argv[i]) == "--demo") { demo = true; live = false; }
+        if (std::string(argv[i]) == "--live") live = true;
+        else if (std::string(argv[i]) == "--demo") live = false;
+    }
+
+    // `--replay <file>` and the dump flags run the headless tool and exit
+    // (docs/milestones.md §9). They are what tell the two modes apart: `--demo`
+    // alone means THIS binary's demo mode, while `--demo` beside `--dump` means
+    // the replay tool — so the test is on the flags only the tool understands.
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--replay" || arg == "--dump" || arg == "--dump-snapshot" || arg == "--task" ||
+            arg == "--demo-lines" || arg == "-h" || arg == "--help") {
+            return pie::gui::runReplayCli(argc, argv);
+        }
     }
 
     AppSession app;
     app.live = live;
 
-    char buf[256];
     const int minW = static_cast<int>(kMinWindowWidth);
     const int minH = static_cast<int>(kMinWindowHeight);
 
@@ -155,8 +248,22 @@ int main(int argc, char** argv) {
                 return false;
             }
             app.reader = std::thread(readerThread, std::ref(app.sdk), std::ref(app.queue), std::ref(app.stopReader));
+            // The connect sequence, snapshot first (docs/milestones.md §5.3). Every
+            // line that arrives until the snapshot is applied is buffered, so the
+            // snapshot and the stream are reconciled rather than raced.
+            const Bootstrap::Commands commands = app.bootstrap.start(nowMs());
+            writeCommand(app.sdk, commands.snapshot);
+            writeCommand(app.sdk, commands.state);
         } else {
-            for (auto& line : pie::gui::demoEvents()) app.model.applyLine(line);
+            // The demo goes through the SAME bootstrap. Nothing answers its two
+            // requests, so the tick below degrades it to event-only — which is the
+            // honest label for a scripted stream, and the reason the demo cannot
+            // accidentally exercise a path live mode does not.
+            app.bootstrap.start(nowMs());
+            for (const std::string& line : pie::gui::demoEvents()) {
+                app.bootstrap.ingestRaw(line, app.model, nowMs());
+            }
+            app.bootstrap.tick(app.model, nowMs() + 6000);
         }
         return true;
     };
@@ -164,27 +271,54 @@ int main(int argc, char** argv) {
     // Once per frame, after ImGui::NewFrame(), before drawing.
     logic.onFrameStart = [&]() {
         if (app.live) {
-            std::string line;
-            while (app.queue.popIfAny(line)) applyRpcLine(app.model, line);
-            if (app.model.consumeAutoOpenPrompt()) app.promptOpen = true;
+            // Drain under the §5.3 budget: at most kDrainMaxLines lines and
+            // kDrainBudgetMs of work per frame, so a backlog spreads across frames
+            // instead of stalling one. A multi-megabyte snapshot is parsed on the
+            // reader thread, so what arrives here is already a DOM.
+            std::vector<InboundLine> lines;
+            app.queue.drain(lines, kDrainMaxLines, kDrainBudgetMs, nowMs);
+            for (const InboundLine& line : lines) app.bootstrap.ingest(line, app.model, nowMs());
+            // The deadline check runs every frame, including frames with no input:
+            // a runtime that never answers must not block the UI forever.
+            app.bootstrap.tick(app.model, nowMs());
         }
         auto& io = ImGui::GetIO();
-        // ':' (Shift+Semicolon) opens the user prompt palette when it is closed.
-        // Esc closes it inside renderPromptPalette. Only open when the palette is
-        // closed so a ':' the user types into the palette input is unaffected.
-        if (!app.promptOpen && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Semicolon, false))
+
+        // The Frame view is derived BEFORE the keys are read, because the
+        // auto-open edge compares it with the previous frame's.
+        const Task* task = currentTask(app.model);
+        const FormulationView formulation = deriveFormulationView(app.model, task);
+        if (app.live && autoOpenEdge(app.prevFormulation, formulation, app.frameLatchVersionId)) {
+            // §7.2: only a pause, or a FAILED continuation, opens the pane by
+            // itself. `decisionOwed` fires nearly every round and is a badge on the
+            // banner instead — a window that grabs focus every round is one the
+            // user learns to close without reading.
             app.promptOpen = true;
-        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_F, false))
-            app.fileListOpen = !app.fileListOpen;
-        if ((io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_G, false))
-            app.graphOpen = !app.graphOpen;
+        }
+        app.prevFormulation = formulation;
+
+        // ':' (Shift+Semicolon) or Enter opens the Frame pane when it is closed.
+        // Esc closes it inside renderFramePane. Only open when it is closed, so a
+        // ':' the user types into the input is unaffected.
+        if (!app.promptOpen) {
+            const bool colon = io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Semicolon, false);
+            // Enter opens it only when no text field owns the keyboard: otherwise
+            // the newline being typed would also re-open the window.
+            const bool enter = !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+            if (colon || enter) app.promptOpen = true;
+        }
+
+        // Panel toggles: Cmd/Ctrl+B belief list, Cmd/Ctrl+T dispatch trace,
+        // Cmd/Ctrl+F file list. `Cmd/Ctrl+G` is gone with the text workspace.
+        PanelId toggled = PanelId::Count;
+        if (panelKeyPressed(toggled)) app.panels.toggle(toggled);
+
         // Cmd/Ctrl + plus/minus zoom the global font by 10% per press, clamped to
-        // a usable range. Uses the same modifier convention as the toggles above.
-        // On the main keyboard the '+' glyph is Shift+Equal, so the primary plus
-        // branch requires io.KeyShift; the numeric-keypad Add key is a bare '+' and
-        // needs no Shift. Minus is a bare key on the main keyboard and also on the
-        // keypad. The key is read from io directly, so the chord does not depend on
-        // widget focus.
+        // a usable range. On the main keyboard the '+' glyph is Shift+Equal, so the
+        // primary plus branch requires io.KeyShift; the numeric-keypad Add key is a
+        // bare '+' and needs no Shift. Minus is a bare key on the main keyboard and
+        // also on the keypad. The key is read from io directly, so the chord does
+        // not depend on widget focus.
         if (io.KeySuper || io.KeyCtrl) {
             if ((io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Equal, false)) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd, false))
                 app.fontScale = std::clamp(app.fontScale * 1.10f, AppSession::kMinFontScale, AppSession::kMaxFontScale);
@@ -194,7 +328,9 @@ int main(int argc, char** argv) {
         }
     };
 
-    // Build one ImGui frame's widgets.
+    // Build one ImGui frame's widgets. A flat sequence over shell rectangles
+    // (§7.4): every region is drawn into the rectangle computeShellLayout gave it,
+    // and nothing here decides geometry or model meaning.
     logic.onDraw = [&]() {
         auto& io = ImGui::GetIO();
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -204,66 +340,88 @@ int main(int argc, char** argv) {
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoScrollbar);
 
-        // The floating overlays (user prompt palette, file list) are independent
-        // ImGui windows and must render in BOTH the text workspace and the Graph
-        // View mode. They are drawn before the Graph View early-return so that
-        // GraphView mode never affects them.
-        renderPromptPalette(app.promptOpen, app.promptState, app.model, app.live, app.graphOpen,
-                            [&app](const std::string& msg) {
-                                writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
-                            });
-        renderFileList(app.fileListOpen, app.model);
+        const Task* task = currentTask(app.model);
+        const FormulationView formulation = deriveFormulationView(app.model, task);
 
-        // Phase 2 (M0) Graph View: when active, render the projected node graph
-        // instead of the three-lane text workspace. Cmd+G toggles back.
-        if (app.graphOpen) {
-            GraphTaskState graphState = projectGraphTask(app.model);
-            PieGraphLayout freshLayout = computeGraphLayout(graphState);
-            // M6: freeze settled (closed-frame / belief) nodes across live
-            // updates; active frame takes fresh positions.
-            PieGraphLayout layout = stabilizeLiveLayout(graphState, freshLayout, app.graphLive);
-            ImGui::Text("Node Graph View — (Cmd/Ctrl+G to return to Text View)");
-            // Reserve a single-row footer at the very bottom of the screen; the
-            // canvas child takes the remaining height so its content never
-            // overlaps the footer row. Only the role context is passed to the
-            // graph view; the per-phase model/CH telemetry lives in the footer.
-            float graphFooterH = ImGui::GetFrameHeightWithSpacing() * 1.2f;
-            ImGui::BeginChild("graph-canvas", ImVec2(0, -graphFooterH), false);
-            renderGraphView(app.graphView, graphState, layout, app.model.cursor().stage,
-                            app.model.session());
-            ImGui::EndChild();
-            ImGui::BeginChild("graph-footer", ImVec2(0, graphFooterH), true);
-            renderGraphFooter(app.model);
-            ImGui::EndChild();
-            ImGui::End();
-            return;
-        }
+        // The floating windows are drawn first so they sit above the docked panels
+        // and are never clipped by a child region.
+        renderFramePane(app.promptOpen, app.frameState, app.model, /*canSend=*/app.live,
+                        /*historyNavigationEnabled=*/true, [&app](const std::string& msg) {
+                            writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
+                        });
+        renderFileList(app.panels.openFlag(PanelId::FileList), app.model);
 
-        float winW = io.DisplaySize.x;
-        float winH = io.DisplaySize.y;
-        float pad = 8.0f;
+        const float rowH = ImGui::GetFrameHeightWithSpacing();
+        // The Frame pane is open exactly while its window is. §4 binds ONE key
+        // (':' or Enter) to "frame pane", and the pane is two halves: the reading
+        // (docked, so it can sit beside the canvas) and the reply (floating, so it
+        // never reserves a band). Opening one and not the other would leave the
+        // user answering a question they cannot see, so they open and close
+        // together, and Esc — handled inside renderFramePane — closes both.
+        app.panels.setOpen(PanelId::FrameControl, app.promptOpen);
+        const ShellLayout shell =
+            computeShellLayout(io.DisplaySize.x, io.DisplaySize.y, rowH, app.panels);
 
-        float rowH = ImGui::GetFrameHeightWithSpacing();
-        LayoutMetrics lm = computeLayout(io.DisplaySize.x, winH, rowH);
-        float headerH = lm.headerH;
-        float summaryH = lm.summaryH;
-        float footerH = lm.footerH;
-        float laneH = lm.laneH;
-
-        ImGui::BeginChild("top", ImVec2(0, headerH), false);
+        // --- header: the status band ---------------------------------------
+        ImGui::SetCursorPos(ImVec2(shell.header.x, shell.header.y));
+        ImGui::BeginChild("status", ImVec2(shell.header.w, shell.header.h), false);
         renderStatusBar(app.model);
         ImGui::EndChild();
 
-        ImGui::BeginChild("lanes", ImVec2(0, laneH), false);
-        renderLogListBox(app.model, app.viewId);
+        // --- canvas: the graph ---------------------------------------------
+        ImGui::SetCursorPos(ImVec2(shell.canvas.x, shell.canvas.y));
+        ImGui::BeginChild("canvas", ImVec2(shell.canvas.w, shell.canvas.h), false);
+        {
+            const GraphTaskState graphState = projectGraphTask(app.model);
+            const PieGraphLayout fresh = computeGraphLayout(graphState);
+            // Freeze settled (closed-episode) rows across live updates; the active
+            // episode takes fresh positions.
+            const PieGraphLayout layout = stabilizeLiveLayout(graphState, fresh, app.graphLive);
+            renderGraphView(app.graphView, graphState, layout);
+        }
         ImGui::EndChild();
 
-        ImGui::BeginChild("summary", ImVec2(0, summaryH), false);
-        renderSummary(app.model, app.viewId);
-        ImGui::EndChild();
+        // --- the docked panels ----------------------------------------------
+        // Each renders into the rectangle the layout gave it. A panel that is open
+        // always HAS a non-empty rectangle: that is the property
+        // pi_gui_shell_layout_test sweeps for at every window size.
+        if (!shell.beliefPanel.empty()) {
+            ImGui::SetCursorPos(ImVec2(shell.beliefPanel.x, shell.beliefPanel.y));
+            ImGui::BeginChild("beliefs", ImVec2(shell.beliefPanel.w, shell.beliefPanel.h), true);
+            app.beliefList = buildBeliefList(app.model, task, app.beliefSort, app.beliefFilter);
+            renderBeliefList(app.beliefList, app.model, app.beliefSort, app.beliefFilter);
+            ImGui::EndChild();
+        }
+        if (!shell.tracePanel.empty()) {
+            ImGui::SetCursorPos(ImVec2(shell.tracePanel.x, shell.tracePanel.y));
+            ImGui::BeginChild("trace", ImVec2(shell.tracePanel.w, shell.tracePanel.h), true);
+            renderDispatchTrace(app.model, app.tracePane);
+            ImGui::EndChild();
+        }
+        if (!shell.framePane.empty()) {
+            ImGui::SetCursorPos(ImVec2(shell.framePane.x, shell.framePane.y));
+            ImGui::BeginChild("frame", ImVec2(shell.framePane.w, shell.framePane.h), true);
+            renderFramePaneContent(
+                formulation, app.model, app.frameState, /*canAct=*/app.live,
+                [&app](const std::string& versionId) {
+                    writeCommand(app.sdk, serializeApproveFrameCommand(nextPromptId(), versionId));
+                },
+                [&app](const std::string& message) {
+                    writeCommand(app.sdk, serializeFrameCorrectCommand(nextPromptId(), message));
+                },
+                // A chip click goes where the record lives: a belief to the belief
+                // list. Opening the panel is the shell's business, not the pane's —
+                // the pane reports the click and nothing else.
+                [&app](const FormulationChip& chip) {
+                    if (chip.opensBeliefs) app.panels.setOpen(PanelId::BeliefList, true);
+                });
+            ImGui::EndChild();
+        }
 
-        ImGui::BeginChild("footer", ImVec2(0, footerH), true);
-        renderFooter(app.model);
+        // --- footer: the role telemetry --------------------------------------
+        ImGui::SetCursorPos(ImVec2(shell.footer.x, shell.footer.y));
+        ImGui::BeginChild("footer", ImVec2(shell.footer.w, shell.footer.h), true);
+        renderGraphFooter(app.model);
         ImGui::EndChild();
 
         ImGui::End();

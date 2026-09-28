@@ -21,10 +21,9 @@ const ImVec4 kFocusAccent(0.43f, 0.78f, 0.86f, 1.0f);
 // the EXECUTING stage. Distinct from kGray, which is a text color.
 const ImVec4 kPaneBgDark(0.22f, 0.23f, 0.25f, 1.0f);
 
-// Animated background for the current flow-step pane. The active pane's
-// background oscillates between black and kPaneBgDark following a sinusoidal
-// (non-linear) time relationship, per the user's explicit request overriding
-// the gui no-animation rule for this highlight.
+// The one approved animation. Oscillates between black and kPaneBgDark on a
+// sinusoid, per the user's explicit request overriding the gui no-animation rule.
+// Its caller is now the canvas current-node halo (GraphView.cpp); see Theme.h.
 ImVec4 paneBg(bool active) {
     if (!active) return ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
     const float kSpeed = 1.0f;  // radians per second; full cycle ~ 6.28 s
@@ -32,29 +31,18 @@ ImVec4 paneBg(bool active) {
     return ImVec4(kPaneBgDark.x * t, kPaneBgDark.y * t, kPaneBgDark.z * t, 1.0f);
 }
 
-const char* historySymbol(pie::gui::LoopFrame::History h) {
-    switch (h) {
-        case pie::gui::LoopFrame::History::Closed: return "✓";
-        case pie::gui::LoopFrame::History::Unresolved: return "!";
-        case pie::gui::LoopFrame::History::Falsified: return "✗";
-        case pie::gui::LoopFrame::History::NewBelief: return "+";
-        case pie::gui::LoopFrame::History::Revised: return "~";
-        case pie::gui::LoopFrame::History::Current: return "●";
+ImVec4 beliefStatusColor(BeliefStatus status) {
+    // The five cases are the complete set: the contract derives a status from
+    // provenance with the precedence superseded > refuted > supported >
+    // inconclusive > proposed, so there is no sixth value and nothing to fall back
+    // to. A `switch` with no default is what keeps that true when the enum grows.
+    switch (status) {
+        case BeliefStatus::Proposed: return kAccent;
+        case BeliefStatus::Supported: return kGreen;
+        case BeliefStatus::Refuted: return kRed;
+        case BeliefStatus::Inconclusive: return kGray;
+        case BeliefStatus::Superseded: return kAmber;
     }
-    return "";
-}
-
-ImVec4 beliefStatusColor(const std::string& status) {
-    if (status == "proposed") return kAccent;
-    if (status == "supported") return kGreen;
-    if (status == "refuted") return kRed;
-    if (status == "inconclusive") return kGray;
-    if (status == "superseded") return kAmber;
-    // Legacy demo statuses retained for back-compat with older fixtures.
-    if (status == "open") return kAccent;
-    if (status == "closed") return kGreen;
-    if (status == "falsified") return kRed;
-    if (status == "revised") return kAmber;
     return ImGui::GetStyleColorVec4(ImGuiCol_Text);
 }
 

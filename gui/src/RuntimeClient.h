@@ -2,18 +2,25 @@
 //
 // Spawns the PI CLI in RPC mode, writes commands to stdin, reads JSONL events
 // from stdout into a thread-safe EventQueue, and stops the reader cleanly.
-// Non-rendering; used by main in --live mode.
+// Non-rendering; used by live mode.
+//
+// The framing, the JSON parse and the drain budget live in EventQueue.h, which is
+// headless and unit-tested. This file is only the part that needs a process: the
+// fork/exec, the pipes, and the thread that owns them. §5.3 requires the parse to
+// happen on the reader thread rather than the frame thread, because a
+// `get_domain_snapshot` line for a long session is megabytes and parsing it inside
+// the frame loop stalls the UI for the whole parse.
 #pragma once
 
 #include <atomic>
-#include <deque>
-#include <mutex>
 #include <string>
+
+#include "EventQueue.h"
 
 namespace pie::gui {
 
-// SDK child process (used in --live mode). Same transport as the previous
-// build: fork/exec node, JSONL on stdout, commands on stdin.
+// SDK child process. Same transport as the previous build: fork/exec node, JSONL
+// on stdout, commands on stdin.
 struct SdkProcess {
     int pid = -1;
     int inFd = -1;
@@ -27,23 +34,12 @@ bool spawnSdk(SdkProcess& sp);
 // Write one command line to the SDK's stdin (appends a newline).
 void writeCommand(SdkProcess& sp, const std::string& cmd);
 
-// Thread-safe FIFO of incoming JSONL lines from the SDK.
-class EventQueue {
-public:
-    void push(std::string line) { std::lock_guard<std::mutex> lk(m_); q_.push_back(std::move(line)); }
-    bool popIfAny(std::string& out) {
-        std::lock_guard<std::mutex> lk(m_);
-        if (q_.empty()) return false;
-        out = std::move(q_.front());
-        q_.pop_front();
-        return true;
-    }
-private:
-    std::mutex m_;
-    std::deque<std::string> q_;
-};
-
-// Reader thread: append stdout chunks, split on newlines, push lines to `q`.
+// Reader thread: frame stdout into lines, parse each one, push it to `q`.
+//
+// Parsing here rather than on the drain side is deliberate (docs/milestones.md
+// §5.3). A line that does not parse is still pushed, with `parsed == false`, so
+// the frame thread can record it as an issue — a reader that dropped it would
+// turn a truncated write into silence.
 void readerThread(SdkProcess& sp, EventQueue& q, std::atomic<bool>& stop);
 
 } // namespace pie::gui

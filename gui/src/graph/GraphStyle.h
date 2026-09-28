@@ -1,15 +1,29 @@
-// GraphStyle: central Graph View visual style (Phase 2 M9).
+// GraphStyle: the canvas's single visual style entry point.
 //
-// A single, governable entry point for every spacing / typography / border /
-// dim-ratio / arrow / padding / size literal that used to be scattered through
-// GraphView.cpp (and the layout / routing geometry constants in PieGraphLayout
-// and GraphRouting). Headless and ImGui-free: colors are rgb triples (uint8_t)
-// so the config compiles into the headless model layer and can be asserted
-// without a window; the UI layer converts them to ImU32 via IM_COL32.
+// One governable place for every spacing / colour / dim-ratio / arrow / size
+// literal the canvas uses. Headless and ImGui-free: colours are rgb triples
+// (uint8_t) so the config compiles into the model layer and can be asserted
+// without a window; the UI layer converts them with IM_COL32.
 //
-// The default instance `kGraphStyle` is the single source of truth. A viewer
-// (GraphView) reads from it rather than hardcoding values, so a future style
-// tweak is one place, not a sweep of literals.
+// The default instance `kGraphStyle` is the single source of truth: the headless
+// layout reads its geometry and the renderer reads its colours, so the two cannot
+// drift.
+//
+// NEVER ADD A `std::string` MEMBER. `inline constexpr GraphStyle kGraphStyle{}`
+// requires a literal type, and a std::string member makes the type non-literal —
+// which breaks the single default instance and every `constexpr` reader at once.
+// If a string is ever needed here, it belongs beside the style, not inside it.
+//
+// PRUNED FOR THE DOT CANVAS (§6.3). The v1 style carried a region/band vocabulary:
+// `*RegionFill` / `*RegionLabel` / `regionFillAlpha` for the titled boxes the old
+// layout drew, `frame*` for the LoopFrame container, `cardTextPad*`, `nodeW/H`,
+// `columnHeaderHeight`, `phaseBandGap`, `routingTextSlotH`, `peripheryGap`,
+// `pointsPerInch`. A dot-and-link canvas has no boxes, no headers and no bands, so
+// every one of those is gone rather than left unread. What survived was renamed
+// for the same reason: `indicatorRadius` became `dotRadius`, `cardBorderWidth`
+// became `dotRingWidth`, and the `edge*Width` / `edge*` colour block became the
+// `link*` block, because "edge" named a graph-theory relation and "link" names
+// what is drawn.
 
 #pragma once
 
@@ -25,140 +39,127 @@ struct GraphStyle {
     };
 
     // --- Canvas / grid ---
-    float gridStep = 32.0f;      // base grid spacing (multiplied by zoom at draw)
+    float gridStep = 32.0f;  // base grid spacing (multiplied by zoom at draw)
     float zoomMin = 0.3f;
     float zoomMax = 2.5f;
-    float zoomStep = 0.08f;
-    Rgb canvasBg{18, 18, 22};
-    Rgb gridLine{50, 52, 60};
-    int gridLineAlpha = 70;
+    float zoomStep = 0.1f;
+    Rgb canvasBg{24, 26, 30};
+    Rgb gridLine{44, 48, 54};
+    int gridLineAlpha = 90;
 
-    // --- Node indicator + label (a node is a dot + free text, not a card) ---
-    float cardRadius = 4.0f;
-    float cardBorderWidth = 1.5f;   // drawn width scaled by zoom (indicator ring width)
-    float cardTextPadX = 8.0f;
-    float cardTextPadY = 6.0f;
-    float currentBarWidth = 4.0f;
-    float indicatorRadius = 7.0f;  // node indicator dot radius (dot precedes the label)
-    float indicatorGap = 8.0f;     // blank gap between the indicator dot and its text label
-    Rgb cardSelected{60, 90, 135};
-    Rgb cardCurrent{80, 60, 140};
-    Rgb cardBelief{58, 88, 96};
-    Rgb cardBeliefFalsified{120, 50, 50};
-    Rgb cardBeliefRevised{110, 95, 50};
-    Rgb cardBeliefClosed{70, 70, 76};
-    Rgb cardBeliefSupported{72, 108, 60};   // validated belief (supported)
-    Rgb cardBeliefSuperseded{110, 80, 60};  // replaced belief (superseded/supercede)
-    Rgb cardPlan{52, 78, 108};
-    Rgb cardExecOk{104, 204, 120};  // success (green), per user status-color spec
-    Rgb cardExecFailed{120, 48, 48};
-    Rgb cardExecRunning{104, 76, 30};
-    Rgb cardDistill{96, 66, 116};
-    Rgb cardPropose{64, 104, 112};  // hypothesis-formation (propose) node
-    Rgb cardDefault{60, 65, 78};
-    Rgb borderSelected{255, 176, 50};
-    Rgb borderCurrent{150, 90, 240};
-    Rgb borderDefault{120, 130, 145};
-    int borderDefaultAlpha = 220;
-    Rgb textBody{230, 235, 240};
-    Rgb currentAccent{255, 200, 90};
+    // --- Dot geometry ---
+    // A node's whole geometry is a centre and a radius. There is no width or
+    // height: the v1 200x60 card is gone.
+    float dotDiameter = 14.0f;
+    // The ring drawn around a dot to mark selection / the current station.
+    float dotRadius = 7.0f;
+    float dotRingWidth = 2.0f;
+    // A link stops this far short of the dot's edge, so the arrowhead is legible
+    // rather than buried in the ring.
+    float linkGapFromDot = 3.0f;
 
-    // --- Task focus accent (left bar on Belief nodes in the selected task's focus) ---
-    // Distinct from currentAccent: the CURRENT marker is which node the runtime is executing,
-    // the focus bar is which beliefs the task is acting on. Kept separate from the dimMuted
-    // alpha path, which means "outside the dependency query".
-    float focusBarWidth = 4.0f;
+    // --- Link geometry ---
+    // Two dash lengths (on, off) for a link to a record this delta introduced.
+    // Two floats rather than a std::vector so the aggregate stays constexpr.
+    float linkDash[2] = {5.0f, 4.0f};
+    float linkWidthLocal = 1.6f;   // station-to-station
+    float linkWidthLong = 1.1f;    // cross-row / rail-bound
+    float arrowheadSize = 7.0f;
+    float arrowheadHalf = 3.6f;
+
+    // --- Node colours, by family ---
+    Rgb dotDefault{120, 126, 136};
+    Rgb dotRow{96, 104, 118};
+    Rgb dotRouting{150, 190, 210};
+    Rgb dotSelection{176, 208, 224};
+    Rgb dotPlan{104, 168, 238};
+    Rgb dotDistillation{190, 126, 224};
+    Rgb dotDelta{220, 180, 140};
+    Rgb dotIntervention{238, 184, 74};
+    Rgb dotRecheck{140, 200, 190};
+    Rgb dotFormulation{112, 205, 126};
+
+    // --- Execution colours, by terminal status ---
+    Rgb dotExecutionRunning{238, 184, 74};
+    Rgb dotExecutionOk{104, 204, 120};
+    Rgb dotExecutionFailed{220, 96, 90};
+    Rgb dotExecutionCancelled{150, 150, 150};
+
+    // --- Belief colours, by DERIVED status ---
+    // The status is never stored; it is derived from provenance with the
+    // precedence superseded > refuted > supported > inconclusive > proposed, so
+    // these five are the complete set.
+    Rgb dotBeliefProposed{88, 132, 200};
+    Rgb dotBeliefSupported{104, 204, 120};
+    Rgb dotBeliefRefuted{220, 96, 90};
+    Rgb dotBeliefInconclusive{150, 150, 150};
+    Rgb dotBeliefSuperseded{190, 150, 70};
+
+    // --- Rings ---
+    Rgb dotRingDefault{70, 76, 86};
+    Rgb dotRingSelected{240, 240, 240};
+    // The cursor's station. The halo below pulses; this is the steady ring.
+    Rgb dotRingCurrent{88, 166, 255};
+    int dotRingDefaultAlpha = 140;
+
+    // --- The current-node halo (the one approved animation, §6.3) ---
+    // The v1 paneBg pulse highlighted the active pane's background. Its callers
+    // were the three lanes and App.cpp, all removed; the animation itself was
+    // approved by the user and is not dropped. It now draws as a ring around the
+    // cursor's station, over the same black <-> halo-peak sinusoid.
+    float currentHaloWidth = 5.0f;
+    Rgb currentHaloColor{88, 166, 255};
+
+    // --- Task focus accent ---
+    float focusBarWidth = 3.0f;
     Rgb focusAccent{110, 200, 220};
 
-    // --- Task outcome band (below the last LoopFrame) ---
-    // Height is derived, not fixed: the band carries a label plus three or four
-    // content lines, so a constant would clip the last line whenever blockers are
-    // present. GraphStyle is ImGui-free, so this is a per-line estimate rather than
-    // a measured text height.
-    float outcomeBandLineH = 24.0f;
-    float outcomeBandPad = 10.0f;
-    int outcomeBandAlpha = 40;
-    Rgb outcomeBandFill{48, 76, 86};
-    Rgb outcomeLabel{150, 200, 215};
-    Rgb outcomeBlockers{232, 150, 120};
+    // --- Task outcome band ---
+    float outcomeBandLineH = 34.0f;
+    float outcomeBandPad = 8.0f;
+    int outcomeBandAlpha = 30;
+    Rgb outcomeBandFill{70, 96, 120};
+    Rgb outcomeLabel{200, 216, 232};
+    Rgb outcomeBlockers{238, 184, 74};
 
-    // --- Dim ratios (selection / dependency query) ---
-    float dimMuted = 0.38f;       // node alpha when outside the dependency set
-    float edgeAlphaPath = 0.9f;   // route on the selected dependency path
-    float edgeAlphaOffPath = 0.25f;
-    float edgeAlphaLongDefault = 0.45f;
-    float edgeAlphaLocalDefault = 0.6f;
+    // --- Dim ratios ---
+    float dimMuted = 0.35f;           // a node unrelated to the selection
+    float linkAlphaPath = 0.95f;      // a link on the highlighted path
+    float linkAlphaOffPath = 0.16f;   // a link off it, while something is selected
+    float linkAlphaLong = 0.45f;      // a cross-row link with nothing selected
+    float linkAlphaLocal = 0.85f;     // a station-to-station link
 
-    // --- Edges ---
-    float edgeWidthLong = 1.6f;   // * zoom at draw
-    float edgeWidthLocal = 2.0f;  // * zoom at draw
-    int edgeMutedAlphaScale = 70; // alpha denominator for the muted edge color
-    Rgb edgeBeliefToPlan{104, 204, 120};
-    Rgb edgePlanToExecution{190, 198, 208};
-    Rgb edgeExecutionToDistill{190, 198, 208};
-    Rgb edgeDistillToBelief{220, 140, 220};
-    Rgb edgeDistillToPropose{150, 190, 210};
-    Rgb edgeBeliefToPropose{104, 204, 120};
-    Rgb edgeProposeToBelief{220, 180, 140};
-    Rgb edgeMuted{90, 95, 100};
-    float arrowheadSize = 8.0f;   // base length along the direction
-    float arrowheadHalf = 4.0f;   // half-width across the direction
-    float opGlyphRadius = 9.0f;
-    Rgb opGlyphFill{220, 140, 220};
-    int opGlyphFillAlpha = 230;
-    Rgb opGlyphText{30, 30, 30};
+    // --- Link colours, by semantic type ---
+    Rgb linkPlanToExecution{104, 168, 238};
+    Rgb linkExecutionToDistillation{170, 140, 220};
+    Rgb linkDistillationToDelta{190, 126, 224};
+    Rgb linkDeltaToBelief{104, 204, 120};
+    Rgb linkBeliefToDelta{220, 180, 140};
+    Rgb linkSourceToFormulation{112, 205, 126};
+    Rgb linkVersionToVersion{150, 190, 210};
+    Rgb linkRecheckToEpisode{140, 200, 190};
+    Rgb linkMuted{90, 94, 100};
 
-    // --- Frame container / navigation header ---
-    float frameRadius = 6.0f;
-    float frameBorderWidth = 1.5f;  // * zoom at draw
-    float frameLabelPadX = 6.0f;
-    float frameLabelPadY = 4.0f;
-    Rgb frameBorder{80, 90, 110};
-    int frameBorderAlpha = 110;
-    Rgb frameLabel{170, 185, 200};
-    int frameLabelAlpha = 200;
+    // --- Text ---
+    Rgb textBody{214, 218, 224};
+    Rgb textMuted{150, 156, 164};
+    Rgb accent{88, 166, 255};
 
-    // --- Layout / routing geometry (sizes) ---
-    float nodeW = 200.0f;
-    float nodeH = 60.0f;
-    float pointsPerInch = 72.0f;
-    float framePad = 12.0f;
-    float frameGap = 120.0f;
-    float peripheryGap = 40.0f;
+    // --- Tooltip ---
+    // Every node family now has one, so the width and the wrap column are what
+    // keep a long plan intent readable.
+    float tooltipMaxWidth = 520.0f;
+    float tooltipWrapColumn = 76.0f;
 
-    // --- Deterministic custom layout geometry (replaces Graphviz dot) ---
-    // The custom engine stacks LoopFrames into vertical rows and uses three
-    // fixed x-regions (Belief | Plan+Distill | Execution). These gaps keep the
-    // regions / rows from overlapping.
-    float rowGap = 48.0f;        // vertical gap between LoopFrame rows
-    float regionGap = 80.0f;     // horizontal gap between Belief / mid / Execution columns
-    float nodeGapH = 28.0f;      // horizontal gap between nodes in a region row
-    float nodeGapV = 28.0f;      // vertical gap between stacked nodes (belief / exec column)
+    // --- Belief rail series mark ---
+    // A small mark beside a belief dot showing how many rounds carried it. A mark,
+    // not a node: never hit-tested, never a layout input.
+    float seriesMarkRadius = 3.0f;
+
+    // --- Layout / routing geometry ---
+    float rowGap = 48.0f;      // vertical gap between episode rows
+    float columnGap = 40.0f;   // horizontal gap between stations / rail entries
     float canvasPad = 28.0f;
-    float beliefAnnotationWidth = 132.0f;
-    float columnHeaderHeight = 36.0f;
-    float phaseBandGap = 28.0f;
-    float frameLabelWidth = 150.0f;
-    float routingTextSlotH = 26.0f;   // slot reserved above a frame box for its routing decision text
-
-    // --- Semantic region surfaces ---
-    Rgb beliefRegionFill{40, 82, 54};
-    Rgb planRegionFill{35, 64, 98};
-    Rgb distillRegionFill{73, 48, 92};
-    Rgb executionRegionFill{92, 68, 26};
-    int regionFillAlpha = 38;
-    Rgb beliefRegionLabel{112, 205, 126};
-    Rgb planRegionLabel{104, 168, 238};
-    Rgb distillRegionLabel{190, 126, 224};
-    Rgb executionRegionLabel{238, 184, 74};
-    Rgb proposeRegionFill{64, 104, 112};   // matches cardPropose
-    Rgb proposeRegionLabel{150, 190, 210}; // matches edgeDistillToPropose
-
-    // --- Frame-level Routing decision text slot (the retained Route step) ---
-    // A frame's routingDecision/routingReason is rendered as a text slot above
-    // the frame box; belief cards are all product/code and use the plain belief
-    // colors. beliefFramingLabel was removed with the framing domain.
-    Rgb beliefRoutingLabel{240, 176, 52};   // amber (Route text slot)
 };
 
 // The single default style instance. Shared by the headless layout / routing

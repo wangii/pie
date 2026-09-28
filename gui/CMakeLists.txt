@@ -121,55 +121,175 @@ endif()
 # ---------------------------------------------------------------------------
 # Model layer: headless, no ImGui dependency. Unit-testable without a window.
 # ---------------------------------------------------------------------------
-add_library(pi_gui_model STATIC src/Model.cpp src/FileList.cpp
-    src/graph/GraphModel.cpp src/graph/PieGraphLayout.cpp
-    src/graph/GraphRouting.cpp src/graph/GraphInteraction.cpp src/graph/GraphLive.cpp
-    src/graph/GraphNavigation.cpp src/graph/GraphCache.cpp)
+# M2: the model layer is the v7 fold. Json.cpp is the DOM every wire line is
+# parsed with; DomainEvents.cpp owns the event vocabulary; Model.cpp owns the
+# state and the appliers.
+#
+# M3 added the adapter: EventQueue.cpp is the framing + parse-on-read + budgeted
+# drain, Bootstrap.cpp is the connect sequence, ModelDump/SnapshotWriter are the
+# replay tool's two output forms (a text dump, and a `get_domain_snapshot`
+# response line that a reconnect can be replayed against).
+#
+# M6-M8 added what the panels render: BeliefListModel.cpp (belief rows),
+# TraceModel.cpp (dispatch-trace rows), FormulationView.cpp (the Frame pane's
+# content). All three are pure derivations over the model, so a panel's whole
+# content is testable without a window — which is why they live in this library
+# and not next to the ImGui that draws them.
+add_library(pi_gui_model STATIC
+    src/Model.cpp
+    src/DomainEvents.cpp
+    src/Json.cpp
+    src/EventQueue.cpp
+    src/Bootstrap.cpp
+    src/ModelDump.cpp
+    src/SnapshotWriter.cpp
+    src/BeliefListModel.cpp
+    src/TraceModel.cpp
+    src/FormulationView.cpp
+    src/FileList.cpp
+)
 target_include_directories(pi_gui_model PUBLIC src)
+
+# ---------------------------------------------------------------------------
+# Graph layer: headless projection + layout + link geometry + caches.
+#
+# ImGui-free on purpose — only GraphView.cpp touches ImGui, and it is not here.
+# It depends on pi_gui_model because the projection reads the v7 records.
+# ---------------------------------------------------------------------------
+add_library(pi_gui_graph STATIC
+    src/graph/GraphModel.cpp
+    src/graph/PieGraphLayout.cpp
+    src/graph/GraphRouting.cpp
+    src/graph/GraphInteraction.cpp
+    src/graph/GraphCache.cpp
+    src/graph/GraphNavigation.cpp
+    src/graph/GraphLive.cpp
+)
+target_link_libraries(pi_gui_graph PUBLIC pi_gui_model)
+target_include_directories(pi_gui_graph PUBLIC src)
 
 # ---------------------------------------------------------------------------
 # Model unit tests (headless; no window, no SDK).
 # ---------------------------------------------------------------------------
 enable_testing()
-add_executable(pi_gui_model_test src/Model.test.cpp)
-target_link_libraries(pi_gui_model_test PRIVATE pi_gui_model)
-target_include_directories(pi_gui_model_test PRIVATE src)
-add_test(NAME pi_gui_model_test COMMAND pi_gui_model_test)
 
-# Phase 2 M1 graph projection + M3 layout test (headless).
-add_executable(pi_gui_graph_test src/graph/GraphModel.test.cpp)
-target_link_libraries(pi_gui_graph_test PRIVATE pi_gui_model)
-target_include_directories(pi_gui_graph_test PRIVATE src)
-add_test(NAME pi_gui_graph_test COMMAND pi_gui_graph_test)
+# M0: the JSON DOM. Every later milestone reads wire events through it, so its
+# fixtures are real `get_domain_snapshot` / domain-event payloads.
+add_executable(pi_gui_json_test src/Json.test.cpp)
+target_link_libraries(pi_gui_json_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_json_test PRIVATE src)
+add_test(NAME pi_gui_json_test COMMAND pi_gui_json_test)
 
-# Phase 2 M4/M5/M6 routing + selection + live-stability test (headless).
-add_executable(pi_gui_graph_m456_test src/graph/GraphM456.test.cpp)
-target_link_libraries(pi_gui_graph_m456_test PRIVATE pi_gui_model)
-target_include_directories(pi_gui_graph_m456_test PRIVATE src)
-add_test(NAME pi_gui_graph_m456_test COMMAND pi_gui_graph_m456_test)
+# M2: the v7 domain fold. Replaces the v1-era pi_gui_model_test.
+add_executable(pi_gui_domain_test src/Domain.test.cpp)
+target_link_libraries(pi_gui_domain_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_domain_test PRIVATE src)
+add_test(NAME pi_gui_domain_test COMMAND pi_gui_domain_test)
 
-# Phase 2 M7 Focus Current navigation + M8 cache reuse/invalidation + M9 style
-# structure test (headless, links pi_gui_model; no ImGui).
-add_executable(pi_gui_graph_m789_test src/graph/GraphM789.test.cpp)
-target_link_libraries(pi_gui_graph_m789_test PRIVATE pi_gui_model)
-target_include_directories(pi_gui_graph_m789_test PRIVATE src)
-add_test(NAME pi_gui_graph_m789_test COMMAND pi_gui_graph_m789_test)
+# M3: the connect sequence — buffering, the two-order answer to `get_state`,
+# ReplayIssues, and the three orderings that must reach the same terminal state.
+add_executable(pi_gui_bootstrap_test src/Bootstrap.test.cpp)
+target_link_libraries(pi_gui_bootstrap_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_bootstrap_test PRIVATE src)
+add_test(NAME pi_gui_bootstrap_test COMMAND pi_gui_bootstrap_test)
 
-# GraphView label clipping geometry regression test (headless; no ImGui).
-add_executable(pi_gui_graph_label_layout_test src/graph/GraphLabelLayout.test.cpp)
-target_link_libraries(pi_gui_graph_label_layout_test PRIVATE pi_gui_model)
-target_include_directories(pi_gui_graph_label_layout_test PRIVATE src)
-add_test(NAME pi_gui_graph_label_layout_test COMMAND pi_gui_graph_label_layout_test)
+# M3: the headless transcript replay tool (docs/milestones.md §10). Not a test —
+# it is how a real session transcript is run through the live pipeline without a
+# window. M9 made the same entry point reachable as `pie_gui --replay <file>`, so
+# this binary exists for the case that one cannot: a build with
+# PIE_GUI_BUILD_APP=OFF, which is what a machine without the platform SDK has.
+add_executable(pie_gui_replay src/ReplayTool.cpp)
+target_link_libraries(pie_gui_replay PRIVATE pi_gui_model)
+target_include_directories(pie_gui_replay PRIVATE src)
+target_compile_definitions(pie_gui_replay PRIVATE PIE_GUI_REPLAY_STANDALONE)
+
+# The tool's own smoke run: the built-in demo stream through the real bootstrap,
+# asserting on the derived values rather than on an exit code alone.
+add_test(NAME pi_gui_replay_test COMMAND pie_gui_replay --demo)
+set_tests_properties(pi_gui_replay_test PROPERTIES
+    PASS_REGULAR_EXPRESSION "task task-1 status=completed")
+
+# The same stream read back from a checked-in transcript file. The `--demo` test
+# above proves the pipeline; this one proves the FILE path — framing, a trailing
+# newline, and a transcript on disk rather than in memory, which is how the tool
+# is actually used. Regenerate the fixture with:
+#   ./build/debug/pie_gui_replay --demo-lines > tests/fixtures/demo-session.jsonl
+add_test(NAME pi_gui_replay_file_test
+    COMMAND pie_gui_replay --replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/demo-session.jsonl)
+set_tests_properties(pi_gui_replay_file_test PROPERTIES
+    PASS_REGULAR_EXPRESSION "belief B1 \\[refuted\\]")
+
+# M4: the v7 graph projection (nodes/edges) and the dot+rail+row layout. Replaces
+# the v1-era pi_gui_graph_test (projection) and pi_gui_graph_m456_test (geometry,
+# link routing, dependency emphasis, live stability, cache).
+add_executable(pi_gui_graph_projection_test src/graph/GraphModel.test.cpp)
+target_link_libraries(pi_gui_graph_projection_test PRIVATE pi_gui_graph)
+target_include_directories(pi_gui_graph_projection_test PRIVATE src)
+add_test(NAME pi_gui_graph_projection_test COMMAND pi_gui_graph_projection_test)
+
+add_executable(pi_gui_graph_edges_test src/graph/GraphEdges.test.cpp)
+target_link_libraries(pi_gui_graph_edges_test PRIVATE pi_gui_graph)
+target_include_directories(pi_gui_graph_edges_test PRIVATE src)
+add_test(NAME pi_gui_graph_edges_test COMMAND pi_gui_graph_edges_test)
+
+# M5: canvas geometry + the style aggregate's literal-type promise, and the live
+# canvas at scale. Replace pi_gui_graph_label_layout_test and pi_gui_graph_m789_test.
+add_executable(pi_gui_graph_geometry_test src/graph/GraphGeometry.test.cpp)
+target_link_libraries(pi_gui_graph_geometry_test PRIVATE pi_gui_graph)
+target_include_directories(pi_gui_graph_geometry_test PRIVATE src)
+add_test(NAME pi_gui_graph_geometry_test COMMAND pi_gui_graph_geometry_test)
+
+add_executable(pi_gui_graph_live_test src/graph/GraphLive.test.cpp)
+target_link_libraries(pi_gui_graph_live_test PRIVATE pi_gui_graph)
+target_include_directories(pi_gui_graph_live_test PRIVATE src)
+add_test(NAME pi_gui_graph_live_test COMMAND pi_gui_graph_live_test)
+
+# M6: the belief list rows — labels, derived status, the supersession chain and
+# the review obligations the panel surfaces.
+add_executable(pi_gui_belief_list_test src/BeliefList.test.cpp)
+target_link_libraries(pi_gui_belief_list_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_belief_list_test PRIVATE src)
+add_test(NAME pi_gui_belief_list_test COMMAND pi_gui_belief_list_test)
+
+# M7: the dispatch trace — one row per stage window, every column attributed to
+# its source, and the em-dash wherever a source is missing.
+add_executable(pi_gui_trace_test src/Trace.test.cpp)
+target_link_libraries(pi_gui_trace_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_trace_test PRIVATE src)
+add_test(NAME pi_gui_trace_test COMMAND pi_gui_trace_test)
+
+# M9: the shell geometry that lays the panels out, replacing pi_gui_layout_test.
+add_executable(pi_gui_shell_layout_test src/ShellLayout.test.cpp)
+target_include_directories(pi_gui_shell_layout_test PRIVATE src)
+add_test(NAME pi_gui_shell_layout_test COMMAND pi_gui_shell_layout_test)
+
+# M8: the Frame view — the banner's exactly-one derivation, the auto-open edge,
+# the source chips and the changed-field markers.
+add_executable(pi_gui_formulation_test src/Formulation.test.cpp)
+target_link_libraries(pi_gui_formulation_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_formulation_test PRIVATE src)
+add_test(NAME pi_gui_formulation_test COMMAND pi_gui_formulation_test)
+
+# ---------------------------------------------------------------------------
+# Where the v1 targets went (the rewrite's transition record; the parked-target
+# table that stood here between M2 and M9 is now this list):
+#
+#   pi_gui_model_test              -> pi_gui_domain_test            (M2)
+#   pi_gui_graph_test              -> pi_gui_graph_projection_test  (M4)
+#   pi_gui_graph_m456_test         -> pi_gui_graph_edges_test       (M4)
+#   pi_gui_graph_m789_test         -> pi_gui_graph_live_test        (M5)
+#   pi_gui_graph_label_layout_test -> pi_gui_graph_geometry_test    (M5)
+#   pi_gui_layout_test             -> pi_gui_shell_layout_test      (M9)
+#
+# The app binary was parked from M2 to M5 (docs/milestones.md §2) and relinked at
+# M5, the milestone whose gate needs it; M9 rewrote App.cpp as a flat panel
+# sequence over ShellLayout. Nothing is parked now: the whole suite is the gate.
+# ---------------------------------------------------------------------------
 
 # User prompt command serialization + outbound pipe test (headless).
 add_executable(pi_gui_prompt_test src/PromptCmd.test.cpp)
 target_include_directories(pi_gui_prompt_test PRIVATE src)
 add_test(NAME pi_gui_prompt_test COMMAND pi_gui_prompt_test)
-
-# Layout geometry (no-overlap) test (headless).
-add_executable(pi_gui_layout_test src/LayoutMetrics.test.cpp)
-target_include_directories(pi_gui_layout_test PRIVATE src)
-add_test(NAME pi_gui_layout_test COMMAND pi_gui_layout_test)
 
 # User prompt palette input autogrow height (pure logic; headless).
 add_executable(pi_gui_palette_metrics_test src/PaletteMetrics.test.cpp)
@@ -182,22 +302,31 @@ target_include_directories(pi_gui_path_complete_test PRIVATE src)
 add_test(NAME pi_gui_path_complete_test COMMAND pi_gui_path_complete_test)
 
 # ---------------------------------------------------------------------------
-# GUI app: UI + runtime client, links the model layer + ImGui backend.
+# GUI app: UI + runtime client, links the graph layer + model layer + ImGui backend.
+#
+# M9 rewrote App.cpp as a flat sequence over `computeShellLayout` (docs/milestones.md
+# §7.4): header, canvas, the open docked panels, footer, plus the two floating
+# windows. The four panels are wired here as sources — BeliefPane (M6 rows), TracePane
+# (M7), FramePane (M8, which also grew out of PromptPalette) — and ShellLayout.h is
+# header-only, so it has no source to list.
+#
+# The node graph is the workspace: the three-lane text workspace (BeliefLane /
+# CognitiveLane / ExecutionLane / LogListBox / Summary / UiShared) was removed in
+# the v7 rewrite (docs/milestones.md §1.4, M1), and LayoutMetrics was deleted in M9.
 # ---------------------------------------------------------------------------
+set(PIE_GUI_BUILD_APP ON CACHE BOOL "Build the pie_gui app binary")
+if(PIE_GUI_BUILD_APP)
 add_executable(pie_gui
     src/App.cpp
+    src/ReplayTool.cpp
     src/StatusBar.cpp
-    src/BeliefLane.cpp
-    src/CognitiveLane.cpp
-    src/ExecutionLane.cpp
-    src/LogListBox.cpp
-    src/Summary.cpp
     src/Footer.cpp
-    src/PromptPalette.cpp
+    src/FramePane.cpp
+    src/BeliefPane.cpp
+    src/TracePane.cpp
     src/FileListWindow.cpp
     src/Theme.cpp
     src/UiMarkdown.cpp
-    src/UiShared.cpp
     src/Paths.cpp
     src/RuntimeClient.cpp
     src/graph/GraphView.cpp
@@ -214,7 +343,7 @@ else()
     target_compile_definitions(pie_gui PRIVATE GL_SILENCE_DEPRECATION)
 endif()
 target_include_directories(pie_gui PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(pie_gui PRIVATE pi_gui_model imgui_backend)
+target_link_libraries(pie_gui PRIVATE pi_gui_graph pi_gui_model imgui_backend)
 target_include_directories(pie_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
 
 # SDK entry: repo root is one level above this gui/ dir.
@@ -261,3 +390,4 @@ add_custom_command(
     VERBATIM
 )
 add_dependencies(pie_gui pie_gui_font)
+endif()  # PIE_GUI_BUILD_APP

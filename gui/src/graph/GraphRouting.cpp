@@ -1,74 +1,79 @@
-// GraphRouting.cpp: deterministic routes for the semantic row layout.
+// GraphRouting.cpp: deterministic link geometry for the dot canvas.
+//
+// A dot has no left or right edge, so the v1 "enter at the target's left edge"
+// rule is gone with the boxes. What replaces it is a rule with the same spirit:
+// the anchor point is where the segment MEETS the circle. A link that stops at the
+// centre would be drawn under the dot; one that stops at the bounding box would
+// float away from it on a diagonal.
+//
+// Two shapes remain, chosen by whether the link stays inside its row:
+//
+//   * a DIRECT segment, for a link that crosses rows or reaches a rail (a belief
+//     write-back, a source citation, a version chain);
+//   * a SHORT 3-point dogleg, for a link between two stations in the same row,
+//     which keeps neighboring stations readable when many links overlap.
+//
+// Deterministic: pure function of the two dot positions.
 
 #include "graph/GraphRouting.h"
 
+#include <cmath>
+
+#include "graph/GraphStyle.h"
+
 namespace pie::gui {
+
+namespace {
+
+// The point on the circle around `from` in the direction of `to`, pulled back by
+// linkGapFromDot so the link does not touch the dot.
+std::pair<float, float> anchorTowards(const Dot& from, const Dot& to) {
+    const float dx = to.x - from.x;
+    const float dy = to.y - from.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    const float pull = from.r + kGraphStyle.linkGapFromDot;
+    if (length <= 0.0001f) return {from.x, from.y};
+    const float t = pull / length;
+    // A very short link would otherwise invert: clamp so the anchor never ends up
+    // on the far side of the target.
+    const float clamped = std::min(t, 0.5f);
+    return {from.x + dx * clamped, from.y + dy * clamped};
+}
+
+} // namespace
 
 std::vector<EdgeRoute> computeEdgeRoutes(const GraphTaskState& state,
                                          const PieGraphLayout& layout) {
     std::vector<EdgeRoute> routes;
-
-    auto rect = [&](const std::string& id) -> const GraphRect* {
-        auto it = layout.nodeRects.find(id);
-        return it == layout.nodeRects.end() ? nullptr : &it->second;
-    };
-    auto left = [](const GraphRect& r) {
-        return std::pair<float, float>{r.x, r.y + r.h * 0.5f};
-    };
-    auto right = [](const GraphRect& r) {
-        return std::pair<float, float>{r.x + r.w, r.y + r.h * 0.5f};
-    };
-
     for (const GraphEdge& edge : state.edges) {
-        const GraphRect* sourceRect = rect(edge.source.value);
-        const GraphRect* targetRect = rect(edge.target.value);
-        if (!sourceRect || !targetRect) continue;
+        const Dot* source = layout.dot(edge.source.value);
+        const Dot* target = layout.dot(edge.target.value);
+        // An edge whose endpoint has no dot is skipped rather than drawn to
+        // (0,0): a line to nowhere is worse than a missing line.
+        if (source == nullptr || target == nullptr) continue;
 
         EdgeRoute route;
         route.source = edge.source;
         route.target = edge.target;
         route.type = edge.type;
         route.beliefOperation = edge.beliefOperation;
+        route.dashed = edge.dashed;
 
-        if (edge.type == EdgeSemanticType::BeliefToPlan ||
-            edge.type == EdgeSemanticType::BeliefToPropose) {
-            // Belief -> Plan/Propose is a direct straight line, not a two-elbow
-            // orthogonal polyline: the plan directly reads the beliefs it
-            // selected, so the connection is a single segment.
-            const auto source = right(*sourceRect);
-            const auto target = left(*targetRect);
-            route.points = {source, target};
-            route.longRoute = true;
-        } else if (edge.type == EdgeSemanticType::DistillToBelief) {
-            // Distill -> Belief is a direct line, not a two-elbow orthogonal
-            // polyline: the write-back returns to the belief column as a single
-            // straight segment so it reads as a direct epistemic result.
-            const auto source = left(*sourceRect);
-            const auto target = right(*targetRect);
-            route.points = {source, target};
-            route.longRoute = true;
-        } else if (edge.type == EdgeSemanticType::PlanToExecution) {
-            const auto source = right(*sourceRect);
-            const auto target = left(*targetRect);
-            route.points = {source,
-                            {(source.first + target.first) * 0.5f,
-                             (source.second + target.second) * 0.5f},
-                            target};
-        } else if (edge.type == EdgeSemanticType::ProposeToBelief) {
-            // Propose (middle) writes back to the belief column: a direct long
-            // cross-region return line, isomorphic to Distill -> Belief.
-            const auto source = left(*sourceRect);
-            const auto target = right(*targetRect);
-            route.points = {source, target};
-            route.longRoute = true;
+        const auto start = anchorTowards(*source, *target);
+        const auto end = anchorTowards(*target, *source);
+        if (edge.type == EdgeSemanticType::PlanToExecution ||
+            edge.type == EdgeSemanticType::ExecutionToDistillation ||
+            edge.type == EdgeSemanticType::DistillationToBeliefDelta ||
+            edge.type == EdgeSemanticType::RecheckToEpisode) {
+            // Station to station: the dogleg keeps a dense row legible.
+            route.points = {start,
+                            {(start.first + end.first) * 0.5f, (start.second + end.second) * 0.5f},
+                            end};
         } else {
-            // Local Plan -> Execution / Execution -> Distill / Distill -> Propose.
-            const auto source = left(*sourceRect);
-            const auto target = right(*targetRect);
-            route.points = {source,
-                            {(source.first + target.first) * 0.5f,
-                             (source.second + target.second) * 0.5f},
-                            target};
+            // Cross-row or rail-bound: one straight segment, which is what makes a
+            // long citation read as a single claim rather than a routed path.
+            route.points = {start, end};
+            route.longRoute = true;
         }
         routes.push_back(std::move(route));
     }

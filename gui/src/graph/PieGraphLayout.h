@@ -1,17 +1,31 @@
-// PieGraphLayout: the graph layout engine (Phase 2 M3).
+// PieGraphLayout: the deterministic dot + rail + episode-row layout (§6.2).
 //
-// Headless, ImGui-free, unit-testable. It projects the PIE cognition ontology
-// (nodes/edges) into a deterministic custom layout: LoopFrames are stacked as
-// vertical rows, Beliefs occupy a fixed left column ordered by creation order,
-// Plan / Propose / Distillation occupy the middle regions (Propose at the top,
-// Plan in the middle, Distillation at the bottom, i.e. the loop's time sequence)
-// and Execution occupies the right column ordered by execution order.
-// It does not infer
-// cognition: node/edge semantic types and creation/execution orders are
-// runtime-supplied, only positions come from the engine.
+// Headless and ImGui-free. The engine supplies POSITIONS ONLY: it reads the
+// projected state and never decides what a node means. Anything the canvas shows
+// that is not a position comes from GraphModel.
 //
-// Determinism: identical input yields identical output. Positions are keyed by
-// NodeId so a viewer can place them without re-deriving cognition.
+// The deterministic contract is unchanged from the v1 engine and still the point:
+// identical input produces identical output, and every position is keyed by
+// NodeId. A layout that reflows differently on the same state makes the canvas
+// unusable for following a live session, and makes the layout untestable.
+//
+// WHAT WENT AWAY. The v1 engine laid out a region/band model: `frameRects`,
+// `beliefRegionRects`, `planRegionRects`, `proposeRegionRects`,
+// `distillRegionRects`, `executionRegionRects`, `columnHeaderHeight`,
+// `phaseBandGap`. Every one of those existed to draw a titled box around a group
+// of nodes. A dot-and-link canvas has no boxes, so none of them survive. What is
+// left is:
+//
+//   * `nodes`          — every node's Dot{x, y, r}, keyed by NodeId.
+//   * `gutters`        — one band per episode row: the separator and the ordinal
+//                        label live in the left gutter.
+//   * `versionRail`    — the band the Frame versions are laid along.
+//   * `beliefRail`     — the band the global belief column occupies.
+//   * `outcomeBand`    — the task outcome strip; zero-sized when none was recorded.
+//
+// Sizes collapse from the v1 200x60 card to a single `dotDiameter`. Hit testing
+// and tooltips are radial rather than rectangular, which is why `GraphRect` is now
+// only used for BANDS (rails, gutters, the outcome strip) and never for a node.
 
 #pragma once
 
@@ -23,42 +37,36 @@
 
 namespace pie::gui {
 
-// A plain axis-aligned rectangle in layout coordinates. Kept ImGui-free so the
-// layout engine is testable without a window; the UI layer converts to ImVec2.
-struct GraphRect {
+// A node's position and radius. There is no width or height: a dot is a circle,
+// and a consumer that needs a box computes it from the radius.
+struct Dot {
     float x = 0.0f;
     float y = 0.0f;
-    float w = 0.0f;
-    float h = 0.0f;
+    float r = 0.0f;
+    bool valid() const { return r > 0.0f; }
 };
 
-// The layout output: every node's rectangle, every frame container rectangle,
-// and the total canvas size.
 struct PieGraphLayout {
-    std::map<std::string, GraphRect> nodeRects;   // keyed by NodeId value
-    std::map<std::string, GraphRect> frameRects;          // keyed by frame id
-    std::map<std::string, GraphRect> beliefRegionRects;   // newly-created Beliefs, keyed by frame id
-    std::map<std::string, GraphRect> planRegionRects;     // upper middle band, keyed by frame id
-    std::map<std::string, GraphRect> proposeRegionRects;  // middle band, keyed by frame id
-    std::map<std::string, GraphRect> distillRegionRects;  // lower middle band, keyed by frame id
-    std::map<std::string, GraphRect> executionRegionRects;// right column, keyed by frame id
-    GraphRect beliefColumnRect;                   // global left column
-    // Task-level outcome band below the last LoopFrame. Zero width when the task recorded no
-    // outcome. Task scope, not frame content, so it is not cached per closed frame.
-    GraphRect taskOutcomeRect;
+    // Keyed by NodeId value. Every node in the state has an entry.
+    std::map<std::string, Dot> nodes;
+    // One band per episode row, in row order.
+    std::vector<EpisodeGutter> gutters;
+    // The Frame rail's band and the belief column's band. Both are zero-sized when
+    // the state has no versions / no beliefs.
+    GraphRect versionRail;
+    GraphRect beliefRail;
+    // The task outcome strip, or a zero-size rect when the task recorded none.
+    GraphRect outcomeBand;
     float canvasWidth = 0.0f;
     float canvasHeight = 0.0f;
+
+    // The dot for a node, or nullptr. Radial hit testing: a consumer asks whether a
+    // point is inside `r` of (x, y).
+    const Dot* dot(const std::string& nodeId) const;
 };
 
-// Compute a deterministic custom layout for a projected task graph, replacing
-// the Graphviz DOT auto-layout. LoopFrames are stacked as vertical rows; Belief
-// nodes form a fixed left column ordered by creation order (and grouped by the
-// round that created them); Plan / Execution / Distillation form the middle /
-// right regions per frame. Region adjacency and row / node spacing derive from
-// GraphStyle. General contract: every node rect has positive size, node rects
-// do not overlap, frames have a container, and the canvas size is positive. The
-// per-region directional ordering (Belief left-of-Plan, Distill return-leftward)
-// is now guaranteed by construction.
+// Lay one projected task out. Deterministic: identical `state` in, identical
+// `PieGraphLayout` out.
 PieGraphLayout computeGraphLayout(const GraphTaskState& state);
 
 } // namespace pie::gui

@@ -25,17 +25,24 @@ extern const ImVec4 kGray;
 extern const ImVec4 kFocusAccent;
 extern const ImVec4 kPaneBgDark;
 
-// Animated background for the current flow-step pane (user-approved exception
-// to the no-animation rule). Inactive panes keep the default child background.
+// The one user-approved animation in the GUI (docs/milestones.md §6.3), and its
+// single definition. `active` false is the resting child background; true is the
+// black <-> kPaneBgDark sinusoid.
+//
+// It used to wash the background of the current flow-step pane, which is why the
+// name says "pane". Those panes were the cognitive and execution lanes, both
+// removed with the text workspace. The animation was NOT dropped with them: M5
+// redirected it onto the canvas's current-node halo (GraphView.cpp), which calls
+// `paneBg(true)` for the pulsing ring. The name is kept deliberately — renaming it
+// would make the redirect look like a new animation rather than the one the user
+// asked to keep.
 ImVec4 paneBg(bool active);
 
-// Symbol for a frame's history flag. Only used by the (removed) navigator's
-// legend; retained for completeness/tests.
-const char* historySymbol(pie::gui::LoopFrame::History h);
-
-// Status -> row color for the belief set pane (proposed/supported/refuted/
-// superseded).
-ImVec4 beliefStatusColor(const std::string& status);
+// Colour for a belief's DERIVED status. Takes the enum rather than a string: the
+// v1 signature took a status name, which let a caller pass a spelling the model
+// could not produce (and it did: four legacy spellings were carried for
+// back-compat with fixtures that no longer exist).
+ImVec4 beliefStatusColor(BeliefStatus status);
 
 // Markdown renderer font resources, loaded by main and read by UiMarkdown.
 void setMarkdownFonts(ImFont* codeFont, ImFont* boldFont);

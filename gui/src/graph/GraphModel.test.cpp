@@ -1,33 +1,30 @@
-// Headless tests for the Phase 2 M1 graph projection and M3 layout engine.
-// No window, no ImGui, no SDK. Run: ./pi_gui_graph_test  (non-zero on failure).
-
-#include "graph/GraphLive.h"
-#include "graph/GraphModel.h"
-#include "graph/PieGraphLayout.h"
-#include "Model.h"
+// M4: the v7 graph projection (docs/milestones.md §6.1).
+//
+// The projection is the whole of the canvas's meaning. The renderer only decides
+// colour and position, so an element that is missing here is missing from the
+// product, and an element that is present but INVENTED is a claim the runtime
+// never made. Both failures are invisible in a screenshot, so the assertions
+// below are mostly of the form "this came from that field":
+//
+//   * every element in §6.1's table is projected from the record it names,
+//   * plan -> execution and execution -> distillation are produced (the two edges
+//     `domain-model.md` says were declared but never emitted),
+//   * a fast-path episode has no plan node and no plan -> execution edge,
+//   * the cursor's stage resolves to a station, and `closed` resolves to the same
+//     station faded rather than to one of its own,
+//   * nothing overlaps and every node has a positive radius.
 
 #include <cstdio>
-#include <set>
 #include <string>
+#include <vector>
 
-using pie::gui::BeliefOperation;
-using pie::gui::EdgeSemanticType;
-using pie::gui::GraphLiveState;
-using pie::gui::GraphTaskState;
-using pie::gui::LoopFrameInfo;
-using pie::gui::NativeGuiModel;
-using pie::gui::NodeFamily;
-using pie::gui::PieGraphLayout;
-using pie::gui::projectGraphTask;
-using pie::gui::computeGraphLayout;
-using pie::gui::stabilizeLiveLayout;
-using pie::gui::beliefNodeTitle;
-using pie::gui::planNodeTitle;
-using pie::gui::edgeIsCreate;
-using pie::gui::GraphNode;
-using pie::gui::NodeId;
-using pie::gui::GraphRect;
-using pie::gui::GraphEdge;
+#include "DemoEvents.h"
+#include "DomainEvents.h"
+#include "Model.h"
+#include "graph/GraphModel.h"
+#include "graph/PieGraphLayout.h"
+
+using namespace pie::gui;
 
 static int failures = 0;
 static void check(bool cond, const char* what) {
@@ -39,528 +36,540 @@ static void check(bool cond, const char* what) {
     }
 }
 
-static std::string beliefRecord(const char* id, const char* statement, const char* domain,
-                                const char* expectation) {
-    std::string s = "{\"id\":\"";
-    s += id;
-    s += "\",\"statement\":\"";
-    s += statement;
-    s += "\",\"domain\":\"";
-    s += domain;
-    s += "\",\"expectation\":\"";
-    s += expectation;
-    s += "\",\"evidenceRounds\":1,\"skillRefs\":[],\"supportedBy\":[],\"refutedBy\":[],\"withdrawn\":false}";
-    return s;
-}
-
-static void delta(NativeGuiModel& m, const char* frameId, const char* deltaId,
-                  const char* op, const char* beliefId,
-                  const char* producerPhase = "propose") {
-    std::string rec = beliefRecord(beliefId, "statement of ", "code", "expectation");
-    std::string line = "{\"type\":\"BeliefDeltaApplied\",\"taskId\":\"task-1\",\"frameId\":\"";
-    line += frameId;
-    line += "\",\"delta\":{\"id\":\"";
-    line += deltaId;
-    line += "\",\"frameId\":\"";
-    line += frameId;
-    line += "\",\"producerPhase\":\"";
-    line += producerPhase;
-    line += "\",\"operation\":\"";
-    line += op;
-    line += "\",\"beliefId\":\"";
-    line += beliefId;
-    line += "\",\"resultBeliefId\":\"";
-    line += beliefId;
-    line += "\",\"resultingBeliefs\":[";
-    line += rec;
-    line += "]},\"activeBeliefs\":[\"";
-    line += beliefId;
-    line += "\"]}";
-    m.applyLine(line);
-}
-
-// Build a model with two belief-loop frames mirroring the domain vocabulary.
-static NativeGuiModel buildModel() {
+// The demo stream is the fixture: a real scripted v7 session with two rounds, a
+// revised reading, a correction and an answered review. A hand-built state would
+// only assert what the test already believes.
+static NativeGuiModel demoModel() {
     NativeGuiModel model;
-    model.applyLine(R"({"type":"TaskOpened","taskId":"task-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-    model.applyLine(R"({"type":"TargetDefined","taskId":"task-1","target":{"id":"t","statement":"verify pytest"}})");
-
-    // Frame 1: propose belief-1, belief-2; plan; two executions; distill.
-    model.applyLine(R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-1","ordinal":1})");
-    model.applyLine(R"({"type":"FrameBodySelected","taskId":"task-1","frameId":"frame-1","body":"belief-loop","openBeliefsAtStart":[]})");
-    delta(model, "frame-1", "delta-1", "propose", "belief-1");
-    delta(model, "frame-1", "delta-2", "propose", "belief-2");
-    model.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-1","plan":{"id":"plan-1","selectedToExplore":["belief-1","belief-2"],"intent":"verify dependency"}})");
-    model.applyLine(R"({"type":"ExecutionStarted","taskId":"task-1","frameId":"frame-1","execution":{"id":"exec-1","planId":"plan-1","intention":"read","tool":"read","input":{"path":"requirements.txt"}}})");
-    model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-1","executionId":"exec-1","output":"pytest==8.0","status":"succeeded"})");
-    model.applyLine(R"({"type":"ExecutionStarted","taskId":"task-1","frameId":"frame-1","execution":{"id":"exec-2","planId":"plan-1","intention":"bash","tool":"bash","input":{"command":"pip show pytest"}}})");
-    model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-1","executionId":"exec-2","output":"exit 1","status":"failed","error":"not found"})");
-    delta(model, "frame-1", "delta-1-support", "support", "belief-1", "distill");
-    delta(model, "frame-1", "delta-2-inconclusive", "inconclusive", "belief-2", "distill");
-    model.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-1","distillation":{"id":"distill-1","inputs":["exec-1","exec-2"],"contents":"declared vs runtime differ","outputs":["delta-1-support","delta-2-inconclusive"]}})");
-    model.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-1"})");
-
-    // Frame 2: propose belief-3; plan; one execution; distill; close.
-    model.applyLine(R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-2","ordinal":2})");
-    model.applyLine(R"({"type":"FrameBodySelected","taskId":"task-1","frameId":"frame-2","body":"belief-loop","openBeliefsAtStart":[]})");
-    delta(model, "frame-2", "delta-3", "propose", "belief-3");
-    model.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-2","plan":{"id":"plan-2","selectedToExplore":["belief-3"],"intent":"check env"}})");
-    model.applyLine(R"({"type":"ExecutionStarted","taskId":"task-1","frameId":"frame-2","execution":{"id":"exec-3","planId":"plan-2","intention":"bash","tool":"bash","input":{"command":"ls"}}})");
-    model.applyLine(R"({"type":"ExecutionCompleted","taskId":"task-1","frameId":"frame-2","executionId":"exec-3","output":"a b c","status":"succeeded"})");
-    delta(model, "frame-2", "delta-3-support", "support", "belief-3", "distill");
-    model.applyLine(R"({"type":"DistillationProduced","taskId":"task-1","frameId":"frame-2","distillation":{"id":"distill-2","inputs":["exec-3"],"contents":"ok","outputs":["delta-3-support"]}})");
-    model.applyLine(R"({"type":"FrameClosed","taskId":"task-1","frameId":"frame-2"})");
-
+    for (const std::string& line : demoEvents()) applyRpcLine(model, line);
     return model;
 }
 
-// Belief create is a Propose step: a BeliefDeltaApplied with operation
-// "propose" must project as one Propose node plus a Propose->Belief edge whose
-// beliefOperation is Create, and the layout must place both positively.
-static void testBeliefCreateIsPropose() {
-    NativeGuiModel m;
-    m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-    m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"distill","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
-    m.applyLine(R"({"type":"DistillationProduced","taskId":"t-1","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
-
-    GraphTaskState s = projectGraphTask(m);
-    int proposeCount = 0, createEdges = 0, distillToPropose = 0, beliefCount = 0;
-    for (const GraphNode& n : s.nodes) {
-        if (n.family == NodeFamily::Propose) {
-            ++proposeCount;
-            check(n.displayType == "propose", "create Propose node displayType is 'propose'");
-            check(n.frameId && *n.frameId == "f1::next", "distill Propose node belongs to the pending next frame");
-        }
-        if (n.family == NodeFamily::Belief) {
-            ++beliefCount;
-            check(n.displayType == "proposed", "created belief status projected as 'proposed'");
-        }
+static size_t countFamily(const GraphTaskState& state, NodeFamily family) {
+    size_t n = 0;
+    for (const GraphNode& node : state.nodes) {
+        if (node.family == family) ++n;
     }
-    for (const GraphEdge& e : s.edges) {
-        if (e.type == EdgeSemanticType::ProposeToBelief && e.beliefOperation &&
-            *e.beliefOperation == BeliefOperation::Create) ++createEdges;
-        if (e.type == EdgeSemanticType::DistillToPropose) ++distillToPropose;
-    }
-    check(proposeCount == 1, "belief create yields exactly one Propose node");
-    check(createEdges == 1, "belief create yields one Propose->Belief create edge");
-    check(distillToPropose == 1, "belief create yields one Distill->Propose edge");
-    check(beliefCount == 1, "belief create yields exactly one belief node");
-    check(s.frames.size() == 2 && s.frames.back().id == "f1::next",
-          "distill output creates a pending next frame container");
-
-    PieGraphLayout layout = computeGraphLayout(s);
-    const GraphRect* pr = nullptr;
-    for (const auto& [k, r] : layout.nodeRects) if (k == "d1") { pr = &r; break; }
-    if (pr) check(pr->w > 0.0f && pr->h > 0.0f, "create Propose node has a positive-size layout rect");
-    else check(false, "create Propose node is laid out");
+    return n;
 }
 
-// Belief-creation deltas that reach the model before their frame opens, or that
-// omit beliefId but still project a resulting belief, must still yield a
-// Propose node (and a Propose->Belief create edge) once the frame is known.
-static void testBeliefCreateMissingFrameAndLink() {
-    // Out-of-order: the delta arrives before FrameOpened but names its frame.
-    {
-        NativeGuiModel m;
-        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        GraphTaskState s = projectGraphTask(m);
-        int propose = 0;
-        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
-        check(propose == 1, "out-of-order belief create still yields one Propose node");
+static size_t countEdges(const GraphTaskState& state, EdgeSemanticType type) {
+    size_t n = 0;
+    for (const GraphEdge& edge : state.edges) {
+        if (edge.type == type) ++n;
     }
-    // Empty beliefId but the resultingBeliefs create a belief.
-    {
-        NativeGuiModel m;
-        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
-        GraphTaskState s = projectGraphTask(m);
-        int propose = 0, createEdges = 0;
-        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
-        for (const GraphEdge& e : s.edges)
-            if (e.type == EdgeSemanticType::ProposeToBelief && e.beliefOperation &&
-                *e.beliefOperation == BeliefOperation::Create && e.target.valid()) ++createEdges;
-        check(propose == 1, "empty-beliefId belief create still yields one Propose node");
-        check(createEdges == 1, "empty-beliefId belief create links Propose->Belief (create)");
-    }
-    // Replay of the same delta id must not duplicate the Propose node.
-    {
-        NativeGuiModel m;
-        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        const char* deltaLine = R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})";
-        m.applyLine(deltaLine);
-        m.applyLine(deltaLine);  // replay
-        GraphTaskState s = projectGraphTask(m);
-        int propose = 0;
-        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
-        check(propose == 1, "replayed belief-delta id yields a single Propose node");
-    }
-    // Repeated FrameOpened must not clobber a backfilled delta.
-    {
-        NativeGuiModel m;
-        m.applyLine(R"({"type":"TaskOpened","taskId":"t-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-1","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-1","frameId":"f1","ordinal":1})");  // duplicate
-        GraphTaskState s = projectGraphTask(m);
-        int propose = 0;
-        for (const GraphNode& n : s.nodes) if (n.family == NodeFamily::Propose) ++propose;
-        check(propose == 1, "repeated FrameOpened preserves the backfilled Propose node");
-    }
+    return n;
 }
 
-static void testRefineLinksSourceAndResultBeliefs() {
-    NativeGuiModel m;
-    m.applyLine(R"({"type":"TaskOpened","taskId":"t-r","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-    m.applyLine(R"({"type":"FrameOpened","taskId":"t-r","frameId":"f1","ordinal":1})");
-    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-r","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"propose","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"one mechanism","domain":"code","expectation":"one handler","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
-    m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-r","frameId":"f1","delta":{"id":"d2","frameId":"f1","producerPhase":"distill","operation":"refine","beliefId":"B1","sourceBeliefId":"B1","resultBeliefId":"B2","resultingBeliefs":[{"id":"B1","statement":"one mechanism","domain":"code","expectation":"one handler","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"supersededBy":"B2","withdrawn":false},{"id":"B2","statement":"multiple mechanisms","domain":"code","expectation":"multiple handlers","evidenceRounds":1,"skillRefs":[],"supportedBy":[{"evidence":"three handlers"}],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B2"]})");
-    m.applyLine(R"({"type":"DistillationProduced","taskId":"t-r","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"refined","outputs":["d2"]}})");
-
-    GraphTaskState s = projectGraphTask(m);
-    bool sourceToRefine = false;
-    bool refineToResult = false;
-    bool refineToSource = false;
-    for (const GraphEdge& edge : s.edges) {
-        if (edge.type == EdgeSemanticType::BeliefToPropose &&
-            edge.source.value == "B1" && edge.target.value == "d2") sourceToRefine = true;
-        if (edge.type == EdgeSemanticType::ProposeToBelief &&
-            edge.source.value == "d2" && edge.target.value == "B2") refineToResult = true;
-        if (edge.type == EdgeSemanticType::ProposeToBelief &&
-            edge.source.value == "d2" && edge.target.value == "B1") refineToSource = true;
+static const GraphNode* findFamily(const GraphTaskState& state, NodeFamily family,
+                                   const std::string& episodeId) {
+    for (const GraphNode& node : state.nodes) {
+        if (node.family == family && node.episodeId == episodeId) return &node;
     }
-    check(sourceToRefine, "refine links source Belief -> Propose");
-    check(refineToResult, "refine links Propose -> replacement Belief");
-    check(!refineToSource, "refine does not write back to the superseded source");
+    return nullptr;
+}
+
+static bool hasEdge(const GraphTaskState& state, EdgeSemanticType type, const std::string& source,
+                    const std::string& target) {
+    for (const GraphEdge& edge : state.edges) {
+        if (edge.type == type && edge.source.value == source && edge.target.value == target) return true;
+    }
+    return false;
 }
 
 int main() {
-    NativeGuiModel model = buildModel();
-    GraphTaskState state = projectGraphTask(model);
+    NativeGuiModel model = demoModel();
+    check(model.issues().empty(), "the demo stream folds without issues");
 
-    // --- M1: node families ---
-    int proposeNodes1 = 0, proposeNodes2 = 0, pendingProposeNodes = 0;
-    int beliefCount = 0, planCount = 0, execCount1 = 0, distillCount = 0;
-    bool beliefsGlobal = true;
-    for (const auto& n : state.nodes) {
-        switch (n.family) {
-            case NodeFamily::Belief:
-                ++beliefCount;
-                if (n.frameId.has_value()) beliefsGlobal = false;
-                break;
-            case NodeFamily::Plan: ++planCount; break;
-            case NodeFamily::Execution:
-                if (n.frameId && *n.frameId == "frame-1") ++execCount1;
-                break;
-            case NodeFamily::Distill: ++distillCount; break;
-            case NodeFamily::Propose:
-                if (n.frameId && *n.frameId == "frame-1") ++proposeNodes1;
-                if (n.frameId && *n.frameId == "frame-2") ++proposeNodes2;
-                if (n.frameId && *n.frameId == "frame-2::next") ++pendingProposeNodes;
-                break;
+    // ---------------------------------------------------------------------
+    // The projected task
+    // ---------------------------------------------------------------------
+    check(projectedTask(model) != nullptr, "a task is projected");
+    check(projectedTask(model) != nullptr && projectedTask(model)->id == "task-1",
+          "the cursor's task is the one projected");
+    check(projectGraphTask(model, nullptr).nodes.empty(), "a null task projects nothing");
+
+    const GraphTaskState state = projectGraphTask(model);
+    check(state.taskId == "task-1", "the projection names its task");
+
+    // ---------------------------------------------------------------------
+    // Every element in §6.1's table
+    // ---------------------------------------------------------------------
+    check(countFamily(state, NodeFamily::Belief) == 2, "both beliefs are on the belief rail");
+    check(countFamily(state, NodeFamily::EpisodeRow) == 2, "one row anchor per episode");
+    check(state.rows.size() == 2, "two episode rows");
+    check(state.rows.size() == 2 && state.rows[0].ordinal == 1 && state.rows[1].ordinal == 2,
+          "rows are in ordinal order");
+    check(countFamily(state, NodeFamily::Routing) == 2, "one routing node per episode");
+    check(countFamily(state, NodeFamily::Plan) == 2, "one plan node per belief-loop episode");
+    check(countFamily(state, NodeFamily::Execution) == 3, "one node per execution");
+    check(countFamily(state, NodeFamily::Distillation) == 2, "one node per distillation");
+    check(countFamily(state, NodeFamily::BeliefDelta) == 4, "one node per belief delta");
+    check(countFamily(state, NodeFamily::Recheck) == 1, "the task's recheck has a node");
+    check(countFamily(state, NodeFamily::Formulation) == 2, "one node per Frame version");
+
+    // The selection ring survives only while it is pending: episode 1's was
+    // committed by its plan, episode 2's by its plan too. Neither is drawn.
+    check(countFamily(state, NodeFamily::ExperimentSelection) == 0,
+          "a committed experiment selection leaves no ring");
+    check(countFamily(state, NodeFamily::Intervention) == 0, "the demo has no intervention");
+
+    // ---------------------------------------------------------------------
+    // The Frame rail
+    // ---------------------------------------------------------------------
+    check(state.versions.size() == 2, "both versions are on the rail");
+    check(state.versions.size() == 2 && state.versions[0].ordinal == 1 && state.versions[1].ordinal == 2,
+          "the rail is in ordinal order");
+    check(state.versions.size() == 2 && state.versions[1].previousVersionId == "formulation-1",
+          "the rail exposes the version chain");
+    check(state.versions.size() == 2 && state.versions[1].approved,
+          "the rail says which version the user approved");
+    check(state.versions.size() == 2 && !state.versions[0].approved,
+          "the superseded version is not marked approved");
+    check(state.versions.size() == 2 && state.versions[1].current,
+          "the latest version is the current reading");
+    check(hasEdge(state, EdgeSemanticType::FormulationToFormulation, "Fv:formulation-1",
+                  "Fv:formulation-2"),
+          "version -> version comes from previousVersionId");
+
+    // ---------------------------------------------------------------------
+    // The two edges that were declared but never produced
+    // ---------------------------------------------------------------------
+    check(hasEdge(state, EdgeSemanticType::PlanToExecution, "plan:plan-1", "exec:exec-1"),
+          "plan -> execution comes from execution.planId");
+    check(hasEdge(state, EdgeSemanticType::PlanToExecution, "plan:plan-1", "exec:exec-2"),
+          "every execution of the plan is linked");
+    check(hasEdge(state, EdgeSemanticType::PlanToExecution, "plan:plan-2", "exec:exec-3"),
+          "the second round's plan links its execution");
+    check(countEdges(state, EdgeSemanticType::PlanToExecution) == 3,
+          "exactly the executions that name a plan are linked");
+    check(hasEdge(state, EdgeSemanticType::ExecutionToDistillation, "exec:exec-1", "distill:distillation-1"),
+          "execution -> distillation comes from distillation.inputs");
+    check(hasEdge(state, EdgeSemanticType::ExecutionToDistillation, "exec:exec-2", "distill:distillation-1"),
+          "every distillation input is linked");
+    check(hasEdge(state, EdgeSemanticType::ExecutionToDistillation, "exec:exec-3", "distill:distillation-2"),
+          "the second round's distillation links its input");
+    check(countEdges(state, EdgeSemanticType::ExecutionToDistillation) == 3,
+          "exactly the named inputs are linked");
+
+    // ---------------------------------------------------------------------
+    // The epistemic edges
+    // ---------------------------------------------------------------------
+    check(hasEdge(state, EdgeSemanticType::DistillationToBeliefDelta, "distill:distillation-1",
+                  "delta:delta-3"),
+          "distillation -> delta comes from distillation.outputs");
+    check(hasEdge(state, EdgeSemanticType::BeliefDeltaToBelief, "delta:delta-1", "B:belief-1"),
+          "delta -> belief comes from resultingBeliefs");
+    // delta-3 supports belief-1 and delta-4 refutes it: both name the record they
+    // adjudicate, so the write-back edge expresses them and no lineage edge is
+    // drawn (two arrows between one pair reads as a cycle).
+    check(!hasEdge(state, EdgeSemanticType::BeliefToBeliefDelta, "B:belief-1", "delta:delta-3"),
+          "a support draws no lineage edge: its source IS its result");
+    check(!hasEdge(state, EdgeSemanticType::BeliefToBeliefDelta, "B:belief-1", "delta:delta-4"),
+          "a refutation draws no lineage edge either");
+    check(hasEdge(state, EdgeSemanticType::BeliefDeltaToBelief, "delta:delta-3", "B:belief-1"),
+          "a support writes back to the belief it adjudicated");
+
+    {
+        // A delta that introduced a record draws dashed; one that changed
+        // provenance on an existing record draws solid.
+        const GraphEdge* propose = nullptr;
+        const GraphEdge* support = nullptr;
+        for (const GraphEdge& edge : state.edges) {
+            if (edge.type != EdgeSemanticType::BeliefDeltaToBelief) continue;
+            if (edge.source.value == "delta:delta-1") propose = &edge;
+            if (edge.source.value == "delta:delta-3") support = &edge;
         }
-    }
-    check(beliefCount == 3, "three global belief nodes");
-    check(beliefsGlobal, "beliefs are global (no owning frame)");
-    check(planCount == 2, "two plan nodes");
-    check(execCount1 == 2, "two execution nodes for frame 1");
-    check(distillCount == 2, "two distill nodes");
-    // Initial proposals stay in their producing frame. Distill-produced
-    // write-backs move to the successor from explicit producerPhase metadata.
-    check(proposeNodes1 == 2, "frame 1 owns its two initial Propose nodes");
-    check(proposeNodes2 == 3, "frame 2 owns two prior distill write-backs and its initial proposal");
-    check(pendingProposeNodes == 1, "frame 2's distill output targets the pending next frame");
-    check(state.frames.size() == 3 && state.frames.back().id == "frame-2::next",
-          "the pending next frame is exposed as a graph container");
-
-    // --- M1: typed, directed edges with valid endpoints ---
-    bool allTyped = !state.edges.empty();
-    int createEdges = 0;
-    for (const auto& e : state.edges) {
-        const bool known = e.type == EdgeSemanticType::BeliefToPlan ||
-                           e.type == EdgeSemanticType::PlanToExecution ||
-                           e.type == EdgeSemanticType::ExecutionToDistill ||
-                           e.type == EdgeSemanticType::DistillToPropose ||
-                           e.type == EdgeSemanticType::BeliefToPropose ||
-                           e.type == EdgeSemanticType::ProposeToBelief;
-        if (!known) allTyped = false;
-        if (!e.source.valid() || !e.target.valid()) allTyped = false;
-        if (e.type == EdgeSemanticType::ProposeToBelief && e.beliefOperation &&
-            *e.beliefOperation == BeliefOperation::Create) ++createEdges;
-    }
-    check(allTyped, "all edges typed and valid");
-    check(createEdges == 3, "three Propose->Belief create edges (propose ops)");
-
-    // --- M1: frame containers ---
-    check(state.frames.size() == 3, "two materialized plus one pending frame container");
-
-    // --- M3: layout determinism ---
-    PieGraphLayout layout = computeGraphLayout(state);
-    PieGraphLayout layout2 = computeGraphLayout(state);
-    bool deterministic = layout.nodeRects.size() == layout2.nodeRects.size();
-    for (const auto& [k, r] : layout.nodeRects) {
-        auto it = layout2.nodeRects.find(k);
-        if (it == layout2.nodeRects.end() ||
-            it->second.x != r.x || it->second.y != r.y ||
-            it->second.w != r.w || it->second.h != r.h) deterministic = false;
-    }
-    check(deterministic, "layout is deterministic");
-
-    auto findRect = [&](const std::string& id) -> const pie::gui::GraphRect* {
-        auto it = layout.nodeRects.find(id);
-        return it == layout.nodeRects.end() ? nullptr : &it->second;
-    };
-    const auto* b1 = findRect("belief-1");
-    const auto* p1 = findRect("plan-1");
-    const auto* e1 = findRect("exec-1");
-    const auto* d1 = findRect("distill-1");
-    const auto* pr1 = findRect("delta-1");
-    check(b1 && p1 && e1 && d1 && pr1, "core nodes placed");
-
-    bool allValid = true;
-    bool noOverlap = true;
-    for (const auto& [k, r] : layout.nodeRects) {
-        if (r.w <= 0.0f || r.h <= 0.0f) allValid = false;
-        for (const auto& [k2, r2] : layout.nodeRects) {
-            if (k == k2) continue;
-            if (r.x < r2.x + r2.w && r.x + r.w > r2.x && r.y < r2.y + r2.h && r.y + r.h > r2.y)
-                noOverlap = false;
-        }
-    }
-    check(allValid, "every node rect has positive size");
-    check(noOverlap, "node rects do not overlap");
-
-    check(layout.frameRects.count("frame-1") && layout.frameRects.count("frame-2"),
-          "both frames have a container");
-    check(layout.planRegionRects.count("frame-1") && layout.distillRegionRects.count("frame-1") &&
-          layout.executionRegionRects.count("frame-1"),
-          "frame 1 exposes Plan/Distillation/Execution regions");
-
-    check(layout.canvasWidth > 0 && layout.canvasHeight > 0, "canvas size is positive");
-
-    testBeliefCreateIsPropose();
-    testBeliefCreateMissingFrameAndLink();
-    testRefineLinksSourceAndResultBeliefs();
-
-    // A pending successor uses the same row as the real successor once it is
-    // opened; the proposal changes only its frame id, not its node id.
-    {
-        NativeGuiModel m;
-        m.applyLine(R"({"type":"TaskOpened","taskId":"t-2","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f1","ordinal":1})");
-        m.applyLine(R"({"type":"BeliefDeltaApplied","taskId":"t-2","frameId":"f1","delta":{"id":"d1","frameId":"f1","producerPhase":"distill","operation":"propose","resultBeliefId":"B1","resultingBeliefs":[{"id":"B1","statement":"x","domain":"code","expectation":"","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["B1"]})");
-
-        // producerPhase supplies provenance immediately; no event-order guess
-        // is needed before DistillationProduced arrives.
-        GraphLiveState live;
-        GraphTaskState provisional = projectGraphTask(m);
-        PieGraphLayout provisionalLayout = stabilizeLiveLayout(
-            provisional, computeGraphLayout(provisional), live);
-        const GraphNode* provisionalNode = nullptr;
-        for (const GraphNode& n : provisional.nodes)
-            if (n.family == NodeFamily::Propose) provisionalNode = &n;
-        check(provisionalNode && provisionalNode->frameId && *provisionalNode->frameId == "f1::next",
-              "distill proposal immediately targets the pending successor");
-        const GraphNode* provisionalBelief = nullptr;
-        for (const GraphNode& n : provisional.nodes)
-            if (n.family == NodeFamily::Belief && n.id.value == "B1") provisionalBelief = &n;
-        check(provisionalBelief && provisionalBelief->createdInFrame &&
-                  *provisionalBelief->createdInFrame == "f1::next",
-              "distill result belief immediately anchors to the pending successor");
-
-        m.applyLine(R"({"type":"DistillationProduced","taskId":"t-2","frameId":"f1","distillation":{"id":"D1","inputs":[],"contents":"c","outputs":["d1"]}})");
-        GraphTaskState pending = projectGraphTask(m);
-        PieGraphLayout pendingFresh = computeGraphLayout(pending);
-        PieGraphLayout pendingStable = stabilizeLiveLayout(pending, pendingFresh, live);
-        const GraphNode* before = nullptr;
-        for (const GraphNode& n : pending.nodes) if (n.family == NodeFamily::Propose) before = &n;
-        check(before && before->frameId && *before->frameId == "f1::next",
-              "proposal initially targets the stable pending successor");
-        check(pendingFresh.nodeRects.at("d1").y == pendingStable.nodeRects.at("d1").y &&
-                  pendingStable.nodeRects.at("d1").y == provisionalLayout.nodeRects.at("d1").y,
-              "distillation correlation does not reparent an explicit proposal");
-
-        // The Belief its Propose produces must follow the same reparenting: its
-        // display anchor re-aims at the pending successor, and the already-warmed
-        // stableBeliefRects cache must not pin it to its old producing row.
-        const GraphNode* pendingBelief = nullptr;
-        for (const GraphNode& n : pending.nodes)
-            if (n.family == NodeFamily::Belief && n.id.value == "B1") pendingBelief = &n;
-        check(pendingBelief && pendingBelief->createdInFrame &&
-                  *pendingBelief->createdInFrame == "f1::next",
-              "belief re-anchors to the pending successor to match its Propose");
-        check(pendingFresh.nodeRects.at("B1").y == pendingStable.nodeRects.at("B1").y &&
-                  pendingStable.nodeRects.at("B1").y == provisionalLayout.nodeRects.at("B1").y,
-              "distillation correlation does not reparent an explicit result belief");
-        m.applyLine(R"({"type":"FrameOpened","taskId":"t-2","frameId":"f2","ordinal":2})");
-        GraphTaskState materialized = projectGraphTask(m);
-        const GraphNode* after = nullptr;
-        for (const GraphNode& n : materialized.nodes) if (n.family == NodeFamily::Propose) after = &n;
-        check(after && after->id.value == "d1" && after->frameId && *after->frameId == "f2",
-              "proposal remaps to the real successor without changing its id");
-        check(materialized.frames.size() == 2 && materialized.frames.back().id == "f2",
-              "real successor replaces the pending container");
-    }
-
-    // --- Create is a sub-state of the write-back semantic, not a separate edge ---
-    {
-        check(edgeIsCreate(EdgeSemanticType::ProposeToBelief, BeliefOperation::Create),
-              "create is a Propose->Belief write-back sub-state");
-        check(edgeIsCreate(EdgeSemanticType::DistillToBelief, BeliefOperation::Create),
-              "create is a Distill->Belief write-back sub-state");
-        check(!edgeIsCreate(EdgeSemanticType::ProposeToBelief, BeliefOperation::Update),
-              "non-create Propose write-back is not the create sub-state");
-        check(!edgeIsCreate(EdgeSemanticType::ProposeToBelief, std::nullopt),
-              "no operation is not a create write-back");
-        check(!edgeIsCreate(EdgeSemanticType::DistillToPropose, BeliefOperation::Create),
-              "non-write-back semantics are never create");
-    }
-
-    // --- M1: belief node title carries the authoritative status suffix ---
-    {
-        GraphNode b;
-        b.id = NodeId{"B1"};
-        b.title = "B1";
-        b.family = NodeFamily::Belief;
-        b.domain = "";
-        b.displayType = "";
-        check(beliefNodeTitle(b) == "Belief B1", "no status -> no suffix (Belief B1)");
-        b.displayType = "belief";
-        check(beliefNodeTitle(b) == "Belief B1", "'belief' placeholder -> no suffix");
-        b.displayType = "proposed";
-        check(beliefNodeTitle(b) == "Belief B1 (proposed)", "proposed suffix");
-        b.displayType = "supported";
-        check(beliefNodeTitle(b) == "Belief B1 (supported)", "supported suffix");
-        b.displayType = "refuted";
-        check(beliefNodeTitle(b) == "Belief B1 (refuted)", "refuted suffix");
-        b.displayType = "superseded";
-        check(beliefNodeTitle(b) == "Belief B1 (superseded)", "authoritative 'superseded' spelling");
-        check(beliefNodeTitle(b) != "Belief B1 (superceded)", "misspelling 'superceded' is not emitted");
-        b.domain = "code";
-        check(beliefNodeTitle(b) == "Belief B1 (superseded)", "code domain keeps Belief prefix (no Target/Route)");
-        b.title = "";
-        check(beliefNodeTitle(b) == "Belief B1 (superseded)", "empty title falls back to id");
+        check(propose != nullptr && propose->dashed, "a proposing delta draws dashed");
+        check(support != nullptr && !support->dashed, "a supporting delta draws solid");
     }
 
     // ---------------------------------------------------------------------
-    // planNodeTitle: the Plan node must carry the decision the plan informs.
-    // Plan nodes have no tooltip, so the label is the only place the intent can
-    // appear; an empty intent must degrade to exactly the pre-change label.
+    // Source citations into the Frame rail: the first auditable surface for them
+    // ---------------------------------------------------------------------
+    check(hasEdge(state, EdgeSemanticType::SourceToFormulation, "B:belief-1", "Fv:formulation-2"),
+          "a belief source cites the version it shaped");
+    check(hasEdge(state, EdgeSemanticType::SourceToFormulation, "exec:exec-3", "Fv:formulation-2"),
+          "an execution source cites the version it shaped");
+    // formulation-2 cites a prompt, a correction and a belief; only the belief and
+    // the execution have nodes.
+    check(countEdges(state, EdgeSemanticType::SourceToFormulation) == 2,
+          "only citations that name a drawn record become links");
+
+    // ---------------------------------------------------------------------
+    // The recheck
+    // ---------------------------------------------------------------------
+    check(hasEdge(state, EdgeSemanticType::RecheckToEpisode, "recheck:episode-2", "row:episode-2"),
+          "recheck -> episode comes from recheck.episodeId");
+    check(countFamily(state, NodeFamily::Recheck) == 1 &&
+              findFamily(state, NodeFamily::Recheck, "episode-2") != nullptr,
+          "the recheck is drawn in the row it reconsiders");
+
+    // ---------------------------------------------------------------------
+    // No dangling edges: every endpoint is a real node
     // ---------------------------------------------------------------------
     {
-        GraphNode p;
-        p.id = NodeId{"P-1"};
-        p.title = "P-1";
-        p.family = NodeFamily::Plan;
-        check(planNodeTitle(p) == "Plan P-1", "no intent -> bare family label");
-        p.compactText = "whether to change the caller or the adapter";
-        check(planNodeTitle(p) == "Plan P-1 · whether to change the caller or the adapter",
-              "intent is appended to the family label");
-        p.compactText = "  whether  to\nchange\tthe adapter  ";
-        check(planNodeTitle(p) == "Plan P-1 · whether to change the adapter",
-              "whitespace and newlines collapse to single spaces");
-        p.compactText.clear();
-        p.compactText.assign(80, 'x');
-        const std::string truncated = planNodeTitle(p);
-        check(truncated.size() < 80, "a long intent is truncated");
-        check(truncated.rfind("…") != std::string::npos, "truncation is marked with an ellipsis");
-        p.title = "";
-        p.compactText.clear();
-        check(planNodeTitle(p) == "Plan P-1", "empty title falls back to the id");
-
-        // Non-Plan families are untouched by this builder.
-        GraphNode e;
-        e.id = NodeId{"E-1"};
-        e.family = NodeFamily::Execution;
-        e.title = "read requirements.txt";
-        check(e.title == "read requirements.txt", "execution label is unaffected");
+        bool allResolve = true;
+        for (const GraphEdge& edge : state.edges) {
+            if (state.node(edge.source) == nullptr || state.node(edge.target) == nullptr) {
+                allResolve = false;
+                std::fprintf(stderr, "  dangling edge %s -> %s\n", edge.source.value.c_str(),
+                             edge.target.value.c_str());
+            }
+        }
+        check(allResolve, "every edge endpoint is a projected node");
     }
 
     // ---------------------------------------------------------------------
-    // Task scope and task outcome: projected from the SELECTED task, and the
-    // outcome band is placed below every LoopFrame without moving existing
-    // geometry.
+    // Fast path: no plan, and no invented one
     // ---------------------------------------------------------------------
     {
-        NativeGuiModel model;
-        model.applyLine(R"({"type":"TaskOpened","taskId":"task-1","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
-        model.applyLine(R"({"type":"FrameOpened","taskId":"task-1","frameId":"frame-1","ordinal":1})");
-        delta(model, "frame-1", "delta-1", "propose", "belief-1");
-        delta(model, "frame-1", "delta-2", "propose", "belief-2");
-        // belief-1 is in scope, belief-2 is retained history the task is not acting on.
-        model.applyLine(R"({"type":"FocusDeclared","taskId":"task-1","beliefIds":["belief-1"]})");
-        model.applyLine(R"({"type":"PlanProduced","taskId":"task-1","frameId":"frame-1","plan":{"id":"plan-1","selectedToExplore":["belief-1"],"intent":"whether to change the caller or the adapter"}})");
-        model.applyLine(R"({"type":"CursorChanged","taskId":"task-1","frameId":"frame-1","stage":"executing"})");
-
-        GraphTaskState state = projectGraphTask(model);
-        check(state.focusDeclared, "projection reports the declared focus");
-        check(state.focusBeliefIds.size() == 1 && state.focusBeliefIds[0] == "belief-1",
-              "projection carries the focus ids verbatim");
-
-        const GraphNode* inFocus = nullptr;
-        const GraphNode* retained = nullptr;
-        const GraphNode* plan = nullptr;
-        for (const GraphNode& n : state.nodes) {
-            if (n.id.value == "belief-1") inFocus = &n;
-            if (n.id.value == "belief-2") retained = &n;
-            if (n.family == NodeFamily::Plan) plan = &n;
-        }
-        check(inFocus && inFocus->inFocus, "the focused belief is marked in focus");
-        check(retained && !retained->inFocus, "a belief outside the focus is retained history");
-        check(inFocus && !inFocus->frameId.has_value(), "focus does not make a belief frame-owned");
-        check(plan && planNodeTitle(*plan).find("whether to change the caller or the adapter") != std::string::npos,
-              "the projected Plan node surfaces its decision through planNodeTitle");
-
-        // No outcome yet: no band, and the canvas is exactly the pre-change geometry.
-        PieGraphLayout before = computeGraphLayout(state);
-        check(before.taskOutcomeRect.w == 0.0f, "no outcome -> no band");
-
-        model.applyLine(R"({"type":"TaskOutcomeRecorded","taskId":"task-1","outcome":{"result":"changed the adapter","evidence":"the propagation test passed","blockers":"the timeout path is untested"}})");
-        GraphTaskState withOutcome = projectGraphTask(model);
-        check(withOutcome.taskOutcome.present, "projection reports the recorded outcome");
-        check(withOutcome.taskOutcome.blockers == "the timeout path is untested", "projection carries blockers");
-
-        PieGraphLayout after = computeGraphLayout(withOutcome);
-        check(after.taskOutcomeRect.w > 0.0f && after.taskOutcomeRect.h > 0.0f, "outcome band has positive size");
-        check(after.canvasHeight > before.canvasHeight, "the band extends the canvas");
-        // The band sits below every frame and overlaps no node.
-        float lowestFrameBottom = 0.0f;
-        for (const auto& entry : after.frameRects) {
-            const float bottom = entry.second.y + entry.second.h;
-            if (bottom > lowestFrameBottom) lowestFrameBottom = bottom;
-        }
-        check(after.taskOutcomeRect.y >= lowestFrameBottom, "the band is placed below the last LoopFrame");
-        for (const auto& entry : after.nodeRects) {
-            const GraphRect& n = entry.second;
-            const bool overlaps = after.taskOutcomeRect.x < n.x + n.w && n.x < after.taskOutcomeRect.x + after.taskOutcomeRect.w &&
-                                  after.taskOutcomeRect.y < n.y + n.h && n.y < after.taskOutcomeRect.y + after.taskOutcomeRect.h;
-            check(!overlaps, "the band overlaps no node rect");
-        }
+        // A fast-path episode is the same chain minus the plan. Build one from a
+        // minimal stream rather than from the demo, which has no fast path.
+        NativeGuiModel fast;
+        const char* lines[] = {
+            R"({"type":"TaskOpened","schemaVersion":7,"eventId":"f1","taskId":"t-fast","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})",
+            R"({"type":"EpisodeOpened","schemaVersion":7,"eventId":"f2","taskId":"t-fast","episodeId":"e-fast","ordinal":1})",
+            R"({"type":"RoutingDecided","schemaVersion":7,"eventId":"f3","taskId":"t-fast","episodeId":"e-fast","routing":{"id":"r-fast","statement":"s","decision":"fast-path","suitabilityProbability":0.9,"successProbability":0.9,"estimatedSteps":1,"difficulty":"low","reason":"r"}})",
+            // The fast path has no Plan to carry the adoption, so the body selection
+            // records it directly. A fast-path selection WITHOUT one is refused by
+            // the contract, which is why the field is here rather than omitted.
+            R"({"type":"EpisodeBodySelected","schemaVersion":7,"eventId":"f4","taskId":"t-fast","episodeId":"e-fast","body":"fast-path","formulation":{"kind":"unformed"}})",
+            R"({"type":"ExecutionStarted","schemaVersion":7,"eventId":"f5","taskId":"t-fast","episodeId":"e-fast","execution":{"id":"x-fast","intention":"look","tool":"bash","input":{"command":"ls"}}})",
+            R"({"type":"ExecutionCompleted","schemaVersion":7,"eventId":"f6","taskId":"t-fast","episodeId":"e-fast","executionId":"x-fast","output":"a","status":"succeeded"})",
+        };
+        for (const char* line : lines) applyRpcLine(fast, line);
+        const GraphTaskState fastState = projectGraphTask(fast);
+        check(countFamily(fastState, NodeFamily::Plan) == 0,
+              "a fast-path episode projects no plan node (the plan is not invented)");
+        check(countEdges(fastState, EdgeSemanticType::PlanToExecution) == 0,
+              "a fast-path episode projects no plan -> execution edge");
+        check(countFamily(fastState, NodeFamily::Execution) == 1,
+              "the fast-path execution is still projected");
+        check(fastState.rows.size() == 1 && fastState.rows[0].routingDecision == "fast-path",
+              "the row says which decision routed it");
+        check(fastState.rows.size() == 1 && fastState.rows[0].bodyKind == "fast-path",
+              "the row says which body kind it is (this is what separates it from a closed belief loop)");
     }
 
     // ---------------------------------------------------------------------
-    // A model with frames but no task projects without scope or outcome rather
-    // than failing (several fixtures open frames directly).
+    // The current station, per stage
     // ---------------------------------------------------------------------
     {
-        NativeGuiModel model;
-        model.applyLine(R"({"type":"FrameOpened","taskId":"task-x","frameId":"frame-x","ordinal":1})");
-        delta(model, "frame-x", "delta-x", "propose", "belief-x");
-        GraphTaskState state = projectGraphTask(model);
-        check(!state.focusDeclared, "no task -> focus stays undeclared");
-        check(!state.taskOutcome.present, "no task -> no outcome");
-        bool anyInFocus = false;
-        for (const GraphNode& n : state.nodes) {
-            if (n.inFocus) anyInFocus = true;
+        // Walk the cursor through the stages the demo's own CursorChanged lines
+        // use, and check the resolved station each time.
+        struct Case {
+            const char* stage;
+            const char* expectedFamily;
+        };
+        const Case cases[] = {
+            {"routing", "routing"},
+            {"proposing", "plan"},
+            {"executing", "execution"},
+            {"distilling", "distillation"},
+        };
+        for (const Case& c : cases) {
+            NativeGuiModel m = demoModel();
+            const std::string line = std::string("{\"type\":\"CursorChanged\",\"schemaVersion\":7,"
+                                                 "\"eventId\":\"cursor-probe\",\"taskId\":\"task-1\","
+                                                 "\"episodeId\":\"episode-1\",\"stage\":\"") +
+                                     c.stage + "\"}";
+            applyRpcLine(m, line);
+            const GraphTaskState s = projectGraphTask(m);
+            check(s.currentNode.has_value(), "the cursor resolves to a station");
+            const GraphNode* node = s.currentNode.has_value() ? s.node(*s.currentNode) : nullptr;
+            check(node != nullptr && std::string(nodeFamilyToString(node->family)) == c.expectedFamily,
+                  (std::string("stage ") + c.stage + " resolves to the " + c.expectedFamily +
+                   " station").c_str());
+            check(node != nullptr && node->state == NodeVisualState::Current,
+                  (std::string("stage ") + c.stage + " marks the station current").c_str());
         }
-        check(!anyInFocus, "no task -> nothing is in focus");
+        // `closed` resolves to the distillation station, FADED. That is not a
+        // station of its own: "the round finished here" is a different claim from
+        // "work is happening here" (§6.1).
+        {
+            NativeGuiModel m = demoModel();
+            applyRpcLine(m, R"({"type":"CursorChanged","schemaVersion":7,"eventId":"cursor-closed","taskId":"task-1","episodeId":"episode-1","stage":"closed"})");
+            const GraphTaskState s = projectGraphTask(m);
+            const GraphNode* node = s.currentNode.has_value() ? s.node(*s.currentNode) : nullptr;
+            check(node != nullptr && node->family == NodeFamily::Distillation,
+                  "stage closed resolves to the distillation station");
+            check(node != nullptr && node->state == NodeVisualState::CurrentFaded,
+                  "stage closed marks it faded, not current");
+        }
+        // An unknown stage resolves to nothing rather than to an arbitrary node.
+        {
+            NativeGuiModel m = demoModel();
+            applyRpcLine(m, R"({"type":"CursorChanged","schemaVersion":7,"eventId":"cursor-unknown","taskId":"task-1","episodeId":"episode-1","stage":"invented"})");
+            const GraphTaskState s = projectGraphTask(m);
+            check(!s.currentNode.has_value(), "an unknown stage leaves no current station");
+        }
+        // A cursor for a different task leaves this projection without a current
+        // station rather than highlighting a station the cursor never named.
+        // (The cursor cannot be pointed at a task the model has no record of: the
+        // applier refuses a dangling citation, so the case needs two real tasks.)
+        {
+            NativeGuiModel m = demoModel();
+            applyRpcLine(m, R"({"type":"TaskOpened","schemaVersion":7,"eventId":"cursor-task","taskId":"task-2","initialPrompt":{"id":"p2","original":"second","effective":"second"},"inheritedBeliefs":[]})");
+            applyRpcLine(m, R"({"type":"EpisodeOpened","schemaVersion":7,"eventId":"cursor-ep","taskId":"task-2","episodeId":"episode-9","ordinal":1})");
+            applyRpcLine(m, R"({"type":"CursorChanged","schemaVersion":7,"eventId":"cursor-other","taskId":"task-2","episodeId":"episode-9","stage":"executing"})");
+            check(m.cursor().taskId == "task-2", "the cursor moved to the second task");
+            check(projectedTask(m) != nullptr && projectedTask(m)->id == "task-2",
+                  "the projected task follows the cursor");
+            const GraphTaskState s = projectGraphTask(m, m.task("task-1"));
+            check(!s.currentNode.has_value(), "a cursor for another task highlights nothing");
+            check(s.cursorStage == EpisodeStage::Unknown,
+                  "the projection does not borrow the other task's stage");
+        }
     }
 
-    if (failures == 0) std::printf("PASS\n");
-    std::printf("graph test: %s\n", failures == 0 ? "PASS" : "FAIL");
+    // The demo's own final cursor: episode-1, closed (no CursorChanged ever named
+    // episode-2, and the runtime's cursor only moves on an explicit event).
+    check(state.cursorStage == EpisodeStage::Closed, "the demo's cursor stage is closed");
+    check(state.currentNode.has_value() &&
+              state.node(*state.currentNode)->episodeId == "episode-1",
+          "the current station is in the episode the cursor names");
+    {
+        bool oneFaded = false;
+        for (const GraphNode& node : state.nodes) {
+            if (node.state == NodeVisualState::CurrentFaded) oneFaded = true;
+        }
+        check(oneFaded, "exactly the cursor's station is marked faded");
+        check(state.rows.size() == 2 && state.rows[0].current && !state.rows[1].current,
+              "the cursor's row is marked current");
+    }
+
+    // ---------------------------------------------------------------------
+    // Belief rail semantics
+    // ---------------------------------------------------------------------
+    {
+        const GraphNode* b1 = state.node("B:belief-1");
+        const GraphNode* b2 = state.node("B:belief-2");
+        check(b1 != nullptr && b2 != nullptr, "both beliefs resolved");
+        check(b1 != nullptr && b1->title == "B1", "the belief's title is its derived label");
+        check(b2 != nullptr && b2->title == "B2", "labels come from record order");
+        // status is DERIVED from provenance; the projection reads the derivation,
+        // it does not invent one.
+        check(b1 != nullptr && b1->beliefStatus == BeliefStatus::Refuted,
+              "belief-1's projected status is the derived one (refuted)");
+        check(b2 != nullptr && b2->beliefStatus == BeliefStatus::Proposed,
+              "belief-2 was never adjudicated, so it is proposed");
+        check(b1 != nullptr && b1->inFocus, "the declared focus marks the belief in focus");
+        check(b2 != nullptr && !b2->inFocus, "a belief outside the focus is not marked");
+    }
+
+    // ---------------------------------------------------------------------
+    // The outcome band
+    // ---------------------------------------------------------------------
+    check(state.taskOutcome.present, "the recorded outcome is projected");
+    check(state.taskOutcome.blockers == "only the local runtime was checked",
+          "the outcome carries its blockers");
+
+    // ---------------------------------------------------------------------
+    // Every node has a tooltip, and every label is non-empty
+    // ---------------------------------------------------------------------
+    {
+        bool allTitled = true;
+        bool allHaveTooltips = true;
+        for (const GraphNode& node : state.nodes) {
+            if (node.title.empty()) {
+                allTitled = false;
+                std::fprintf(stderr, "  untitled node %s\n", node.id.value.c_str());
+            }
+            // §6.1/M5: every node family gets a tooltip. The v1 canvas deliberately
+            // omitted Plan and Distill; that carve-out is gone.
+            if (node.fullText.empty()) {
+                allHaveTooltips = false;
+                std::fprintf(stderr, "  no tooltip for %s\n", node.id.value.c_str());
+            }
+        }
+        check(allTitled, "every node has a title");
+        check(allHaveTooltips, "every node has a tooltip body, including Plan and Distill");
+    }
+    {
+        const GraphNode* plan = findFamily(state, NodeFamily::Plan, "episode-1");
+        check(plan != nullptr && plan->fullText.find("adoption") != std::string::npos,
+              "the plan's tooltip carries its adoption, which §6.1 requires");
+        const GraphNode* distill = findFamily(state, NodeFamily::Distillation, "episode-1");
+        check(distill != nullptr && distill->fullText.find("inputs") != std::string::npos,
+              "the distillation's tooltip names its inputs");
+        const GraphNode* exec = findFamily(state, NodeFamily::Execution, "episode-1");
+        check(exec != nullptr && exec->fullText.find("plan: plan-1") != std::string::npos,
+              "the execution's tooltip names the plan it belongs to");
+    }
+
+    // ---------------------------------------------------------------------
+    // Determinism
+    // ---------------------------------------------------------------------
+    {
+        const GraphTaskState again = projectGraphTask(model);
+        check(again.nodes.size() == state.nodes.size() && again.edges.size() == state.edges.size(),
+              "projecting twice gives the same shape");
+        bool identical = true;
+        for (size_t i = 0; i < state.nodes.size(); ++i) {
+            if (state.nodes[i].id.value != again.nodes[i].id.value ||
+                state.nodes[i].fullText != again.nodes[i].fullText) {
+                identical = false;
+            }
+        }
+        check(identical, "projecting twice gives byte-identical nodes");
+    }
+    // A state with no cursor at all still projects the task.
+    {
+        NativeGuiModel m = demoModel();
+        // Replace the state with one whose cursor is absent by projecting a task
+        // the cursor does not name.
+        const GraphTaskState s = projectGraphTask(m, m.task("task-1"));
+        check(!s.nodes.empty(), "an explicit task projects even when the cursor names another");
+    }
+
+    // ---------------------------------------------------------------------
+    // Layout
+    // ---------------------------------------------------------------------
+    {
+        const PieGraphLayout layout = computeGraphLayout(state);
+        check(layout.nodes.size() == state.nodes.size(),
+              "every projected node has a dot (none silently dropped)");
+        check(layout.gutters.size() == state.rows.size(), "every row has a gutter");
+
+        bool positive = true;
+        for (const GraphNode& node : state.nodes) {
+            const Dot* dot = layout.dot(node.id.value);
+            if (dot == nullptr || dot->r <= 0.0f) {
+                positive = false;
+                std::fprintf(stderr, "  no positive dot for %s\n", node.id.value.c_str());
+            }
+        }
+        check(positive, "every dot has a positive radius");
+
+        // No two dots overlap. Dots are circles, so the test is the distance
+        // against the summed radii — the radial equivalent of the v1 rect test.
+        {
+            bool overlaps = false;
+            for (size_t i = 0; i < state.nodes.size(); ++i) {
+                for (size_t j = i + 1; j < state.nodes.size(); ++j) {
+                    const Dot* a = layout.dot(state.nodes[i].id.value);
+                    const Dot* b = layout.dot(state.nodes[j].id.value);
+                    if (a == nullptr || b == nullptr) continue;
+                    const float dx = a->x - b->x;
+                    const float dy = a->y - b->y;
+                    if (dx * dx + dy * dy < (a->r + b->r) * (a->r + b->r)) {
+                        overlaps = true;
+                        std::fprintf(stderr, "  %s overlaps %s\n", state.nodes[i].id.value.c_str(),
+                                     state.nodes[j].id.value.c_str());
+                    }
+                }
+            }
+            check(!overlaps, "no two dots overlap");
+        }
+
+        // Row bands stack without overlapping, in ordinal order.
+        {
+            bool stacked = true;
+            for (size_t i = 1; i < layout.gutters.size(); ++i) {
+                const GraphRect& above = layout.gutters[i - 1].rect;
+                const GraphRect& below = layout.gutters[i].rect;
+                if (above.y + above.h > below.y) stacked = false;
+            }
+            check(stacked, "row bands stack without overlapping");
+        }
+
+        // The rails are above the rows, and the outcome band is below them.
+        {
+            const float firstRowY = layout.gutters.empty() ? 0.0f : layout.gutters.front().rect.y;
+            check(layout.versionRail.y + layout.versionRail.h <= firstRowY,
+                  "the Frame rail sits above the first row");
+            const float lastRowBottom =
+                layout.gutters.empty() ? 0.0f
+                                       : layout.gutters.back().rect.y + layout.gutters.back().rect.h;
+            check(layout.outcomeBand.y >= lastRowBottom,
+                  "the outcome band sits below every row, never inside one");
+            check(layout.outcomeBand.w > 0.0f, "the outcome band has a positive width");
+        }
+
+        check(layout.canvasWidth > 0.0f && layout.canvasHeight > 0.0f,
+              "the canvas extent is positive");
+        {
+            // Nothing is placed outside the canvas.
+            bool inside = true;
+            for (const auto& entry : layout.nodes) {
+                const Dot& dot = entry.second;
+                if (dot.x - dot.r < 0.0f || dot.y - dot.r < 0.0f ||
+                    dot.x + dot.r > layout.canvasWidth || dot.y + dot.r > layout.canvasHeight) {
+                    inside = false;
+                    std::fprintf(stderr, "  %s outside the canvas\n", entry.first.c_str());
+                }
+            }
+            check(inside, "every dot is inside the canvas extent");
+        }
+        // Deterministic: the same state lays out identically.
+        {
+            const PieGraphLayout again = computeGraphLayout(state);
+            bool identical = again.nodes.size() == layout.nodes.size();
+            for (const auto& entry : layout.nodes) {
+                const auto it = again.nodes.find(entry.first);
+                if (it == again.nodes.end() || it->second.x != entry.second.x ||
+                    it->second.y != entry.second.y) {
+                    identical = false;
+                }
+            }
+            check(identical, "the layout is deterministic");
+        }
+        // The belief rail is a column: every belief shares an x, and their y is
+        // ordered by record order.
+        {
+            std::vector<const Dot*> beliefDots;
+            for (const GraphNode& node : state.nodes) {
+                if (node.family == NodeFamily::Belief) beliefDots.push_back(layout.dot(node.id.value));
+            }
+            check(beliefDots.size() == 2 && beliefDots[0] != nullptr && beliefDots[1] != nullptr &&
+                      beliefDots[0]->x == beliefDots[1]->x,
+                  "the belief rail is a single column");
+            check(beliefDots.size() == 2 && beliefDots[1]->y > beliefDots[0]->y,
+                  "the belief column is ordered by record order");
+        }
+        // A row's stations are ordered left to right by station order.
+        {
+            const Dot* route = layout.dot("route:routing-1");
+            const Dot* plan = layout.dot("plan:plan-1");
+            const Dot* exec = layout.dot("exec:exec-1");
+            const Dot* distill = layout.dot("distill:distillation-1");
+            check(route != nullptr && plan != nullptr && exec != nullptr && distill != nullptr,
+                  "the first row's stations are all placed");
+            check(route != nullptr && plan != nullptr && route->x < plan->x,
+                  "routing comes before the plan");
+            check(plan != nullptr && exec != nullptr && plan->x < exec->x,
+                  "the plan comes before its executions");
+            check(exec != nullptr && distill != nullptr && exec->x < distill->x,
+                  "the executions come before the distillation");
+        }
+        // The rail dots are above the row dots, and the row anchor is left of its
+        // stations.
+        {
+            const Dot* version = layout.dot("Fv:formulation-1");
+            const Dot* route = layout.dot("route:routing-1");
+            const Dot* anchor = layout.dot("row:episode-1");
+            check(version != nullptr && route != nullptr && version->y < route->y,
+                  "the Frame rail is above the rows");
+            check(anchor != nullptr && route != nullptr && anchor->x < route->x,
+                  "the row anchor sits in the gutter, left of the stations");
+        }
+        // An empty state still lays out: a zero canvas would make a consumer's
+        // division undefined.
+        {
+            const GraphTaskState empty;
+            const PieGraphLayout emptyLayout = computeGraphLayout(empty);
+            check(emptyLayout.nodes.empty(), "an empty state places no dots");
+            check(emptyLayout.canvasWidth > 0.0f && emptyLayout.canvasHeight > 0.0f,
+                  "an empty state still has a positive canvas");
+            check(!emptyLayout.outcomeBand.w, "an empty state has no outcome band");
+        }
+    }
+
+    if (failures == 0) {
+        std::printf("ALL PASS\n");
+    } else {
+        std::printf("%d FAILURES\n", failures);
+    }
     return failures == 0 ? 0 : 1;
 }

@@ -19,7 +19,7 @@ namespace pie::gui {
 
 // The pan that centers `nodeId` in a viewW x viewH viewport at the given zoom.
 // Independent of the current pan, so it can be used for first-entry and explicit
-// Focus Current. Returns {0,0} if the node has no rect.
+// Focus Current. Returns {0,0} if the node has no dot.
 struct PanResult {
     float x = 0.0f;
     float y = 0.0f;
