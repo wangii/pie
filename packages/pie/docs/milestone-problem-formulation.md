@@ -26,9 +26,9 @@
 当前运行时细节见 [domain-model.md](domain-model.md) 与 [belief-loop-roles.md](belief-loop-roles.md)。
 
 另一个增量——distillation 的两路反馈与每轮 Frame 重审——见
-[milestone-formulation-recheck.md](milestone-formulation-recheck.md)。决策 1–7 已确认，M7.1–M7.3
-（文档回写、residual 承载、门槛与重审记录、协议 v6）已实现，M7.4–M7.5（投影、终端呈现与回归）
-尚未实现。该文件已确认的契约是：
+[milestone-formulation-recheck.md](milestone-formulation-recheck.md)。决策 1–7 已确认，M7.1–M7.5
+（文档回写、residual 承载、门槛与重审记录、投影与终端呈现、回归与协议 v6）已实现；唯一未完成项
+是终端人工验证。该文件已确认的契约是：
 
 - residual 仍只以 distill 散文承载，不新增事件、字段、折叠或快照；呈现单位是一条 residual
   含多个观察，每个观察附来源。因此“每轮把异常送进重审”靠的是重审本身，而不是一条异常记录。
@@ -144,7 +144,7 @@ distillation
 为什么不是串行的一步接一步：异常（residual）不需要先变成 belief 才能影响理解，而 belief
 集合没有变化也仍然可能需要重审。两路不可互相替代：重审不能结清未裁定的 belief，裁定也
 不能代替“这些 beliefs 对当前任务意味着什么”的判断。本节的循环描述现有设计；“每轮重审必须
-留下可回放的结果”已由 M7.3 实现（门槛与任务级重审记录，协议 v6），其呈现仍待 M7.4；而
+留下可回放的结果”已由 M7.3 实现（门槛与任务级重审记录，协议 v6），其呈现已由 M7.4 落地；而
 “residual 需要记录”已确认不做（决策 1 选 B，见
 [milestone-formulation-recheck.md](milestone-formulation-recheck.md)）。
 
@@ -593,7 +593,7 @@ fast path 有 Frame 后才能成功关闭，发布失败不能假成功，收尾
 ### M6：回归验证与文档收敛
 
 - [ ] 完成下列关键场景测试，更新角色、领域模型及 framing-belief 历史说明中的关联文档。
-- [x] 在 docs/README.md 索引本 milestone，并标记为待实现。
+- [x] 在 docs/README.md 索引本 milestone，当时标注为“待实现”（本次文档收敛后，README 该行改为 “M1–M5 implemented, M6 partially complete”）。
 - [ ] 随实现更新文档状态，区分已实现契约与尚未完成的阶段。
 - [ ] 全部代码检查通过，完成终端人工验证，记录协议变更及 GUI 后续依赖。
 

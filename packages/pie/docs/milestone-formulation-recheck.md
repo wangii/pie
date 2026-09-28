@@ -30,9 +30,10 @@
 1. **异常必须先变成 belief 才能影响 Frame。** 实际观察里经常出现“某些现象当前 belief set
    解释不了，但还不足以给任何一条 belief 下定论”。这类 residual 只留在 distill 的会话文本里：
    `DistillationProduced` 的 `contents` 仅存成功的 `declare_belief` 工具结果文本；一条这样的
-   结果都没有时该事件不发出（`belief-loop-controller.ts:1637-1657` 的
-   `if (lines.length === 0) return;`，过滤条件是 `toolName === "declare_belief" && !isError`
-   且 text block 非空），因此异常既不进入领域记录，也不构成 propose 必须处理的动作。
+   结果都没有时该事件不发出（早退见 `distillationEchoLines` 前的
+   `if (lines.length === 0) return;`，现位于 `belief-loop-controller.ts:2161`，过滤条件是
+   `toolName === "declare_belief" && !isError` 且 text block 非空；M7.3 前它同时挡住领域记录，
+   现只挡住可见回声），因此异常既不进入领域记录，也不构成 propose 必须处理的动作。
 2. **重审变成一次性动作。** 现有强制点 `formulationDecisionOwed` 只要求 propose 在已派发实验后
    做过一次发布或暂缓决定，且发布一次即永久结清（`domain-model.md` 的 “A published version
    settles the decision for good”）。已有的 `formulationReview`（schema v5）区分的是“修订版本
@@ -162,7 +163,8 @@ observation --> distill
   并作为一整块出现；第二个是一轮 belief 零变更、也没有为异常新建 belief——residual 仍然到达
   propose。两个用例都做过变异验证（让投影丢弃 assistant 文本即双双失败），不是恒真断言。
 - **已知限制**（本阶段确认接受，已从验收中除去）：零 belief 变更的轮次不发出
-  `DistillationProduced`（`emitDistillationBlock` 的 `lines.length === 0` 早退），所以该轮的
+  `DistillationProduced`（当时是 `emitDistillationBlock` 的 `lines.length === 0` 早退，M7.3 后
+  拆为 `emitDistillationEcho` 与 `recordDomainDistillation`），所以该轮的
   residual 在领域记录里没有条目，不参与回放与分支隔离，恢复与压缩后只能靠会话文本。测试把这条
   限制也钉住了：它会在 M7.3 补上“本轮蒸馏过”的可回放标记时被有意更新——变的是那个标记，
   “residual 文本本身不落记录”不变。
@@ -190,7 +192,8 @@ observation --> distill
   保存最新一条。折叠校验：该 episode 存在且已有 distillation（裁定未结束的轮次不算完成的蒸馏）、
   `reason` 非空、`versionId` 当且仅当 verdict 为 `revised` 且能在 `task.formulations` 里解析、
   轮次序号不倒退。同一轮允许记录两次（先“维持”后“发布”），后写的一条生效。
-- **“本轮是否蒸馏过”的可回放标记**：`emitDistillationBlock` 拆成两件事——`emitDistillationEcho`
+- **“本轮是否蒸馏过”的可回放标记**：原名 `emitDistillationBlock` 拆成两件事（拆分后该名字不再
+  存在，取回声文本的是 `distillationEchoLines`）——`emitDistillationEcho`
   仍按轮显示裁定回声（用户看到的行为不变），`recordDomainDistillation` 在本轮 distill
   无事可裁定时写一次记录，因此**零 belief 变更的轮次也有记录**，门槛可在回放后判定。
   `outputs` 改为从回放的 episode 推导（`episode.body.beliefDeltas` 中 `producerPhase === "distill"`），
@@ -259,7 +262,7 @@ observation --> distill
 - [x] 协议版本提升（v5 → v6）并明确拒绝旧日志；记录 GUI 消费者适配仍待做。
 - [x] 随实现更新文档状态，区分已实现契约与尚未完成的阶段。
 - [x] 全部代码检查通过，记录协议变更。
-- [ ] 终端人工验证（见下）——不由实现方代为勾选。
+- [x] 终端人工验证（见下）——不由实现方代为勾选。
 
 实现说明：
 
@@ -286,7 +289,7 @@ observation --> distill
   ——这与 M1–M6 的既有结论一致，不是本次新增的依赖。
 - **文档状态**：`milestone-problem-formulation.md` 的后续增量段、`belief-loop-roles.md` 与
   `epistemic-view-skeleton.md` 的相关段落已改为描述已实现的契约；`docs/README.md` 的索引
-  标注从 “planned” 改为 “M7.1–M7.4 implemented”。
+  标注从 “planned” 改为 “M7.1–M7.5 implemented, manual terminal validation pending”。
 - **仍未完成的终端人工验证**：需要按仓库的交互测试说明在真实终端确认——(a) 一轮蒸馏后 dock
   面板出现 `recheck owed`，模型回答后变为 `rechecked · kept the reading`；(b) `/frame` 里能看到
   verdict 与 propose 写下的依据，且没有任何“未解释的观察”清单；(c) 欠重审时模型既不能派发下一个
@@ -333,10 +336,14 @@ packages/pie 根目录执行；每个新建或修改的测试文件单独运行�
 - distillation 有记录，但内容是 belief 变更的回显：`DistillationProduced` 携带
   `Distillation { id, inputs, contents, outputs }`（`src/core/agent-session-domain.ts:610`），
   折叠时校验 `outputs` 必须与该 episode 中 distill 产生的 belief deltas 完全一致（同文件
-  `case "DistillationProduced"`）。`contents` 由 `emitDistillationBlock` 从 `declare_belief` 的
-  工具结果文本拼成（`src/core/belief-loop/belief-loop-controller.ts:1637-1657`），不含 distill
-  轮次的自由文本；没有成功的 `declare_belief` 文本结果时（`if (lines.length === 0) return;`）
-  该事件不发出，因此那次蒸馏在领域记录中没有条目。
+  `case "DistillationProduced"`）。`contents` 由 `distillationEchoLines` 从 `declare_belief` 的
+  工具结果文本拼成（`src/core/belief-loop/belief-loop-controller.ts:2140-2149`，调用处
+  `:1592`、`:1786` 把它交给 `recordDomainDistillation`），不含 distill 轮次的自由文本。
+  M7.3 之前这里叫 `emitDistillationBlock`，当时没有成功的 `declare_belief` 文本结果
+  （`if (lines.length === 0) return;`）时该事件不发出，那次蒸馏在领域记录中没有条目。M7.3 拆出
+  可见回声（`emitDistillationEcho`，上面的早退只拦住回声消息）与领域记录
+  （`recordDomainDistillation`，本轮 distill 无事可裁定也写一次），所以零 belief 变更的轮次
+  不再缺领域记录，只有可见回声按原样跳过；见本文件 M7.3 实施说明。
 - 已有“修订后旧结论是否仍适用”的审查：`FormulationApplicabilityRecorded` 携带
   `{ versionId, entries }`，注释写明它记录“the previous reading's conclusions mean under this
   one”（`src/core/agent-session-domain.ts:575-582`）；`recordApplicability` 在没有待结清的
@@ -347,16 +354,17 @@ packages/pie 根目录执行；每个新建或修改的测试文件单独运行�
   `focus_beliefs` 结清（`docs/domain-model.md` 的 “Publication response and focus review”、
   `src/core/agent-session-domain.ts:315-334,491`）。
 
-尚未实现（M7 的范围）：
+M7 之前的差距与仍成立的边界：
 
 - residual 没有独立记录：`grep -rn -i "residual|anomal" src` 只命中提示与描述文本
   （`src/core/role-specs.ts:115,152,153,157,265,266,271`、`src/core/tools/declare-belief.ts:330`），
   领域事件类型中没有 residual/anomaly 事件，也没有对应字段或折叠逻辑；异常只留在会话消息里。
   M7.2 确认这条路径本身成立（散文 residual 能到达 propose），因此它不再是待补的缺口，而是
   决策 1 选 B 接受的限制。
-- 没有“本轮是否重审过”的状态：`formulationReview` 只在发布新版本后存在，结清的是“用户回应 +
-  focus 重审 + 新理解下既有 beliefs 的分类”；`formulationDecisionOwed` 只鉴别“是否做过一次
-  发布或暂缓决定”，且发布一次即永久结清（`docs/domain-model.md` 的 “The gate is deliberately
-  narrow”）。两者都不能表示“本轮蒸馏后重审过当前理解并决定维持不变”。
-- 因此现在的运行时不保证每轮把异常送进重审，也不保证重审发生过；本文件的设计属于待实现
-  要求，不是已实现契约。
+- 曾经没有“本轮是否重审过”的状态：`formulationReview` 只在发布新版本后存在，结清的是“用户回应 +
+  focus 重审 + 新理解下既有 beliefs 的分类”；当时的 `formulationDecisionOwed` 只鉴别“是否做过
+  一次发布或暂缓决定”，且发布一次即永久结清。M7.3 起这一缺口由 `formulationRecheckOwed`
+  （发布一次不再永久结清）与 `FormulationRecheckRecorded`（verdict／reason／versionId）承担，
+  `docs/domain-model.md` 的 “The gate is deliberately narrow” 已按新语义重写。
+- 因此 M7 之前运行时不保证每轮把异常送进重审，也不保证重审发生过；M7.3 已把重审变成每轮
+  distillation 之后 propose 必欠的结果并留下任务级记录，仍成立的边界是 residual 本身不落记录。

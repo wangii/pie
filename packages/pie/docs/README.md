@@ -7,7 +7,7 @@ This directory contains only documentation for PIE's epistemic model and belief 
 - [Epistemic boundary](epistemic-view-skeleton.md)
 - [Framing beliefs removal](framing-belief.md)
 - [Agent-session domain model](domain-model.md)
-- [Milestone: Frame as current problem formulation (planned)](milestone-problem-formulation.md)
+- [Milestone: Frame as current problem formulation (M1–M5 implemented, M6 partially complete; terminal manual validation pending)](milestone-problem-formulation.md)
 - [Milestone: Frame reconsideration after distillation (M7.1–M7.5 implemented, manual terminal validation pending)](milestone-formulation-recheck.md)
 
 General CLI, SDK, extension, provider, session, RPC, TUI, and configuration documentation is shared

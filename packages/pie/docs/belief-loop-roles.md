@@ -75,12 +75,12 @@ user request remains the task target rather than being copied into framing belie
 
 | role | responsibility | tools | model |
 |---|---|---|---|
-| `propose` | choose the next material uncertainty; state how the task is currently understood; answer the user's corrections; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `set_formulation`, `defer_formulation`, `answer_correction`, `view_beliefs`, `conclude` | `pie.proposeModel` (default `pie.defaultModel`) |
+| `propose` | choose the next material uncertainty; state how the task is currently understood; answer the user's corrections; select one coherent experiment and the decision it informs | `route_task`, `declare_belief`, `focus_beliefs`, `select_experiment`, `set_formulation`, `defer_formulation`, `recheck_formulation`, `answer_correction`, `review_applicability`, `view_beliefs`, `conclude` | `pie.proposeModel` (default `pie.defaultModel`) |
 | `execution` | gather all materially distinct raw observations; perform minimal interventions when needed | active execution tools plus read-only `view_beliefs` (fast path also `report_outcome`) | `pie.executionModel` |
 | `distill` | adjudicate tested beliefs, inspect residual, and refine the world model | `declare_belief`, `view_beliefs`, `conclude` | `pie.distillationModel` |
 | `finalReport` | synthesize the evidence-grounded answer and preserve uncertainty | none | `pie.reportModel` (default `pie.defaultModel`) |
 
-`set_formulation`, `defer_formulation`, and `answer_correction` are propose's alone. Distill may
+`set_formulation`, `defer_formulation`, `recheck_formulation`, `review_applicability`, and `answer_correction` are propose's alone. Distill may
 find that the residual exposes a reframing, but a suggestion is not the current understanding: only
 propose publishes, and a distill turn cannot state the agent's reading or clear the decision by
 making it itself. Answering a user correction is propose's for the same reason — the user objected
