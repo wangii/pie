@@ -1,6 +1,6 @@
 /**
- * The belief set: the epistemic loop's object — immutable records, append-only except for
- * the single task-end pruning operation (`pruneForNewTask`).
+ * The belief set: the epistemic loop's object — immutable, append-only records; task boundaries
+ * call `pruneForNewTask`, which keeps every record (see below).
  *
  * A belief is a named relational assertion about product or code, carrying a
  * falsifiable `expectation` and a structured `evidenceRounds` estimate. Any number
@@ -283,15 +283,15 @@ export function validateRoutingDifficulty(difficulty: RoutingDifficulty): void {
 /**
  * Mutable-internally, immutable-records belief set. `apply` is the single choke point:
  * every delta is validated and applied as an append-only update (records are replaced
- * with new immutable copies, never mutated in place). The one exception is
- * `pruneForNewTask`, the task-boundary cleanup that drops records whose provenance no
- * longer carries meaning across tasks.
+ * with new immutable copies, never mutated in place). Task boundaries call
+ * `pruneForNewTask`, which keeps every record: a prior refutation or inconclusive judgment can
+ * be selected again in a later task.
  */
 export class BeliefSet {
 	private _beliefs: Belief[] = [];
 	private _nextId = 1;
 
-	/** All belief records currently held; negatives and ephemera are removed at task end by `pruneForNewTask`. */
+	/** All belief records currently held. `pruneForNewTask` keeps them; nothing is removed at task end. */
 	get beliefs(): readonly Belief[] {
 		return this._beliefs;
 	}

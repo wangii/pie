@@ -36,6 +36,7 @@ src/**
 !src/core/role-specs.ts
 !src/core/sdk.ts
 !src/core/settings-manager.ts
+!src/core/settings-storage.ts
 !src/core/skills.ts
 !src/core/slash-commands.ts
 !src/core/system-prompt.ts
@@ -46,10 +47,13 @@ src/**
 !src/core/tools/view-beliefs.ts
 !src/index.ts
 !src/main.ts
+!src/modes/interactive/auth-login.ts
 !src/modes/interactive/components/belief-set-panel.ts
 !src/modes/interactive/components/custom-message.ts
 !src/modes/interactive/components/footer.ts
 !src/modes/interactive/components/frame-panel.ts
+!src/modes/interactive/extension-dialogs.ts
+!src/modes/interactive/format-helpers.ts
 !src/modes/interactive/interactive-mode.ts
 !src/modes/interactive/theme/theme.ts
 !src/modes/print-mode.ts

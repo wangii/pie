@@ -1210,14 +1210,11 @@ function requireAdoption(event: AgentSessionDomainEvent, task: Task, adoption: F
 	}
 }
 
-export function applyAgentSessionDomainEvent(
-	snapshot: AgentSessionSnapshot,
-	event: AgentSessionDomainEvent,
-): AgentSessionSnapshot {
-	if (event.schemaVersion !== AGENT_SESSION_DOMAIN_SCHEMA_VERSION) {
-		fail(event, `unsupported schema version ${event.schemaVersion}`);
-	}
+type AgentSessionDomainEventType = AgentSessionDomainEvent["type"];
 
+type DomainEventApplier = (snapshot: AgentSessionSnapshot, event: AgentSessionDomainEvent) => AgentSessionSnapshot;
+
+function applyTaskEvent(snapshot: AgentSessionSnapshot, event: AgentSessionDomainEvent): AgentSessionSnapshot {
 	switch (event.type) {
 		case "TaskOpened": {
 			if (snapshot.tasks.has(event.taskId)) fail(event, `task ${event.taskId} already exists`);
@@ -1320,6 +1317,13 @@ export function applyAgentSessionDomainEvent(
 			// the model may conclude again with a corrected delivery record.
 			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, taskOutcome: event.outcome }) };
 		}
+		default:
+			return fail(event, `unexpected ${event.type} in the task applier`);
+	}
+}
+
+function applyFormulationEvent(snapshot: AgentSessionSnapshot, event: AgentSessionDomainEvent): AgentSessionSnapshot {
+	switch (event.type) {
 		case "ProblemFormulationRecorded": {
 			const task = requireTask(snapshot, event);
 			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
@@ -1575,6 +1579,13 @@ export function applyAgentSessionDomainEvent(
 			}
 			return { ...snapshot, tasks: replaceTask(snapshot, { ...task, formulationRecheck: recheck }) };
 		}
+		default:
+			return fail(event, `unexpected ${event.type} in the formulation applier`);
+	}
+}
+
+function applyEpisodeEvent(snapshot: AgentSessionSnapshot, event: AgentSessionDomainEvent): AgentSessionSnapshot {
+	switch (event.type) {
 		case "EpisodeOpened": {
 			const task = requireTask(snapshot, event);
 			if (task.status !== "active") fail(event, `task ${task.id} is ${task.status}`);
@@ -1699,6 +1710,13 @@ export function applyAgentSessionDomainEvent(
 				tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, experimentSelection: undefined })),
 			};
 		}
+		default:
+			return fail(event, `unexpected ${event.type} in the episode applier`);
+	}
+}
+
+function applyLoopEvent(snapshot: AgentSessionSnapshot, event: AgentSessionDomainEvent): AgentSessionSnapshot {
+	switch (event.type) {
 		case "BeliefDeltaApplied": {
 			const { task, episode } = requireClassifiedEpisode(snapshot, event);
 			if (episode.body.kind !== "belief-loop")
@@ -1836,11 +1854,56 @@ export function applyAgentSessionDomainEvent(
 			return { ...snapshot, tasks: replaceTask(snapshot, replaceEpisode(task, { ...episode, body })) };
 		}
 		default:
-			// An unrecognized type means a log written by a newer runtime is being replayed by an
-			// older build. Fail loudly: falling through would return an undefined snapshot and crash
-			// much later with no trace of the cause.
-			return fail(event, `unknown domain event type`);
+			return fail(event, `unexpected ${event.type} in the loop applier`);
 	}
+}
+
+// Each event type names the applier that owns its category. The table is what keeps the entry
+// point thin: a `switch` here would hold one branch per event type, so moving the case bodies
+// out would leave the same branch count behind at the entry point.
+const DOMAIN_EVENT_APPLIERS = {
+	TaskOpened: applyTaskEvent,
+	TaskClosed: applyTaskEvent,
+	TargetDefined: applyTaskEvent,
+	FocusDeclared: applyTaskEvent,
+	TaskOutcomeRecorded: applyTaskEvent,
+	ProblemFormulationRecorded: applyFormulationEvent,
+	ProblemFormulationDeferred: applyFormulationEvent,
+	FormulationApproved: applyFormulationEvent,
+	FormulationCorrectionSubmitted: applyFormulationEvent,
+	FormulationCorrectionResolved: applyFormulationEvent,
+	FormulationApplicabilityRecorded: applyFormulationEvent,
+	FormulationRecheckRecorded: applyFormulationEvent,
+	EpisodeOpened: applyEpisodeEvent,
+	RoutingDecided: applyEpisodeEvent,
+	EpisodeBodySelected: applyEpisodeEvent,
+	EpisodeClosed: applyEpisodeEvent,
+	CursorChanged: applyEpisodeEvent,
+	InterventionAdded: applyEpisodeEvent,
+	ExperimentSelected: applyEpisodeEvent,
+	ExperimentSelectionVoided: applyEpisodeEvent,
+	BeliefDeltaApplied: applyLoopEvent,
+	PlanProduced: applyLoopEvent,
+	ExecutionStarted: applyLoopEvent,
+	ExecutionCompleted: applyLoopEvent,
+	DistillationProduced: applyLoopEvent,
+} satisfies Record<AgentSessionDomainEventType, DomainEventApplier>;
+
+export function applyAgentSessionDomainEvent(
+	snapshot: AgentSessionSnapshot,
+	event: AgentSessionDomainEvent,
+): AgentSessionSnapshot {
+	if (event.schemaVersion !== AGENT_SESSION_DOMAIN_SCHEMA_VERSION) {
+		fail(event, `unsupported schema version ${event.schemaVersion}`);
+	}
+	const applier = DOMAIN_EVENT_APPLIERS[event.type] as DomainEventApplier | undefined;
+	if (applier === undefined) {
+		// An unrecognized type means a log written by a newer runtime is being replayed by an
+		// older build. Fail loudly: falling through would return an undefined snapshot and crash
+		// much later with no trace of the cause.
+		return fail(event, `unknown domain event type`);
+	}
+	return applier(snapshot, event);
 }
 
 export function replayAgentSessionDomainEvents(

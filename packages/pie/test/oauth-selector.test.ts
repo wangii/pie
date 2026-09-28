@@ -1,8 +1,8 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { AuthLoginFlow } from "../src/modes/interactive/auth-login.ts";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -17,7 +17,7 @@ describe("OAuthSelectorComponent", () => {
 
 	it("projects provider-owned auth options without provider-specific filtering", () => {
 		const getLoginProviderOptions = (
-			InteractiveMode as unknown as {
+			AuthLoginFlow as unknown as {
 				prototype: {
 					getLoginProviderOptions(
 						this: object,
@@ -41,12 +41,15 @@ describe("OAuthSelectorComponent", () => {
 				auth: { apiKey: { name: "Google Cloud credentials" } },
 			},
 		];
+		// `AuthLoginFlow` reads everything through its host, so the fake only supplies the session.
 		const fakeThis = {
-			session: {
-				modelRuntime: {
-					getProviders: () => providers,
-					getProviderAuthStatus: () => ({ configured: false }),
-					isUsingOAuth: () => false,
+			host: {
+				session: {
+					modelRuntime: {
+						getProviders: () => providers,
+						getProviderAuthStatus: () => ({ configured: false }),
+						isUsingOAuth: () => false,
+					},
 				},
 			},
 		};

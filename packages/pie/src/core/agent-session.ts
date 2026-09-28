@@ -90,7 +90,9 @@ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
 	type ContextUsage,
+	type ExtensionActions,
 	type ExtensionCommandContextActions,
+	type ExtensionContextActions,
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
@@ -111,6 +113,7 @@ import {
 	type ToolExecutionStartEvent,
 	type ToolExecutionUpdateEvent,
 	type ToolInfo,
+	type ToolResultEventResult,
 	type TreePreparation,
 	type TurnEndEvent,
 	type TurnStartEvent,
@@ -622,47 +625,7 @@ export class AgentSession {
 				}
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
-			if (isProbeTool(toolCall.name) && this._beliefLoop.currentTaskId && this._beliefLoop.currentEpisodeId) {
-				const isFastPath =
-					!this._beliefLoop.beliefSetUsable ||
-					(this._beliefLoop.loopState.role === "execution" && this._beliefLoop.loopState.fastPath);
-				if (isFastPath) {
-					this._beliefLoop.selectDomainEpisodeBody("fast-path");
-				} else {
-					this._beliefLoop.ensureDomainPlan(this._beliefLoop.beliefSet.proposed().map((belief) => belief.id));
-				}
-				const planId = isFastPath ? undefined : this._beliefLoop.currentPlanId;
-				this._beliefLoop.recordDomainEvent({
-					...this._beliefLoop.domainEventBase(),
-					type: "ExecutionStarted",
-					taskId: this._beliefLoop.currentTaskId,
-					episodeId: this._beliefLoop.currentEpisodeId,
-					execution: {
-						id: toolCall.id,
-						planId,
-						intention: `Run ${toolCall.name}`,
-						tool: toolCall.name,
-						input: JSON.parse(JSON.stringify(args)) as JsonValue,
-						filePath:
-							typeof (args as Record<string, unknown>).path === "string"
-								? (args as Record<string, string>).path
-								: undefined,
-					},
-				});
-				this._beliefLoop.currentEpisodeExecutionIds.push(toolCall.id);
-				if (hookResult?.block) {
-					this._beliefLoop.recordDomainEvent({
-						...this._beliefLoop.domainEventBase(),
-						type: "ExecutionCompleted",
-						taskId: this._beliefLoop.currentTaskId,
-						episodeId: this._beliefLoop.currentEpisodeId,
-						executionId: toolCall.id,
-						output: hookResult.reason ?? "Tool execution was blocked",
-						status: "failed",
-						error: hookResult.reason ?? "Tool execution was blocked",
-					});
-				}
-			}
+			this._recordProbeExecutionStart(toolCall.id, toolCall.name, args, hookResult);
 			return hookResult;
 		};
 
@@ -686,19 +649,7 @@ export class AgentSession {
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
 			});
-			if (isProbeTool(toolCall.name) && this._beliefLoop.currentTaskId && this._beliefLoop.currentEpisodeId) {
-				const effectiveIsError = hookResult?.isError ?? isError;
-				this._beliefLoop.recordDomainEvent({
-					...this._beliefLoop.domainEventBase(),
-					type: "ExecutionCompleted",
-					taskId: this._beliefLoop.currentTaskId,
-					episodeId: this._beliefLoop.currentEpisodeId,
-					executionId: toolCall.id,
-					output: JSON.parse(JSON.stringify(normalizedContent)) as JsonValue[],
-					status: effectiveIsError ? "failed" : "succeeded",
-					error: effectiveIsError ? contentText(normalizedContent, "Tool execution failed") : undefined,
-				});
-			}
+			this._recordProbeExecutionEnd(toolCall.id, toolCall.name, hookResult, normalizedContent, isError);
 
 			if (!hookResult && normalizedContent === content) {
 				return undefined;
@@ -711,6 +662,95 @@ export class AgentSession {
 				usage: hookResult?.usage,
 			};
 		};
+	}
+
+	/**
+	 * Record a probe tool's dispatch on the domain log, and settle the episode body first: a
+	 * fast-path episode states itself as such, while a belief-loop episode resolves the plan the
+	 * call belongs to. A call the extension hook blocked is answered immediately — the tool never
+	 * runs, so no `afterToolCall` will complete it.
+	 *
+	 * No-ops unless a probe runs inside an open episode; the guard lives here so both call sites
+	 * stay a single line.
+	 */
+	private _recordProbeExecutionStart(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+		hookResult: ToolCallEventResult | undefined,
+	): void {
+		const taskId = this._beliefLoop.currentTaskId;
+		const episodeId = this._beliefLoop.currentEpisodeId;
+		if (!isProbeTool(toolName) || !taskId || !episodeId) return;
+
+		const isFastPath =
+			!this._beliefLoop.beliefSetUsable ||
+			(this._beliefLoop.loopState.role === "execution" && this._beliefLoop.loopState.fastPath);
+		if (isFastPath) {
+			this._beliefLoop.selectDomainEpisodeBody("fast-path");
+		} else {
+			this._beliefLoop.ensureDomainPlan(this._beliefLoop.beliefSet.proposed().map((belief) => belief.id));
+		}
+		const planId = isFastPath ? undefined : this._beliefLoop.currentPlanId;
+		this._beliefLoop.recordDomainEvent({
+			...this._beliefLoop.domainEventBase(),
+			type: "ExecutionStarted",
+			taskId,
+			episodeId,
+			execution: {
+				id: toolCallId,
+				planId,
+				intention: `Run ${toolName}`,
+				tool: toolName,
+				input: JSON.parse(JSON.stringify(args)) as JsonValue,
+				filePath:
+					typeof (args as Record<string, unknown>).path === "string"
+						? (args as Record<string, string>).path
+						: undefined,
+			},
+		});
+		this._beliefLoop.currentEpisodeExecutionIds.push(toolCallId);
+		if (hookResult?.block) {
+			this._beliefLoop.recordDomainEvent({
+				...this._beliefLoop.domainEventBase(),
+				type: "ExecutionCompleted",
+				taskId,
+				episodeId,
+				executionId: toolCallId,
+				output: hookResult.reason ?? "Tool execution was blocked",
+				status: "failed",
+				error: hookResult.reason ?? "Tool execution was blocked",
+			});
+		}
+	}
+
+	/**
+	 * Settle a probe tool's dispatch on the domain log with what it actually returned. Runs after
+	 * the extension's tool_result hook and image normalization, so the recorded output is what the
+	 * model will see rather than the raw result.
+	 */
+	private _recordProbeExecutionEnd(
+		toolCallId: string,
+		toolName: string,
+		hookResult: ToolResultEventResult | undefined,
+		normalizedContent: Awaited<ReturnType<typeof normalizeToolResultImages>>,
+		isError: boolean,
+	): void {
+		const taskId = this._beliefLoop.currentTaskId;
+		const episodeId = this._beliefLoop.currentEpisodeId;
+		if (!isProbeTool(toolName) || !taskId || !episodeId) return;
+
+		const effectiveIsError = hookResult?.isError ?? isError;
+		this._beliefLoop.recordDomainEvent({
+			...this._beliefLoop.domainEventBase(),
+			type: "ExecutionCompleted",
+			taskId,
+			episodeId,
+			executionId: toolCallId,
+			output: JSON.parse(JSON.stringify(normalizedContent)) as JsonValue[],
+			status: effectiveIsError ? "failed" : "succeeded",
+			error: effectiveIsError ? contentText(normalizedContent, "Tool execution failed") : undefined,
+		});
 	}
 
 	/**
@@ -1115,35 +1155,7 @@ export class AgentSession {
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "turn_end") {
-			const extensionEvent: TurnEndEvent = {
-				type: "turn_end",
-				turnIndex: this._turnIndex,
-				message: event.message,
-				toolResults: event.toolResults,
-			};
-			await this._extensionRunner.emit(extensionEvent);
-			this._turnIndex++;
-			// Advance the belief-loop role at turn completion so a role that ends on a plain
-			// `stop` response (e.g. the execution role's final observation) still steers the
-			// next role before the agent loop settles. `prepareNextTurnWithContext` only runs
-			// ahead of a *next* turn, which a `stop` response never triggers. This runs before
-			// the pending-custom-message flush so messages it queues (the fast-path distillation
-			// summary) are appended this turn.
-			await this._beliefLoop.advanceRole({
-				message: event.message as AssistantMessage,
-				toolResults: event.toolResults,
-				context: {
-					messages: this.agent.state.messages,
-					tools: this.agent.state.tools,
-				},
-				newMessages: [],
-			});
-			// A turn ends after its assistant message and every tool result has been appended,
-			// so this is the first point in the run where a context-only custom message can be
-			// inserted without landing between a tool call and its result. Flushing after the
-			// extension dispatch and the role advance above also picks up messages that turn_end
-			// handlers queued.
-			this._flushPendingCustomMessages();
+			await this._emitTurnEndExtensionEvent(event);
 		} else if (event.type === "message_start") {
 			const extensionEvent: MessageStartEvent = {
 				type: "message_start",
@@ -1158,24 +1170,7 @@ export class AgentSession {
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_end") {
-			const extensionEvent: MessageEndEvent = {
-				type: "message_end",
-				message: event.message,
-			};
-			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
-			if (replacement) {
-				// Untyped extension handlers can return messages with null/missing content;
-				// normalize so it never enters agent state or session history.
-				const normalized =
-					(replacement.role === "user" ||
-						replacement.role === "assistant" ||
-						replacement.role === "toolResult" ||
-						replacement.role === "custom") &&
-					replacement.content == null
-						? ({ ...replacement, content: [] } as AgentMessage)
-						: replacement;
-				this._replaceMessageInPlace(event.message, normalized);
-			}
+			await this._emitMessageEndExtensionEvent(event);
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
 				type: "tool_execution_start",
@@ -1202,6 +1197,64 @@ export class AgentSession {
 				isError: event.isError,
 			};
 			await this._extensionRunner.emit(extensionEvent);
+		}
+	}
+
+	/**
+	 * Dispatch a completed turn to extensions, then advance the belief loop and flush.
+	 *
+	 * The role advances here, not only in `prepareNextTurnWithContext`, so a role that ends on a
+	 * plain `stop` response (e.g. the execution role's final observation) still steers the next
+	 * role before the agent loop settles — `prepareNextTurnWithContext` runs only ahead of a *next*
+	 * turn, which a `stop` response never triggers. Both that advance and the flush run after the
+	 * extension dispatch, so messages a turn_end handler queues are picked up in the same turn.
+	 */
+	private async _emitTurnEndExtensionEvent(event: Extract<AgentEvent, { type: "turn_end" }>): Promise<void> {
+		const extensionEvent: TurnEndEvent = {
+			type: "turn_end",
+			turnIndex: this._turnIndex,
+			message: event.message,
+			toolResults: event.toolResults,
+		};
+		await this._extensionRunner.emit(extensionEvent);
+		this._turnIndex++;
+		await this._beliefLoop.advanceRole({
+			message: event.message as AssistantMessage,
+			toolResults: event.toolResults,
+			context: {
+				messages: this.agent.state.messages,
+				tools: this.agent.state.tools,
+			},
+			newMessages: [],
+		});
+		// A turn ends after its assistant message and every tool result has been appended, so this
+		// is the first point in the run where a context-only custom message can be inserted without
+		// landing between a tool call and its result.
+		this._flushPendingCustomMessages();
+	}
+
+	/**
+	 * Let extensions replace the finalized message. The replacement is written into the original
+	 * object in place, so agent state, later events and session persistence all see one message.
+	 */
+	private async _emitMessageEndExtensionEvent(event: Extract<AgentEvent, { type: "message_end" }>): Promise<void> {
+		const extensionEvent: MessageEndEvent = {
+			type: "message_end",
+			message: event.message,
+		};
+		const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
+		if (replacement) {
+			// Untyped extension handlers can return messages with null/missing content;
+			// normalize so it never enters agent state or session history.
+			const normalized =
+				(replacement.role === "user" ||
+					replacement.role === "assistant" ||
+					replacement.role === "toolResult" ||
+					replacement.role === "custom") &&
+				replacement.content == null
+					? ({ ...replacement, content: [] } as AgentMessage)
+					: replacement;
+			this._replaceMessageInPlace(event.message, normalized);
 		}
 	}
 
@@ -1643,7 +1696,6 @@ export class AgentSession {
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
-		let messages: AgentMessage[] | undefined;
 		// Handle extension commands first (execute immediately, even during streaming)
 		// Extension commands manage their own LLM interaction via pi.sendMessage()
 		if (expandPromptTemplates && text.startsWith("/")) {
@@ -1661,34 +1713,12 @@ export class AgentSession {
 			);
 		}
 
-		// Emit input event for extension interception (before skill/template expansion)
-		let currentText = text;
-		let currentImages = options?.images;
-		if (this._extensionRunner.hasHandlers("input")) {
-			const inputResult = await this._extensionRunner.emitInput(
-				currentText,
-				currentImages,
-				options?.source ?? "interactive",
-				this.isStreaming ? options?.streamingBehavior : undefined,
-			);
-			if (inputResult.action === "handled") {
-				preflightResult?.("handled");
-				return;
-			}
-			if (inputResult.action === "transform") {
-				currentText = inputResult.text;
-				currentImages = inputResult.images ?? currentImages;
-			}
+		const resolved = await this._resolvePromptInput(text, options, expandPromptTemplates);
+		if (!resolved) {
+			preflightResult?.("handled");
+			return;
 		}
-
-		// Expand skill commands (/skill:name args) and prompt templates (/template args)
-		let expandedText = currentText;
-		if (expandPromptTemplates) {
-			expandedText = this._expandSkillCommand(expandedText);
-			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-		}
-		// Capture the request text for the fast-path distillation summary.
-		this._beliefLoop.currentTaskRequestText = expandedText;
+		const { expandedText, images: currentImages } = resolved;
 
 		// If streaming, queue via steer() or followUp() based on option. A follow-up typed
 		// while the previous loop is concluding must reset the loop when it is delivered, so
@@ -1723,6 +1753,69 @@ export class AgentSession {
 		this._flushPendingCustomMessages();
 
 		// Validate model
+		await this._ensurePromptModelUsable();
+
+		// Check if we need to compact before sending (catches aborted responses).
+		// The user's new prompt is sent below, so do not call agent.continue() here.
+		const lastAssistant = this._findLastAssistantMessage();
+		if (lastAssistant) {
+			await this._checkCompaction(lastAssistant, false);
+		}
+
+		const messages = await this._buildPromptMessages(expandedText, currentImages);
+		this._beginPromptTask(text, expandedText, options, currentImages);
+
+		preflightResult?.("started");
+		await this._runAgentPrompt(messages);
+	}
+
+	/**
+	 * Resolve the text and images a prompt will carry, running the extension hooks that can
+	 * intercept or rewrite it on the way in. Returns `undefined` when an extension consumed the
+	 * prompt, which the caller reports as "handled" rather than sending anything.
+	 */
+	private async _resolvePromptInput(
+		text: string,
+		options: PromptOptions | undefined,
+		expandPromptTemplates: boolean,
+	): Promise<{ expandedText: string; images: ImageContent[] | undefined } | undefined> {
+		// Emit input event for extension interception (before skill/template expansion)
+		let currentText = text;
+		let currentImages = options?.images;
+		if (this._extensionRunner.hasHandlers("input")) {
+			const inputResult = await this._extensionRunner.emitInput(
+				currentText,
+				currentImages,
+				options?.source ?? "interactive",
+				this.isStreaming ? options?.streamingBehavior : undefined,
+			);
+			if (inputResult.action === "handled") {
+				return undefined;
+			}
+			if (inputResult.action === "transform") {
+				currentText = inputResult.text;
+				currentImages = inputResult.images ?? currentImages;
+			}
+		}
+
+		// Expand skill commands (/skill:name args) and prompt templates (/template args)
+		let expandedText = currentText;
+		if (expandPromptTemplates) {
+			expandedText = this._expandSkillCommand(expandedText);
+			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+		}
+		// Capture the request text for the fast-path distillation summary.
+		this._beliefLoop.currentTaskRequestText = expandedText;
+
+		return { expandedText, images: currentImages };
+	}
+
+	/**
+	 * Fail the prompt unless the session has a model it can actually authenticate. A missing
+	 * credential falls back to the configured default model when there is one, and only throws
+	 * once there is nothing left to try.
+	 */
+	private async _ensurePromptModelUsable(): Promise<void> {
 		if (!this.model) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -1747,16 +1840,19 @@ export class AgentSession {
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
 		}
+	}
 
-		// Check if we need to compact before sending (catches aborted responses).
-		// The user's new prompt is sent below, so do not call agent.continue() here.
-		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) {
-			await this._checkCompaction(lastAssistant, false);
-		}
-
+	/**
+	 * Build the message list a prompt runs with: the user message, any queued `nextTurn` context,
+	 * and the custom messages `before_agent_start` handlers returned. Applying an extension's
+	 * system-prompt override happens here too, since it belongs to the same request.
+	 */
+	private async _buildPromptMessages(
+		expandedText: string,
+		currentImages: ImageContent[] | undefined,
+	): Promise<AgentMessage[]> {
 		// Build messages array (custom message if any, then user message)
-		messages = [];
+		const messages: AgentMessage[] = [];
 
 		// Add user message
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -1803,10 +1899,24 @@ export class AgentSession {
 			// Ensure we're using the base prompt (in case previous turn had modifications)
 			this._systemPromptOverride = undefined;
 		}
-		// A fresh user task after the previous loop concluded re-runs the belief loop
-		// from the epistemic role instead of staying parked in the no-tools finalReport
-		// role. The belief set is retained as session knowledge — the task-end prune
-		// keeps only settled product/code records — and the loop resets.
+
+		return messages;
+	}
+
+	/**
+	 * Point the belief loop at the task this prompt is for.
+	 *
+	 * A fresh user task after the previous loop concluded re-runs the belief loop from the
+	 * epistemic role instead of staying parked in the no-tools finalReport role; the loop resets
+	 * and the belief set carries over as session knowledge. A prompt arriving inside an open task
+	 * is recorded as an intervention instead.
+	 */
+	private _beginPromptTask(
+		text: string,
+		expandedText: string,
+		options: PromptOptions | undefined,
+		currentImages: ImageContent[] | undefined,
+	): void {
 		if (this._beliefLoop.role === "finalReport") {
 			this._beliefLoop.resetLoopForNewTask();
 		}
@@ -1816,13 +1926,6 @@ export class AgentSession {
 			this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
 		}
 		this._beliefLoop.applyRoleSurface();
-
-		if (!messages) {
-			return;
-		}
-
-		preflightResult?.("started");
-		await this._runAgentPrompt(messages);
 	}
 
 	/**
@@ -2503,70 +2606,33 @@ export class AgentSession {
 				}
 			}
 
-			let summary: string;
-			let firstKeptEntryId: string;
-			let tokensBefore: number;
-			let usage: Usage | undefined;
-			let details: unknown;
-
-			if (extensionCompaction) {
-				// Extension provided compaction content
-				summary = extensionCompaction.summary;
-				firstKeptEntryId = extensionCompaction.firstKeptEntryId;
-				tokensBefore = extensionCompaction.tokensBefore;
-				usage = extensionCompaction.usage;
-				details = extensionCompaction.details;
-			} else {
-				// Shared default summary generator, also used by automatic compaction.
-				const result = await this._runDefaultCompaction(
-					preparation,
-					requestModel,
-					apiKey,
-					headers,
-					customInstructions,
-					this._compactionAbortController.signal,
-					env,
-					"manual",
-				);
-				summary = result.summary;
-				firstKeptEntryId = result.firstKeptEntryId;
-				tokensBefore = result.tokensBefore;
-				usage = result.usage;
-				details = result.details;
-			}
+			const compaction = await this._resolveCompactionSummary(
+				preparation,
+				extensionCompaction,
+				{ model: requestModel, apiKey, headers, env },
+				customInstructions,
+				this._compactionAbortController.signal,
+				"manual",
+			);
 
 			if (this._compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.refreshContext();
-			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-					reason: "manual",
-					willRetry: false,
-				});
-			}
+			const estimatedTokensAfter = await this._appendCompactionAndNotifyExtensions(
+				compaction,
+				fromExtension,
+				"manual",
+				false,
+			);
 
 			const compactionResult: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
+				summary: compaction.summary,
+				firstKeptEntryId: compaction.firstKeptEntryId,
+				tokensBefore: compaction.tokensBefore,
 				estimatedTokensAfter,
-				usage,
-				details,
+				usage: compaction.usage,
+				details: compaction.details,
 			};
 			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
 			this._compactionAbortController = undefined;
@@ -2681,24 +2747,7 @@ export class AgentSession {
 			}
 
 			if (this._overflowRecoveryAttempted) {
-				const errorMessage = contextOverflow
-					? "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model."
-					: "Truncated response recovery failed after one compact-and-retry attempt.";
-				this._emit({
-					type: "compaction_end",
-					reason: "overflow",
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					errorMessage,
-				});
-				await this._emitSessionCompactFailed({
-					reason: "overflow",
-					errorMessage,
-					aborted: false,
-					willRetry: false,
-					fromExtension: false,
-				});
+				await this._reportOverflowRecoveryFailure(contextOverflow);
 				return false;
 			}
 
@@ -2713,37 +2762,155 @@ export class AgentSession {
 		}
 
 		// Case 3: threshold compaction without retry.
-		// For error messages or all-zero usage messages, estimate from the last valid response.
-		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
-		// responses can still compact and do not reset context accounting.
-		let contextTokens: number;
-		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
-		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
-			const messages = this.agent.state.messages;
-			const estimate = estimateContextTokens(messages);
-			// Without provider usage, estimate.tokens is the pure message-size estimate.
-			// Only usage-backed estimates need the stale pre-compaction check.
-			if (estimate.lastUsageIndex !== null) {
-				// Verify the usage source is post-compaction. Kept pre-compaction messages
-				// have stale usage reflecting the old (larger) context and would falsely
-				// trigger compaction right after one just finished.
-				const usageMsg = messages[estimate.lastUsageIndex];
-				if (
-					compactionEntry &&
-					usageMsg.role === "assistant" &&
-					(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
-				) {
-					return false;
-				}
-			}
-			contextTokens = estimate.tokens;
-		} else {
-			contextTokens = directContextTokens;
+		const contextTokens = this._contextTokensForCompaction(assistantMessage, compactionEntry);
+		if (contextTokens === undefined) {
+			return false;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
+	}
+
+	/**
+	 * Settle what the compaction summary will be.
+	 *
+	 * An extension that answered `session_before_compact` with content supplies it; otherwise the
+	 * shared default generator runs. Both manual and automatic compaction resolve their summary
+	 * here so the two paths cannot drift on which one wins.
+	 */
+	private async _resolveCompactionSummary(
+		preparation: CompactionPreparation,
+		extensionCompaction: CompactionResult | undefined,
+		request: {
+			model: Model<any>;
+			apiKey: string | undefined;
+			headers: Record<string, string> | undefined;
+			env: Record<string, string> | undefined;
+		},
+		customInstructions: string | undefined,
+		signal: AbortSignal,
+		reason: "manual" | "threshold" | "overflow",
+	): Promise<CompactionResult> {
+		if (extensionCompaction) {
+			// Extension provided compaction content
+			return extensionCompaction;
+		}
+		return await this._runDefaultCompaction(
+			preparation,
+			request.model,
+			request.apiKey,
+			request.headers,
+			customInstructions,
+			signal,
+			request.env,
+			reason,
+		);
+	}
+
+	/**
+	 * Append a compaction to the session, rebuild the agent's context from it, and tell extensions
+	 * it landed. Returns the post-compaction token estimate, which only the caller's result needs.
+	 *
+	 * The saved entry is looked up by summary because `appendCompaction` assigns the id itself.
+	 */
+	private async _appendCompactionAndNotifyExtensions(
+		compaction: CompactionResult,
+		fromExtension: boolean,
+		reason: "manual" | "threshold" | "overflow",
+		willRetry: boolean,
+	): Promise<number> {
+		this.sessionManager.appendCompaction(
+			compaction.summary,
+			compaction.firstKeptEntryId,
+			compaction.tokensBefore,
+			compaction.details,
+			fromExtension,
+			compaction.usage,
+		);
+		const newEntries = this.sessionManager.getEntries();
+		const sessionContext = this.sessionManager.buildSessionContext();
+		this.refreshContext();
+		const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
+
+		// Get the saved compaction entry for the extension event
+		const savedCompactionEntry = newEntries.find(
+			(e) => e.type === "compaction" && e.summary === compaction.summary,
+		) as CompactionEntry | undefined;
+
+		if (this._extensionRunner && savedCompactionEntry) {
+			await this._extensionRunner.emit({
+				type: "session_compact",
+				compactionEntry: savedCompactionEntry,
+				fromExtension,
+				reason,
+				willRetry,
+			});
+		}
+
+		return estimatedTokensAfter;
+	}
+
+	/**
+	 * Tokens currently in context, for a threshold decision.
+	 *
+	 * For error messages or all-zero usage responses the provider usage is unusable, so the
+	 * count is estimated from the messages instead. That fallback is what lets a session stuck
+	 * behind a persistent API error (e.g. 529) still compact rather than never resetting its
+	 * context accounting. Returns `undefined` when the only usage-backed estimate available
+	 * predates the latest compaction: those kept pre-compaction messages carry the old, larger
+	 * usage, which would otherwise retrigger compaction right after one just finished.
+	 */
+	private _contextTokensForCompaction(
+		assistantMessage: AssistantMessage,
+		compactionEntry: CompactionEntry | null,
+	): number | undefined {
+		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
+		if (assistantMessage.stopReason !== "error" && directContextTokens !== 0) {
+			return directContextTokens;
+		}
+
+		const messages = this.agent.state.messages;
+		const estimate = estimateContextTokens(messages);
+		// Without provider usage, estimate.tokens is the pure message-size estimate.
+		// Only usage-backed estimates need the stale pre-compaction check.
+		if (estimate.lastUsageIndex !== null) {
+			const usageMsg = messages[estimate.lastUsageIndex];
+			if (
+				compactionEntry &&
+				usageMsg.role === "assistant" &&
+				(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
+			) {
+				return undefined;
+			}
+		}
+		return estimate.tokens;
+	}
+
+	/**
+	 * Report that overflow recovery has already been spent: one compact-and-retry attempt is all
+	 * this session gets, so the second failure ends the run and says so on both the event stream
+	 * and the extension hook.
+	 */
+	private async _reportOverflowRecoveryFailure(contextOverflow: boolean | undefined): Promise<void> {
+		const errorMessage = contextOverflow
+			? "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model."
+			: "Truncated response recovery failed after one compact-and-retry attempt.";
+		this._emit({
+			type: "compaction_end",
+			reason: "overflow",
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+			errorMessage,
+		});
+		await this._emitSessionCompactFailed({
+			reason: "overflow",
+			errorMessage,
+			aborted: false,
+			willRetry: false,
+			fromExtension: false,
+		});
 	}
 
 	/**
@@ -2816,37 +2983,14 @@ export class AgentSession {
 				}
 			}
 
-			let summary: string;
-			let firstKeptEntryId: string;
-			let tokensBefore: number;
-			let usage: Usage | undefined;
-			let details: unknown;
-
-			if (extensionCompaction) {
-				// Extension provided compaction content
-				summary = extensionCompaction.summary;
-				firstKeptEntryId = extensionCompaction.firstKeptEntryId;
-				tokensBefore = extensionCompaction.tokensBefore;
-				usage = extensionCompaction.usage;
-				details = extensionCompaction.details;
-			} else {
-				// Shared default summary generator, also used by manual compaction.
-				const compactResult = await this._runDefaultCompaction(
-					preparation,
-					requestModel,
-					apiKey,
-					headers,
-					undefined,
-					this._autoCompactionAbortController.signal,
-					env,
-					reason,
-				);
-				summary = compactResult.summary;
-				firstKeptEntryId = compactResult.firstKeptEntryId;
-				tokensBefore = compactResult.tokensBefore;
-				usage = compactResult.usage;
-				details = compactResult.details;
-			}
+			const compaction = await this._resolveCompactionSummary(
+				preparation,
+				extensionCompaction,
+				{ model: requestModel, apiKey, headers, env },
+				undefined,
+				this._autoCompactionAbortController.signal,
+				reason,
+			);
 
 			if (this._autoCompactionAbortController.signal.aborted) {
 				this._emit({
@@ -2865,34 +3009,20 @@ export class AgentSession {
 				return false;
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.refreshContext();
-			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-					reason,
-					willRetry,
-				});
-			}
+			const estimatedTokensAfter = await this._appendCompactionAndNotifyExtensions(
+				compaction,
+				fromExtension,
+				reason,
+				willRetry,
+			);
 
 			const result: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
+				summary: compaction.summary,
+				firstKeptEntryId: compaction.firstKeptEntryId,
+				tokensBefore: compaction.tokensBefore,
 				estimatedTokensAfter,
-				usage,
-				details,
+				usage: compaction.usage,
+				details: compaction.details,
 			};
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
@@ -3068,127 +3198,146 @@ export class AgentSession {
 		this.agent.state.model = refreshedModel;
 	}
 
-	private _bindExtensionCore(runner: ExtensionRunner): void {
-		const getCommands = (): SlashCommandInfo[] => {
-			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
-				name: command.invocationName,
-				description: command.description,
-				source: "extension",
-				sourceInfo: command.sourceInfo,
-			}));
+	/**
+	 * The slash commands extensions can invoke, in the order the UI lists them: extension
+	 * commands, then prompt templates, then skills.
+	 */
+	private _collectSlashCommands(runner: ExtensionRunner): SlashCommandInfo[] {
+		const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
+			name: command.invocationName,
+			description: command.description,
+			source: "extension",
+			sourceInfo: command.sourceInfo,
+		}));
 
-			const templates: SlashCommandInfo[] = this.promptTemplates.map((template) => ({
-				name: template.name,
-				description: template.description,
-				source: "prompt",
-				sourceInfo: template.sourceInfo,
-			}));
+		const templates: SlashCommandInfo[] = this.promptTemplates.map((template) => ({
+			name: template.name,
+			description: template.description,
+			source: "prompt",
+			sourceInfo: template.sourceInfo,
+		}));
 
-			const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
-				name: `skill:${skill.name}`,
-				description: skill.description,
-				source: "skill",
-				sourceInfo: skill.sourceInfo,
-			}));
+		const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
+			name: `skill:${skill.name}`,
+			description: skill.description,
+			source: "skill",
+			sourceInfo: skill.sourceInfo,
+		}));
 
-			return [...extensionCommands, ...templates, ...skills];
+		return [...extensionCommands, ...templates, ...skills];
+	}
+
+	/** What an extension may do through `pi` inside a command or tool handler. */
+	private _extensionActions(runner: ExtensionRunner): ExtensionActions {
+		return {
+			sendMessage: (message, options) => {
+				this.sendCustomMessage(message, options).catch((err) => {
+					runner.emitError({
+						extensionPath: "<runtime>",
+						event: "send_message",
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
+			},
+			sendUserMessage: (content, options) => {
+				this.sendUserMessage(content, options).catch((err) => {
+					runner.emitError({
+						extensionPath: "<runtime>",
+						event: "send_user_message",
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
+			},
+			appendEntry: (customType, data) => {
+				const entryId = this.sessionManager.appendCustomEntry(customType, data);
+				const entry = this.sessionManager.getEntry(entryId);
+				if (entry) {
+					this._emit({ type: "entry_appended", entry });
+				}
+			},
+			setSessionName: (name) => {
+				this.setSessionName(name);
+			},
+			getSessionName: () => {
+				return this.sessionManager.getSessionName();
+			},
+			setLabel: (entryId, label) => {
+				this.sessionManager.appendLabelChange(entryId, label);
+			},
+			getActiveTools: () => this.getActiveToolNames(),
+			getAllTools: () => this.getAllTools(),
+			setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
+			refreshTools: () => this._refreshToolRegistry(),
+			getCommands: () => this._collectSlashCommands(runner),
+			setModel: async (model) => {
+				if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
+				await this.setModel(model);
+				return true;
+			},
+			getThinkingLevel: () => this.thinkingLevel,
+			setThinkingLevel: (level) => this.setThinkingLevel(level),
 		};
+	}
 
+	/** Session state and controls an extension may read or invoke. */
+	private _extensionContextActions(): ExtensionContextActions {
+		return {
+			getModel: () => this.model,
+			getScopedModels: () => this._scopedModels,
+			isIdle: () => this.isIdle,
+			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
+			getSignal: () => this.agent.signal,
+			abort: () => {
+				if (this._extensionAbortHandler) {
+					this._extensionAbortHandler();
+					return;
+				}
+				void this.abort();
+			},
+			hasPendingMessages: () => this.pendingMessageCount > 0,
+			shutdown: () => {
+				this._extensionShutdownHandler?.();
+			},
+			getContextUsage: () => this.getContextUsage(),
+			compact: (options) => {
+				void (async () => {
+					try {
+						const result = await this.compact(options?.customInstructions);
+						options?.onComplete?.(result);
+					} catch (error) {
+						const err = error instanceof Error ? error : new Error(String(error));
+						options?.onError?.(err);
+					}
+				})();
+			},
+			getSystemPrompt: () => this.systemPrompt,
+			getSystemPromptOptions: () => this._baseSystemPromptOptions,
+		};
+	}
+
+	/** Model-provider registration an extension may perform. */
+	private _extensionProviderActions(): Parameters<ExtensionRunner["bindCore"]>[2] {
+		return {
+			registerProvider: (name, config) => {
+				this._modelRuntime.registerProvider(name, config);
+				this._refreshCurrentModelFromRegistry();
+			},
+			registerNativeProvider: (provider) => {
+				this._modelRuntime.registerNativeProvider(provider);
+				this._refreshCurrentModelFromRegistry();
+			},
+			unregisterProvider: (name) => {
+				this._modelRuntime.unregisterProvider(name);
+				this._refreshCurrentModelFromRegistry();
+			},
+		};
+	}
+
+	private _bindExtensionCore(runner: ExtensionRunner): void {
 		runner.bindCore(
-			{
-				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				sendUserMessage: (content, options) => {
-					this.sendUserMessage(content, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_user_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				appendEntry: (customType, data) => {
-					const entryId = this.sessionManager.appendCustomEntry(customType, data);
-					const entry = this.sessionManager.getEntry(entryId);
-					if (entry) {
-						this._emit({ type: "entry_appended", entry });
-					}
-				},
-				setSessionName: (name) => {
-					this.setSessionName(name);
-				},
-				getSessionName: () => {
-					return this.sessionManager.getSessionName();
-				},
-				setLabel: (entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
-				},
-				getActiveTools: () => this.getActiveToolNames(),
-				getAllTools: () => this.getAllTools(),
-				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
-				refreshTools: () => this._refreshToolRegistry(),
-				getCommands,
-				setModel: async (model) => {
-					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
-					await this.setModel(model);
-					return true;
-				},
-				getThinkingLevel: () => this.thinkingLevel,
-				setThinkingLevel: (level) => this.setThinkingLevel(level),
-			},
-			{
-				getModel: () => this.model,
-				getScopedModels: () => this._scopedModels,
-				isIdle: () => this.isIdle,
-				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-				getSignal: () => this.agent.signal,
-				abort: () => {
-					if (this._extensionAbortHandler) {
-						this._extensionAbortHandler();
-						return;
-					}
-					void this.abort();
-				},
-				hasPendingMessages: () => this.pendingMessageCount > 0,
-				shutdown: () => {
-					this._extensionShutdownHandler?.();
-				},
-				getContextUsage: () => this.getContextUsage(),
-				compact: (options) => {
-					void (async () => {
-						try {
-							const result = await this.compact(options?.customInstructions);
-							options?.onComplete?.(result);
-						} catch (error) {
-							const err = error instanceof Error ? error : new Error(String(error));
-							options?.onError?.(err);
-						}
-					})();
-				},
-				getSystemPrompt: () => this.systemPrompt,
-				getSystemPromptOptions: () => this._baseSystemPromptOptions,
-			},
-			{
-				registerProvider: (name, config) => {
-					this._modelRuntime.registerProvider(name, config);
-					this._refreshCurrentModelFromRegistry();
-				},
-				registerNativeProvider: (provider) => {
-					this._modelRuntime.registerNativeProvider(provider);
-					this._refreshCurrentModelFromRegistry();
-				},
-				unregisterProvider: (name) => {
-					this._modelRuntime.unregisterProvider(name);
-					this._refreshCurrentModelFromRegistry();
-				},
-			},
+			this._extensionActions(runner),
+			this._extensionContextActions(),
+			this._extensionProviderActions(),
 		);
 	}
 
@@ -3285,29 +3434,12 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
-	private _buildRuntime(options: {
-		activeToolNames?: string[];
-		flagValues?: Map<string, boolean | string>;
-		includeAllExtensionTools?: boolean;
-	}): void {
-		const autoResizeImages = this.settingsManager.getImageAutoResize();
-		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
-		const baseToolDefinitions = this._baseToolsOverride
-			? Object.fromEntries(
-					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
-						name,
-						createToolDefinitionFromAgentTool(tool),
-					]),
-				)
-			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
-				});
-
-		this._baseToolDefinitions = new Map(
-			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
-		);
+	/**
+	 * Register the belief-loop tool surface: routing, belief mutation, focus and experiment
+	 * selection, the formulation tools, and conclusion. Each definition closes over the controller,
+	 * so the loop keeps the state and the tool is only a translation of its input into loop calls.
+	 */
+	private _registerBeliefToolDefinitions(): void {
 		this._baseToolDefinitions.set(
 			"route_task",
 			createRouteTaskToolDefinition(this._beliefLoop.routingSet) as ToolDefinition,
@@ -3413,6 +3545,32 @@ export class AgentSession {
 			"report_outcome",
 			createReportOutcomeToolDefinition((outcome) => this._beliefLoop.recordOutcome(outcome)) as ToolDefinition,
 		);
+	}
+
+	private _buildRuntime(options: {
+		activeToolNames?: string[];
+		flagValues?: Map<string, boolean | string>;
+		includeAllExtensionTools?: boolean;
+	}): void {
+		const autoResizeImages = this.settingsManager.getImageAutoResize();
+		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
+		const shellPath = this.settingsManager.getShellPath();
+		const baseToolDefinitions = this._baseToolsOverride
+			? Object.fromEntries(
+					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
+						name,
+						createToolDefinitionFromAgentTool(tool),
+					]),
+				)
+			: createAllToolDefinitions(this._cwd, {
+					read: { autoResizeImages },
+					bash: { commandPrefix: shellCommandPrefix, shellPath },
+				});
+
+		this._baseToolDefinitions = new Map(
+			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
+		);
+		this._registerBeliefToolDefinitions();
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -3839,91 +3997,32 @@ export class AgentSession {
 			}
 
 			// Run default summarizer if needed
-			let summaryText: string | undefined;
-			let summaryDetails: unknown;
-			let summaryUsage: Usage | undefined;
-			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const model = this.model!;
-				const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
-				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
-					model: requestModel,
-					apiKey,
-					headers,
-					env,
-					signal: this._branchSummaryAbortController.signal,
-					customInstructions,
-					replaceInstructions,
-					reserveTokens: branchSummarySettings.reserveTokens,
-					streamFn: this.agent.streamFunction,
-					retry: this.settingsManager.getRetrySettings(),
-					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
-				});
-				if (result.aborted) {
-					return { cancelled: true, aborted: true };
-				}
-				if (result.error) {
-					throw new Error(result.error);
-				}
-				summaryText = result.summary;
-				summaryUsage = result.usage;
-				summaryDetails = {
-					readFiles: result.readFiles || [],
-					modifiedFiles: result.modifiedFiles || [],
-				};
-			} else if (extensionSummary) {
-				summaryText = extensionSummary.summary;
-				summaryDetails = extensionSummary.details;
-				summaryUsage = extensionSummary.usage;
+			const summary = await this._resolveBranchSummary(
+				entriesToSummarize,
+				extensionSummary,
+				options,
+				customInstructions,
+				replaceInstructions,
+			);
+			if (!summary.ok) {
+				return { cancelled: true, aborted: true };
 			}
+			const { summaryText, summaryDetails, summaryUsage } = summary;
 
 			// Determine the new leaf position based on target type
-			let newLeafId: string | null;
-			let editorText: string | undefined;
-
-			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
-				newLeafId = targetEntry.parentId;
-				editorText = contentText(targetEntry.message.content, "");
-			} else if (targetEntry.type === "custom_message") {
-				// Custom message: leaf = parent (null if root), text goes to editor
-				newLeafId = targetEntry.parentId;
-				editorText = contentText(targetEntry.content, "");
-			} else {
-				// Non-user message: leaf = selected node
-				newLeafId = targetId;
-			}
+			const { newLeafId, editorText } = this._treeNavigationTarget(targetEntry, targetId);
 
 			// Switch leaf (with or without summary)
 			// Summary is attached at the navigation target position (newLeafId), not the old branch
-			let summaryEntry: BranchSummaryEntry | undefined;
-			if (summaryText) {
-				// Create summary at target position (can be null for root)
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-					summaryUsage,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-
-				// Attach label to the summary entry
-				if (label) {
-					this.sessionManager.appendLabelChange(summaryId, label);
-				}
-			} else if (newLeafId === null) {
-				// No summary, navigating to root - reset leaf
-				this.sessionManager.resetLeaf();
-			} else {
-				// No summary, navigating to non-root
-				this.sessionManager.branch(newLeafId);
-			}
-
-			// Attach label to target entry when not summarizing (no summary entry to label)
-			if (label && !summaryText) {
-				this.sessionManager.appendLabelChange(targetId, label);
-			}
+			const summaryEntry = this._applyTreeNavigation(
+				newLeafId,
+				targetId,
+				summaryText,
+				summaryDetails,
+				summaryUsage,
+				fromExtension,
+				label,
+			);
 
 			// Update agent state
 			this.refreshContext();
@@ -3949,6 +4048,134 @@ export class AgentSession {
 		} finally {
 			this._branchSummaryAbortController = undefined;
 		}
+	}
+
+	/**
+	 * Produce the branch summary a tree navigation carries, if any.
+	 *
+	 * An extension's `session_before_tree` summary wins when it supplied one and a summary was
+	 * asked for; otherwise the configured model writes it. An aborted generation is reported rather
+	 * than thrown, because navigation treats it the same as a cancellation.
+	 */
+	private async _resolveBranchSummary(
+		entriesToSummarize: SessionEntry[],
+		extensionSummary: { summary: string; details?: unknown; usage?: Usage } | undefined,
+		options: { summarize?: boolean },
+		customInstructions: string | undefined,
+		replaceInstructions: boolean | undefined,
+	): Promise<
+		| { ok: true; summaryText: string | undefined; summaryDetails: unknown; summaryUsage: Usage | undefined }
+		| { ok: false }
+	> {
+		if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
+			const model = this.model!;
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+			const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
+			const result = await generateBranchSummary(entriesToSummarize, {
+				model: requestModel,
+				apiKey,
+				headers,
+				env,
+				signal: this._branchSummaryAbortController!.signal,
+				customInstructions,
+				replaceInstructions,
+				reserveTokens: branchSummarySettings.reserveTokens,
+				streamFn: this.agent.streamFunction,
+				retry: this.settingsManager.getRetrySettings(),
+				callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
+			});
+			if (result.aborted) {
+				return { ok: false };
+			}
+			if (result.error) {
+				throw new Error(result.error);
+			}
+			return {
+				ok: true,
+				summaryText: result.summary,
+				summaryUsage: result.usage,
+				summaryDetails: {
+					readFiles: result.readFiles || [],
+					modifiedFiles: result.modifiedFiles || [],
+				},
+			};
+		}
+		if (extensionSummary) {
+			return {
+				ok: true,
+				summaryText: extensionSummary.summary,
+				summaryDetails: extensionSummary.details,
+				summaryUsage: extensionSummary.usage,
+			};
+		}
+		return { ok: true, summaryText: undefined, summaryDetails: undefined, summaryUsage: undefined };
+	}
+
+	/**
+	 * Where the leaf goes for a navigation target, and what text (if any) the editor should be
+	 * refilled with. Navigating to a user or custom message lands the leaf on its parent and hands
+	 * the message back to the editor; any other entry becomes the leaf itself.
+	 */
+	private _treeNavigationTarget(
+		targetEntry: SessionEntry,
+		targetId: string,
+	): { newLeafId: string | null; editorText: string | undefined } {
+		if (targetEntry.type === "message" && targetEntry.message.role === "user") {
+			// User message: leaf = parent (null if root), text goes to editor
+			return { newLeafId: targetEntry.parentId, editorText: contentText(targetEntry.message.content, "") };
+		}
+		if (targetEntry.type === "custom_message") {
+			// Custom message: leaf = parent (null if root), text goes to editor
+			return { newLeafId: targetEntry.parentId, editorText: contentText(targetEntry.content, "") };
+		}
+		// Non-user message: leaf = selected node
+		return { newLeafId: targetId, editorText: undefined };
+	}
+
+	/**
+	 * Move the session leaf and, when there is a summary, attach it at the navigation target rather
+	 * than the branch being left. A label lands on the summary when there is one, and on the target
+	 * entry otherwise.
+	 */
+	private _applyTreeNavigation(
+		newLeafId: string | null,
+		targetId: string,
+		summaryText: string | undefined,
+		summaryDetails: unknown,
+		summaryUsage: Usage | undefined,
+		fromExtension: boolean,
+		label: string | undefined,
+	): BranchSummaryEntry | undefined {
+		let summaryEntry: BranchSummaryEntry | undefined;
+		if (summaryText) {
+			// Create summary at target position (can be null for root)
+			const summaryId = this.sessionManager.branchWithSummary(
+				newLeafId,
+				summaryText,
+				summaryDetails,
+				fromExtension,
+				summaryUsage,
+			);
+			summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+
+			// Attach label to the summary entry
+			if (label) {
+				this.sessionManager.appendLabelChange(summaryId, label);
+			}
+		} else if (newLeafId === null) {
+			// No summary, navigating to root - reset leaf
+			this.sessionManager.resetLeaf();
+		} else {
+			// No summary, navigating to non-root
+			this.sessionManager.branch(newLeafId);
+		}
+
+		// Attach label to target entry when not summarizing (no summary entry to label)
+		if (label && !summaryText) {
+			this.sessionManager.appendLabelChange(targetId, label);
+		}
+
+		return summaryEntry;
 	}
 
 	/**

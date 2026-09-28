@@ -11,6 +11,7 @@ import type { AuthSelectorProvider } from "../src/modes/interactive/components/o
 import { WorkingStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
 import { InteractiveMode, phaseWorkingMessage } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -466,7 +467,7 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 			skillCommands: Map<string, string>;
 			sessionManager: { getCwd: () => string };
 			fdPath: null;
-			getLoginProviderOptions: () => AuthSelectorProvider[];
+			authLogin: { getLoginProviderOptions: () => AuthSelectorProvider[] };
 		};
 
 		const createBaseAutocompleteProvider = (
@@ -486,11 +487,13 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 			skillCommands: new Map(),
 			sessionManager: { getCwd: () => "/tmp" },
 			fdPath: null,
-			getLoginProviderOptions: () => [
-				{ id: "anthropic", name: "Anthropic", authType: "oauth" },
-				{ id: "anthropic", name: "Anthropic", authType: "api_key" },
-				{ id: "openai", name: "OpenAI", authType: "api_key" },
-			],
+			authLogin: {
+				getLoginProviderOptions: () => [
+					{ id: "anthropic", name: "Anthropic", authType: "oauth" },
+					{ id: "anthropic", name: "Anthropic", authType: "api_key" },
+					{ id: "openai", name: "OpenAI", authType: "api_key" },
+				],
+			},
 		};
 
 		const provider = createBaseAutocompleteProvider.call(fakeThis);
@@ -557,10 +560,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 					getThemes: () => ({ themes: [], diagnostics: [] }),
 				},
 			},
-			formatDisplayPath: (p: string) => (InteractiveMode as any).prototype.formatDisplayPath.call(fakeThis, p),
-			formatExtensionDisplayPath: (p: string) =>
-				(InteractiveMode as any).prototype.formatExtensionDisplayPath.call(fakeThis, p),
-			formatContextPath: (p: string) => (InteractiveMode as any).prototype.formatContextPath.call(fakeThis, p),
+			// Path/diagnostic formatting lives in format-helpers.ts as module functions now, so
+			// `showLoadedResources` calls them directly and they need no entry here.
 			getStartupExpansionState: () => (InteractiveMode as any).prototype.getStartupExpansionState.call(fakeThis),
 			buildScopeGroups: () => [],
 			formatScopeGroups: () => "resource-list",
@@ -583,7 +584,6 @@ describe("InteractiveMode.showLoadedResources", () => {
 			) => (InteractiveMode as any).prototype.getCompactNonPackageExtensionLabel.call(fakeThis, p, index, allPaths),
 			getCompactExtensionLabels: (extensions: ExtensionFixture[]) =>
 				(InteractiveMode as any).prototype.getCompactExtensionLabels.call(fakeThis, extensions),
-			formatDiagnostics: () => "diagnostics",
 			getBuiltInCommandConflictDiagnostics: () => [],
 		};
 
@@ -1309,7 +1309,8 @@ describe("InteractiveMode.handleSessionCommand", () => {
 			execution: { model: undefined, latestCacheHitRate: undefined },
 		});
 		(InteractiveMode as any).prototype.handleSessionCommand.call(fakeThis);
-		const rendered = renderLastLine(fakeThis.chatContainer, 220);
+		// The renderer emits per-cell color escapes that split "(CH —)" from its label.
+		const rendered = stripAnsi(renderLastLine(fakeThis.chatContainer, 220));
 		expect(rendered).toContain("Epistemic: — (CH —)");
 		expect(rendered).toContain("Distillation: — (CH —)");
 		expect(rendered).toContain("Execution: — (CH —)");

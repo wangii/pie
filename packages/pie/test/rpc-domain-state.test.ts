@@ -205,6 +205,8 @@ describe("RPC domain state", () => {
 			await waitForEvent("ProblemFormulationRecorded");
 
 			const state = await send({ type: "get_state" });
+			expect(state.type).toBe("response");
+			expect(state.command).toBe("get_state");
 			expect(state.success).toBe(true);
 			const formulation = (state.data as { formulation: Record<string, unknown> | null }).formulation;
 			// The version is the point: a client that just connected has no other way to learn which
@@ -223,6 +225,8 @@ describe("RPC domain state", () => {
 			// The snapshot is the state the live events are applied to, so a client that reads it
 			// and then subscribes sees one continuous history rather than two that can disagree.
 			const snapshotResponse = await send({ type: "get_domain_snapshot" });
+			expect(snapshotResponse.type).toBe("response");
+			expect(snapshotResponse.command).toBe("get_domain_snapshot");
 			expect(snapshotResponse.success).toBe(true);
 			const snapshot = snapshotResponse.data as {
 				tasks: Array<{ status: string; formulations: Array<{ ordinal: number }> }>;
@@ -241,10 +245,13 @@ describe("RPC domain state", () => {
 		const { cleanup } = await startRpcMode();
 		try {
 			const state = await send({ type: "get_state" });
+			expect(state.type).toBe("response");
+			expect(state.command).toBe("get_state");
 			expect(state.success).toBe(true);
 			expect((state.data as { formulation: unknown }).formulation).toBeNull();
 
 			const snapshotResponse = await send({ type: "get_domain_snapshot" });
+			expect(snapshotResponse.command).toBe("get_domain_snapshot");
 			expect((snapshotResponse.data as { tasks: unknown[] }).tasks).toEqual([]);
 		} finally {
 			await cleanup();
@@ -259,10 +266,13 @@ describe("RPC domain state", () => {
 			// An approval names the reading it is for; naming one that is not waiting is an error
 			// rather than a silent success.
 			const wrong = await send({ type: "approve_frame", versionId: "formulation-nope" });
+			expect(wrong.type).toBe("response");
+			expect(wrong.command).toBe("approve_frame");
 			expect(wrong.success).toBe(false);
 			expect(String(wrong.error)).toContain("is not the reading waiting for approval");
 
 			const approved = await send({ type: "approve_frame" });
+			expect(approved.command).toBe("approve_frame");
 			expect(approved.success).toBe(true);
 			expect((approved.data as { outcome: string }).outcome).toBe("recorded");
 			expect(String((approved.data as { versionId: string }).versionId)).toMatch(/^formulation-/);
@@ -288,10 +298,13 @@ describe("RPC domain state", () => {
 			await waitForEvent("ProblemFormulationRecorded");
 
 			const blank = await send({ type: "frame_correct", message: "   " });
+			expect(blank.type).toBe("response");
+			expect(blank.command).toBe("frame_correct");
 			expect(blank.success).toBe(false);
 			expect(String(blank.error)).toContain("no active task, or the correction was blank");
 
 			const corrected = await send({ type: "frame_correct", message: "the question is about the re-arm path" });
+			expect(corrected.command).toBe("frame_correct");
 			expect(corrected.success).toBe(true);
 			expect(String((corrected.data as { correctionId: string }).correctionId)).toMatch(/^formulation-correction-/);
 

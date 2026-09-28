@@ -8,7 +8,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
 import { DEFAULT_RADIUS_GATEWAY } from "@earendil-works/pi-ai/providers/radius-config";
 import type {
@@ -53,9 +52,7 @@ import {
 	APP_TITLE,
 	CONFIG_DIR_NAME,
 	getAgentDir,
-	getAuthPath,
 	getDebugLogPath,
-	getDocsPath,
 	getShareViewerUrl,
 	VERSION,
 } from "../../config.ts";
@@ -82,7 +79,6 @@ import type {
 	ExtensionContext,
 	ExtensionRunner,
 	ExtensionUIContext,
-	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
 	ProjectTrustContext,
@@ -92,12 +88,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
-import {
-	defaultModelPerProvider,
-	findExactModelReferenceMatch,
-	resolveModelScopeFromModels,
-} from "../../core/model-resolver.ts";
-import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
+import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -114,11 +105,11 @@ import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
-import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+import { AuthLoginFlow } from "./auth-login.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -132,9 +123,6 @@ import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
-import { ExtensionEditorComponent } from "./components/extension-editor.ts";
-import { ExtensionInputComponent } from "./components/extension-input.ts";
-import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
 import {
 	buildFrameDetailLines,
@@ -144,14 +132,9 @@ import {
 	summaryPanelShown,
 } from "./components/frame-panel.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
-import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
-import {
-	type AuthSelectorProvider,
-	formatAuthSelectorProviderType,
-	OAuthSelectorComponent,
-} from "./components/oauth-selector.ts";
+import { type AuthSelectorProvider, formatAuthSelectorProviderType } from "./components/oauth-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -170,7 +153,16 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { ExtensionDialogs } from "./extension-dialogs.ts";
 import { editInExternalEditor } from "./external-editor.ts";
+import {
+	type DiagnosticsFormatHelpers,
+	formatContextPath,
+	formatDiagnostics,
+	formatDisplayPath,
+	formatExtensionDisplayPath,
+	formatScopeGroups as formatScopeGroupsImpl,
+} from "./format-helpers.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
 import {
@@ -256,10 +248,6 @@ function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
 }
 
-function isUnknownModel(model: Model<any> | undefined): boolean {
-	return !!model && model.provider === "unknown" && model.id === "unknown" && model.api === "unknown";
-}
-
 function quoteIfNeeded(value: string): string {
 	if (value.length > 0 && !/[^a-zA-Z0-9_\-./~:@]/.test(value)) {
 		return value;
@@ -280,10 +268,6 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 	}
 	args.push("--session", sessionManager.getSessionId());
 	return args.join(" ");
-}
-
-function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
-	return providerId in defaultModelPerProvider;
 }
 
 /**
@@ -316,12 +300,6 @@ function formatRoleSlotLine(
 	const model = slot.model ? `${slot.model.provider}/${slot.model.id}` : "—";
 	const ch = slot.latestCacheHitRate !== undefined ? `${slot.latestCacheHitRate.toFixed(1)}%` : "—";
 	return `  ${dim(`${label}:`)} ${model} ${dim(`(CH ${ch})`)}`;
-}
-
-function llamaCppPostLoginGuidance(actionLabel: string, loadedModelCount: number): string {
-	return loadedModelCount === 0
-		? `${actionLabel}. No llama.cpp models are loaded. Use /llama to load a model, then /model to select it.`
-		: `${actionLabel}. Use /model to select a loaded llama.cpp model, or /llama to manage models.`;
 }
 
 type LoginProviderCompletionOption = {
@@ -584,9 +562,6 @@ export class InteractiveMode {
 	private shutdownRequested = false;
 
 	// Extension UI state
-	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
-	private extensionInput: ExtensionInputComponent | undefined = undefined;
-	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -625,6 +600,8 @@ export class InteractiveMode {
 	};
 	private autoTrustOnReloadCwd: string | undefined;
 	private themeController: InteractiveThemeController;
+	private authLoginFlow: AuthLoginFlow | undefined;
+	private extensionDialogsInstance: ExtensionDialogs | undefined;
 
 	// Convenience accessors
 	private get session(): AgentSession {
@@ -638,6 +615,73 @@ export class InteractiveMode {
 	}
 	private get settingsManager() {
 		return this.session.settingsManager;
+	}
+
+	/**
+	 * The selector/input/editor dialogs extensions open over the editor. Built on first use and
+	 * bound to this instance's live view state: the editor and its container are reassigned when
+	 * an extension swaps the editor component, so the dialogs must see the current objects.
+	 */
+	private get extensionDialogs(): ExtensionDialogs {
+		if (!this.extensionDialogsInstance) {
+			const self = this;
+			this.extensionDialogsInstance = new ExtensionDialogs({
+				get ui() {
+					return self.ui;
+				},
+				get editor() {
+					return self.editor;
+				},
+				get editorContainer() {
+					return self.editorContainer;
+				},
+				get keybindings() {
+					return self.keybindings;
+				},
+				getExternalEditorCommand: () => self.settingsManager.getExternalEditorCommand(),
+				disposeActiveSelector: () => self.disposeActiveSelector(),
+				toggleToolOutputExpansion: () => self.toggleToolOutputExpansion(),
+			});
+		}
+		return this.extensionDialogsInstance;
+	}
+
+	/**
+	 * The provider login/logout flow, built on first use so it can bind to this instance's live
+	 * view state. Every member it reads is forwarded through a getter: the editor, its container,
+	 * and the session are all reassigned during the app's life (extension editor swaps, session
+	 * switches), so the flow must see the current object rather than one captured at construction.
+	 */
+	private get authLogin(): AuthLoginFlow {
+		if (!this.authLoginFlow) {
+			const self = this;
+			this.authLoginFlow = new AuthLoginFlow({
+				get session() {
+					return self.session;
+				},
+				get ui() {
+					return self.ui;
+				},
+				get editor() {
+					return self.editor;
+				},
+				get editorContainer() {
+					return self.editorContainer;
+				},
+				get footer() {
+					return self.footer;
+				},
+				showError: (message) => self.showError(message),
+				showStatus: (message) => self.showStatus(message),
+				showWarning: (message) => self.showWarning(message),
+				showSelector: (create) => self.showSelector(create),
+				updateAvailableProviderCount: () => self.updateAvailableProviderCount(),
+				updateEditorBorderColor: () => self.updateEditorBorderColor(),
+				checkDaxnutsEasterEgg: (model) => self.checkDaxnutsEasterEgg(model),
+				maybeWarnAboutAnthropicSubscriptionAuth: (model) => self.maybeWarnAboutAnthropicSubscriptionAuth(model),
+			});
+		}
+		return this.authLoginFlow;
 	}
 
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
@@ -809,7 +853,7 @@ export class InteractiveMode {
 		const loginCommand = slashCommands.find((command) => command.name === "login");
 		if (loginCommand) {
 			loginCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const providers = getLoginProviderCompletionOptions(this.getLoginProviderOptions());
+				const providers = getLoginProviderCompletionOptions(this.authLogin.getLoginProviderOptions());
 				return createFuzzyAutocompleteItems(providers, prefix, getLoginProviderSearchText, (provider) => ({
 					value: provider.id,
 					label: provider.id,
@@ -1423,35 +1467,6 @@ export class InteractiveMode {
 	// Extension System
 	// =========================================================================
 
-	private formatDisplayPath(p: string): string {
-		const home = os.homedir();
-		let result = p;
-
-		// Replace home directory with ~
-		if (result.startsWith(home)) {
-			result = `~${result.slice(home.length)}`;
-		}
-
-		return result;
-	}
-
-	private formatExtensionDisplayPath(path: string): string {
-		let result = this.formatDisplayPath(path);
-		result = result.replace(/\/index\.ts$/, "").replace(/\/index\.js$/, "");
-		return result;
-	}
-
-	private formatContextPath(p: string): string {
-		const cwd = path.resolve(this.sessionManager.getCwd());
-		const absolutePath = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
-		const relativePath = getCwdRelativePath(absolutePath, cwd);
-		if (relativePath !== undefined) {
-			return relativePath;
-		}
-
-		return this.formatDisplayPath(absolutePath);
-	}
-
 	private getStartupExpansionState(): boolean {
 		return this.options.verbose || this.toolOutputExpanded;
 	}
@@ -1493,7 +1508,7 @@ export class InteractiveMode {
 			return gitMatch[1];
 		}
 
-		return this.formatDisplayPath(fullPath);
+		return formatDisplayPath(fullPath);
 	}
 
 	private getCompactPathLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
@@ -1542,7 +1557,7 @@ export class InteractiveMode {
 	}
 
 	private getCompactDisplayPathSegments(resourcePath: string): string[] {
-		return this.formatDisplayPath(resourcePath)
+		return formatDisplayPath(resourcePath)
 			.replace(/\\/g, "/")
 			.split("/")
 			.filter((segment) => segment.length > 0 && segment !== "~");
@@ -1696,27 +1711,7 @@ export class InteractiveMode {
 			formatPackagePath: (item: { path: string; sourceInfo?: SourceInfo }, source: string) => string;
 		},
 	): string {
-		const lines: string[] = [];
-
-		for (const group of groups) {
-			lines.push(`  ${theme.fg("accent", group.scope)}`);
-
-			const sortedPaths = [...group.paths].sort((a, b) => a.path.localeCompare(b.path));
-			for (const item of sortedPaths) {
-				lines.push(theme.fg("dim", `    ${options.formatPath(item)}`));
-			}
-
-			const sortedPackages = Array.from(group.packages.entries()).sort(([a], [b]) => a.localeCompare(b));
-			for (const [source, items] of sortedPackages) {
-				lines.push(`    ${theme.fg("mdLink", source)}`);
-				const sortedPackagePaths = [...items].sort((a, b) => a.path.localeCompare(b.path));
-				for (const item of sortedPackagePaths) {
-					lines.push(theme.fg("dim", `      ${options.formatPackagePath(item, source)}`));
-				}
-			}
-		}
-
-		return lines.join("\n");
+		return formatScopeGroupsImpl(groups, options);
 	}
 
 	private findSourceInfoForPath(p: string, sourceInfos: Map<string, SourceInfo>): SourceInfo | undefined {
@@ -1740,60 +1735,7 @@ export class InteractiveMode {
 			const labelText = scopeLabel ? `${label} (${scopeLabel})` : label;
 			return `${labelText} ${shortPath}`;
 		}
-		return this.formatDisplayPath(p);
-	}
-
-	private formatDiagnostics(diagnostics: readonly ResourceDiagnostic[], sourceInfos: Map<string, SourceInfo>): string {
-		const lines: string[] = [];
-
-		// Group collision diagnostics by name
-		const collisions = new Map<string, ResourceDiagnostic[]>();
-		const otherDiagnostics: ResourceDiagnostic[] = [];
-
-		for (const d of diagnostics) {
-			if (d.type === "collision" && d.collision) {
-				const list = collisions.get(d.collision.name) ?? [];
-				list.push(d);
-				collisions.set(d.collision.name, list);
-			} else {
-				otherDiagnostics.push(d);
-			}
-		}
-
-		// Format collision diagnostics grouped by name
-		for (const [name, collisionList] of collisions) {
-			const first = collisionList[0]?.collision;
-			if (!first) continue;
-			lines.push(theme.fg("warning", `  "${name}" collision:`));
-			lines.push(
-				theme.fg(
-					"dim",
-					`    ${theme.fg("success", "✓")} ${this.formatPathWithSource(first.winnerPath, this.findSourceInfoForPath(first.winnerPath, sourceInfos))}`,
-				),
-			);
-			for (const d of collisionList) {
-				if (d.collision) {
-					lines.push(
-						theme.fg(
-							"dim",
-							`    ${theme.fg("warning", "✗")} ${this.formatPathWithSource(d.collision.loserPath, this.findSourceInfoForPath(d.collision.loserPath, sourceInfos))} (skipped)`,
-						),
-					);
-				}
-			}
-		}
-
-		for (const d of otherDiagnostics) {
-			if (d.path) {
-				const formattedPath = this.formatPathWithSource(d.path, this.findSourceInfoForPath(d.path, sourceInfos));
-				lines.push(theme.fg(d.type === "error" ? "error" : "warning", `  ${formattedPath}`));
-				lines.push(theme.fg(d.type === "error" ? "error" : "warning", `    ${d.message}`));
-			} else {
-				lines.push(theme.fg(d.type === "error" ? "error" : "warning", `  ${d.message}`));
-			}
-		}
-
-		return lines.join("\n");
+		return formatDisplayPath(p);
 	}
 
 	private showLoadedResources(options?: {
@@ -1878,11 +1820,9 @@ export class InteractiveMode {
 			];
 			if (contextFiles.length > 0) {
 				this.loadedResourcesContainer.addChild(new Spacer(1));
-				const contextList = contextFiles
-					.map((f) => theme.fg("dim", `  ${this.formatDisplayPath(f.path)}`))
-					.join("\n");
+				const contextList = contextFiles.map((f) => theme.fg("dim", `  ${formatDisplayPath(f.path)}`)).join("\n");
 				const contextCompactList = formatCompactList(
-					contextFiles.map((contextFile) => this.formatContextPath(contextFile.path)),
+					contextFiles.map((contextFile) => formatContextPath(contextFile.path, this.sessionManager.getCwd())),
 					{ sort: false },
 				);
 				addLoadedSection("Context", contextCompactList, contextList);
@@ -1894,7 +1834,7 @@ export class InteractiveMode {
 					skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
 				);
 				const skillList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
+					formatPath: (item) => formatDisplayPath(item.path),
 					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
 				});
 				const skillCompactList = formatCompactList(skills.map((skill) => skill.name));
@@ -1910,11 +1850,11 @@ export class InteractiveMode {
 				const templateList = this.formatScopeGroups(groups, {
 					formatPath: (item) => {
 						const template = templateByPath.get(item.path);
-						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
+						return template ? `/${template.name}` : formatDisplayPath(item.path);
 					},
 					formatPackagePath: (item) => {
 						const template = templateByPath.get(item.path);
-						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
+						return template ? `/${template.name}` : formatDisplayPath(item.path);
 					},
 				});
 				const promptCompactList = formatCompactList(templates.map((template) => `/${template.name}`));
@@ -1924,9 +1864,8 @@ export class InteractiveMode {
 			if (extensions.length > 0) {
 				const groups = this.buildScopeGroups(extensions);
 				const extList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatExtensionDisplayPath(item.path),
-					formatPackagePath: (item) =>
-						this.formatExtensionDisplayPath(this.getShortPath(item.path, item.sourceInfo)),
+					formatPath: (item) => formatExtensionDisplayPath(item.path),
+					formatPackagePath: (item) => formatExtensionDisplayPath(this.getShortPath(item.path, item.sourceInfo)),
 				});
 				const extensionCompactList = formatCompactList(this.getCompactExtensionLabels(extensions));
 				addLoadedSection("Extensions", extensionCompactList, extList, "mdHeading");
@@ -1943,7 +1882,7 @@ export class InteractiveMode {
 					})),
 				);
 				const themeList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
+					formatPath: (item) => formatDisplayPath(item.path),
 					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
 				});
 				const themeCompactList = formatCompactList(
@@ -1957,9 +1896,16 @@ export class InteractiveMode {
 		}
 
 		if (showDiagnostics) {
+			// `formatDiagnostics` renders paths through this class's own source lookup, so the binding is
+			// built once here and shared by the four diagnostic groups below.
+			const diagnosticsFormatHelpers: DiagnosticsFormatHelpers = {
+				formatPathWithSource: (p: string, sourceInfo?: SourceInfo) => this.formatPathWithSource(p, sourceInfo),
+				findSourceInfoForPath: (p: string, infos: Map<string, SourceInfo>) => this.findSourceInfoForPath(p, infos),
+			};
+
 			const skillDiagnostics = skillsResult.diagnostics;
 			if (skillDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(skillDiagnostics, sourceInfos);
+				const warningLines = formatDiagnostics(skillDiagnostics, sourceInfos, diagnosticsFormatHelpers);
 				this.loadedResourcesContainer.addChild(
 					new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0),
 				);
@@ -1968,7 +1914,7 @@ export class InteractiveMode {
 
 			const promptDiagnostics = promptsResult.diagnostics;
 			if (promptDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(promptDiagnostics, sourceInfos);
+				const warningLines = formatDiagnostics(promptDiagnostics, sourceInfos, diagnosticsFormatHelpers);
 				this.loadedResourcesContainer.addChild(
 					new Text(`${theme.fg("warning", "[Prompt conflicts]")}\n${warningLines}`, 0, 0),
 				);
@@ -1992,7 +1938,7 @@ export class InteractiveMode {
 			extensionDiagnostics.push(...shortcutDiagnostics);
 
 			if (extensionDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(extensionDiagnostics, sourceInfos);
+				const warningLines = formatDiagnostics(extensionDiagnostics, sourceInfos, diagnosticsFormatHelpers);
 				this.loadedResourcesContainer.addChild(
 					new Text(`${theme.fg("warning", "[Extension issues]")}\n${warningLines}`, 0, 0),
 				);
@@ -2001,7 +1947,7 @@ export class InteractiveMode {
 
 			const themeDiagnostics = themesResult.diagnostics;
 			if (themeDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(themeDiagnostics, sourceInfos);
+				const warningLines = formatDiagnostics(themeDiagnostics, sourceInfos, diagnosticsFormatHelpers);
 				this.loadedResourcesContainer.addChild(
 					new Text(`${theme.fg("warning", "[Theme conflicts]")}\n${warningLines}`, 0, 0),
 				);
@@ -2369,15 +2315,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
-		if (this.extensionSelector) {
-			this.hideExtensionSelector();
-		}
-		if (this.extensionInput) {
-			this.hideExtensionInput();
-		}
-		if (this.extensionEditor) {
-			this.hideExtensionEditor();
-		}
+		this.extensionDialogs.reset();
 		this.ui.hideOverlay();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
@@ -2551,9 +2489,9 @@ export class InteractiveMode {
 
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
-			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
-			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
-			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
+			select: (title, options, opts) => this.extensionDialogs.showSelector(title, options, opts),
+			confirm: (title, message, opts) => this.extensionDialogs.confirm(title, message, opts),
+			input: (title, placeholder, opts) => this.extensionDialogs.showInput(title, placeholder, opts),
 			notify: (message, type) => this.showExtensionNotify(message, type),
 			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
@@ -2574,7 +2512,7 @@ export class InteractiveMode {
 			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
 			setEditorText: (text) => this.editor.setText(text),
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
-			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
+			editor: (title, prefill) => this.extensionDialogs.showEditor(title, prefill),
 			addAutocompleteProvider: (factory) => {
 				this.autocompleteProviderWrappers.push(factory);
 				this.setupAutocompleteProvider();
@@ -2603,177 +2541,12 @@ export class InteractiveMode {
 		};
 	}
 
-	/**
-	 * Show a selector for extensions.
-	 */
-	private showExtensionSelector(
-		title: string,
-		options: string[],
-		opts?: ExtensionUIDialogOptions,
-	): Promise<string | undefined> {
-		return new Promise((resolve) => {
-			if (opts?.signal?.aborted) {
-				resolve(undefined);
-				return;
-			}
-
-			const onAbort = () => {
-				this.hideExtensionSelector();
-				resolve(undefined);
-			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-			this.extensionSelector = new ExtensionSelectorComponent(
-				title,
-				options,
-				(option) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(option);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(undefined);
-				},
-				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
-			);
-
-			this.disposeActiveSelector();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionSelector);
-			this.ui.setFocus(this.extensionSelector);
-			this.ui.requestRender();
-		});
-	}
-
-	/**
-	 * Hide the extension selector.
-	 */
-	private hideExtensionSelector(): void {
-		this.extensionSelector?.dispose();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
-		this.extensionSelector = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
-	}
-
-	/**
-	 * Show a confirmation dialog for extensions.
-	 */
-	private async showExtensionConfirm(
-		title: string,
-		message: string,
-		opts?: ExtensionUIDialogOptions,
-	): Promise<boolean> {
-		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
-		return result === "Yes";
-	}
-
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
-		const confirmed = await this.showExtensionConfirm(
+		const confirmed = await this.extensionDialogs.confirm(
 			"Session cwd not found",
 			formatMissingSessionCwdPrompt(error.issue),
 		);
 		return confirmed ? error.issue.fallbackCwd : undefined;
-	}
-
-	/**
-	 * Show a text input for extensions.
-	 */
-	private showExtensionInput(
-		title: string,
-		placeholder?: string,
-		opts?: ExtensionUIDialogOptions,
-	): Promise<string | undefined> {
-		return new Promise((resolve) => {
-			if (opts?.signal?.aborted) {
-				resolve(undefined);
-				return;
-			}
-
-			const onAbort = () => {
-				this.hideExtensionInput();
-				resolve(undefined);
-			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-			this.extensionInput = new ExtensionInputComponent(
-				title,
-				placeholder,
-				(value) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(value);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(undefined);
-				},
-				{ tui: this.ui, timeout: opts?.timeout },
-			);
-
-			this.disposeActiveSelector();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionInput);
-			this.ui.setFocus(this.extensionInput);
-			this.ui.requestRender();
-		});
-	}
-
-	/**
-	 * Hide the extension input.
-	 */
-	private hideExtensionInput(): void {
-		this.extensionInput?.dispose();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
-		this.extensionInput = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
-	}
-
-	/**
-	 * Show a multi-line editor for extensions (with Ctrl+G support).
-	 */
-	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
-		return new Promise((resolve) => {
-			this.extensionEditor = new ExtensionEditorComponent(
-				this.ui,
-				this.keybindings,
-				title,
-				prefill,
-				(value) => {
-					this.hideExtensionEditor();
-					resolve(value);
-				},
-				() => {
-					this.hideExtensionEditor();
-					resolve(undefined);
-				},
-				undefined,
-				this.settingsManager.getExternalEditorCommand(),
-			);
-
-			this.disposeActiveSelector();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionEditor);
-			this.ui.setFocus(this.extensionEditor);
-			this.ui.requestRender();
-		});
-	}
-
-	/**
-	 * Hide the extension editor.
-	 */
-	private hideExtensionEditor(): void {
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
-		this.extensionEditor = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
 	}
 
 	/**
@@ -3186,11 +2959,11 @@ export class InteractiveMode {
 			if (text === "/login" || text.startsWith("/login ")) {
 				const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
 				this.editor.setText("");
-				await this.handleLoginCommand(providerRef);
+				await this.authLogin.handleLoginCommand(providerRef);
 				return;
 			}
 			if (text === "/logout") {
-				this.showOAuthSelector("logout");
+				this.authLogin.showOAuthSelector("logout");
 				this.editor.setText("");
 				return;
 			}
@@ -5418,7 +5191,7 @@ export class InteractiveMode {
 					// Check if we should skip the prompt (user preference to always default to no summary)
 					if (!this.settingsManager.getBranchSummarySkipPrompt()) {
 						while (true) {
-							const summaryChoice = await this.showExtensionSelector("Summarize branch?", [
+							const summaryChoice = await this.extensionDialogs.showSelector("Summarize branch?", [
 								"No summary",
 								"Summarize",
 								"Summarize with custom prompt",
@@ -5433,7 +5206,9 @@ export class InteractiveMode {
 							wantsSummary = summaryChoice !== "No summary";
 
 							if (summaryChoice === "Summarize with custom prompt") {
-								customInstructions = await this.showExtensionEditor("Custom summarization instructions");
+								customInstructions = await this.extensionDialogs.showEditor(
+									"Custom summarization instructions",
+								);
 								if (customInstructions === undefined) {
 									// User cancelled - loop back to summary selector
 									continue;
@@ -5601,521 +5376,6 @@ export class InteractiveMode {
 		}
 	}
 
-	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
-		const options: AuthSelectorProvider[] = [];
-		for (const provider of this.session.modelRuntime.getProviders()) {
-			const authStatus = this.session.modelRuntime.getProviderAuthStatus(provider.id);
-			const status = authStatus.configured
-				? {
-						type: this.session.modelRuntime.isUsingOAuth(provider.id) ? ("oauth" as const) : ("api_key" as const),
-						source: authStatus.label ?? authStatus.source,
-					}
-				: undefined;
-			if ((!authType || authType === "oauth") && provider.auth.oauth) {
-				options.push({
-					id: provider.id,
-					name: provider.name,
-					authType: "oauth",
-					method: provider.auth.oauth,
-					status,
-				});
-			}
-			if ((!authType || authType === "api_key") && provider.auth.apiKey) {
-				options.push({
-					id: provider.id,
-					name: provider.name,
-					authType: "api_key",
-					method: provider.auth.apiKey,
-					status,
-				});
-			}
-		}
-		return options.sort((a, b) => a.name.localeCompare(b.name));
-	}
-
-	private async getLogoutProviderOptions(): Promise<AuthSelectorProvider[]> {
-		return (await this.session.modelRuntime.listCredentials({ signal: AbortSignal.timeout(15_000) }))
-			.map(({ providerId, type }) => ({
-				id: providerId,
-				name: this.session.modelRuntime.getProvider(providerId)?.name ?? providerId,
-				authType: type,
-				status: { type, source: "stored credential" },
-			}))
-			.sort((a, b) => a.name.localeCompare(b.name));
-	}
-
-	private findLoginProviderOptions(providerRef: string): AuthSelectorProvider[] {
-		const normalizedProviderRef = providerRef.trim().toLowerCase();
-		if (!normalizedProviderRef) {
-			return [];
-		}
-
-		return this.getLoginProviderOptions().filter(
-			(provider) =>
-				provider.id.toLowerCase() === normalizedProviderRef ||
-				provider.name.toLowerCase() === normalizedProviderRef,
-		);
-	}
-
-	private async handleLoginCommand(providerRef?: string): Promise<void> {
-		if (!providerRef) {
-			this.showLoginAuthTypeSelector();
-			return;
-		}
-
-		const providerOptions = this.findLoginProviderOptions(providerRef);
-		if (providerOptions.length === 1) {
-			await this.startProviderLogin(providerOptions[0]!);
-			return;
-		}
-
-		if (providerOptions.length > 1) {
-			const providerIds = new Set(providerOptions.map((provider) => provider.id));
-			if (providerIds.size === 1) {
-				this.showLoginAuthTypeSelector(providerOptions);
-				return;
-			}
-		}
-
-		this.showLoginProviderSelector(undefined, providerRef);
-	}
-
-	private async startProviderLogin(providerOption: AuthSelectorProvider): Promise<void> {
-		if (providerOption.authType === "oauth") {
-			await this.showLoginDialog(providerOption.id, providerOption.name);
-		} else if (providerOption.method?.login) {
-			await this.showApiKeyLoginDialog(providerOption.id, providerOption.name);
-		} else {
-			this.showAmbientAuthDialog(providerOption);
-		}
-	}
-
-	private showLoginAuthTypeSelector(providerOptions?: AuthSelectorProvider[]): void {
-		const oauthProvider = providerOptions?.find((provider) => provider.authType === "oauth");
-		const oauthLoginLabel =
-			oauthProvider?.method && "loginLabel" in oauthProvider.method ? oauthProvider.method.loginLabel : undefined;
-		const subscriptionLabel = oauthLoginLabel ?? "Sign in with an account";
-		const apiKeyLabel = "Sign in with an API key";
-		const availableAuthTypes = providerOptions
-			? new Set(providerOptions.map((provider) => provider.authType))
-			: new Set<AuthSelectorProvider["authType"]>(["oauth", "api_key"]);
-		const options: string[] = [];
-		if (availableAuthTypes.has("oauth")) {
-			options.push(subscriptionLabel);
-		}
-		if (availableAuthTypes.has("api_key")) {
-			options.push(apiKeyLabel);
-		}
-
-		if (options.length === 0) {
-			this.showStatus("No login methods available.");
-			return;
-		}
-
-		if (providerOptions && options.length === 1) {
-			const providerOption = providerOptions[0];
-			if (providerOption) {
-				void this.startProviderLogin(providerOption);
-			}
-			return;
-		}
-
-		const title = providerOptions?.[0]
-			? `Select authentication method for ${providerOptions[0].name}:`
-			: "Select authentication method:";
-		this.showSelector((done) => {
-			const selector = new ExtensionSelectorComponent(
-				title,
-				options,
-				(option) => {
-					done();
-					const authType = option === subscriptionLabel ? "oauth" : "api_key";
-					if (providerOptions) {
-						const providerOption = providerOptions.find((provider) => provider.authType === authType);
-						if (providerOption) {
-							void this.startProviderLogin(providerOption);
-						}
-						return;
-					}
-					this.showLoginProviderSelector(authType);
-				},
-				() => {
-					done();
-					this.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
-		});
-	}
-
-	private showLoginProviderSelector(authType?: AuthSelectorProvider["authType"], initialSearchInput?: string): void {
-		const providerOptions = this.getLoginProviderOptions(authType);
-		if (providerOptions.length === 0) {
-			const message =
-				authType === "oauth"
-					? "No subscription providers available."
-					: authType === "api_key"
-						? "No API key providers available."
-						: "No login providers available.";
-			this.showStatus(message);
-			return;
-		}
-
-		this.showSelector((done) => {
-			const selector = new OAuthSelectorComponent(
-				"login",
-				providerOptions,
-				async (providerId, selectedAuthType) => {
-					done();
-
-					const providerOption = providerOptions.find(
-						(provider) => provider.id === providerId && provider.authType === selectedAuthType,
-					);
-					if (!providerOption) {
-						return;
-					}
-
-					await this.startProviderLogin(providerOption);
-				},
-				() => {
-					done();
-					if (authType) {
-						this.showLoginAuthTypeSelector();
-					} else {
-						this.ui.requestRender();
-					}
-				},
-				initialSearchInput,
-			);
-			return { component: selector, focus: selector };
-		});
-	}
-
-	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
-		if (mode === "login") {
-			this.showLoginAuthTypeSelector();
-			return;
-		}
-
-		let providerOptions: AuthSelectorProvider[];
-		try {
-			providerOptions = await this.getLogoutProviderOptions();
-		} catch (error) {
-			this.showError(`Could not read stored credentials: ${error instanceof Error ? error.message : String(error)}`);
-			return;
-		}
-		if (providerOptions.length === 0) {
-			this.showStatus(
-				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
-			);
-			return;
-		}
-
-		this.showSelector((done) => {
-			const selector = new OAuthSelectorComponent(
-				mode,
-				providerOptions,
-				async (providerId: string) => {
-					done();
-
-					const providerOption = providerOptions.find((provider) => provider.id === providerId);
-					if (!providerOption) {
-						return;
-					}
-
-					try {
-						await this.session.modelRuntime.logout(providerOption.id, {
-							signal: AbortSignal.timeout(15_000),
-						});
-						await this.updateAvailableProviderCount();
-						const message =
-							providerOption.authType === "oauth"
-								? `Logged out of ${providerOption.name}`
-								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-						this.showStatus(message);
-					} catch (error: unknown) {
-						const message = error instanceof Error ? error.message : String(error);
-						this.showError(
-							error instanceof CredentialSynchronizationError
-								? `Credentials removed for ${providerOption.name}, but local model state could not be synchronized: ${message}`
-								: `Logout failed: ${message}`,
-						);
-					}
-				},
-				() => {
-					done();
-					this.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
-		});
-	}
-
-	private async completeProviderAuthentication(
-		providerId: string,
-		providerName: string,
-		authType: "oauth" | "api_key",
-		previousModel: Model<any> | undefined,
-	): Promise<void> {
-		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
-
-		let selectedModel: Model<any> | undefined;
-		let selectionError: string | undefined;
-		if (isUnknownModel(previousModel)) {
-			const availableModels = this.session.modelRuntime.getAvailableSnapshot();
-			const providerModels = availableModels.filter((model) => model.provider === providerId);
-			// Matches LLAMA_PROVIDER_ID from extensions/llama/provider.ts; kept inline to avoid coupling interactive mode to the built-in extension.
-			if (providerId === "llama.cpp") {
-				selectionError = llamaCppPostLoginGuidance(actionLabel, providerModels.length);
-			} else if (!hasDefaultModelProvider(providerId)) {
-				selectionError = `${actionLabel}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
-			} else if (providerModels.length === 0) {
-				selectionError = `${actionLabel}, but no models are available for that provider. Use /model to select a model.`;
-			} else {
-				const defaultModelId = defaultModelPerProvider[providerId];
-				selectedModel = providerModels.find((model) => model.id === defaultModelId);
-				if (!selectedModel) {
-					selectionError = `${actionLabel}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
-				} else {
-					try {
-						await this.session.setModel(selectedModel, { persist: true });
-					} catch (error: unknown) {
-						selectedModel = undefined;
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
-					}
-				}
-			}
-		}
-
-		await this.updateAvailableProviderCount();
-		this.footer.invalidate();
-		this.updateEditorBorderColor();
-		if (selectedModel) {
-			this.showStatus(`${actionLabel}. Selected ${selectedModel.id}. Credentials saved to ${getAuthPath()}`);
-			void this.maybeWarnAboutAnthropicSubscriptionAuth(selectedModel);
-			this.checkDaxnutsEasterEgg(selectedModel);
-		} else {
-			this.showStatus(`${actionLabel}. Credentials saved to ${getAuthPath()}`);
-			if (selectionError) {
-				this.showError(selectionError);
-			} else {
-				void this.maybeWarnAboutAnthropicSubscriptionAuth();
-			}
-		}
-
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 15_000);
-		void this.session.modelRuntime
-			.refresh({ providers: [providerId], signal: controller.signal })
-			.then((result) => {
-				if (result.aborted) {
-					this.showWarning(`${actionLabel}, but its model catalog refresh timed out; using cached models.`);
-				} else if (result.errors.size > 0) {
-					this.showWarning(`${actionLabel}, but its model catalog could not be refreshed; using cached models.`);
-				}
-				this.updateAvailableProviderCount();
-				this.footer.invalidate();
-				this.ui.requestRender();
-			})
-			.catch((error: unknown) => {
-				this.showWarning(
-					`${actionLabel}, but its model catalog could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			})
-			.finally(() => clearTimeout(timeout));
-	}
-
-	private showAmbientAuthDialog(providerOption: AuthSelectorProvider): void {
-		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
-		};
-
-		const dialog = new LoginDialogComponent(
-			this.ui,
-			providerOption.id,
-			() => restoreEditor(),
-			providerOption.name,
-			`${providerOption.name} setup`,
-		);
-		dialog.showInfo(
-			`${providerOption.method?.name ?? "Authentication"} is configured outside ${APP_NAME}.`,
-			[],
-			true,
-		);
-
-		this.editorContainer.clear();
-		this.editorContainer.addChild(dialog);
-		this.ui.setFocus(dialog);
-		this.ui.requestRender();
-	}
-
-	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
-		const previousModel = this.session.model;
-
-		const dialog = new LoginDialogComponent(
-			this.ui,
-			providerId,
-			(_success, _message) => {
-				// Completion handled below
-			},
-			providerName,
-		);
-
-		if (providerId === "amazon-bedrock") {
-			dialog.showDetails([
-				theme.fg("text", "You can also use an AWS profile, IAM keys, or role-based credentials."),
-				theme.fg("muted", "See:"),
-				theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
-			]);
-		}
-
-		this.editorContainer.clear();
-		this.editorContainer.addChild(dialog);
-		this.ui.setFocus(dialog);
-		this.ui.requestRender();
-
-		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
-		};
-
-		try {
-			await this.loginProvider(dialog, providerId, "api_key");
-			restoreEditor();
-			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
-		} catch (error: unknown) {
-			restoreEditor();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (error instanceof CredentialSynchronizationError) {
-				this.showError(
-					`Saved API key for ${providerName}, but local model state could not be synchronized: ${errorMsg}`,
-				);
-			} else if (errorMsg !== "Login cancelled") {
-				this.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
-			}
-		}
-	}
-
-	private showAuthSelect(
-		dialog: LoginDialogComponent,
-		prompt: Extract<AuthPrompt, { type: "select" }>,
-	): Promise<string> {
-		return new Promise((resolve, reject) => {
-			const restoreDialog = () => {
-				this.editorContainer.clear();
-				this.editorContainer.addChild(dialog);
-				this.ui.setFocus(dialog);
-				this.ui.requestRender();
-			};
-			const labels = prompt.options.map((option) => option.label);
-			const selector = new ExtensionSelectorComponent(
-				prompt.message,
-				labels,
-				(optionLabel) => {
-					restoreDialog();
-					const id = prompt.options.find((option) => option.label === optionLabel)?.id;
-					if (id) resolve(id);
-					else reject(new Error("Login cancelled"));
-				},
-				() => {
-					restoreDialog();
-					reject(new Error("Login cancelled"));
-				},
-			);
-			this.editorContainer.clear();
-			this.editorContainer.addChild(selector);
-			this.ui.setFocus(selector);
-			this.ui.requestRender();
-		});
-	}
-
-	private async showAuthPrompt(dialog: LoginDialogComponent, prompt: AuthPrompt): Promise<string> {
-		let response: Promise<string>;
-		if (prompt.type === "select") {
-			response = this.showAuthSelect(dialog, prompt);
-		} else if (prompt.type === "manual_code") {
-			response = dialog.showManualInput(prompt.message);
-		} else {
-			response = dialog.showPrompt(prompt.message, prompt.placeholder);
-		}
-		if (!prompt.signal) return response;
-		if (prompt.signal.aborted) throw new Error("Login cancelled");
-		const signal = prompt.signal;
-		let onAbort: (() => void) | undefined;
-		const aborted = new Promise<string>((_resolve, reject) => {
-			onAbort = () => reject(new Error("Login cancelled"));
-			signal.addEventListener("abort", onAbort, { once: true });
-		});
-		try {
-			return await Promise.race([response, aborted]);
-		} finally {
-			if (onAbort) signal.removeEventListener("abort", onAbort);
-		}
-	}
-
-	private notifyAuthDialog(dialog: LoginDialogComponent, event: AuthEvent): void {
-		if (event.type === "auth_url") {
-			dialog.showAuth(event.url, event.instructions);
-		} else if (event.type === "device_code") {
-			dialog.showDeviceCode(event);
-			dialog.showWaiting("Waiting for authentication...");
-		} else if (event.type === "info") {
-			dialog.showInfo(event.message, event.links);
-		} else {
-			dialog.showProgress(event.message);
-		}
-	}
-
-	private async loginProvider(
-		dialog: LoginDialogComponent,
-		providerId: string,
-		method: "api_key" | "oauth",
-	): Promise<void> {
-		await this.session.modelRuntime.login(providerId, method, {
-			signal: dialog.signal,
-			prompt: (prompt) => this.showAuthPrompt(dialog, prompt),
-			notify: (event) => this.notifyAuthDialog(dialog, event),
-		});
-	}
-
-	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
-		const previousModel = this.session.model;
-		const dialog = new LoginDialogComponent(this.ui, providerId, (_success, _message) => {}, providerName);
-		this.editorContainer.clear();
-		this.editorContainer.addChild(dialog);
-		this.ui.setFocus(dialog);
-		this.ui.requestRender();
-
-		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
-		};
-
-		try {
-			await this.loginProvider(dialog, providerId, "oauth");
-			restoreEditor();
-			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
-		} catch (error: unknown) {
-			restoreEditor();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (error instanceof CredentialSynchronizationError) {
-				this.showError(
-					`Logged in to ${providerName}, but local model state could not be synchronized: ${errorMsg}`,
-				);
-			} else if (errorMsg !== "Login cancelled") {
-				this.showError(`Failed to login to ${providerName}: ${errorMsg}`);
-			}
-		}
-	}
-
 	// =========================================================================
 	// Command handlers
 	// =========================================================================
@@ -6264,7 +5524,10 @@ export class InteractiveMode {
 			return;
 		}
 
-		const confirmed = await this.showExtensionConfirm("Import session", `Replace current session with ${inputPath}?`);
+		const confirmed = await this.extensionDialogs.confirm(
+			"Import session",
+			`Replace current session with ${inputPath}?`,
+		);
 		if (!confirmed) {
 			this.showStatus("Import cancelled");
 			return;
