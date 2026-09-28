@@ -20,8 +20,12 @@ interface FakeContext {
 	session: {
 		submitFormulationCorrection: (text: string) => { id: string } | undefined;
 		approveFormulation: (versionId?: string) => FormulationApprovalResult;
+		autoApproveFrame: boolean;
+		setAutoApproveFrame: (enabled: boolean) => void;
 	};
 	submitted: string[];
+	/** Backs the fake session's session-scoped auto-approve toggle. */
+	autoApproveFrameState: boolean;
 	/** Every version id the approval command passed, `undefined` for "the reading on screen". */
 	approved: Array<string | undefined>;
 	/** Set to make the next approval come back refused, as the runtime does. */
@@ -45,6 +49,7 @@ type FrameHandlers = {
 	showFrameDetail(this: unknown): void;
 	hideFrameDetail(this: unknown): void;
 	writeFrameDetailToTranscript(this: unknown): void;
+	toggleFrameAutoApprove(this: unknown): void;
 };
 
 const handlers = InteractiveMode.prototype as unknown as FrameHandlers;
@@ -56,6 +61,7 @@ const waitResolutionHandler = handlers.formulationWaitResolution;
 const showHandler = handlers.showFrameDetail;
 const hideHandler = handlers.hideFrameDetail;
 const transcriptHandler = handlers.writeFrameDetailToTranscript;
+const toggleAutoApproveHandler = handlers.toggleFrameAutoApprove;
 
 function version(): ProblemFormulationVersion {
 	return {
@@ -108,8 +114,15 @@ function createContext(): FakeContext {
 					approval: { versionId: versionId ?? "formulation-1", approvedAt: "2026-09-25T00:00:00.000Z" },
 				};
 			},
+			get autoApproveFrame() {
+				return context.autoApproveFrameState;
+			},
+			setAutoApproveFrame: (enabled: boolean) => {
+				context.autoApproveFrameState = enabled;
+			},
 		},
 		submitted: [],
+		autoApproveFrameState: false,
 		approved: [],
 		statuses: [],
 		frameDetailVisible: false,
@@ -142,6 +155,7 @@ function createContext(): FakeContext {
 		showFrameDetail: () => showHandler.call(context),
 		hideFrameDetail: () => hideHandler.call(context),
 		writeFrameDetailToTranscript: () => transcriptHandler.call(context),
+		toggleFrameAutoApprove: () => toggleAutoApproveHandler.call(context),
 	});
 }
 
@@ -243,6 +257,45 @@ describe("/frame command", () => {
 		context.session.submitFormulationCorrection = () => undefined;
 		handlers.handleFrameCommand.call(context, "correct fix it");
 		expect(context.statuses.join("\n")).toContain("No active task to correct");
+	});
+
+	it("routes the single-letter aliases to the same handlers", () => {
+		const approveContext = createContext();
+		handlers.handleFrameCommand.call(approveContext, "a");
+		handlers.handleFrameCommand.call(approveContext, " a formulation-9 ");
+		expect(approveContext.approved).toEqual([undefined, "formulation-9"]);
+		expect(approveContext.submitted).toEqual([]);
+
+		const correctContext = createContext();
+		handlers.handleFrameCommand.call(correctContext, "c it is the wrong target");
+		expect(correctContext.submitted).toEqual(["it is the wrong target"]);
+
+		const fullContext = createContext();
+		handlers.handleFrameCommand.call(fullContext, "f");
+		expect(fullContext.transcript).toHaveLength(2);
+
+		const closeContext = createContext();
+		handlers.handleFrameCommand.call(closeContext, "cl");
+		expect(closeContext.detailVisibility).toEqual([false]);
+	});
+
+	it("keeps an alias correction with no text from recording an empty one", () => {
+		const context = createContext();
+		handlers.handleFrameCommand.call(context, "c   ");
+		expect(context.submitted).toEqual([]);
+		expect(context.statuses.join("\n")).toContain("Usage: /frame correct");
+	});
+
+	it("toggles session auto-approval and reports the new state", () => {
+		const context = createContext();
+		handlers.handleFrameCommand.call(context, "autoapprove");
+		expect(context.autoApproveFrameState).toBe(true);
+		expect(context.statuses.join("\n")).toContain("Frame auto-approve: on");
+		handlers.handleFrameCommand.call(context, "auto");
+		expect(context.autoApproveFrameState).toBe(false);
+		expect(context.statuses.join("\n")).toContain("Frame auto-approve: off");
+		// Toggling the switch is not itself an approval.
+		expect(context.approved).toEqual([]);
 	});
 
 	it("toggles the summary panel through the keybinding handler", () => {

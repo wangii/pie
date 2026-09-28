@@ -467,6 +467,14 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 	});
 }
 
+/** Short aliases for the `/frame` subcommands, resolved on the first token before the branches. */
+const FRAME_SUBCOMMAND_ALIASES: Record<string, string> = {
+	a: "approve",
+	c: "correct",
+	f: "full",
+	cl: "close",
+};
+
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private renderer: TuiMainScreen | TuiAltScreen;
@@ -6662,29 +6670,50 @@ export class InteractiveMode {
 	 */
 	private handleFrameCommand(argument: string): void {
 		const text = argument.trim();
-		if (text === "" || text === "show" || text === "history") {
+		const separator = text.indexOf(" ");
+		const head = separator === -1 ? text : text.slice(0, separator);
+		// The alias resolves on the first token alone, so `a formulation-7` and `c <text>` keep the
+		// argument parsing the long names already use, and every old spelling keeps its branch.
+		const subcommand = FRAME_SUBCOMMAND_ALIASES[head] ?? head;
+		const rest = separator === -1 ? "" : text.slice(separator + 1).trim();
+		if (subcommand === "" || subcommand === "show" || subcommand === "history") {
 			this.showFrameDetail();
 			return;
 		}
-		if (text === "close" || text === "hide") {
+		if (subcommand === "close" || subcommand === "hide") {
 			this.hideFrameDetail();
 			return;
 		}
-		if (text === "full") {
+		if (subcommand === "full") {
 			this.writeFrameDetailToTranscript();
 			return;
 		}
-		if (text === "approve" || text.startsWith("approve ")) {
-			this.approveFrame(text.slice("approve".length).trim());
+		if (subcommand === "approve") {
+			this.approveFrame(rest);
 			return;
 		}
-		if (text === "correct" || text.startsWith("correct ")) {
-			this.submitFrameCorrection(text.slice("correct".length).trim());
+		if (subcommand === "correct") {
+			this.submitFrameCorrection(rest);
+			return;
+		}
+		if (subcommand === "autoapprove" || subcommand === "auto") {
+			this.toggleFrameAutoApprove();
 			return;
 		}
 		this.showStatus(
-			"Usage: /frame, /frame history, /frame full, /frame approve [version], /frame correct <text>, or /frame close",
+			"Usage: /frame, /frame history, /frame full (f), /frame approve [version] (a), /frame correct <text> (c), /frame close (cl), or /frame autoapprove (auto)",
 		);
+	}
+
+	/**
+	 * `/frame autoapprove` — session-scoped: the reading published after a run is approved without
+	 * waiting for the user. It toggles, and it reports the new state because the setting has no other
+	 * visible surface and the user is about to rely on it.
+	 */
+	private toggleFrameAutoApprove(): void {
+		const enabled = !this.session.autoApproveFrame;
+		this.session.setAutoApproveFrame(enabled);
+		this.showStatus(`Frame auto-approve: ${enabled ? "on" : "off"}`);
 	}
 
 	/**

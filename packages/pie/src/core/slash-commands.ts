@@ -32,7 +32,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "frame",
 		description: "Show how the agent currently reads this task, its history, and corrections",
-		argumentHint: "[approve [version]|correct <text>|full|close]",
+		argumentHint: "[approve [version]|correct <text>|full|close|autoapprove] (aliases: a, c, f, cl, auto)",
 	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },

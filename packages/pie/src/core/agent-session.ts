@@ -382,6 +382,12 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	/**
+	 * Whether a Frame published by this session's belief loop is approved as soon as it waits, without
+	 * the user's `/frame approve`. Session-scoped on purpose: the pause is the safety property that the
+	 * approval is a deliberate act, so it is not written to settings and does not survive a restart.
+	 */
+	private _autoApproveFrame = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -1495,7 +1501,26 @@ export class AgentSession {
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 			await this._emitAgentSettled();
+			this._autoApproveWaitingFrame();
 		}
+	}
+
+	/**
+	 * Approve the Frame this run just paused on, when the session toggle is on.
+	 *
+	 * Runs after `_emitAgentSettled`, not from inside the turn: the approval starts its own
+	 * continuation turn, and starting that while this run is still unwinding would re-enter the agent
+	 * loop mid-flight. It goes through `approveFormulation`, so an unanswered objection still refuses
+	 * the approval and every other check (named version, no reading waiting) still applies.
+	 */
+	private _autoApproveWaitingFrame(): void {
+		if (!this._autoApproveFrame) return;
+		// Mid-run there is nothing safe to do here: the approval's continuation is started by
+		// `sendCustomMessage`, which would only queue a steer while the run is streaming. The run's own
+		// boundary calls this again once it has settled, and that call starts the continuation.
+		if (this.isStreaming) return;
+		if (!this._beliefLoop.awaitingFormulationResponse()) return;
+		this.approveFormulation();
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
@@ -1619,183 +1644,178 @@ export class AgentSession {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
-
-		try {
-			// Handle extension commands first (execute immediately, even during streaming)
-			// Extension commands manage their own LLM interaction via pi.sendMessage()
-			if (expandPromptTemplates && text.startsWith("/")) {
-				const handled = await this._tryExecuteExtensionCommand(text);
-				if (handled) {
-					// Extension command executed, no prompt to send
-					preflightResult?.("handled");
-					return;
-				}
-			}
-
-			if (this._compactionAbortController !== undefined) {
-				throw new Error(
-					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
-				);
-			}
-
-			// Emit input event for extension interception (before skill/template expansion)
-			let currentText = text;
-			let currentImages = options?.images;
-			if (this._extensionRunner.hasHandlers("input")) {
-				const inputResult = await this._extensionRunner.emitInput(
-					currentText,
-					currentImages,
-					options?.source ?? "interactive",
-					this.isStreaming ? options?.streamingBehavior : undefined,
-				);
-				if (inputResult.action === "handled") {
-					preflightResult?.("handled");
-					return;
-				}
-				if (inputResult.action === "transform") {
-					currentText = inputResult.text;
-					currentImages = inputResult.images ?? currentImages;
-				}
-			}
-
-			// Expand skill commands (/skill:name args) and prompt templates (/template args)
-			let expandedText = currentText;
-			if (expandPromptTemplates) {
-				expandedText = this._expandSkillCommand(expandedText);
-				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-			}
-			// Capture the request text for the fast-path distillation summary.
-			this._beliefLoop.currentTaskRequestText = expandedText;
-
-			// If streaming, queue via steer() or followUp() based on option. A follow-up typed
-			// while the previous loop is concluding must reset the loop when it is delivered, so
-			// mark it here; `_advanceRole` consumes the flag on delivery.
-			if (this.isStreaming) {
-				if (this._beliefLoop.role === "finalReport") {
-					this._beliefLoop.pendingNewTask = true;
-					this._beliefLoop.pendingDomainTaskPrompt = {
-						originalText: text,
-						effectiveText: expandedText,
-						originalImages: options?.images,
-						effectiveImages: currentImages,
-					};
-				}
-				if (!options?.streamingBehavior) {
-					throw new Error(
-						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-					);
-				}
-				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
-				} else {
-					this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
-					await this._queueSteer(expandedText, currentImages);
-				}
-				preflightResult?.("queued");
+		// Handle extension commands first (execute immediately, even during streaming)
+		// Extension commands manage their own LLM interaction via pi.sendMessage()
+		if (expandPromptTemplates && text.startsWith("/")) {
+			const handled = await this._tryExecuteExtensionCommand(text);
+			if (handled) {
+				// Extension command executed, no prompt to send
+				preflightResult?.("handled");
 				return;
 			}
+		}
 
-			// Flush any pending bash and custom messages before the new prompt
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
-
-			// Validate model
-			if (!this.model) {
-				throw new Error(formatNoModelSelectedMessage());
-			}
-
-			const hasConfiguredAuth =
-				this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
-				(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
-			if (!hasConfiguredAuth) {
-				const fallback = await this._resolveAuthFallbackModel();
-				if (fallback) {
-					this._beliefLoop.markRoleDegraded(this._beliefLoop.role);
-					this.agent.state.model = fallback;
-				} else {
-					const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
-					if (isOAuth) {
-						throw new Error(
-							`Authentication failed for "${this.model.provider}". ` +
-								`Credentials may have expired or network is unavailable. ` +
-								`Run '/login ${this.model.provider}' to re-authenticate.`,
-						);
-					}
-					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
-				}
-			}
-
-			// Check if we need to compact before sending (catches aborted responses).
-			// The user's new prompt is sent below, so do not call agent.continue() here.
-			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant) {
-				await this._checkCompaction(lastAssistant, false);
-			}
-
-			// Build messages array (custom message if any, then user message)
-			messages = [];
-
-			// Add user message
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
-			}
-			messages.push({
-				role: "user",
-				content: userContent,
-				timestamp: Date.now(),
-			});
-
-			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this._pendingNextTurnMessages) {
-				messages.push(msg);
-			}
-			this._pendingNextTurnMessages = [];
-
-			// Emit before_agent_start extension event
-			const result = await this._extensionRunner.emitBeforeAgentStart(
-				expandedText,
-				currentImages,
-				this._baseSystemPrompt,
-				this._baseSystemPromptOptions,
+		if (this._compactionAbortController !== undefined) {
+			throw new Error(
+				"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 			);
-			// Add all custom messages from extensions
-			if (result?.messages) {
-				for (const msg of result.messages) {
-					messages.push({
-						role: "custom",
-						customType: msg.customType,
-						// Untyped extensions can pass null/missing content; normalize at ingestion.
-						content: msg.content ?? [],
-						display: msg.display,
-						details: msg.details,
-						timestamp: Date.now(),
-					});
-				}
+		}
+
+		// Emit input event for extension interception (before skill/template expansion)
+		let currentText = text;
+		let currentImages = options?.images;
+		if (this._extensionRunner.hasHandlers("input")) {
+			const inputResult = await this._extensionRunner.emitInput(
+				currentText,
+				currentImages,
+				options?.source ?? "interactive",
+				this.isStreaming ? options?.streamingBehavior : undefined,
+			);
+			if (inputResult.action === "handled") {
+				preflightResult?.("handled");
+				return;
 			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt !== undefined) {
-				this._systemPromptOverride = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this._systemPromptOverride = undefined;
+			if (inputResult.action === "transform") {
+				currentText = inputResult.text;
+				currentImages = inputResult.images ?? currentImages;
 			}
-			// A fresh user task after the previous loop concluded re-runs the belief loop
-			// from the epistemic role instead of staying parked in the no-tools finalReport
-			// role. The belief set is retained as session knowledge — the task-end prune
-			// keeps only settled product/code records — and the loop resets.
+		}
+
+		// Expand skill commands (/skill:name args) and prompt templates (/template args)
+		let expandedText = currentText;
+		if (expandPromptTemplates) {
+			expandedText = this._expandSkillCommand(expandedText);
+			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+		}
+		// Capture the request text for the fast-path distillation summary.
+		this._beliefLoop.currentTaskRequestText = expandedText;
+
+		// If streaming, queue via steer() or followUp() based on option. A follow-up typed
+		// while the previous loop is concluding must reset the loop when it is delivered, so
+		// mark it here; `_advanceRole` consumes the flag on delivery.
+		if (this.isStreaming) {
 			if (this._beliefLoop.role === "finalReport") {
-				this._beliefLoop.resetLoopForNewTask();
+				this._beliefLoop.pendingNewTask = true;
+				this._beliefLoop.pendingDomainTaskPrompt = {
+					originalText: text,
+					effectiveText: expandedText,
+					originalImages: options?.images,
+					effectiveImages: currentImages,
+				};
 			}
-			if (!this._beliefLoop.currentTaskId) {
-				this._beliefLoop.beginDomainTask(text, expandedText, options?.images, currentImages);
+			if (!options?.streamingBehavior) {
+				throw new Error(
+					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+				);
+			}
+			if (options.streamingBehavior === "followUp") {
+				await this._queueFollowUp(expandedText, currentImages);
 			} else {
 				this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
+				await this._queueSteer(expandedText, currentImages);
 			}
-			this._beliefLoop.applyRoleSurface();
-		} catch (error) {
-			throw error;
+			preflightResult?.("queued");
+			return;
 		}
+
+		// Flush any pending bash and custom messages before the new prompt
+		this._flushPendingBashMessages();
+		this._flushPendingCustomMessages();
+
+		// Validate model
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+
+		const hasConfiguredAuth =
+			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
+			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		if (!hasConfiguredAuth) {
+			const fallback = await this._resolveAuthFallbackModel();
+			if (fallback) {
+				this._beliefLoop.markRoleDegraded(this._beliefLoop.role);
+				this.agent.state.model = fallback;
+			} else {
+				const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
+				if (isOAuth) {
+					throw new Error(
+						`Authentication failed for "${this.model.provider}". ` +
+							`Credentials may have expired or network is unavailable. ` +
+							`Run '/login ${this.model.provider}' to re-authenticate.`,
+					);
+				}
+				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+			}
+		}
+
+		// Check if we need to compact before sending (catches aborted responses).
+		// The user's new prompt is sent below, so do not call agent.continue() here.
+		const lastAssistant = this._findLastAssistantMessage();
+		if (lastAssistant) {
+			await this._checkCompaction(lastAssistant, false);
+		}
+
+		// Build messages array (custom message if any, then user message)
+		messages = [];
+
+		// Add user message
+		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		if (currentImages) {
+			userContent.push(...currentImages);
+		}
+		messages.push({
+			role: "user",
+			content: userContent,
+			timestamp: Date.now(),
+		});
+
+		// Inject any pending "nextTurn" messages as context alongside the user message
+		for (const msg of this._pendingNextTurnMessages) {
+			messages.push(msg);
+		}
+		this._pendingNextTurnMessages = [];
+
+		// Emit before_agent_start extension event
+		const result = await this._extensionRunner.emitBeforeAgentStart(
+			expandedText,
+			currentImages,
+			this._baseSystemPrompt,
+			this._baseSystemPromptOptions,
+		);
+		// Add all custom messages from extensions
+		if (result?.messages) {
+			for (const msg of result.messages) {
+				messages.push({
+					role: "custom",
+					customType: msg.customType,
+					// Untyped extensions can pass null/missing content; normalize at ingestion.
+					content: msg.content ?? [],
+					display: msg.display,
+					details: msg.details,
+					timestamp: Date.now(),
+				});
+			}
+		}
+		// Apply extension-modified system prompt, or reset to base
+		if (result?.systemPrompt !== undefined) {
+			this._systemPromptOverride = result.systemPrompt;
+		} else {
+			// Ensure we're using the base prompt (in case previous turn had modifications)
+			this._systemPromptOverride = undefined;
+		}
+		// A fresh user task after the previous loop concluded re-runs the belief loop
+		// from the epistemic role instead of staying parked in the no-tools finalReport
+		// role. The belief set is retained as session knowledge — the task-end prune
+		// keeps only settled product/code records — and the loop resets.
+		if (this._beliefLoop.role === "finalReport") {
+			this._beliefLoop.resetLoopForNewTask();
+		}
+		if (!this._beliefLoop.currentTaskId) {
+			this._beliefLoop.beginDomainTask(text, expandedText, options?.images, currentImages);
+		} else {
+			this._beliefLoop.addDomainIntervention(this._beliefLoop.promptContent(expandedText, currentImages));
+		}
+		this._beliefLoop.applyRoleSurface();
 
 		if (!messages) {
 			return;
@@ -2931,6 +2951,19 @@ export class AgentSession {
 	/** Whether auto-compaction is enabled */
 	get autoCompactionEnabled(): boolean {
 		return this.settingsManager.getCompactionEnabled();
+	}
+
+	/** Toggle session-scoped auto-approval of published Frames. */
+	setAutoApproveFrame(enabled: boolean): void {
+		this._autoApproveFrame = enabled;
+		// Turning it on while a reading is already waiting has no later run boundary to pick the
+		// approval up, so the same automatic approval is applied here as well.
+		if (enabled) this._autoApproveWaitingFrame();
+	}
+
+	/** Whether published Frames are approved automatically. Session-scoped; off by default. */
+	get autoApproveFrame(): boolean {
+		return this._autoApproveFrame;
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
