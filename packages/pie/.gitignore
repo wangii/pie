@@ -61,3 +61,4 @@ src/**
 !src/modes/rpc/rpc-mode.ts
 !src/modes/rpc/rpc-types.ts
 !src/utils/changelog.ts
+!src/utils/image-resize-core.ts

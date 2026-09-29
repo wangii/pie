@@ -317,4 +317,53 @@ describe("RPC domain state", () => {
 			await cleanup();
 		}
 	}, 30000);
+
+	it("reports and toggles session-scoped Frame auto-approval", async () => {
+		const { cleanup } = await startRpcMode();
+		try {
+			const initial = await send({ type: "get_state" });
+			expect((initial.data as { autoApproveFrame: boolean }).autoApproveFrame).toBe(false);
+
+			const on = await send({ type: "set_auto_approve_frame", enabled: true });
+			expect(on.type).toBe("response");
+			expect(on.command).toBe("set_auto_approve_frame");
+			expect(on.success).toBe(true);
+			// The toggle is session state with no domain event behind it, so the only way a client
+			// can tell it is on is to read it back: the approval it causes replays as an ordinary
+			// FormulationApproved and is indistinguishable from a hand-approval.
+			const afterOn = await send({ type: "get_state" });
+			expect((afterOn.data as { autoApproveFrame: boolean }).autoApproveFrame).toBe(true);
+
+			const off = await send({ type: "set_auto_approve_frame", enabled: false });
+			expect(off.success).toBe(true);
+			const afterOff = await send({ type: "get_state" });
+			expect((afterOff.data as { autoApproveFrame: boolean }).autoApproveFrame).toBe(false);
+		} finally {
+			await cleanup();
+		}
+	}, 30000);
+
+	it("approves the reading that is already waiting when auto-approval is turned on", async () => {
+		const { cleanup } = await startRpcMode();
+		try {
+			void send({ type: "prompt", message: "is the cache persistent?" });
+			await waitForEvent("ProblemFormulationRecorded");
+
+			const waiting = await send({ type: "get_state" });
+			const before = (waiting.data as { formulation: Record<string, unknown> }).formulation;
+			expect(before.awaitingResponse).toBe(true);
+
+			// A reading already on the table has no later run boundary to pick the approval up, so
+			// turning the toggle on approves it there and then. A client that only waited for the
+			// next run would leave the run paused while showing the toggle as on.
+			await send({ type: "set_auto_approve_frame", enabled: true });
+
+			const after = await send({ type: "get_state" });
+			const formulation = (after.data as { formulation: Record<string, unknown> }).formulation;
+			expect(formulation.awaitingResponse).toBe(false);
+			expect(formulation.approved).toBe(true);
+		} finally {
+			await cleanup();
+		}
+	}, 30000);
 });

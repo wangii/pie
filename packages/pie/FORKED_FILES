@@ -51,3 +51,4 @@ modes/rpc/rpc-client.ts
 modes/rpc/rpc-mode.ts
 modes/rpc/rpc-types.ts
 utils/changelog.ts
+utils/image-resize-core.ts

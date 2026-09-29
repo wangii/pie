@@ -99,13 +99,13 @@ type AnyRpcCommandHandler = (
 
 type DomainCommand = Extract<
 	RpcCommand,
-	{ type: "approve_frame" | "frame_correct" | "get_state" | "get_domain_snapshot" }
+	{ type: "approve_frame" | "frame_correct" | "set_auto_approve_frame" | "get_state" | "get_domain_snapshot" }
 >;
 
 /**
  * The Frame/domain surface: reading the current formulation and the user's explicit acts on it.
  *
- * These four are synchronous reads of `session` state plus two user acts; none rebinds the session
+ * These five are synchronous reads of `session` state plus three user acts; none rebinds the session
  * or responds asynchronously, unlike the prompt preflight and the session-replacing commands. They
  * are handled here as one readable unit instead of interleaving with those entries in the table.
  */
@@ -136,6 +136,16 @@ const handleDomainCommand = (command: DomainCommand, ctx: RpcCommandContext): Rp
 			return ctx.success(id, "frame_correct", { correctionId: correction.id });
 		}
 
+		case "set_auto_approve_frame": {
+			// Turning this on approves a reading that is already waiting (see `setAutoApproveFrame`),
+			// so this command can have the same effect as `approve_frame` and stands under the same
+			// rule: a refusal is an error, never a silent success. There is no refusal to report here
+			// — a refused automatic approval leaves the reading waiting, and the client sees that in
+			// the `get_state` that follows, which is why this returns no outcome of its own.
+			ctx.session.setAutoApproveFrame(command.enabled);
+			return ctx.success(id, "set_auto_approve_frame");
+		}
+
 		case "get_state": {
 			const state: RpcSessionState = {
 				model: ctx.session.model,
@@ -148,6 +158,7 @@ const handleDomainCommand = (command: DomainCommand, ctx: RpcCommandContext): Rp
 				sessionId: ctx.session.sessionId,
 				sessionName: ctx.session.sessionName,
 				autoCompactionEnabled: ctx.session.autoCompactionEnabled,
+				autoApproveFrame: ctx.session.autoApproveFrame,
 				messageCount: ctx.session.messages.length,
 				pendingMessageCount: ctx.session.pendingMessageCount,
 				formulation: ctx.session.getFormulationState() ?? null,
@@ -242,11 +253,12 @@ const commandHandlers: RpcCommandHandlers = {
 	// Frame / domain state
 	// =================================================================
 
-	// These four share one handler (see `handleDomainCommand`): reads of the current formulation
+	// These five share one handler (see `handleDomainCommand`): reads of the current formulation
 	// and the user's explicit acts on it. None of them rebinds the session or defers its response,
 	// so they do not belong with the preflight and rebinding cases above.
 	approve_frame: (command, ctx) => handleDomainCommand(command, ctx),
 	frame_correct: (command, ctx) => handleDomainCommand(command, ctx),
+	set_auto_approve_frame: (command, ctx) => handleDomainCommand(command, ctx),
 	get_state: (command, ctx) => handleDomainCommand(command, ctx),
 	get_domain_snapshot: (command, ctx) => handleDomainCommand(command, ctx),
 

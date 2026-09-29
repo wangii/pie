@@ -36,6 +36,10 @@ export type RpcCommand =
 	// pause on a reading; a plain prompt/steer/follow_up is ordinary input and never consent.
 	| { id?: string; type: "approve_frame"; versionId?: string }
 	| { id?: string; type: "frame_correct"; message: string }
+	// Session-scoped, not an act on one reading: while this is on, each reading is approved as the
+	// run that published it settles. It is still an *approval* — an unanswered objection refuses it,
+	// exactly as it refuses `approve_frame` — so turning it off is not how a user withdraws consent.
+	| { id?: string; type: "set_auto_approve_frame"; enabled: boolean }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State
@@ -117,6 +121,15 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	/**
+	 * Whether published Frames are approved automatically. Session-scoped; off by default.
+	 *
+	 * Every other field the Frame pane reads is derived from the domain log. This one is not: the
+	 * approval it causes is recorded as a `FormulationApproved` event, but the toggle itself has no
+	 * event behind it, so a client that never asks can never tell the two apart — a Frame approved
+	 * by the toggle and one approved by hand replay identically.
+	 */
+	autoApproveFrame: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
 	/**
@@ -185,6 +198,7 @@ export type RpcResponse =
 			success: true;
 			data: { correctionId: string };
 	  }
+	| { id?: string; type: "response"; command: "set_auto_approve_frame"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 
 	// State
