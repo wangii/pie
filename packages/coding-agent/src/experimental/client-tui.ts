@@ -744,6 +744,7 @@ export async function runClientTui(command: ClientCommand, options: RunClientTui
 		tuiMode: "fullscreen",
 		showHardwareCursor: settingsManager.getShowHardwareCursor(),
 		logDirectory: agentDir,
+		fullscreenWheelScrollLines: settingsManager.getFullscreenWheelScrollLines(),
 	});
 	tui.setClearOnShrink(settingsManager.getClearOnShrink());
 	let component: ExperimentalClientTui | undefined;

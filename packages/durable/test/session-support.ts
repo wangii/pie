@@ -1,8 +1,10 @@
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
+	type CommitPublication,
 	type ConversationId,
 	type DocumentAddress,
+	type DocumentCommitChange,
 	type DocumentId,
 	type DocumentPoint,
 	type DocumentRecord,
@@ -11,9 +13,7 @@ import {
 	type Seq,
 	type StorageWrite,
 } from "@earendil-works/pi-durable";
-import type { CommitPublication } from "../src/session/publications.ts";
-import { SessionKernel } from "../src/session/session.ts";
-import type { DocumentCommitChange } from "../src/session/transaction.ts";
+import { SessionImpl } from "../src/session/session.ts";
 
 export const context: Context = BACKGROUND_CONTEXT;
 
@@ -55,6 +55,11 @@ export class ControlledStorage extends MemoryStorage {
 		const held = { gate: deferred(), entered: deferred() };
 		this.#findGate = held;
 		return { entered: held.entered.promise, release: () => this.#release("find", held) };
+	}
+
+	/** Simulate a crash during the held commit: it never reaches storage, and later commits proceed. */
+	crash(): void {
+		this.#commitGate = undefined;
 	}
 
 	failNextCommit(error: Error): void {
@@ -110,11 +115,11 @@ export class ControlledStorage extends MemoryStorage {
 /** Session kernel plus its controlled storage and every committed publication. */
 export function openTestSession(): {
 	readonly storage: ControlledStorage;
-	readonly session: SessionKernel;
+	readonly session: SessionImpl;
 	readonly publications: CommitPublication[];
 } {
 	const storage = new ControlledStorage();
-	const session = new SessionKernel(storage);
+	const session = new SessionImpl(storage);
 	const publications: CommitPublication[] = [];
 	session.subscribeCommits((publication) => {
 		publications.push(publication);
@@ -140,7 +145,7 @@ export function documentCopyChanges(
 }
 
 /** Create one conversation and return its ID. */
-export async function createConversation(session: SessionKernel): Promise<ConversationId> {
+export async function createConversation(session: SessionImpl): Promise<ConversationId> {
 	return session.commit(async (tx) => (await tx.createConversation({ ownership: { kind: "ownerless" } })).id, context);
 }
 

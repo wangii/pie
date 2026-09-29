@@ -1376,6 +1376,9 @@ export class AgentSession {
 			description: definition.description,
 			parameters: definition.parameters,
 			promptGuidelines: definition.promptGuidelines,
+			exposure: definition.exposure ?? "direct",
+			...(definition.namespace ? { namespace: definition.namespace } : {}),
+			...(definition.annotations ? { annotations: { ...definition.annotations } } : {}),
 			sourceInfo,
 		}));
 	}
@@ -3336,6 +3339,7 @@ export class AgentSession {
 			},
 			getActiveTools: () => this.getActiveToolNames(),
 			getAllTools: () => this.getAllTools(),
+			getSettings: () => this.settingsManager.getSettings(),
 			setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
 			refreshTools: () => this._refreshToolRegistry(),
 			getCommands: () => this._collectSlashCommands(runner),

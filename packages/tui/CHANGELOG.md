@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `"auto"` to `TuiAltScreenOptions.wheelScrollLines`, which accelerates fast wheel spins on terminals that send one event per notch, and `TuiAltScreen.setWheelScrollLines()` for runtime updates ([#9758](https://github.com/earendil-works/pi/issues/9758)).
+
 ### Fixed
 
 - Fixed `/skill` autocomplete appearing empty when loaded skill names did not contain the letters in `skill` ([#9944](https://github.com/earendil-works/pi/issues/9944)).
 - Fixed path and `@` autocomplete not working after opening wrappers such as `(`, `[`, `{`, `<`, or a backtick, e.g. `(~/Dev<Tab>`.
 - Reduced image stretching in terminals that use the Kitty graphics protocol ([#8938](https://github.com/earendil-works/pi/issues/8938)).
 - Fixed the shell cursor staying hidden after exit when an extension closed an overlay during shutdown ([#10026](https://github.com/earendil-works/pi/issues/10026)).
+- Improved rendering performance for styled text: `visibleWidth()` measures ANSI-styled ASCII without grapheme segmentation, `Box` checks its render cache without re-padding every line, and `Markdown` reuses parsed tokens across theme and width changes.
 
 ## [0.87.1] - 2026-09-22
 

@@ -17,6 +17,28 @@ function documentWrites(writes: readonly StorageWrite[]): readonly StorageWrite[
 }
 
 describe("Session document checkpoints", () => {
+	it("calls checkpointWhen with its definition as the receiver", async () => {
+		const Doc = defineDoc<{ count: number }>({
+			kind: "checkpoint.receiver",
+			version: 1,
+			scope: "session",
+			initial: () => ({ count: 0 }),
+			checkpointWhen(value) {
+				return value.count === this.initial().count + 2;
+			},
+		});
+		const { session, storage } = openTestSession();
+		for (let count = 0; count <= 2; count++) {
+			await session.commit(async (tx) => {
+				(await tx.doc(Doc)).count = count;
+			}, context);
+		}
+		const kinds = storage.commits.flatMap((writes) =>
+			writes.flatMap((write) => (write.type === "document.change" ? [write.content.kind] : [])),
+		);
+		expect(kinds).toEqual(["delta", "base"]);
+	});
+
 	it("selects bases only for nonempty ordinary batches and passes the exact prepared revision and ops", async () => {
 		const calls: { value: Readonly<JsonObject>; ops: readonly Op[] }[] = [];
 		const falseCalls: { value: Readonly<JsonObject>; ops: readonly Op[] }[] = [];
@@ -85,6 +107,54 @@ describe("Session document checkpoints", () => {
 			throw new Error("Expected checkpoint base");
 		}
 		expect(writes[0]!.content.value).toBe(snapshot);
+	});
+
+	it("passes the stored delta count since the newest base, including after unload and version bases", async () => {
+		const seen: number[] = [];
+		const V1 = defineDoc<{ count: number }>({
+			kind: "checkpoint.deltas-since-base",
+			version: 1,
+			scope: "session",
+			initial: () => ({ count: 0 }),
+			checkpointWhen: (_value, _ops, info) => {
+				seen.push(info.deltasSinceBase);
+				return info.deltasSinceBase >= 2;
+			},
+		});
+		const V2 = defineDoc<{ count: number }>({
+			kind: "checkpoint.deltas-since-base",
+			version: 2,
+			scope: "session",
+			initial: () => ({ count: 0 }),
+			migrate: (value) => ({ count: value.count as number }),
+			checkpointWhen: (_value, _ops, info) => {
+				seen.push(info.deltasSinceBase);
+				return false;
+			},
+		});
+		const { session, storage } = openTestSession();
+		const increment = async (token: typeof V1): Promise<void> => {
+			await session.commit(async (tx) => {
+				(await tx.doc(token)).count++;
+			}, context);
+		};
+		await session.commit((tx) => tx.doc(V1).then(() => undefined), context);
+		await increment(V1);
+		await increment(V1);
+		await increment(V1);
+		await session.unloadDocuments();
+		await increment(V1);
+		expect(seen).toEqual([0, 1, 2, 0]);
+		const kinds = storage.commits
+			.slice(-4)
+			.map((writes) => (writes[0]!.type === "document.change" ? writes[0]!.content.kind : writes[0]!.type));
+		expect(kinds).toEqual(["delta", "delta", "base", "delta"]);
+
+		// A required version base resets the count without calling the predicate.
+		await increment(V2);
+		await increment(V2);
+		expect(seen).toEqual([0, 1, 2, 0, 0]);
+		expect(storage.commits.at(-2)![0]).toMatchObject({ content: { kind: "base", version: 2 } });
 	});
 
 	it("skips the predicate for empty batches but calls it for nonempty structural no-ops", async () => {
@@ -682,5 +752,76 @@ describe("Session historical document snapshots", () => {
 		expect(await session.snapshotAsOf(Doc, conversationId, recreatedAt, context)).toEqual({ value: "new" });
 		await session.close(context);
 		await expect(session.snapshotAsOf(Doc, conversationId, recreatedAt, context)).rejects.toThrow("closed");
+	});
+});
+
+describe("Session tracker cache across definition versions", () => {
+	type V1 = { name: string };
+	type V2 = { names: string[] };
+	const V1Doc = defineDoc<V1>({
+		kind: "cache.versioned",
+		version: 1,
+		scope: "session",
+		initial: () => ({ name: "first" }),
+	});
+	const V2Doc = defineDoc<V2>({
+		kind: "cache.versioned",
+		version: 2,
+		scope: "session",
+		initial: () => ({ names: [] }),
+		migrate: (value) => ({ names: [value.name as string] }),
+	});
+
+	it("migrates a document cached by an older token without unloading", async () => {
+		const { session, storage } = openTestSession();
+		await session.commit((tx) => tx.doc(V1Doc), context);
+		expect(await session.snapshot(V1Doc, context)).toEqual({ name: "first" });
+
+		// Reloaded extension code accesses the still-cached document with a newer token.
+		expect(await session.snapshot(V2Doc, context)).toEqual({ names: ["first"] });
+		await session.commit(async (tx) => {
+			(await tx.doc(V2Doc)).names.push("second");
+		}, context);
+		const write = documentWrites(storage.commits.at(-1)!)[0]!;
+		expect(write).toMatchObject({
+			type: "document.change",
+			content: { version: 2, kind: "base", value: { names: ["first", "second"] } },
+		});
+		await expect(session.snapshot(V1Doc, context)).rejects.toThrow("newer version 2");
+	});
+
+	it("sends observers of an older shape a root replacement after a newer token writes", async () => {
+		const { session } = openTestSession();
+		await session.commit((tx) => tx.doc(V1Doc), context);
+		const state = (await session.documentState(V1Doc, context))!;
+		const watch = (await session.watchDoc(V1Doc, context))!;
+		const frames: (readonly unknown[])[] = [];
+		const delivered = new Promise<void>((resolve) => {
+			watch.start(async (_value, ops) => {
+				frames.push(ops);
+				resolve();
+			});
+		});
+		await session.commit(async (tx) => {
+			(await tx.doc(V2Doc)).names.push("second");
+		}, context);
+		await delivered;
+		expect(state.value).toEqual({ names: ["first", "second"] });
+		expect(watch.value).toEqual({ names: ["first", "second"] });
+		expect(frames).toEqual([[["r", { names: ["first", "second"] }]]]);
+		state.dispose();
+		await watch.stop();
+	});
+
+	it("serves an older token from Storage after a newer token migrated only in memory", async () => {
+		const { session } = openTestSession();
+		await session.commit((tx) => tx.doc(V1Doc), context);
+		await session.unloadDocuments();
+		expect(await session.snapshot(V2Doc, context)).toEqual({ names: ["first"] });
+		expect(await session.snapshot(V1Doc, context)).toEqual({ name: "first" });
+		await session.commit(async (tx) => {
+			(await tx.doc(V1Doc)).name = "renamed";
+		}, context);
+		expect(await session.snapshot(V2Doc, context)).toEqual({ names: ["renamed"] });
 	});
 });

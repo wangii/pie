@@ -19,6 +19,12 @@
 - Added a runtime chat-model check to the `Models` stream entry points so non-chat models fail with a clear `ModelsError` instead of a missing-api stream error.
 - Added array-based `models.all.json` and `providers/{id}.all.json` variants to the generated and published JSON catalog, allowing the same upstream ID once per model type; the existing keyed `models.json` and `providers/{id}.json` stay chat-only for released clients.
 - Added `onProviderStreamEvent` to observe parsed provider stream events before normalization, including provider-specific fields not retained in assistant messages ([#9784](https://github.com/earendil-works/pi/issues/9784)).
+- Added Claude Sonnet 5.5 to the built-in Anthropic model catalog with adaptive thinking, mid-conversation effort, 1M context, and official pricing metadata.
+
+### Changed
+
+- Unified the Anthropic, OpenAI Codex, OpenRouter, and Radius browser sign-in callback servers into one shared implementation with the same browser pages. The OAuth page helpers are now available as `@earendil-works/pi-ai/utils/oauth-page`.
+- Changed Radius browser sign-in to exchange the authorization code before showing the browser page, so token exchange failures are shown in the browser.
 
 ### Fixed
 
@@ -26,6 +32,11 @@
 - Fixed model-level `samplingParams` being dropped by direct `stream()`/`complete()` calls on OpenAI-compatible APIs ([#9506](https://github.com/earendil-works/pi/issues/9506)).
 - Fixed Mistral GLM models producing empty text blocks and split thinking blocks from empty content deltas, which could make later requests fail with "Expected at most one leading ThinkChunk" ([#9674](https://github.com/earendil-works/pi/issues/9674)).
 - Fixed OpenAI Fast mode requests being priced at the standard rate when the response reports `service_tier: "fast"`, as GPT-6 models do ([#10034](https://github.com/earendil-works/pi/issues/10034)).
+- Fixed Mistral reasoning models ignoring the requested thinking level: GLM 5.3 now uses `reasoning_effort` instead of `prompt_mode`, GLM 5.2 accepts `max`, and Mistral models only offer the effort levels the API supports ([#9678](https://github.com/earendil-works/pi/issues/9678)).
+- Fixed OpenCode Zen and OpenCode Go `qwen3.8-flash` thinking being replayed as plain text on later turns because the endpoint returns empty thinking signatures ([#10047](https://github.com/earendil-works/pi/issues/10047)).
+- Fixed OpenAI Responses streams returning unfinished tool calls as runnable, which made servers that omit `output_index` (such as llama.cpp) run mixed-up commands; such streams now end with an error ([#9974](https://github.com/earendil-works/pi/issues/9974)).
+- Fixed Anthropic and OpenAI Codex browser sign-in waiting indefinitely after the provider redirected with an authorization error; sign-in now fails with the provider's error description.
+- Fixed Anthropic browser sign-in failing when its callback port is in use; it now falls back to pasting the redirect URL.
 
 ## [0.87.1] - 2026-09-22
 

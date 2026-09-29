@@ -2,6 +2,7 @@ import {
 	type ConversationId,
 	defineDoc,
 	defineDocFamily,
+	defineTask,
 	type EntryId,
 	StorageRejected,
 	type StorageWrite,
@@ -627,13 +628,13 @@ describe("Session conversation document forks", () => {
 			scope: "task",
 			initial: () => ({ value: "task" }),
 		});
-		const Work = {
-			definition: {
-				name: "fork.scope.work",
-				version: 1,
-				initial: () => ({ phase: "start" }),
-			},
-		};
+		const Work = defineTask<null, { phase: "start" }, null>({
+			name: "fork.scope.work",
+			version: 1,
+			initial: () => ({ phase: "start" }),
+			phases: { start: async () => {} },
+			abort: async () => {},
+		});
 		const { session, storage, publications } = openTestSession();
 		const parentId = await createConversation(session);
 		let forkAt!: EntryId;

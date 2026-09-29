@@ -39,6 +39,23 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
 	});
 
+	it("includes Claude Sonnet 5.5 with managed effort levels and official pricing", () => {
+		const model = getModel("anthropic", "claude-sonnet-5-5");
+		expect(model).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			compat: {
+				forceAdaptiveThinking: true,
+				supportsMidConvoEffort: true,
+				supportsMidConvoSystemMessages: true,
+				supportsMidConvoToolChanges: true,
+				supportsTemperature: false,
+			},
+		});
+		expect(getSupportedThinkingLevels(model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+	});
+
 	it("includes max but not xhigh for Anthropic Sonnet 4.6 on anthropic-messages API", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-6");
 		expect(model).toBeDefined();
@@ -157,12 +174,6 @@ describe("getSupportedThinkingLevels", () => {
 		const model = getModel("opencode-go", "deepseek-v4.1-flash");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toEqual(["low", "high", "max"]);
-	});
-
-	it("includes only high plus off for OpenCode Go Kimi K2.6", () => {
-		const model = getModel("opencode-go", "kimi-k2.6");
-		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "high"]);
 	});
 
 	it("excludes thinking off for Moonshot Kimi K2.7 Code models", () => {

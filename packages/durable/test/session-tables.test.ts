@@ -3,9 +3,9 @@ import {
 	type ConversationId,
 	defineDoc,
 	defineDocFamily,
+	defineTask,
 	type EntryId,
 	ReadAfterWrite,
-	type Task,
 	type TaskId,
 	type TaskRecord,
 } from "@earendil-works/pi-durable";
@@ -14,9 +14,13 @@ import { idFromNumber } from "../src/ids.ts";
 import { context, createConversation, documentChanges, flush, openTestSession } from "./session-support.ts";
 
 type Checkpoint = { phase: "start" } | { phase: "next"; step: number };
-const WorkTask: Task<{ path: string }, Checkpoint, { ok: boolean }, object> = {
-	definition: { name: "test.work", version: 1, initial: () => ({ phase: "start" }) },
-};
+const WorkTask = defineTask<{ path: string }, Checkpoint, { ok: boolean }>({
+	name: "test.work",
+	version: 1,
+	initial: () => ({ phase: "start" }),
+	phases: { start: async () => {}, next: async () => {} },
+	abort: async () => {},
+});
 
 type Progress = { lines: string[] };
 const ProgressDoc = defineDoc<Progress>({
@@ -115,7 +119,7 @@ describe("Session transaction tables", () => {
 		const { session } = openTestSession();
 		const conversationId = await createConversation(session);
 		const taskId = await createTask(session, conversationId);
-		await session.commit(async (tx) => {
+		await session.commitWith(async (tx) => {
 			const task = (await tx.task(taskId))!;
 			tx.setTask(task);
 			await expect(tx.task(taskId)).rejects.toBeInstanceOf(ReadAfterWrite);
@@ -193,7 +197,7 @@ describe("Session transaction tables", () => {
 		expect(await storage.conversation(created.child.id, context)).toEqual(created.child);
 
 		await expect(
-			session.commit(async (tx) => {
+			session.commitWith(async (tx) => {
 				const supervisor = (await tx.task(created.supervisorId))!;
 				tx.setTask({ ...supervisor, conversationId: created.child.id });
 			}, context),
@@ -206,7 +210,7 @@ describe("Session transaction tables", () => {
 		const parentId = await createConversation(session);
 		let movedStagedTaskId: TaskId<{ ok: boolean }> | undefined;
 		await expect(
-			session.commit(async (tx) => {
+			session.commitWith(async (tx) => {
 				const taskId = await tx.createTask(WorkTask, { path: "move" }, { conversationId: parentId });
 				movedStagedTaskId = taskId;
 				tx.setTask({
@@ -232,7 +236,7 @@ describe("Session transaction tables", () => {
 
 		let rejectedChildId: ConversationId | undefined;
 		await expect(
-			session.commit(async (tx) => {
+			session.commitWith(async (tx) => {
 				const supervisorId = await tx.createTask(WorkTask, { path: "aborting" }, { conversationId: parentId });
 				rejectedChildId = (await tx.createConversation({ ownership: { kind: "task", taskId: supervisorId } })).id;
 				tx.setTask({
@@ -253,7 +257,7 @@ describe("Session transaction tables", () => {
 		expect(await storage.conversation(rejectedChildId, context)).toBeUndefined();
 
 		await expect(
-			session.commit(async (tx) => {
+			session.commitWith(async (tx) => {
 				const supervisorId = await tx.createTask(WorkTask, { path: "terminal" }, { conversationId: parentId });
 				await tx.createConversation({ ownership: { kind: "task", taskId: supervisorId } });
 				tx.setTask({
@@ -271,7 +275,7 @@ describe("Session transaction tables", () => {
 		).rejects.toThrow("is terminal");
 
 		const terminalOwnerId = await createTask(session, parentId);
-		await session.commit(async (tx) => {
+		await session.commitWith(async (tx) => {
 			tx.setTask(terminal((await tx.task(terminalOwnerId))!));
 		}, context);
 		await expect(
@@ -313,7 +317,7 @@ describe("Session transaction tables", () => {
 		const { session, storage } = openTestSession();
 		const conversationId = await createConversation(session);
 		const taskId = await createTask(session, conversationId);
-		await session.commit(async (tx) => {
+		await session.commitWith(async (tx) => {
 			const task = (await tx.task(taskId))!;
 			tx.setTask({
 				id: task.id,
@@ -367,7 +371,7 @@ describe("Session transaction tables", () => {
 		const { session } = openTestSession();
 		const conversationId = await createConversation(session);
 		const taskId = await createTask(session, conversationId, true);
-		await session.commit(async (tx) => {
+		await session.commitWith(async (tx) => {
 			const task = (await tx.task(taskId))!;
 			const progress = await tx.doc(ProgressDoc, taskId);
 			tx.setTask(terminal(task));
@@ -390,7 +394,7 @@ describe("Session transaction tables", () => {
 		}, context);
 		await flush();
 		const published = publications.length;
-		await session.commit(async (tx) => {
+		await session.commitWith(async (tx) => {
 			const task = (await tx.task(taskId))!;
 			(await tx.doc(StepDoc, taskId, "new", null)).lines.push("created then retired");
 			tx.setTask(terminal(task));
@@ -421,7 +425,7 @@ describe("Session transaction tables", () => {
 		);
 		expect(alive.items).toEqual([]);
 		await expect(
-			session.commit(async (tx) => {
+			session.commitWith(async (tx) => {
 				tx.setTask(terminal((await tx.task(taskId))!));
 			}, context),
 		).rejects.toThrow(`Task ${taskId} is already terminal`);

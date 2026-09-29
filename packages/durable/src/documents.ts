@@ -2,6 +2,7 @@ import { copyJson, type JsonValue } from "@earendil-works/chord";
 import type { Op } from "@earendil-works/chord/delta";
 import { idFromNumber } from "./ids.ts";
 import type {
+	CheckpointInfo,
 	CommonDocDefinition,
 	ConversationDocFamilyToken,
 	ConversationDocToken,
@@ -85,7 +86,7 @@ export type AnyDocDefinition = DocumentSemantics & {
 	readonly family?: true;
 	initial(seed?: JsonValue): JsonObject;
 	migrate?(value: JsonObject, fromVersion: number): JsonObject;
-	checkpointWhen?(value: Readonly<JsonObject>, ops: readonly Op[]): boolean;
+	checkpointWhen?(value: Readonly<JsonObject>, ops: readonly Op[], info: CheckpointInfo): boolean;
 };
 
 /** Erased singleton or family token. */

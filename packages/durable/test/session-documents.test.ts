@@ -351,8 +351,8 @@ describe("Session document transactions", () => {
 
 	it("rejects Tx use after the callback settles", async () => {
 		const { session, conversationId } = await setupLive();
-		let captured: Parameters<Parameters<typeof session.commit>[0]>[0] | undefined;
-		await session.commit((tx) => {
+		let captured: Parameters<Parameters<typeof session.commitWith>[0]>[0] | undefined;
+		await session.commitWith((tx) => {
 			captured = tx;
 		}, context);
 		await expect(captured!.doc(LiveDoc, conversationId)).rejects.toThrow("Transaction has settled");
@@ -411,7 +411,7 @@ describe("Session document transactions", () => {
 		const counter = await session.snapshot(CounterDoc, context);
 		const commits = storage.commits.length;
 		await expect(
-			session.commit(async (tx) => {
+			session.commitWith(async (tx) => {
 				(await tx.doc(LiveDoc, conversationId)).message = "lost";
 				(await tx.doc(CounterDoc)).count = 2;
 				// Replacing a missing task fails during assembly, after every change was prepared.
@@ -603,32 +603,31 @@ describe("Session document transactions", () => {
 		expect((await session.snapshot(LiveDoc, conversationId, context))!.items).toEqual(["a", "b", "c"]);
 	});
 
-	it("delivers publications off the mutation line so listeners can start a nested commit", async () => {
+	it("delivers complete publications synchronously after adoption", async () => {
 		const { session, publications, conversationId } = await setupLive();
-		await flush();
 		const published = publications.length;
 		let listenerContext: typeof context | undefined;
-		const nested = new Promise<void>((resolve, reject) => {
-			const unsubscribe = session.subscribeCommits((_publication, deliveredContext) => {
-				unsubscribe();
-				listenerContext = deliveredContext;
-				void session
-					.commit(async (tx) => {
-						(await tx.doc(CounterDoc)).count = 1;
-					}, context)
-					.then(resolve, reject);
-			});
+		const unsubscribe = session.subscribeCommits((_publication, deliveredContext) => {
+			listenerContext = deliveredContext;
 		});
 		const result = await session.commit(async (tx) => {
 			(await tx.doc(LiveDoc, conversationId)).message = "m";
 			return "done";
 		}, context);
 		expect(result).toBe("done");
-		await nested;
 		expect(listenerContext).toBe(context);
-		expect(await session.snapshot(CounterDoc, context)).toEqual({ count: 1 });
-		await flush();
-		expect(publications.length).toBe(published + 2);
+		expect(publications.length).toBe(published + 1);
+		unsubscribe();
+	});
+
+	it("publishes close synchronously and supports unsubscription", async () => {
+		const { session } = openTestSession();
+		const calls: string[] = [];
+		session.subscribeClose(() => calls.push("active"));
+		const unsubscribe = session.subscribeClose(() => calls.push("removed"));
+		unsubscribe();
+		await session.close(context);
+		expect(calls).toEqual(["active"]);
 	});
 
 	it("settles admitted commits before close and rejects later admission", async () => {

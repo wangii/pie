@@ -32,7 +32,7 @@ export type KnownImageApi = "openrouter-images";
 
 export type ImageApi = KnownImageApi | (string & {});
 
-export type KnownClassifierApi = "typesafe-system-one" | "cloudflare-workers-ai-system-one";
+export type KnownClassifierApi = "typesafe-system-one" | "cloudflare-workers-ai-system-one" | "llama-cpp-classify";
 
 export type ClassifierApi = KnownClassifierApi | (string & {});
 
@@ -321,7 +321,14 @@ export interface ProviderClassifier {
 	): Promise<ClassifierResult>;
 }
 
-export interface ClassifierOptions extends ProviderRequestOptions<ClassifierModel<ClassifierApi>> {}
+export interface ClassifierOptions extends ProviderRequestOptions<ClassifierModel<ClassifierApi>> {
+	/**
+	 * Divides the answer logits by this value before they are normalized into probabilities.
+	 * Values above 1 soften the distribution; values below 1 sharpen it. Must be positive.
+	 * APIs that cannot apply it ignore it.
+	 */
+	temperature?: number;
+}
 
 export interface ImagesOptions extends ProviderRequestOptions<ImageModel<ImageApi>> {
 	/**
@@ -546,6 +553,8 @@ export interface AssistantMessage {
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
+	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */
+	thinkingLevel?: ModelThinkingLevel;
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
@@ -560,6 +569,28 @@ export interface AssistantMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/** A tool call that another tool made while it ran, for example from a codemode script. */
+export interface NestedToolCallRecord {
+	id: string;
+	name: string;
+	/** Omitted when over the size limits; `argumentsBytes` then gives their size. */
+	arguments?: JsonObject;
+	/** UTF-8 size of the arguments as JSON, set when `arguments` is omitted. */
+	argumentsBytes?: number;
+	/** `unfinished`: the call was still running when the calling tool finished. */
+	status: "ok" | "error" | "unfinished";
+	durationMs?: number;
+	/** Error text, truncated. */
+	error?: string;
+}
+
+/** Bounded record of the nested calls a tool made. Results are not recorded. */
+export interface NestedToolCalls {
+	calls: NestedToolCallRecord[];
+	/** False when calls were dropped, arguments omitted, or calls had not finished. */
+	complete: boolean;
+}
+
 export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails> extends true
 	? {
 			role: "toolResult";
@@ -569,6 +600,8 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 			details?: JsonRepresentation<TDetails>;
 			/** Usage from the tool execution itself, if available. Not part of main LLM context accounting. */
 			usage?: Usage;
+			/** Calls this tool made to other tools. Kept for the session record; not sent to the model. */
+			nestedCalls?: NestedToolCalls;
 			isError: boolean;
 			timestamp: number; // Unix timestamp in milliseconds
 		}

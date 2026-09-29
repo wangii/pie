@@ -11,7 +11,7 @@ facades, membranes, document routing, view projection, events, or clone chains.
 
 - Obsolete `pico` and `pico4` prototypes were removed.
 - `pico3` remains.
-- Packages 1–7 are implemented in `packages/durable`; later Pico5 runtime packages remain.
+- Packages 1–15 are implemented in `packages/durable`; Package 10 was already satisfied by Chord's canonical structural diff implementation.
 
 ## 1. Records, cursors, and memory tables
 
@@ -188,7 +188,7 @@ in one transaction; internal candidate validation must not trigger
 
 ## 8. Checkpoints and migration
 
-After tracker preparation, Session evaluates `checkpointWhen(value, ops)` exactly once
+After tracker preparation, Session evaluates `checkpointWhen(value, ops, { deltasSinceBase })` exactly once
 for ordinary mutations and sends Storage only the selected base or delta.
 Implement required creation/version bases and lazy all-older-version migration
 on typed access; Harness open does not scan ordinary documents.
@@ -196,7 +196,7 @@ on typed access; Harness open does not scan ordinary documents.
 Test read-only in-memory migration, `tx.doc()` migration rollback and coalescing
 with later edits, rewindable migration on current/historical read, the first
 successful `tx.doc()` version base even without a JSON change, newer-version
-rejection, migrated source/watch hydration without a write, subsequent operations
+rejection, migrated state/watch hydration without a write, subsequent operations
 against that migrated baseline, stored-version fork copying, unaccessed and unavailable-definition
 preservation, predicate failure rollback before Storage admission, and checkpoint
 starvation without backend heuristics.
@@ -226,244 +226,356 @@ previous immutable revisions, and equality between Astra's prepared candidate
 and immutable operation replay. One prepared document change remains one Session
 commit; no intermediate candidate is adopted or published.
 
-## 11. Chord document source
+## 11. Chord document state
 
-Chord's existing `ReplicatedStateSource` attachment and `replicatedState(source)`
-adoption contract already matches specification §9.1; this is Pico-side work.
+Use Chord's existing `ReplicatedStateSource` attachment contract internally, but
+expose one already-attached read-only `DocumentState` per acquisition. It must
+atomically hydrate in O(1) from the current immutable revision and publish later
+exact committed immutable value/operation frames without another tracker, value
+copy, or re-diff. Disposal unregisters that one state. Pico remains the sole
+document mutator.
 
-Implement Pico's opaque committed document source on that contract. It must
-atomically attach in O(1) to the source's current immutable revision and later
-committed immutable revision/operation frames without another tracker, value
-copy, or re-diff. Pico
-remains the sole document mutator. Trusted immutable source revisions and
-operation placement payloads may share containers.
-
-Test contiguous Chord delivery sequences, atomic hydrate/subscribe, a snapshot
-that already covers a queued publication without duplicate application,
-retirement between source acquisition and attachment hydrating `null` rather than
-a replacement, retirement ending one incarnation, recreation requiring
-reacquisition, listener isolation, and mutation footguns. Reuse the transaction
-core's immutable published value; do not materialize another document copy.
+Test contiguous Chord delivery sequences, atomic hydrate/subscribe, a baseline
+that covers queued publication without duplicate application, exact value and
+operation reference sharing, retirement to `null`, incarnation-bound recreation,
+independent state disposal, migrated hydration, definition-free fork copies,
+tracker-cache unload, and trusted mutation footguns.
 
 ## 12. Document watches
 
 Implement non-creating `watchDoc` as an incarnation-bound `WatchHandle` that
 returns `undefined` when absent and atomically captures the current immutable
-revision in O(1) while registering for later revisions. Before `start()`, its
-value remains the acquisition revision. After start, retain only the last
-delivered and newest committed immutable revisions. Off the Session line, derive
-`diffRevisions(lastDelivered, newest)` and advance the handle's value to
-`newest`. An empty diff advances silently. A nonempty diff invokes one serialized
-asynchronous listener with a watch-owned cancellation Context carrying values
-from the newest coalesced commit's Context. Do not retain operation queues,
-estimate serialized bytes, call `JSON.stringify()` for accounting, or construct
-reset frames.
+revision in O(1) while registering for later exact committed frames. Before
+`start()`, its value remains the acquisition revision. After start, invoke one
+serialized asynchronous listener with each exact value and operation batch,
+advancing `watch.value` immediately before the callback. Preserve commit Context
+values without inheriting producer cancellation.
 
-Test updates between acquisition/return/start; asynchronous initialization from
-a stable immutable revision; no callback overlap; listener-initiated commits;
-commits during an in-flight callback; coalescing many revisions directly to the
-latest; an empty net diff silently advancing without a callback; replayable
-redundant structural commits coalescing away when state is unchanged; delivery
-Context cancellation ownership; retained earlier revision stability; trusted
-mutation footguns; bounded revision-reference retention; retirement before start
-and while active; recreation; idempotent stop; second-start rejection;
-cancellation during acquisition; cancellation/close during a callback; diff and
-listener-error settlement; `closed` self-join misuse; and invocation-owned
-cleanup in package 15.
+Retain at most 100 pending frames, excluding the in-flight callback. Adding frame
+101 replaces the complete undelivered suffix with one root replacement carrying
+the newest exact immutable revision and Context. Do not estimate serialized
+bytes, call `JSON.stringify()` for accounting, copy values, replay operations, or
+re-diff revisions.
 
-## 13. Conversations and entries
+Test updates between acquisition/return/start; exact values and operation
+references; no callback overlap; listener-initiated commits; commits during an
+in-flight callback; overflow before start and behind an active callback;
+retirement folded into an overflow reset; replayable redundant structural
+commits; delivery Context value preservation; retained earlier revision
+stability; trusted mutation footguns; retirement before start and while active;
+recreation; idempotent stop; second-start rejection; cancellation during
+acquisition; cancellation/close during a callback without aborting or joining it;
+listener-error settlement; and invocation-owned cleanup in package 14.
 
-Implement conversation history/ownership records, entry creation,
-conversation-bound cursor-based fork-aware scans, head lookup, and entry edits.
-Expose public history pagination through `Conversation.entries()`, never through
-`Harness`.
+Packages 13–20 are vertical milestones. Each must leave one real public path
+working end to end; do not defer all integration to the last package.
 
-Test conversation creation and actual forks, deep ancestor caps, same-commit
-entry prefixes, newest-edit wins, self-head resolution, raw head-to-tail
-transcript, and ownership traversal.
+Cross-cutting constraints for these milestones:
 
-## 14. Context derivation and system messages
+- Introduce each persisted built-in document kind once, with its final schema,
+  history/fork policy, migration, checkpoint predicate, and public mount path.
+  Record that concrete protocol in the normative specification when the kind
+  lands. Do not add temporary built-in kinds or later replace a fake schema.
+- Keep all visible progress durable. Tests may use faux models and fake effects,
+  but production code must use pi-ai's exported `Models` interface and the real
+  task chain; do not add a Pico model adapter or production fake successor.
+- Prepare every loaded `ConversationView` revision from the complete candidate
+  Session commit before Storage admission. Never rebuild a view by subscribing
+  to already-committed table/document publications.
+- A milestone may leave later operations unimplemented, but it must not expose a
+  temporary public facade. Extend the final §2.2 objects as later behavior lands.
 
-Implement model-context reduction, PR #9548 positional `SystemMessage` replay,
-tool-result ordering, and missing post-fork tool results. Replay `content`,
-ordered named `sections` with `null` removal, then tool removals/additions.
+## 13. Openable Harness
 
-Test model-less and excluded-stop-reason entries, replacements/omissions,
-multiple heads, section replacement/removal/re-addition order, order-only
-configuration changes between separate request preparations, rejection of
-integer-like section keys, tool addition/removal/replacement order, and raw-view
-versus model context.
+Implement the first usable slice of the final §2.2 surface: `Harness.open/close`
+with a registry, `root(context, { init })`, `conversation(id)`,
+`createConversation({ ownership, init })`, and generic
+inherited Session document APIs (`Harness extends Session`). Implement the
+public `Entry` definition token and `Conversation` handles rather than adding an
+intermediate capability facade. `Conversation` provides `id`, conversation-bound
+`commit()`, fork-aware cursor `entries()`, `context()`, `fork(at, { ownership,
+init })`, and every configuration getter/setter.
 
-## 15. Task definitions and invocations
+Implement the §7.1 registry core: `createRegistry()`, `tools.add`, `tools.wrap`
+composition, `batch`, keyed ordering with remembered positions, `Registration`
+`dispose`, immutable `snapshot()`, and list helpers. Hook,
+task, and system prompt registrations are stored and listed now; their dispatch
+lands in Packages 14–16.
+
+Bring conversation and entry semantics up to the normative contract: explicit
+ownership, fork-aware cursor pagination, head lookup, entry edits, and model
+context derivation. Context reduction includes newest-edit wins, positional PR
+#9548 `SystemMessage` replay, tool-result ordering, missing post-fork tool
+results, excluded stop reasons, and separate raw-history/model-context results.
+
+Define the final `ConversationConfig` document from §2.2. Raw document writes
+are trusted and unchecked. Root creation uses the internal reserved-ID
+bootstrap in one commit together with the default configuration and `init`; do
+not expose a temporary root-creation API.
+
+Open ignores live tasks in this milestone; Package 14 adds reconciliation.
+
+Acceptance: open persistent storage, obtain the root, mutate configuration and
+history through public handles, create and fork conversations, close, reopen,
+and verify stable root/conversation identity and state. Test lazy root creation
+with `init` run once; atomic create/fork with `init`; actual forks; deep ancestor
+caps; same-commit entry prefixes; cursor boundaries; self-head resolution;
+newest-edit wins; raw head-to-tail transcript versus model context; model-less
+and excluded assistant entries; replacements/omissions; multiple heads;
+positional system messages; tool-result ordering; missing post-fork results;
+every configuration getter/setter; `setActiveTools` duplicate and newly-added
+unregistered rejection with stale names allowed; default active tools from the
+registry; as-of configuration inheritance including unavailable names; registry
+add/dispose/batch rollback/nested-batch rejection/keyed order/wrap composition;
+and reopen.
+
+## 14. Durable task runtime
 
 Implement `defineTask`, exhaustive phase maps, full checkpoint replacement,
-kind migration, runtime commits, memos, and invocation close gates.
+kind migration at reservation, runtime commits and memos, invocation lifetime
+gates, scheduler reservation, dependencies, terminal outcomes, typed waits,
+and joins. Complete the task-facing §2.2 methods: `resume`, `getTask`,
+`waitForTask`, `abortTask`, and the task-aware portion of idle waits. Task definitions come from the registry snapshot;
+add `RegistryReader.subscribe()` so registry changes wake the scheduler.
 
-Use a fake two-phase effect. Test intent/effect/outcome recovery,
-unchanged-checkpoint faulting, same-phase checkpoint progress, cancellation
-precedence, thrown-handler faulting, close/reopen without abort marks, outcomes,
-or task-document retirement, no fresh phase/abort dispatch while closing,
-first-writer-wins memos, and automatic watch cleanup.
+Include the execution-critical abort core: durable direct-task marks,
+signal-and-join of an active run, fresh abort invocation, run-commit rejection
+after a mark, and close precedence. Deep owned-subtree cascading and background
+boundaries remain Package 18. Open now reconciles every surviving `running` task
+to `pending`. Missing, too-old, and unmigratable definitions leave the task pending and
+blocked (§5.4); registry changes wake the scheduler to reconsider them. Aborting
+a blocked task settles it as `orphaned` with the full cleanup; nothing else
+orphans a task. Implement per-phase registry snapshots, refresh at
+every normal phase boundary, and hand over when the task definition object changed
+and the new definition can reserve the task.
 
-## 16. Scheduler and terminal tasks
+Deferred to later packages; do not stub them in Package 14:
+- Orphaning writes the terminal `orphaned` record and retires task documents.
+  Unanswered input submissions and clearing run control are added in Package
+  15, when submissions and run control exist.
+- `TaskRuntime.hooks` (the hook runner) is added in Package 16 with hook
+  dispatch. Package 14 adds `runtime.registry` (the phase's registry snapshot)
+  and `runtime.models`.
+- `TaskRuntime.conversation()` returns a `ConversationHandle`, whose `submit`
+  needs Package 15 and whose `abort`/`waitForIdle` need ownership traversal; it
+  is added with the invocation-bound owned APIs in Package 18.
+- Idle waits count live non-background tasks directly (Harness-wide or in the
+  addressed conversation). Traversal through owned conversations and background
+  boundaries replaces this in Package 18.
 
-Implement reservation, running-task reopen reconciliation, dependencies,
-terminal outcomes, waits, holds, joins, and orphaning.
+Use a fake two-phase external effect to test the real runtime. Acceptance is an
+intent/effect/outcome task interrupted after intent, closed, reopened on the same
+storage, and safely resumed to a durable terminal receipt. Also test unchanged-
+checkpoint faulting, same-phase progress, cancellation precedence, thrown
+handlers, dependencies, result values and entry IDs, first-writer-wins memos,
+terminal checkpoint/memo removal, task-document retirement, close/reopen without
+abort marks or fabricated outcomes, no fresh phase/abort dispatch while closing,
+watch cleanup, blocked tasks unblocked
+by later registration, migration failure leaving the record unchanged, handover
+after a same-name task replacement, no handover to a missing or incompatible
+definition, no overlap between predecessor and successor
+invocations, abort of a blocked task settling as `orphaned` with full cleanup,
+run commits rejected after the mark, and crashes at every direct-task abort stage.
 
-Test result values and entry IDs, terminal records after reopen, dependency
-eligibility, unknown kinds, and terminal removal of checkpoints/memos.
+Implemented design notes: every task transition is decided by one callback
+serialized on the Session line (reservation, abort marks, runtime commits, and the
+step before each phase). `Tx` has no task replacement; `runtime.commit()`
+callbacks return the typed next state. `suspend()`, `hold()`, `quiescent()`, and
+a public `markTask()` were dropped from §2.2.
 
-## 17. Abort and owned conversations
+## 15. First runnable no-tool chat turn
 
-Implement durable abort marks, signal/join/fresh-abort invocation, owned
-conversation creation, subtree traversal, background behavior, and idle waits.
+Implement the smallest real input-to-answer vertical path. Extend Package 14's
+`orphaned` settlement to mark affected input submissions unanswered and clear
+matching run control in the same commit, through the Harness hook for
+scheduler-written outcomes (§5.4); the scheduler learns nothing about turns or
+task kinds. Implement the final `pi.live` document (§8.2) with `run` and
+`generation`, the built-in entry kinds (§8.1), and the `pi.generation` task
+(§8.3). The inbox document is defined in Package 17 with its first writer. Add
+input `Submission` admission, request-ID deduplication, reacquisition and
+waiting, idle placement, active-turn ownership, successful answer settlement,
+and terminal failure cleanup. Expose the final `SubmissionDraft` union. Idle
+write submissions append their entry and settle `done`. Until Package 17, every
+submission to a busy conversation rejects with `ConversationBusy` regardless of
+`whenBusy`, writing nothing. Busy steer/follow-up behavior, queued writes, and
+reset remain Package 17.
 
-Test commit rejection after a run task is marked, crashes at every abort stage,
-close precedence over a previously marked task, deep ownership trees, atomic
-retirement of task-scoped documents, default non-inheritance, inheritance from
-the current committed tail, an empty source conversation, document fork
-policies, and explicit model/section seed overrides.
+Also implement the decided surface changes: typed entry tokens
+(`defineEntry<D extends JsonValue>`, token-first `tx.appendEntry()` and
+`tx.entry()` overloads); removal of `input` from `createConversation()`;
+built-in tasks pre-registered by `createRegistry()` (undisposable, not
+overridable, required by `Harness.open`); the `TaskRuntime` additions
+`snapshot`/`snapshotAsOf`, `context()`, `now()`, and `report()`; and the
+`streamOptions`/`retry` configuration fields with their getters and setters.
 
-## 18. Submissions and positional inbox
+Implement the §7.4 system prompt: rendering registered sections with `tag` and
+wrappers, and no-tool request preparation, including
+exact persisted rendered strings, positional system baselines/deltas with empty
+`content`, head-cut rebaselining with `ContextEdit` omissions, order-only
+two-entry rewrites, and section failure handling. No tools are offered in this
+package: preparation emits no tool declarations and passes `PromptInput.tools`
+as `[]`. Until Package 16, a `toolUse` response settles as the answer.
+Implement the ordinary generation phases needed for one response: preparation,
+request intent, durable throttled partials, attempts/retry classification,
+deferred handle polling/cancellation, assistant entry settlement, and input-
+submission completion.
 
-Define the initial inbox and turn-control documents, then implement strict input/
-write `SubmissionRecord` variants, `Conversation.submit()`, request-ID
-deduplication, awaitable/reacquirable submissions, busy admission, withdrawal, queue modes,
-and `postTools`/`final` boundaries. Successful input settlement requires an
-answer; write settlement means entry placement and never starts a turn. Use a fake successor
-task.
+Call pi-ai only through its exported `Models` methods: `getModel()`,
+`streamSimple()`, `fetchDeferred()`, and `cancelDeferred()`. The test double must
+implement that same interface; production code gets no adapter. A missing configured model produces
+the durable `no_model` failure. All progress exposed to observers is committed
+state, never raw provider frames.
+
+Acceptance: `Harness.open → root → resume → submit(input) → Submission.wait →
+durable assistant answer → close/reopen`, using faux Models in tests. Exercise
+interruption and reopen before/after every implemented generation phase,
+aborted-partial conversion, deferred polling/cancellation, retryable and
+terminal model errors, no-visible-undurable updates, exact section order/value
+patches, complete post-head baselines, retained system deltas on both sides of a
+head marker, sections reading conversation documents through `input.read`,
+throwing sections, preparation
+rerun after a concurrent tail/config commit, fault and orphan turn cleanup,
+typed entry tokens, and durable submission settlement. This is also the first print-mode smoke path: print
+awaits its own input submission rather than global idle.
+
+## 16. First coding-agent tool turn
+
+Implement hook dispatch and `TaskRuntime.hooks`, deferred from Package 14
+(Session-wide and scoped to a conversation or its owned subtree) and wire the real generation → tool tasks → post-tools → generation
+chain. Implement offered-set checks, tool pinning from the phase snapshot,
+declaration and argument validation against both the offered declaration and
+the pinned implementation, hook composition, durable execution intent, stored
+replay policy, bounded output/details presentation documents, result entries, post-tools
+joining, controls, and `postTools`/`final` boundaries. The generation task now
+classifies tool calls and continues through the real built-in task chain;
+neither side uses a production fake successor.
+
+Implement preparation behavior for tool loadout additions/removals, same-name
+replacement ordering, complete baseline tool declarations, wrapped tools and
+failing wrappers, and hook memos.
+
+Acceptance: input → model tool call → registered local read/bash/edit operation →
+tool result → model answer → durable submission settlement. Run that path once
+normally and once interrupted/reopened. Test recovery from every tool and post-
+tools phase; offered-history enforcement; before/after hook rules; both stored/
+current replay-policy directions; default and overridden `outputLimits`; output
+content fallback; details replacement, last-details fallback, and coalesced
+commit settlement; drain-
+before-terminal ordering; abort/close with buffered output; invocation-bound
+handles and watches; unregistered active tools that are removed from the offered set, re-added after re-registration, and produce `tool_unavailable` results when called, without failing the request; a tool replaced mid-call
+finishing under its pinned implementation, including across phase boundaries;
+hooks surviving a task reload; duplicate active names offered once; order-only tool changes; atomic assistant/tool/post-tools commits;
+and all positional tool-history cases.
+
+## 17. Live UI and product state
+
+Complete submissions and inbox behavior: busy `steer`/`followUp`/`reject`,
+passive writes, withdrawal, ordered `postTools`/`final` selection, stale targets,
+self-head cuts, successor turns, queued reset/handoff, and every terminal cleanup.
+Successful inputs still require an answer; writes settle on placement and never
+start generation.
+
+Add `harness.blockedTasks()`, deferred from Package 14: the pending tasks this
+process cannot run and why (`missing_task`, `task_too_old`, `migration_failed`
+with the stored and registered versions and the migration error). It is derived
+from task records, the current registry snapshot, and scheduler memory, and is
+never persisted.
+
+Specify and implement the Harness activity view:
+the active conversations, notifications when a conversation becomes active or
+idle, all derived from committed turn-control and task
+state.
+
+Define any remaining built-in preference/presentation documents once with final
+schemas. Implement the structural `{ conversation, entries, docs }`
+`ConversationView`, `viewState()`, and `watch()`. Build the first revision lazily
+on the Session line. For each affected commit, derive and prepare one mounted
+operation batch from the complete candidate transaction before Storage
+admission; after success, only install prepared pointers/cursors and enqueue the
+exact immutable frame. Do not derive the mount through `subscribeCommits()`.
+
+Add the §9.4 notification adapter directly from uncoalesced committed
+publication, without another tracker or persistence authority. Wire TUI
+hydration to structural state/watch, print to its own `Submission`, and JSON/RPC
+to correlated commands plus ordered committed notifications. Transport
+backpressure and disconnect policy stay in the mode adapter.
 
 Table-test every submission transition, cross-type request-ID conflicts,
-interleaved steer/follow-up/write selection, self-head cuts, stale targets,
-successor triggers, reopen waits, writes pending without a later boundary,
-compact large-payload removals, abort results for queued/placed/terminal
-submissions, and orphan/fault cleanup of active turn control.
+interleaved queue selection, compact positional removal of large payloads,
+abort results, reopen waits, writes pending without a later boundary, busy reset
+placement, and orphan/fault cleanup. Test one view publication per Session
+commit; atomic entry/preview settlement; parent-linked active entries and heads;
+mounted create/recreate/retire; preparation rollback before Storage; empty-batch
+suppression and redundant nonempty revisions; contiguous delivery; stable public
+paths; O(1) immutable acquisition; structural sharing; serialized consumers;
+bounded reset behind an in-flight callback; durable retry/tool/collapse status;
+output truncation metadata; the documented placement of diagnostics in entries,
+terminal details, or bounded state; asynchronous consumer initialization; and
+absence of semantic projection. Verify watch overflow cannot erase a separately
+subscribed notification lifecycle, late clients hydrate structurally, and
+notifications expose committed throttled
+progress rather than raw provider frames.
 
-## 19. Remaining built-in documents and view
+## 18. Ownership and subagents
 
-Define the concrete configuration, preference, and live presentation documents;
-reuse the approved inbox/turn definitions. Record all IDs, fields, history,
-fork settings, migration, and checkpoint predicates in the normative
-specification.
+Complete the remaining owned-conversation and abort semantics: durable foreground
+subtree cascades, signal/join/fresh-abort across ownership edges, background
+boundaries, ordinary and full traversal, conversation abort, and exact idle
+waits. Finish invocation-bound owned APIs used by tools and the foreground and
+background subagent provisioning patterns, including atomic task/conversation/
+registry creation and request-ID-safe submission recovery.
 
-Implement `{ conversation, entries, docs }` as immutable structurally shared
-revisions produced by the optimized immutable applier. Build the first revision
-lazily on the Session line. For every later affected Session commit, derive the
-mounted operation batch and prepare its next revision before Storage admission;
-a failure rolls back normally. After Storage succeeds, finalization only installs
-prepared pointers/cursors and enqueues publication. Conversation
-watches use Package 12's O(1) acquisition and latest-revision coalescing.
+Test deep ownership trees, owner edges after terminal settlement, nested
+background boundaries, conversation abort/join with surviving passive writes and
+background tasks, cancellation of waiters without cancellation of work, and
+atomic cancellation intent. Test default non-inheritance, inheritance from the
+current committed tail, empty source conversations, document fork policies,
+configuration overrides through `init`, foreground subagent cascade, and
+background supervisor recovery before and after submission admission.
 
-Test direct task writes, one publication per Session commit, atomic
-entry/preview settlement, parent-linked active-entry reconstruction, head
-changes, mounted create/recreate/retire transitions, preparation failure before
-Storage, empty mounted-batch suppression, redundant nonempty mounted revisions,
-contiguous revisions, stable public paths, immutable O(1) acquisition,
-asynchronous consumer
-initialization, serialized updates, revision/payload structural sharing,
-coalescing behind an in-flight callback, retry/collapse late-join status,
-bounded-output truncation metadata, and absence of semantic projection. Specify
-which diagnostics become entries, terminal details, or bounded document state.
+## 19. Collapse and overflow
 
-## 20. Registries, hooks, and sections
+Implement manual, threshold, and generation-overflow collapse; exchange-boundary
+range selection; summarization; retry policy; staleness checks; and headed
+summary entries. Wire generation's real overflow path directly to the collapse
+task, and complete `Conversation.collapse()` so it returns the admitted task ID.
 
-Implement task/tool/section registries, Session and owned-subtree hooks,
-positional PR #9548 section/tool updates, complete baselines after a head cut,
-and preparation revision checks. Do not add a Session-kernel semantic event
-journal or extension-state router; package 24 adds the thin product notification
-adapter from specification §9.4.
+Generation preparation no longer rechecks the transcript before appending its
+system entries (§7.4, §12): only run tasks and turn boundaries write to a busy
+conversation. A collapse summary for a busy conversation must therefore be
+placed at a turn boundary or as a step of the run, never appended concurrently.
 
-Test registration lifetimes, hook replay with memos, exact persisted rendered
-section strings, minimal section patches and `null` removals, complete baseline
-tool declarations, and a head cut that retains earlier system messages. Verify
-the new baseline entry omits those messages through `ContextEdit` before replay,
-including retained `content`, section order, and tool changes. Include a retained
-delta whose ID precedes the head-carrying entry: select omissions by retained
-context membership, not an ID comparison with the head entry. Test tool loadout
-additions/removals and preparation retry after registry movement. Do
-not implement in-process replacement of Session-side extension code; a host extension
-change uses the Harness close/reopen boundary.
+Test model context before and after collapse, raw history preservation, provider
+failure, declined and stale work, manual/threshold/overflow admission, late-join
+presentation state, and reopen from every phase. Rerun generation overflow
+integration without a fake collapse kind.
 
-## 21. Tool and post-tools tasks
+## 20. Reload and final conformance
 
-Implement offered-set checks, argument validation, tool hooks, durable bounded
-progress, owned APIs, interrupted/replay-safe recovery, result entries,
-post-tools joining, controls, and boundaries using fake tools.
+Complete any remaining §2.2 surface and lifecycle gates and the §7.5 in-process
+reload path through the registry: batch replacement while the Harness keeps
+running, pinned in-flight work, and task handover at phase boundaries.
+Close/reopen is not required for reload.
 
-Test recovery from every phase, both stored/current replay-policy directions,
-default and overridden bounds, streamed-content fallback, progress replacement
-and coalesced commit settlement, drain-before-terminal ordering,
-abort/close with buffered output, invocation-bound owned handles, and atomic
-assistant/tool/post-tools settlement. Use a fake
-generation successor; package 22 replaces it and reruns integration.
+Test that close seals commit and mutation admission, lets already-admitted
+storage settlement finish despite caller cancellation, stops future state/watch
+delivery, joins task/tool/hook invocations outside the Session line, writes no
+abort or terminal outcome, starts no fresh abort invocation, and never runs old
+and new Harness generations concurrently. Include cancellation during watch
+acquisition and an already-running callback that remains caller-owned across
+shutdown. Verify service withdrawal and client detach.
 
-## 22. Generation task
+Run the exhaustive public conformance matrix: stable persisted root identity;
+all root/create/lookup/fork/reset/collapse/abort/idle paths; every configuration
+getter/setter and fork override; typed input/write submissions; task wait/abort;
+generic document access; registry changes before open, between open and resume,
+and while work runs; the activity view; structural watches; and
+blocked tasks surviving open. Compile-test every §2.2 and §3 owner/key/seed overload,
+the normative usage sequences, and the Chord guide. The erased registry test must
+use a concrete narrowed-input task with multiple checkpoint phases and custom
+hooks. Verify that a Chord root-replacement delta remains distinct from a
+Session-selected storage checkpoint.
 
-Implement preparation, request intent, durable throttled partials, attempts,
-retry policy, response classification, continuation, and deferred polling/
-cancellation through pi-ai's exported `Models` interface. Do not add a Pico
-model adapter. The faux test double implements that same interface.
-
-Test every phase before and after reopen, aborted partial conversion, overflow
-through a fake collapse kind, input-submission settlement, and no visible-undurable update.
-Replace the fake tool successor and rerun the package 21 integration tests.
-
-## 23. Collapse task
-
-Implement manual, threshold, and overflow collapse; exchange-boundary range
-selection; summarization; retries; staleness; and headed summary entries.
-
-Test context before/after collapse, provider failure, declined/stale work, and
-reopen from every phase. Replace generation's fake overflow target and rerun its
-overflow integration test.
-
-## 24. Harness integration
-
-Implement the exact public surface in specification §2.2:
-`Harness.open/resume/suspend/close`, lifecycle gates, root/create/lookup
-`Conversation` objects, typed input/write `submit()` and `Submission` objects,
-conversation-bound commits and history pagination, fork/collapse/reset/abort/idle,
-typed task wait/abort, generic document access, task/tool/section registries, and
-structural conversation watches. Do not restore Pico3's
-namespace router, fixed document accessors, semantic view events, or manual Chord
-view bridge.
-
-Expose service withdrawal/client detach and product wiring. Implement the §9.4
-agent-mode notification adapter directly from uncoalesced committed publication,
-without another tracker or persistence authority. Migrate TUI hydration to the
-structural conversation watch, make print await its own input `Submission`, and expose
-JSON/RPC correlated commands plus ordered committed notifications. Test that
-watch latest-revision coalescing cannot erase a separately subscribed
-notification lifecycle, late clients use structural hydration rather than event
-replay, progress notifications
-reflect durable throttled state rather than every provider frame, and stdout
-backpressure/disconnect policy stays in the mode adapter.
-
-Implement the v1 host-extension reload path as stop admission, close/join, dispose,
-rebuild with new document tokens and registered task/tool/section definitions, reopen/migrate live tasks, and resume. Ordinary documents migrate
-on later typed access. Test that closing seals commit and
-mutation admission, lets storage settlement for already-prepared admitted
-commits finish despite caller cancellation, stops watches, joins in-flight watch
-callbacks and task/tool/hook invocations outside the Session line, writes no abort
-or terminal outcome, starts no fresh abort invocation, and does not run old and
-new generations concurrently. Include cancellation during watch acquisition and
-a non-cooperative watch callback in shutdown/extension-reload quiescence tests.
-
-Test stable persisted root identity; atomic conversation/config/section/input-
-submission creation; default `"off"` thinking; every configuration getter/setter; explicit
-active-tool seed duplicate/unregistered rejection; default active registry
-snapshot; as-of fork inheritance including unavailable historical names; durable
-`missing_active_tool` settlement; fork seed overrides; concrete-entry forks;
-collapse task-ID return;
-busy reset admission and later placement; mark-only versus signalling abort;
-conversation abort/join with surviving passive writes and background tasks;
-quiescence with eligible work; listener initial/future delivery and isolation;
-and runtime registration between open and resume without resurrection of a task
-settled during open.
-
-Compile-test every §2.2 and §3 owner/key/seed overload plus the usage sequences
-in the normative specification and Chord guide. Verify that a Chord root
-replacement delta remains distinct from a Session-selected storage checkpoint. The erased registry test must include a concrete task with narrowed
-input, multiple checkpoint phases, and custom hooks. Run all package-specific
-tests and the repository check. Verify a local
-coding-agent turn and a reopened interrupted turn, then stop for final review.
+Run all package-specific tests and the repository check. Finish with a local
+coding-agent turn and a reopened interrupted turn through the public Harness,
+then stop for final review.

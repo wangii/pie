@@ -591,6 +591,7 @@ function supportsAnthropicMidConvoEffort(modelId: string): boolean {
 	const id = modelId.toLowerCase().replace(/^~?anthropic\//, "");
 	return (
 		/^claude-opus-(?:5|5[.-]5)(?:-\d{8})?$/.test(id) ||
+		/^claude-sonnet-5[.-]5(?:-\d{8})?$/.test(id) ||
 		/^claude-(?:fable|mythos)-5(?:[.-]1)(?:-\d{8})?$/.test(id)
 	);
 }
@@ -598,6 +599,7 @@ function supportsAnthropicMidConvoEffort(modelId: string): boolean {
 function supportsAnthropicMidConvoSystemMessages(modelId: string): boolean {
 	return (
 		/^claude-opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$/.test(modelId) ||
+		/^claude-sonnet-5[.-]5(?:-\d{8})?$/.test(modelId) ||
 		/^claude-(?:fable|mythos)-5(?:[.-]1)?(?:-\d{8})?$/.test(modelId)
 	);
 }
@@ -629,7 +631,9 @@ function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
 		id.includes("opus-4-8") ||
 		id.includes("opus-4.8") ||
 		id.includes("opus-5") ||
-		id.includes("opus.5")
+		id.includes("opus.5") ||
+		id.includes("sonnet-5-5") ||
+		id.includes("sonnet-5.5")
 	);
 }
 
@@ -1210,6 +1214,10 @@ function getAnthropicMessagesCompat(provider: string, modelId: string): Anthropi
 		compat.supportsEagerToolInputStreaming = false;
 	}
 	if (provider === "xiaomi" || provider.startsWith("xiaomi-token-plan-")) {
+		compat.allowEmptySignature = true;
+	}
+	// OpenCode Qwen 3.8 Flash emits and accepts thinking blocks with empty signatures.
+	if ((provider === "opencode" || provider === "opencode-go") && modelId === "qwen3.8-flash") {
 		compat.allowEmptySignature = true;
 	}
 	return Object.keys(compat).length > 0 ? compat : undefined;
@@ -2048,6 +2056,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
+				// Models with effort values use `reasoning_effort` with these levels.
+				// Reasoning models without them (Magistral) use `prompt_mode`.
+				const thinkingLevelMap = getEffortThinkingLevelMap(m.reasoning_options ?? []);
+
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
@@ -2055,6 +2067,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "mistral",
 					baseUrl: "https://api.mistral.ai",
 					reasoning: m.reasoning === true,
+					...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
 					cost: {
 						input: m.cost?.input || 0,
@@ -2065,7 +2078,6 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
-				recordModelsDevReasoningOptions("mistral", modelId, m);
 			}
 		}
 
@@ -2712,6 +2724,32 @@ async function generateModels() {
 		});
 	}
 
+	// Add Claude Sonnet 5.5 until models.dev includes it.
+	// https://platform.claude.com/docs/en/models/sonnet-5-5/overview
+	if (!allModels.some((model) => model.provider === "anthropic" && model.id === "claude-sonnet-5-5")) {
+		allModels.push({
+			id: "claude-sonnet-5-5",
+			name: "Claude Sonnet 5.5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "xhigh",
+				max: "max",
+			},
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		});
+	}
+
 	// The authenticated Copilot catalog advertised these models on 2026-09-22,
 	// but models.dev did not include them yet.
 	const missingCopilotModels: Model<Api>[] = [
@@ -2763,9 +2801,10 @@ async function generateModels() {
 			candidate.contextWindow = 1000000;
 		}
 
-		// models.dev may list Opus 5.5 before its effort metadata is complete.
+		// models.dev may list Opus 5.5 and Sonnet 5.5 before their effort metadata is complete.
 		if (
-			(candidate.provider === "anthropic" && candidate.id === "claude-opus-5-5") ||
+			(candidate.provider === "anthropic" &&
+				(candidate.id === "claude-opus-5-5" || candidate.id === "claude-sonnet-5-5")) ||
 			(candidate.provider === "github-copilot" && candidate.id === "claude-opus-5.5")
 		) {
 			mergeThinkingLevelMap(candidate, {
@@ -3193,6 +3232,7 @@ async function generateModels() {
 			provider: "mistral",
 			baseUrl: "https://api.mistral.ai",
 			reasoning: true,
+			thinkingLevelMap: getEffortThinkingLevelMap([{ type: "effort", values: ["none", "high"] }]),
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
