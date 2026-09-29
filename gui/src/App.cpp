@@ -22,9 +22,10 @@
 //             message_start/session_status, correctly reports no telemetry.
 //   --live    explicit; wins if both --demo and --live are supplied.
 //
-// Panels: Cmd/Ctrl+B belief list, Cmd/Ctrl+T dispatch trace, Cmd/Ctrl+F file list,
-// and ':' or Enter opens the Frame pane's prompt window. Cmd/Ctrl+= / - zoom the
-// font. `Cmd/Ctrl+G` is gone with the text workspace it toggled (§4).
+// Panels: Cmd/Ctrl+B belief list, Cmd/Ctrl+T dispatch trace, Cmd/Ctrl+F file list.
+// ':' or Enter opens the Frame pane, which is one floating window carrying the
+// Frame (and Approve / the objection box) above the prompt box. Cmd/Ctrl+= / -
+// zoom the font. `Cmd/Ctrl+G` is gone with the text workspace it toggled (§4).
 
 #include <imgui.h>
 
@@ -281,6 +282,15 @@ int main(int argc, char** argv) {
             // The deadline check runs every frame, including frames with no input:
             // a runtime that never answers must not block the UI forever.
             app.bootstrap.tick(app.model, nowMs());
+            // Whether a reading is waiting travels only in a `get_state` body — no
+            // event carries it — so a run boundary asks for one (see
+            // NativeGuiModel::requestStateRefresh). `Bootstrap::ingest` applies a
+            // get_state response in the Live phase as well as during the connect
+            // sequence, so this is the same command the bootstrap already used, and
+            // it is a re-read on a run boundary rather than a poll on a timer.
+            if (app.model.takeStateRefreshRequest()) {
+                writeCommand(app.sdk, serializeGetStateCommand(nextPromptId()));
+            }
         }
         auto& io = ImGui::GetIO();
 
@@ -344,21 +354,45 @@ int main(int argc, char** argv) {
         const FormulationView formulation = deriveFormulationView(app.model, task);
 
         // The floating windows are drawn first so they sit above the docked panels
-        // and are never clipped by a child region.
-        renderFramePane(app.promptOpen, app.frameState, app.model, /*canSend=*/app.live,
-                        /*historyNavigationEnabled=*/true, [&app](const std::string& msg) {
-                            writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
-                        });
+        // and are never clipped by a child region. The Frame pane is one of them
+        // and it is also the reading: it carries the Frame, Approve and the
+        // objection box together with the prompt box (FramePane.h), which is why
+        // there is no docked Frame rectangle in the shell any more.
+        renderFramePane(
+            app.promptOpen, app.frameState, formulation, app.model, /*canSend=*/app.live,
+            /*canAct=*/app.live, /*historyNavigationEnabled=*/true,
+            [&app](const std::string& msg) {
+                writeCommand(app.sdk, serializePromptCommand(nextPromptId(), msg));
+            },
+            // Each act asks for a fresh `get_state` afterwards. The three change
+            // runtime state the domain log does not carry — the pause, the resume
+            // phase, the auto-approve toggle — so without the re-read the pane would
+            // keep showing the state the act just replaced.
+            [&app](const std::string& versionId) {
+                writeCommand(app.sdk, serializeApproveFrameCommand(nextPromptId(), versionId));
+                app.model.requestStateRefresh();
+            },
+            [&app](const std::string& message) {
+                writeCommand(app.sdk, serializeFrameCorrectCommand(nextPromptId(), message));
+                app.model.requestStateRefresh();
+            },
+            [&app](bool enabled) {
+                writeCommand(app.sdk, serializeSetAutoApproveFrameCommand(nextPromptId(), enabled));
+                app.model.requestStateRefresh();
+            },
+            // A chip click goes where the record lives: a belief to the belief
+            // list. Opening the panel is the shell's business, not the pane's —
+            // the pane reports the click and nothing else.
+            [&app](const FormulationChip& chip) {
+                if (chip.opensBeliefs) app.panels.setOpen(PanelId::BeliefList, true);
+            });
         renderFileList(app.panels.openFlag(PanelId::FileList), app.model);
 
         const float rowH = ImGui::GetFrameHeightWithSpacing();
-        // The Frame pane is open exactly while its window is. §4 binds ONE key
-        // (':' or Enter) to "frame pane", and the pane is two halves: the reading
-        // (docked, so it can sit beside the canvas) and the reply (floating, so it
-        // never reserves a band). Opening one and not the other would leave the
-        // user answering a question they cannot see, so they open and close
-        // together, and Esc — handled inside renderFramePane — closes both.
-        app.panels.setOpen(PanelId::FrameControl, app.promptOpen);
+        // §4 binds ONE key (':' or Enter) to the Frame pane, and the pane is one
+        // window holding both the reading and the reply — so there is no panel
+        // state to sync here and no way to end up answering a question the user
+        // cannot see. Esc, handled inside renderFramePane, closes it.
         const ShellLayout shell =
             computeShellLayout(io.DisplaySize.x, io.DisplaySize.y, rowH, app.panels);
 
@@ -396,25 +430,6 @@ int main(int argc, char** argv) {
             ImGui::SetCursorPos(ImVec2(shell.tracePanel.x, shell.tracePanel.y));
             ImGui::BeginChild("trace", ImVec2(shell.tracePanel.w, shell.tracePanel.h), true);
             renderDispatchTrace(app.model, app.tracePane);
-            ImGui::EndChild();
-        }
-        if (!shell.framePane.empty()) {
-            ImGui::SetCursorPos(ImVec2(shell.framePane.x, shell.framePane.y));
-            ImGui::BeginChild("frame", ImVec2(shell.framePane.w, shell.framePane.h), true);
-            renderFramePaneContent(
-                formulation, app.model, app.frameState, /*canAct=*/app.live,
-                [&app](const std::string& versionId) {
-                    writeCommand(app.sdk, serializeApproveFrameCommand(nextPromptId(), versionId));
-                },
-                [&app](const std::string& message) {
-                    writeCommand(app.sdk, serializeFrameCorrectCommand(nextPromptId(), message));
-                },
-                // A chip click goes where the record lives: a belief to the belief
-                // list. Opening the panel is the shell's business, not the pane's —
-                // the pane reports the click and nothing else.
-                [&app](const FormulationChip& chip) {
-                    if (chip.opensBeliefs) app.panels.setOpen(PanelId::BeliefList, true);
-                });
             ImGui::EndChild();
         }
 

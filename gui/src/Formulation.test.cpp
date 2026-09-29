@@ -155,6 +155,38 @@ int main() {
         check(view.canApprove, "and Approve is live");
         check(view.reviewVersionId == "formulation-1",
               "the approval target is the REVIEW's version, which is what approve_frame will accept");
+        // No `autoApproveFrame` in that payload, so the toggle is UNKNOWN rather
+        // than off: a runtime that did not report it has not said it is disabled,
+        // and an unticked box would be exactly that claim.
+        check(!view.autoApproveKnown, "an unreported auto-approve toggle is unknown, not off");
+    }
+
+    // ---------------------------------------------------------------------
+    // The session toggle is not a property of the task's formulation
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model = foldDemo(indexOfEvent("ev-19"));
+        applyState(model,
+                   R"({"sessionId":"session-1","autoApproveFrame":true,"formulation":{"review":{"versionId":"formulation-1"},"awaitingResponse":true}})");
+        const FormulationView view = deriveFormulationView(model, model.task("task-1"));
+        check(view.autoApproveKnown && view.autoApproveFrame, "the session toggle is carried");
+
+        // Read even with no task open: it is a setting on the SESSION, and the user
+        // can set it before the first reading exists.
+        const FormulationView none = deriveFormulationView(model, nullptr);
+        check(!none.hasTask, "there is no task to show");
+        check(none.autoApproveKnown && none.autoApproveFrame,
+              "but the session toggle is still readable, because it is not the task's");
+
+        // And it is NOT gated on the runtime having described THIS task, which is
+        // what the pause and the resume are gated on: those describe one task's
+        // review, while this describes the session.
+        NativeGuiModel other = foldDemo(indexOfEvent("ev-19"));
+        applyState(other, R"({"autoApproveFrame":true})");
+        check(!deriveFormulationView(other, other.task("task-1")).runtimeKnown,
+              "no formulation block means the task-level runtime facts are unknown");
+        check(deriveFormulationView(other, other.task("task-1")).autoApproveKnown,
+              "but the session toggle is still known");
     }
 
     // ---------------------------------------------------------------------

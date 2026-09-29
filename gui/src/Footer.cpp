@@ -15,7 +15,17 @@ namespace {
 // Render one belief-loop-role slot as "<label>: <provider/id> (CH x.xx%)".
 // Undefined model / cache hit rate render as the em-dash placeholder, matching
 // the TUI footer (formatRoleSlotLine).
-void renderRoleSlot(const char* label, const RoleFooterSlot& slot) {
+//
+// `active` marks the slot whose phase currently has an assistant turn in flight
+// (`NativeGuiModel::openTurn()`): colour + bold is the whole marker, so it stays a
+// static emphasis (gui/AGENTS.md forbids animation) and reuses the bold face the
+// markdown renderer already loaded.
+void renderRoleSlot(const char* label, const RoleFooterSlot& slot, bool active) {
+    ImFont* const bold = active ? markdownBoldFont() : nullptr;
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+        if (bold != nullptr) ImGui::PushFont(bold);
+    }
 
     // Keep the compact bracket label ("[Epi]") used by the text-workspace
     // footer; the graph footer reuses the same slot renderer.
@@ -46,6 +56,26 @@ void renderRoleSlot(const char* label, const RoleFooterSlot& slot) {
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::Separator();
+
+    if (active) {
+        if (bold != nullptr) ImGui::PopFont();
+        ImGui::PopStyleColor();
+    }
+}
+
+// The footer slot an in-flight turn belongs to, or -1 when its stage has no slot.
+// Routing and finalReport (`Closed`) dispatch a model too, but `session_status`
+// carries no slot for them, so they highlight nothing rather than the wrong role.
+int activeRoleSlot(EpisodeStage stage) {
+    switch (stage) {
+        case EpisodeStage::Proposing: return 0;
+        case EpisodeStage::Distilling: return 1;
+        case EpisodeStage::Executing: return 2;
+        case EpisodeStage::Routing:
+        case EpisodeStage::Closed:
+        case EpisodeStage::Unknown: return -1;
+    }
+    return -1;
 }
 
 // Render the role context lengths as one short labeled segment (used by the
@@ -86,11 +116,13 @@ void renderFooter(const pie::gui::NativeGuiModel& m) {
         return;
     }
 
-    renderRoleSlot("Epistemic", f.epistemic);
+    const TraceEntry* const turn = m.openTurn();
+    const int active = turn != nullptr ? activeRoleSlot(turn->stage) : -1;
+    renderRoleSlot("Epistemic", f.epistemic, active == 0);
     ImGui::SameLine();
-    renderRoleSlot("Distillation", f.distillation);
+    renderRoleSlot("Distillation", f.distillation, active == 1);
     ImGui::SameLine();
-    renderRoleSlot("Execution", f.execution);
+    renderRoleSlot("Execution", f.execution, active == 2);
 
     // ImGui::SameLine();
     // ImGui::TextUnformatted("Total cost:");
@@ -118,11 +150,13 @@ void renderGraphFooter(const pie::gui::NativeGuiModel& m) {
         ImGui::SameLine();
     }
     if (f.hasData) {
-        renderRoleSlot("Epistemic", f.epistemic);
+        const TraceEntry* const turn = m.openTurn();
+        const int active = turn != nullptr ? activeRoleSlot(turn->stage) : -1;
+        renderRoleSlot("Epistemic", f.epistemic, active == 0);
         ImGui::SameLine();
-        renderRoleSlot("Distillation", f.distillation);
+        renderRoleSlot("Distillation", f.distillation, active == 1);
         ImGui::SameLine();
-        renderRoleSlot("Execution", f.execution);
+        renderRoleSlot("Execution", f.execution, active == 2);
     }
 }
 

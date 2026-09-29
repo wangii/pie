@@ -827,6 +827,30 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
+    // The state-refresh trigger: a settled run is when a new pause can exist, and
+    // no event carries the pause, so the model asks for a `get_state`.
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        // Not a poll: nothing but a run boundary asks.
+        check(!model.takeStateRefreshRequest(), "a fresh model asks for nothing");
+
+        check(applyRpcLine(model, R"({"type":"turn_end"})") == RpcApplyResult::Ignored, "turn_end applies");
+        check(!model.takeStateRefreshRequest(), "a turn boundary is not a settled run");
+
+        check(applyRpcLine(model, R"({"type":"agent_settled"})") == RpcApplyResult::Ignored,
+              "agent_settled applies");
+        check(model.takeStateRefreshRequest(), "a settled run asks for a fresh get_state");
+        // Taken, not latched: one reason, one command.
+        check(!model.takeStateRefreshRequest(), "the request is consumed by the first read");
+
+        // And it can be asked for again by the next boundary.
+        check(applyRpcLine(model, R"({"type":"agent_settled"})") == RpcApplyResult::Ignored,
+              "a second settled run applies");
+        check(model.takeStateRefreshRequest(), "and asks again");
+    }
+
+    // ---------------------------------------------------------------------
     // The in-message stream and the failed-command surface.
     // ---------------------------------------------------------------------
     {

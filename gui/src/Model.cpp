@@ -1877,6 +1877,13 @@ RpcApplyResult applyRpcLine(NativeGuiModel& model, const json::Value& parsed) {
     // AgentEvent turn boundaries. The domain events are authoritative for episode
     // lifecycles; these only mark a model turn and never open or close one.
     if (type == "agent_start" || type == "turn_start" || type == "turn_end" || type == "agent_settled") {
+        // A settled run is the one moment a NEW pause can exist: the reading was
+        // published during the run, and the run's boundary is when the runtime
+        // stops on it (see `_autoApproveWaitingFrame`, which runs at the same
+        // point). Nothing pushes that fact — `awaitingResponse` travels only in a
+        // `get_state` body — so ask for one here. This is a re-read, not a poll:
+        // it fires on a run boundary, not on a timer.
+        if (type == "agent_settled") model.requestStateRefresh();
         return RpcApplyResult::Ignored;
     }
 

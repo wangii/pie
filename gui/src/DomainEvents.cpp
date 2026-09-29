@@ -1009,6 +1009,12 @@ bool readSessionState(const json::Value& v, SessionState& out) {
     out.thinkingLevel = v.string("thinkingLevel");
     out.isStreaming = v.boolean("isStreaming", false);
     out.isCompacting = v.boolean("isCompacting", false);
+    // Presence, not truthiness: a runtime that does not report the toggle has not
+    // said it is off, and the pane draws a disabled control rather than a lie.
+    if (v.find("autoApproveFrame") != nullptr) {
+        out.autoApproveFrame = v.boolean("autoApproveFrame", false);
+        out.autoApproveKnown = true;
+    }
     out.messageCount = static_cast<long>(v.integer("messageCount", 0));
     out.pendingMessageCount = static_cast<long>(v.integer("pendingMessageCount", 0));
     // `formulation: null` is the no-open-task case and stays nullopt; it is not

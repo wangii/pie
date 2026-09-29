@@ -63,6 +63,16 @@ struct FormulationView {
     bool awaitingResponse = false;
     bool approved = false;
     std::optional<FormulationResumeState> resume;
+    // Session-scoped auto-approval. Unlike the three above it is not a property of
+    // THIS task's formulation — it is a setting on the session — so it is not gated
+    // on the shown task being the active one, and it is read even when there is no
+    // task at all: the toggle can be set before the first reading exists.
+    //
+    // `autoApproveKnown` is separate from the value because the checkbox must draw
+    // "the runtime has not said" as a disabled control, never as an unticked box:
+    // an unticked box is a claim that automatic approval is off.
+    bool autoApproveKnown = false;
+    bool autoApproveFrame = false;
 
     // --- derived from the domain records ---------------------------------
     bool hasTask = false;

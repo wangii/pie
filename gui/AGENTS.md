@@ -67,8 +67,9 @@ The source is split into three layers. Keep new code in the matching layer.
   testable without a window — and each is where a rule like "a column with no
   source renders `—`" or "these regions never overlap" is enforced.
 - **UI (ImGui)** — `src/App.cpp`, which lays the shell out and calls one `render*`
-  per region: `StatusBar`, `Footer`, `BeliefPane`, `TracePane`, `FramePane` (the
-  Frame content plus the floating prompt window it grew out of `PromptPalette`),
+  per region: `StatusBar`, `Footer`, `BeliefPane`, `TracePane`, `FramePane` (one
+  floating window: the Frame reading, Approve and the objection box, then the
+  prompt box it grew out of `PromptPalette`),
   `FileListWindow`, and `graph/GraphView.cpp` (the only ImGui file in the graph
   layer). The UI reads model state; it never decides stage, cursor, or belief
   semantics. **App.cpp does no early return**: opening a panel changes a rectangle
@@ -101,6 +102,19 @@ see its README.
   `EpisodeStage`, the session cursor, or epistemic meaning from a generic log.
   Stage and cursor are set only by `CursorChanged` and `EpisodeClosed`. In
   `NativeGuiModel`, the only belief-registry writer is `BeliefDeltaApplied`.
+- **The pause has no event, so a run boundary re-reads `get_state`.** Whether a
+  reading is waiting for the user (`awaitingResponse`) travels only in a
+  `get_state` body — no domain event and no `session_status` carries it — so a
+  client that asks once at connect can never learn that a run stopped mid-session
+  to ask the user something, and the Approve button it would light up stays dark
+  forever. `NativeGuiModel` therefore raises a refresh request on `agent_settled`
+  (the same boundary at which the runtime's `_autoApproveWaitingFrame` runs), and
+  App answers it with one `get_state`. `Bootstrap::ingest` applies a `get_state`
+  response in the Live phase as well as during the connect sequence, so this is the
+  same command the bootstrap already used. This is a re-read on a boundary, **not a
+  poll**: do not put it on a timer, and do not derive a pause from the log.
+  The Frame pane's own acts (approve, object, toggle auto-approve) ask for one too,
+  because each changes runtime state the domain log does not carry.
 - **Episode boundaries**: only `EpisodeOpened`/`EpisodeClosed` delimit an
   episode. A second plan, or the `proposing` stage, must never serve as a
   separator.
@@ -187,14 +201,46 @@ ImGui backend).
   width back and the panels share what is left, each scrolling internally. Every
   rectangle stays inside the work area — a rect outside it is the one layout
   outcome this section forbids outright.
-- The user prompt window is a floating overlay opened by `:`/Enter and closed by
-  Esc, independent of the main workspace layout. It is rendered as its own ImGui
-  window; text is submitted with Cmd/Ctrl+Enter (Enter inserts a newline, so a
-  multiline prompt is preserved end to end). It does not reserve any band in the
-  layout, so it never overlaps another panel. The Frame pane's docked half opens
-  and closes with it: the panel is the reading and the window is the reply, and
-  opening one without the other would ask the user to answer a question they
-  cannot see.
+- The Frame pane is a floating overlay opened by `:`/Enter and closed by Esc,
+  independent of the main workspace layout. It is rendered as its own ImGui window;
+  text is submitted with Cmd/Ctrl+Enter (Enter inserts a newline, so a multiline
+  prompt is preserved end to end). It reserves no band and holds no docked
+  rectangle, so it takes no width from the canvas and no rectangle
+  `computeShellLayout` hands out can collide with it — that invariant is about the
+  docked rects, and this window is not one of them. It does sit over the graph, so
+  it is sized (72% x 82% of the window, centred) to leave the canvas edges visible
+  rather than to fill the work area.
+- **The Frame pane is one surface, and it is where the reading lives.** M8 split it
+  in two — a docked panel for the reading, the window for the reply — and bound
+  them to a single key. Two costs showed up in use: the Frame had no place of its
+  own in the workspace, and the only way to reach either half was a keystroke
+  nothing in the UI announced. So the window carries both, reading above and reply
+  below, and `PanelId` has no Frame entry. The banner, the acts and the Frame body
+  are pinned in that order, and only the body scrolls (`renderFrameBody`), so
+  Approve cannot be scrolled out of reach on a long reading. The body's height
+  comes from the space *remaining* after the pinned part, never from the window:
+  the pinned part's height depends on how its text wraps, which depends on the
+  width, and taking the body's share from the window let the pinned part grow until
+  the whole pane overflowed and scrolled the acts off the top of the one window
+  that is supposed to be showing them.
+- **The three acts are always drawn, disabled with the reason.** Approve, the
+  auto-approve toggle and the objection box used to appear only while the run was
+  paused, on the argument that a control offered when nothing is waiting invites the
+  confusion `approve_frame` exists to remove. That is right about the *pressing* and
+  wrong about the *showing*: with the row hidden, a user who was paused saw nothing
+  at all and could not tell "this pane has no actions" from "this pane's actions are
+  elsewhere". So the row is always there, greyed when unavailable, with one short
+  line naming the reason. Keep those reasons SHORT — the window is 72% of the app's
+  width, and a sentence wraps to seven lines at the narrowest supported size and
+  pushes the acts off the pane.
+  - The three are not variants of one act. `Approve` consents to the reading **on
+    screen** and is live only while one waits; `Auto-approve` consents to readings
+    that **do not exist yet** and is a session setting (`set_auto_approve_frame`,
+    no versionId); the objection is neither — it is not consent, and it can be sent
+    at any time. That is why auto-approve is a checkbox beside Approve and not a
+    second button: it must not be possible to press it believing it approves the
+    version in front of you. Turning it on approves a reading that is already
+    waiting, so the tooltip has to say so.
 - The window enforces a minimum size via the platform's size-limit call, using the
   single-source constants `kMinWindowWidth`/`kMinWindowHeight` from
   `ShellLayout.h`. Resizing the window can never produce negative or

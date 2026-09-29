@@ -803,6 +803,14 @@ struct SessionState {
     std::string thinkingLevel;
     bool isStreaming = false;
     bool isCompacting = false;
+    // Session-scoped auto-approval of published readings. `autoApproveKnown`
+    // separates "the runtime said off" from "the runtime did not say": the pane
+    // renders the second as a disabled toggle, never as off. Every other fact the
+    // Frame pane reads is derived from the domain log; this one is not — the
+    // approval the toggle causes is recorded as an ordinary `FormulationApproved`,
+    // so a reading approved automatically and one approved by hand replay alike.
+    bool autoApproveKnown = false;
+    bool autoApproveFrame = false;
     long messageCount = 0;
     long pendingMessageCount = 0;
     std::optional<FormulationState> formulation;
@@ -825,6 +833,19 @@ public:
     // SessionState comment above.
     void applySessionState(SessionState state);
     const SessionState& sessionState() const { return sessionState_; }
+
+    // Ask for a fresh `get_state` on the next frame. The run's pause is the one
+    // fact the Frame pane shows that no event announces: `awaitingResponse` only
+    // ever arrives in a `get_state` body, so a client that asks once at connect
+    // can never learn that a run stopped mid-session to ask the user something —
+    // and the Approve button it would light up stays dark forever.
+    void requestStateRefresh() { stateRefreshRequested_ = true; }
+    // True at most once per request, so the caller sends one command per reason.
+    bool takeStateRefreshRequest() {
+        const bool requested = stateRefreshRequested_;
+        stateRefreshRequested_ = false;
+        return requested;
+    }
 
     // True when the bootstrap could not read a snapshot and the whole model is a
     // projection of the live event stream alone. The status bar says so; a panel
@@ -867,6 +888,14 @@ public:
     // `applyRpcLine`; folded into rows by `buildDispatchTrace`. Never replayed —
     // see the section comment above.
     const std::vector<TraceEntry>& trace() const { return trace_; }
+    // The assistant turn `message_end` has not closed yet, or nullptr when no turn
+    // is in flight. The footer reads its `stage` to mark which role slot is
+    // currently executing; a turn the cursor attributed to routing/finalReport
+    // carries no slot and highlights none.
+    const TraceEntry* openTurn() const {
+        if (!openTurn_.has_value() || *openTurn_ >= trace_.size()) return nullptr;
+        return &trace_[*openTurn_];
+    }
     // Append one observation. Public so a test can drive the fold with a log it
     // states outright instead of one it has to coax out of the adapter.
     void recordTrace(TraceEntry entry);
@@ -953,6 +982,7 @@ private:
     std::string session_;
     std::vector<FileEntry> fileList_;
     std::set<std::string> fileOpSeen_;
+    bool stateRefreshRequested_ = false;
 };
 
 // The RPC event adapter (live mode). Consumes one runtime JSONL line (a domain

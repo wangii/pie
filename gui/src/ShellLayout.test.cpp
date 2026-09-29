@@ -61,7 +61,7 @@ int main() {
         check(!overlaps(layout.canvas, layout.footer), "the canvas does not overlap the footer");
         check(layout.header.bottom() <= layout.canvas.y + 0.001f, "the header is above the canvas");
         check(layout.canvas.bottom() <= layout.footer.y + 0.001f, "the canvas is above the footer");
-        check(layout.beliefPanel.empty() && layout.tracePanel.empty() && layout.framePane.empty(),
+        check(layout.beliefPanel.empty() && layout.tracePanel.empty(),
               "a closed panel occupies nothing");
         check(layout.canvas.w >= kMinCanvasWidth, "the canvas keeps its minimum width");
         check(layout.canvas.h >= kMinCanvasHeight, "the canvas keeps its minimum height");
@@ -82,21 +82,21 @@ int main() {
         bool allCanvasMin = true;
         std::string firstFailure;
 
-        // Every combination of the three docked panels.
-        for (int mask = 0; mask < 8; ++mask) {
+        // The Frame pane is not in this sweep because it is not a docked panel:
+        // it lives in the floating window and takes no canvas width (FramePane.h).
+        for (int mask = 0; mask < 4; ++mask) {
             PanelState panels;
             panels.setOpen(PanelId::BeliefList, (mask & 1) != 0);
             panels.setOpen(PanelId::DispatchTrace, (mask & 2) != 0);
-            panels.setOpen(PanelId::FrameControl, (mask & 4) != 0);
             for (float w : widths) {
                 for (float h : heights) {
                     ++cases;
                     const ShellLayout layout = computeShellLayout(w, h, rowH, panels);
                     if (layout.stacked) ++stackedCases;
 
-                    Rect rects[6] = {layout.header,   layout.canvas,    layout.footer,
-                                     layout.beliefPanel, layout.tracePanel, layout.framePane};
-                    for (int i = 0; i < 6; ++i) {
+                    Rect rects[5] = {layout.header, layout.canvas, layout.footer,
+                                     layout.beliefPanel, layout.tracePanel};
+                    for (int i = 0; i < 5; ++i) {
                         if (!inside(rects[i], w, h)) {
                             allInside = false;
                             if (firstFailure.empty()) {
@@ -105,7 +105,7 @@ int main() {
                                                describe(rects[i]);
                             }
                         }
-                        for (int j = i + 1; j < 6; ++j) {
+                        for (int j = i + 1; j < 5; ++j) {
                             if (overlaps(rects[i], rects[j])) {
                                 allDisjoint = false;
                                 if (firstFailure.empty()) {
@@ -127,7 +127,6 @@ int main() {
                     // A closed panel is zero-sized at every size.
                     if (!panels.isOpen(PanelId::BeliefList) && !layout.beliefPanel.empty()) allDisjoint = false;
                     if (!panels.isOpen(PanelId::DispatchTrace) && !layout.tracePanel.empty()) allDisjoint = false;
-                    if (!panels.isOpen(PanelId::FrameControl) && !layout.framePane.empty()) allDisjoint = false;
                 }
             }
         }
@@ -135,7 +134,7 @@ int main() {
         check(allInside, "every region stays inside the work area");
         check(allOrdered, "the header, canvas and footer keep their order");
         check(allCanvasMin, "the canvas is never narrower than its minimum");
-        check(cases == 8 * 6 * 4, "the sweep covered every combination");
+        check(cases == 4 * 6 * 4, "the sweep covered every combination");
         check(stackedCases > 0, "the sweep reached the stacked case");
         check(stackedCases < cases, "and the side-by-side case too");
         if (!firstFailure.empty()) std::fprintf(stderr, "  first failure: %s\n", firstFailure.c_str());
@@ -167,14 +166,14 @@ int main() {
     // ---------------------------------------------------------------------
     {
         PanelState panels;
-        panels.setOpen(PanelId::FrameControl, true);
+        panels.setOpen(PanelId::DispatchTrace, true);
         const ShellLayout layout = computeShellLayout(kMinWindowWidth, kMinWindowHeight, rowH, panels);
         check(layout.stacked, "the minimum window width cannot hold both, so it stacks");
-        check(layout.framePane.y >= layout.canvas.bottom(), "the panel is below the canvas");
-        check(layout.framePane.w > 0.0f && layout.framePane.h > 0.0f,
+        check(layout.tracePanel.y >= layout.canvas.bottom(), "the panel is below the canvas");
+        check(layout.tracePanel.w > 0.0f && layout.tracePanel.h > 0.0f,
               "and at the minimum window size it is still big enough to read");
         check(layout.canvas.h >= kMinCanvasHeight, "the canvas keeps its minimum height too");
-        check(layout.framePane.bottom() <= layout.footer.y + 0.001f, "the stack stops above the footer");
+        check(layout.tracePanel.bottom() <= layout.footer.y + 0.001f, "the stack stops above the footer");
     }
 
     // ---------------------------------------------------------------------
@@ -216,12 +215,11 @@ int main() {
         PanelState panels;
         panels.setOpen(PanelId::BeliefList, true);
         panels.setOpen(PanelId::DispatchTrace, true);
-        panels.setOpen(PanelId::FrameControl, true);
         for (float w : {0.0f, 1.0f, 40.0f, 200.0f}) {
             for (float h : {0.0f, 1.0f, 30.0f, 120.0f}) {
                 const ShellLayout layout = computeShellLayout(w, h, rowH, panels);
-                const Rect rects[6] = {layout.header,      layout.canvas,    layout.footer,
-                                       layout.beliefPanel, layout.tracePanel, layout.framePane};
+                const Rect rects[5] = {layout.header, layout.canvas, layout.footer,
+                                       layout.beliefPanel, layout.tracePanel};
                 bool nonNegative = true;
                 for (const Rect& r : rects) {
                     if (r.w < 0.0f || r.h < 0.0f) nonNegative = false;

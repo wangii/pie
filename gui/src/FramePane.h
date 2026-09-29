@@ -1,21 +1,25 @@
-// FramePane: the Frame's panel (docs/milestones.md §7.2), grown out of the v1
-// user-prompt palette.
+// FramePane: the Frame's pane, and the user-prompt palette the v1 workspace had.
 //
-// Two parts, because they answer two different questions and §7.4 places them in
-// two different rectangles:
+// These are ONE surface, not two. M8 split them — a docked panel for the reading
+// ("what the Frame is") and the floating window for the reply ("what the user
+// wants to say") — and bound them to a single key so neither could be opened
+// alone. That split had two costs that only show up when you use it: the Frame
+// had no place of its own in the workspace, and the only way to reach either half
+// was a keystroke nothing in the UI announced. So the window carries both now:
 //
-//   * `renderFramePaneContent` — WHAT THE READING IS, and what the user is being
-//     asked to do about it. Rendered into the shell's `frame` child. This is the
-//     first surface on which `sources[]` is auditable: a belief chip opens the
-//     belief pane, an execution chip centres the canvas.
-//   * `renderFramePane` — WHAT THE USER WANTS TO SAY. The floating window the
-//     palette always was, opened with ':' and closed with Esc, kept as an overlay
-//     so it never reserves a band in the workspace layout.
+//   * the READING at the top — the banner, the acts it can offer (Approve,
+//     Auto-approve, Correction), and the Frame itself: version, sources, deferral,
+//     corrections, review obligations, recheck, history.
+//   * the REPLY below it — the prompt box, and the assistant's streaming answer.
 //
-// The two acts the pane exists to keep apart live in the banner, side by side and
-// visibly different: `approve_frame` is the ONLY command that means consent, and a
-// plain prompt never releases the pause. Hence a separate correction box (not the
-// prompt box) and a submit button that says what it does not do.
+// The banner and the acts stay pinned while only the Frame body scrolls, so
+// Approve cannot be scrolled out of reach on a long reading.
+//
+// The acts the pane exists to keep apart stay side by side and visibly different:
+// `approve_frame` is the ONLY command that means consent, and a plain prompt never
+// releases the pause. The correction is neither: pressing the one `Correction`
+// button turns the SAME prompt box into the correction input (a mode, not a second
+// box), and the normal Send button keeps saying what it does not do.
 
 #pragma once
 
@@ -36,6 +40,10 @@ using PromptSender = std::function<void(const std::string&)>;
 using FrameApprover = std::function<void(const std::string& versionId)>;
 // `frame_correct` — the user's objection to the reading.
 using FrameCorrector = std::function<void(const std::string& message)>;
+// `set_auto_approve_frame` — the session-scoped toggle. Deliberately NOT an
+// approve: it consents to readings that do not exist yet, which is why it is a
+// checkbox rather than a second button next to Approve.
+using FrameAutoApprover = std::function<void(bool enabled)>;
 // A click on a `sources[]` chip. The pane does not decide where a belief or an
 // execution is shown; it reports the click.
 using FrameChipHandler = std::function<void(const FormulationChip& chip)>;
@@ -55,10 +63,15 @@ struct FramePaneState {
     int mentionActiveIndex = -1;
 
     // --- the Frame's own state -------------------------------------------
-    // The correction box. DELIBERATELY NOT `promptText`: §7.2 requires the two to
-    // be separate inputs, so that submitting one can never be mistaken for the
-    // other — and so a half-typed prompt is not consumed as an objection.
-    std::string correctionText;
+    // The correction mode. Entering it reuses the ONE prompt box as the correction
+    // input; `correctionDraft` keeps the normal prompt draft so Esc can restore it.
+    // A mode on the one input, rather than a second box, so a half-typed prompt is
+    // never consumed as an objection and there is never a second place to type.
+    bool correctionMode = false;
+    std::string correctionDraft;
+    // Set when entering correction mode so the next frame lands the caret in the
+    // prompt box even if the window is not appearing.
+    bool requestPromptFocus = false;
     // The version whose full text is being read in the history list, or empty for
     // the current one. Read-only: the pane never edits a published version.
     std::string viewedVersionId;
@@ -66,16 +79,60 @@ struct FramePaneState {
     bool showCorrections = true;
 };
 
-// Render the Frame content into the CURRENT ImGui child (the shell owns the
-// rectangle). `canAct` is false in a replay, where there is no runtime to send a
-// command to: a button that cannot do anything must not look like it can.
-void renderFramePaneContent(const FormulationView& view, const NativeGuiModel& m,
-                            FramePaneState& state, bool canAct, FrameApprover approve,
-                            FrameCorrector correct, FrameChipHandler onChip);
+// --- correction mode transitions (headless, so the semantics are testable) ---
+//
+// Entering correction mode holds the current prompt as the draft and starts the
+// correction from empty, so a half-typed prompt is never submitted as an
+// objection. Esc cancels the MODE (not the pane) and restores that draft; a
+// successful submit leaves the mode and clears the input. These are the exact
+// state changes the render function makes; keeping them here makes each one
+// assertable without a window.
+inline void enterCorrectionMode(FramePaneState& s) {
+    s.correctionMode = true;
+    s.correctionDraft = s.promptText;
+    s.promptText.clear();
+    // Prompt-only affordances would otherwise replace the correction text.
+    s.promptHistoryIndex = -1;
+    s.promptHistoryDraft.clear();
+    s.mentionCandidates.clear();
+    s.mentionActiveIndex = -1;
+    s.requestPromptFocus = true;
+}
 
-// Render the floating prompt window. `open` is opened by the shell on ':' or
-// Enter and closed by Esc; `state` carries the persistent editor state.
-void renderFramePane(bool& open, FramePaneState& state, const pie::gui::NativeGuiModel& m,
-                     bool canSend, bool historyNavigationEnabled, PromptSender send);
+inline void cancelCorrectionMode(FramePaneState& s) {
+    s.correctionMode = false;
+    s.promptText = s.correctionDraft;
+    s.correctionDraft.clear();
+    s.promptHistoryIndex = -1;
+    s.promptHistoryDraft.clear();
+    s.mentionCandidates.clear();
+    s.mentionActiveIndex = -1;
+    s.requestPromptFocus = true;
+}
+
+// After a submit has been handed to `frame_correct`: leave the mode, clear the
+// input, and keep the caret ready for a following prompt. The pane stays open so
+// the reply to the correction lands where the user is looking.
+inline void leaveCorrectionModeAfterSubmit(FramePaneState& s) {
+    s.correctionMode = false;
+    s.correctionDraft.clear();
+    s.promptText.clear();
+    s.mentionCandidates.clear();
+    s.mentionActiveIndex = -1;
+    s.requestPromptFocus = true;
+}
+
+// Render the Frame pane. `open` is opened by the shell on ':' or Enter and closed
+// by Esc; `state` carries the persistent editor state.
+//
+// `canSend` and `canAct` are separate on purpose: sending a prompt and acting on
+// the Frame are different acts with different availability. Both are false in a
+// replay, where there is no runtime to send a command to — a button that cannot do
+// anything must not look like it can.
+void renderFramePane(bool& open, FramePaneState& state, const FormulationView& view,
+                     const NativeGuiModel& m, bool canSend, bool canAct,
+                     bool historyNavigationEnabled, PromptSender send, FrameApprover approve,
+                     FrameCorrector correct, FrameAutoApprover setAutoApprove,
+                     FrameChipHandler onChip);
 
 } // namespace pie::gui

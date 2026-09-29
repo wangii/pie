@@ -111,4 +111,14 @@ inline std::string serializeFrameCorrectCommand(const std::string& id, const std
            "\",\"message\":\"" + escapeJsonString(message) + "\"}";
 }
 
+// Session-scoped auto-approval. It names no version, because it is not an act on
+// a reading the user is looking at: it consents in advance to readings that have
+// not been written yet. That is why it is a checkbox beside Approve rather than a
+// second button — the two are not variants of one act, and it must not be possible
+// to press it believing it approves the version on screen.
+inline std::string serializeSetAutoApproveFrameCommand(const std::string& id, bool enabled) {
+    return "{\"type\":\"set_auto_approve_frame\",\"id\":\"" + escapeJsonString(id) +
+           "\",\"enabled\":" + (enabled ? "true" : "false") + "}";
+}
+
 } // namespace pie::gui

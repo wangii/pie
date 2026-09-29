@@ -162,6 +162,21 @@ int main() {
               "the late state landed");
         check(model.sessionState().formulation == std::nullopt,
               "`formulation: null` is the no-open-task case, distinct from an empty state");
+        // The runtime did not report the toggle, so it is UNKNOWN, not off. The
+        // Frame pane draws a disabled checkbox for this rather than an unticked one.
+        check(!model.sessionState().autoApproveKnown,
+              "an absent autoApproveFrame is unknown, not false");
+
+        // The Frame pane re-reads `get_state` on every run boundary — the pause that
+        // ends a run travels in no event — so a state response arriving long after
+        // the connect sequence has to land exactly the same way as the first one.
+        // This is the whole mechanism the Approve button depends on.
+        check(bootstrap.ingestRaw(stateLine(R"({"sessionId":"s","thinkingLevel":"low","messageCount":9,
+                                             "autoApproveFrame":true})"),
+                                  model, nowMs()) == BootstrapIngest::State,
+              "a mid-session get_state response is applied, not held");
+        check(model.sessionState().autoApproveKnown && model.sessionState().autoApproveFrame,
+              "the session toggle reads back from the re-read");
     }
 
     // ---------------------------------------------------------------------

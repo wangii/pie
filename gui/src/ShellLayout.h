@@ -25,8 +25,11 @@ struct Rect {
     bool empty() const { return w <= 0.0f || h <= 0.0f; }
 };
 
-// The panels that can be open, in the order they appear when docked.
-enum class PanelId { BeliefList, DispatchTrace, FrameControl, FileList, Count };
+// The panels that can be open, in the order they appear when docked. The Frame
+// pane is deliberately NOT here: it moved wholly into the floating window
+// (FramePane.h), so it holds no docked rectangle and competes with the canvas for
+// no width. FileList is listed only so its floating toggle has an id.
+enum class PanelId { BeliefList, DispatchTrace, FileList, Count };
 inline constexpr int kPanelCount = static_cast<int>(PanelId::Count);
 
 inline constexpr float kPad = 8.0f;
@@ -56,12 +59,11 @@ inline constexpr float kMinWindowHeight = kRefRowHeight * (kHeaderRows + kFooter
 // Which panels the user has open, and how much width each asks for. The fractions
 // are of the WINDOW, so a panel keeps its share when the window grows.
 struct PanelState {
-    // Belief list, dispatch trace and Frame pane closed by default; the file list
-    // is a picker the user opens deliberately.
-    bool open[kPanelCount] = {false, false, false, false};
+    // Belief list and dispatch trace closed by default; the file list is a picker
+    // the user opens deliberately.
+    bool open[kPanelCount] = {false, false, false};
     float beliefListFrac = 0.30f;
     float traceFrac = 0.36f;
-    float framePaneFrac = 0.42f;
 
     bool isOpen(PanelId id) const { return open[static_cast<int>(id)]; }
     // The flag itself, for the one panel whose renderer owns its own open/closed
@@ -86,7 +88,7 @@ struct ShellLayout {
     Rect header, canvas, footer;
     // Zero-sized when the panel is closed, so a caller can render unconditionally
     // and let an empty rectangle mean "nothing to draw".
-    Rect beliefPanel, tracePanel, framePane;
+    Rect beliefPanel, tracePanel;
     // True when the panels are below the canvas: the window is too narrow for
     // canvas and panel side by side.
     bool stacked = false;
@@ -95,7 +97,6 @@ struct ShellLayout {
         switch (id) {
             case PanelId::BeliefList: return &beliefPanel;
             case PanelId::DispatchTrace: return &tracePanel;
-            case PanelId::FrameControl: return &framePane;
             case PanelId::FileList:
             case PanelId::Count: return nullptr;
         }
@@ -105,7 +106,6 @@ struct ShellLayout {
         switch (id) {
             case PanelId::BeliefList: return &beliefPanel;
             case PanelId::DispatchTrace: return &tracePanel;
-            case PanelId::FrameControl: return &framePane;
             case PanelId::FileList:
             case PanelId::Count: return nullptr;
         }
@@ -114,10 +114,10 @@ struct ShellLayout {
 };
 
 // The docked panels, in the order they are placed. The file list is absent on
-// purpose: it is a floating picker.
-inline constexpr PanelId kDockedPanels[] = {PanelId::BeliefList, PanelId::DispatchTrace,
-                                            PanelId::FrameControl};
-inline constexpr int kDockedPanelCount = 3;
+// purpose: it is a floating picker. So is the Frame pane, which is now the
+// floating window itself.
+inline constexpr PanelId kDockedPanels[] = {PanelId::BeliefList, PanelId::DispatchTrace};
+inline constexpr int kDockedPanelCount = 2;
 
 // Compute the workspace geometry for a window of size `winW` x `winH` and a font
 // row of `rowH`. Deterministic: identical inputs give an identical layout, so the
@@ -141,7 +141,7 @@ inline ShellLayout computeShellLayout(float winW, float winH, float rowH,
     const float rowHgt =
         std::max(0.0f, layout.footer.y - kPad - rowY);
 
-    float frac[kDockedPanelCount] = {panels.beliefListFrac, panels.traceFrac, panels.framePaneFrac};
+    float frac[kDockedPanelCount] = {panels.beliefListFrac, panels.traceFrac};
     for (float& value : frac) value = std::clamp(value, 0.0f, 1.0f);
 
     const int openCount = panels.openCount();

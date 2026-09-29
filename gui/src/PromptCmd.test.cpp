@@ -245,6 +245,21 @@ int main() {
               "the correction text round-trips");
     }
     {
+        // `enabled` is a JSON boolean, not a string: `"false"` is a truthy value in
+        // JavaScript, so a quoted one would turn the toggle on when asked to turn
+        // it off — the one failure mode of this command that is silent.
+        const std::string on = pie::gui::serializeSetAutoApproveFrameCommand("req_5", true);
+        check(on == "{\"type\":\"set_auto_approve_frame\",\"id\":\"req_5\",\"enabled\":true}",
+              "set_auto_approve_frame schema, enabled");
+        const std::string off = pie::gui::serializeSetAutoApproveFrameCommand("req_6", false);
+        check(off == "{\"type\":\"set_auto_approve_frame\",\"id\":\"req_6\",\"enabled\":false}",
+              "set_auto_approve_frame schema, disabled");
+        // It carries no version: it consents to readings that do not exist yet, so
+        // there is no version to name and naming one would be a claim about which
+        // reading it applies to.
+        check(lacksField(off, "versionId"), "set_auto_approve_frame names no version");
+    }
+    {
         // The correction box takes the same free text the prompt box does, so it
         // needs the same escaping. A raw newline here would make the whole line
         // invalid JSON and the runtime would reject the objection.

@@ -66,6 +66,11 @@ FormulationView deriveFormulationView(const NativeGuiModel& model, const Task* t
         view.resume = runtime.resume;
     }
 
+    // Read before the task check below: the session toggle does not depend on a
+    // task being open, and the user can set it before the first reading exists.
+    view.autoApproveKnown = session.present && session.autoApproveKnown;
+    view.autoApproveFrame = session.autoApproveFrame;
+
     if (task == nullptr) {
         view.banner = FrameBanner::None;
         return view;

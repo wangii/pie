@@ -270,6 +270,25 @@ target_link_libraries(pi_gui_formulation_test PRIVATE pi_gui_model)
 target_include_directories(pi_gui_formulation_test PRIVATE src)
 add_test(NAME pi_gui_formulation_test COMMAND pi_gui_formulation_test)
 
+# The correction-mode state transitions (pure logic; headless, no window).
+add_executable(pi_gui_frame_pane_test src/FramePane.test.cpp)
+target_link_libraries(pi_gui_frame_pane_test PRIVATE pi_gui_model)
+target_include_directories(pi_gui_frame_pane_test PRIVATE src)
+add_test(NAME pi_gui_frame_pane_test COMMAND pi_gui_frame_pane_test)
+
+# The Frame pane's render wiring (Esc cancels the correction MODE, not the pane;
+# a click on `Correction` enters the mode). Bare ImGui context, no OS window.
+add_executable(pi_gui_frame_pane_render_test
+    src/FramePane.render.test.cpp
+    src/FramePane.cpp
+    src/Theme.cpp
+    src/UiMarkdown.cpp
+)
+target_link_libraries(pi_gui_frame_pane_render_test PRIVATE pi_gui_model imgui_backend)
+target_include_directories(pi_gui_frame_pane_render_test PRIVATE
+    src ${imgui_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
+add_test(NAME pi_gui_frame_pane_render_test COMMAND pi_gui_frame_pane_render_test)
+
 # ---------------------------------------------------------------------------
 # Where the v1 targets went (the rewrite's transition record; the parked-target
 # table that stood here between M2 and M9 is now this list):
@@ -391,3 +410,24 @@ add_custom_command(
 )
 add_dependencies(pie_gui pie_gui_font)
 endif()  # PIE_GUI_BUILD_APP
+
+# Requirement 1 (footer active-slot colour+bold) and requirement 3 (the frame
+# sections as tabs) at the render layer, in a bare ImGui context. Footer.cpp is
+# #included by the test (its helpers are file-local), so it is NOT a source here.
+add_executable(pi_gui_render_wiring_test
+    src/RenderWiring.test.cpp
+    src/FramePane.cpp
+    src/Theme.cpp
+    src/UiMarkdown.cpp
+)
+target_link_libraries(pi_gui_render_wiring_test PRIVATE pi_gui_model imgui_backend)
+target_include_directories(pi_gui_render_wiring_test PRIVATE
+    src ${imgui_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
+add_test(NAME pi_gui_render_wiring_test COMMAND pi_gui_render_wiring_test)
+
+# openTurn() contract + the footer's turn -> active-slot derivation.
+add_executable(pi_gui_open_turn_test src/OpenTurn.test.cpp src/Footer.cpp src/Theme.cpp)
+target_link_libraries(pi_gui_open_turn_test PRIVATE pi_gui_model imgui_backend)
+target_include_directories(pi_gui_open_turn_test PRIVATE
+    src ${imgui_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
+add_test(NAME pi_gui_open_turn_test COMMAND pi_gui_open_turn_test)

@@ -6,7 +6,7 @@
 >
 > 重写删除了三栏文本工作区（`BeliefLane` / `CognitiveLane` / `ExecutionLane` / `LogListBox` / `Summary` / `UiShared` / `LayoutMetrics` 的几何）与遗留的独立查看器 `gui/main.cpp`；下表中标有「已删除」的词条**在源码中已不存在**，保留在此仅用于对照历史。
 >
-> 新增的层次：`Bootstrap` / `EventQueue`（M3）、v7 graph 投影与布局（M4/M5）、`BeliefListModel`（M6）、`TraceModel` / `TracePane`（M7）、`FormulationView` / `FramePane`（M8）、`ShellLayout` / 四个面板接线（M9）。
+> 新增的层次：`Bootstrap` / `EventQueue`（M3）、v7 graph 投影与布局（M4/M5）、`BeliefListModel`（M6）、`TraceModel` / `TracePane`（M7）、`FormulationView` / `FramePane`（M8）、`ShellLayout` / 面板接线（M9）。
 
 ## 写作约定（Conventions）
 
@@ -25,10 +25,12 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 | **Cognitive Lane**（认知过程栏）【已删除（M1）】 | 渲染认知过程（plan/execution/distillation）的三条栏之一。 | ~~`src/CognitiveLane.h`~~ |
 | **Execution Lane**（执行栏）【已删除（M1）】 | 渲染执行轨迹（工具调用与输出）的三条栏之一。 | ~~`src/ExecutionLane.h`~~ |
 | **Lane**（栏）【已删除（M1）】 | 主工作区中并排（或窄窗时垂直堆叠）的三列内容区域；有左/中/右三条。 | ~~`src/LayoutMetrics.h` `laneRects`~~ |
-| **Panel**（面板，M9） | 取代 lane 的工作区单元：belief / trace / frame 三个可停靠面板，由 `ShellLayout` 给出矩形；file list 是浮动窗口。开合由 `Cmd/Ctrl+B` / `Cmd/Ctrl+T` / `:`（Frame 面板）控制。 | `src/ShellLayout.h` |
+| **Panel**（面板，M9） | 取代 lane 的工作区单元：belief / trace 两个可停靠面板，由 `ShellLayout` 给出矩形；file list 是浮动选择器。开合由 `Cmd/Ctrl+B` / `Cmd/Ctrl+T` 控制。**Frame 面板已不是停靠面板**：它整体进入 `FramePane` 的浮动窗，由 `:`/Enter 唤出、Esc 关闭。 | `src/ShellLayout.h` |
 | **Summary**（当前帧摘要）【已删除（M1）】 | 渲染当前循环帧（loop frame）的摘要。 | ~~`src/Summary.h`~~ |
 | **Footer**（底部栏） | 渲染四个信念循环角色（Epistemic/Planner/Distillation/Execution）的模型与缓存命中率，以及累计会话成本；单行紧凑行，钉在工作区底部。 | `src/Footer.h` `renderFooter` |
-| **Prompt Palette / FramePane**（提示面板 → Frame 面板，M8） | 由 `PromptPalette` 演化而来，现分两半：**Frame 内容**（`renderFramePaneContent`，停靠在 shell 的 `frame` 子区域：状态横幅、当前 Frame、deferral、corrections、review 义务、recheck、版本历史）与**浮动输入窗**（`renderFramePane`，`:`/Enter 唤起、Esc 关闭，保留多行输入 + Cmd/Ctrl+Enter、`@` 补全、prompt 历史、归档回复翻页与流式 markdown 回复）。两者由同一次按键开合：面板是「读法」，输入窗是「回话」，只开一个会让用户回答一个看不见的问题。提交按钮文案写明 `Send (does not approve the Frame)`——普通 prompt **永不**释放 pause。 | `src/FramePane.h` |
+| **Prompt Palette / FramePane**（提示面板 → Frame 面板，M8） | 由 `PromptPalette` 演化而来。**它是一个窗口、一个界面**（`renderFramePane`）：上半是**读法**（`FormulationView` 渲染出的状态横幅、三个动作（见 Frame Actions）、当前 Frame、sources、deferral、corrections、review 义务、recheck、版本历史），下半是**回话**（保留 v1 的多行输入 + Cmd/Ctrl+Enter、`@` 补全、prompt 历史、归档回复翻页与流式 markdown 回复）。横幅与两个动作**钉住不滚动**，只有 Frame 正文滚动——长读法不能把 Approve 滚到手够不着的地方。M8 曾把两半拆成「停靠面板 + 浮动窗」，之后又合回一个窗口：拆分让 Frame 在工作区里没有自己的位置，而两半都只能靠一个界面上没有任何提示的按键唤出。提交按钮文案写明 `Send (does not approve the Frame)`——普通 prompt **永不**释放 pause。 | `src/FramePane.h` |
+| **Frame Actions**（Frame 三个动作，M8/后改） | 面板顶部**始终显示**的一行/两行控件：`Approve`（同意**屏幕上**这一版读法，仅当有读法在等待时可用）、`Auto-approve`（同意**尚未写出**的读法，是会话级设置，不是对当前版本的同意）、objection 输入框 + `Submit objection`（**不是**同意，任何时刻都可提交）。不可用时**照画不误**并灰显，下面一行短句说明原因——隐藏动作那一版让被暂停的用户看到的是一片空白，分不清「这个面板没有动作」和「动作在别处」。原因必须**短**：窗口只有应用宽度的 72%，窄窗下长句会折成七行，把动作本身挤出面板。`Auto-approve` 是复选框而不是第二个按钮，因为它绝不能被误当成「同意当前这一版」；打开它**会立刻批准正在等待的那一版**，tooltip 必须写明。 | `src/FramePane.cpp` `renderActions` |
+| **State Refresh**（状态重读） | 暂停没有事件：`awaitingResponse` 只出现在 `get_state` 响应体里，任何 domain 事件与 `session_status` 都不携带它。因此只在连接时问一次 `get_state` 的客户端**永远学不到**运行中途停下来问了用户一句话，那个本该亮起的 Approve 按钮就一直是灰的。`NativeGuiModel` 在 `agent_settled`（运行时 `_autoApproveWaitingFrame` 所在的同一条边界）上标记一次重读请求，App 每帧消费它并发出一条 `get_state`；`Bootstrap::ingest` 在 Live 阶段同样应用 `get_state` 响应，所以这就是连接序列用过的同一条命令。**这是边界上的重读，不是轮询**——不要放到定时器上，也不要从日志推导暂停。三个动作各自也请求一次，因为它们改的是 domain 日志不承载的运行时状态。 | `src/Model.h` `requestStateRefresh`；`src/App.cpp` |
 | **Frame Banner**（状态横幅，M8） | 面板顶部的**恰好一种**状态：`Waiting for your response` / `Approved — continuing` / `Approved — no run continuing` / `Approval continuation failed: {reason}` / `propose owes a reading` / `owes a reconsideration of episode #{ordinal}`。优先级即设计：**用户要动手的**排在**智能体欠账的**之前，因为前者运行已暂停。Approve 是唯一的主按钮，且仅在 `awaitingResponse` 时可用。 | `src/FormulationView.h` `FrameBanner` |
 | **FormulationView**（Frame 视图，M8） | 面板的内容，来自**两个不等权威**的来源：由 domain 记录派生的部分（当前版本、review、deferral、corrections、recheck、两个 *Owed）与 `get_state` 的**运行时事实**（`awaitingResponse` / `approved` / `resume`）。后者不可重放——重放能还原「批准」，还原不了「批准之后的那个 turn 有没有跑起来」——因此原样携带、绝不在此重算。 | `src/FormulationView.h` |
 | **Source Chip**（出处 chip，M8） | `sources[]` 的每一条渲染成一枚 chip：belief chip 打开 belief 面板，execution/distillation chip 把 canvas 居中到该节点，prompt/intervention chip 无处可去因而**不可点**（一个点了没反应的链接比纯文本更糟）。这是第一个让 `sources[]` 可审计的界面。 | `src/FormulationView.cpp` `formulationChips` |
@@ -56,8 +58,8 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 
 | 术语 | 含义 | 出处 |
 |------|------|------|
-| **ShellLayout**（外壳布局，M9） | 由窗口尺寸、字体行高与打开的 panel 算出**每一个**矩形：`header` / `canvas` / `footer` 三条 band，加上 `beliefPanel` / `tracePanel` / `framePane` 三个停靠面板。它取代了 `LayoutMetrics` 的三栏几何（M9 已删除 `LayoutMetrics.h` 与其测试）。 | `src/ShellLayout.h` `computeShellLayout` |
-| **PanelId / PanelState**（面板标识与开关，M9） | 可开关的面板集合（BeliefList / DispatchTrace / FrameControl / FileList）与它们各自的宽度分数。**FileList 不占 canvas 宽度**：它是一个浮动选择器，没有停靠矩形，因此不计入 `openCount`。 | `src/ShellLayout.h` |
+| **ShellLayout**（外壳布局，M9） | 由窗口尺寸、字体行高与打开的 panel 算出**每一个**矩形：`header` / `canvas` / `footer` 三条 band，加上 `beliefPanel` / `tracePanel` 两个停靠面板。它取代了 `LayoutMetrics` 的三栏几何（M9 已删除 `LayoutMetrics.h` 与其测试）。 | `src/ShellLayout.h` `computeShellLayout` |
+| **PanelId / PanelState**（面板标识与开关，M9） | 可开关的面板集合（BeliefList / DispatchTrace / FileList）与它们各自的宽度分数。**FileList 不占 canvas 宽度**：它是一个浮动选择器，没有停靠矩形，因此不计入 `openCount`。 | `src/ShellLayout.h` |
 | **Stacked**（窄窗堆叠，M9） | 窗口窄到 canvas 与面板无法并排时的布局：canvas 占满整行宽度，面板等分剩余高度依次排在它**下面**。每个矩形都留在工作区内——面板各自内部滚动，而不是让整摞跑出窗口底部（矩形越出工作区是 `AGENTS.md` 明令禁止的那一种布局结果）。 | `src/ShellLayout.h` |
 | **PaletteMetrics**（面板度量） | 指令输入框的自动增高高度（信念栏颜色图例的度量已随文本工作区删除）。 | `src/PaletteMetrics.h` |
 | **kMinWindowWidth / kMinWindowHeight** | 窗口最小尺寸单一来源：canvas + padding + 一个面板（宽），以及 header/footer band + canvas 最小高 + 一个堆叠面板（高）。 | `src/ShellLayout.h` |
@@ -146,10 +148,10 @@ UI 层由若干独立的 `render*` 组件函数组成，每个组件只读模型
 - **重复事件仍须调和**：重复路径提前返回对**它写的那条记录**是对的，对 applier 派生出来的其他状态是错的。副作用是**不变量**而非附赠品：「有 plan ⇒ 没有待定 selection」「episode 已关闭 ⇒ 光标已越过它」在任何到达顺序下都成立。漏掉这一步，同一份日志会因快照当时恰好包含什么而收敛到不同终态。
 - **投影决定含义，渲染器只决定颜色与位置**：节点或边不在 `GraphModel.cpp` 里，就不在 canvas 上；反之，投影凭空造出的任何东西都是运行时从未作出的声明。fast path 是常备例子：它没有 `Plan`，所以不得为它画 plan 节点，也不得画 `plan → execution` 边。
 - **canvas 只读**：可以平移、缩放、选中节点、（右键）把视图重新钉回 runtime 光标。除此之外没有拖拽连线、没有新建节点、没有编辑 belief。选中只改变**强调**：高亮该节点的依赖集合并压暗其余，而这个集合由投影出的边算出，不来自对「相关性」的猜测。
-- **面板不得重叠**：垂直 band 依序排布且互不重叠；打开的停靠面板从 canvas row **切走宽度**而非浮在它上面；窄到放不下时改为堆叠（`stacked`），并且**每个矩形都留在工作区内**。这条不变量由 `pi_gui_shell_layout_test` 对「8 种面板组合 × 6 种宽度 × 4 种高度」扫描断言，而不是靠几个手写尺寸。
+- **面板不得重叠**：垂直 band 依序排布且互不重叠；打开的停靠面板从 canvas row **切走宽度**而非浮在它上面；窄到放不下时改为堆叠（`stacked`），并且**每个矩形都留在工作区内**。这条不变量由 `pi_gui_shell_layout_test` 对「4 种面板组合 × 6 种宽度 × 4 种高度」扫描断言，而不是靠几个手写尺寸。Frame 窗不在这条扫描里：它是浮动窗，不占停靠矩形。
 - **一个 stage 窗口 = 一行轨迹，一行内的多次模型调用不得被平均掉**：同一 stage 里跑了两个 turn 时，行上标 `(N turns)` 并在展开里逐个列出。合并它们等于在调试器里藏掉一次模型调用。
 - **缺来源就渲染 `—`，绝不把缺口显示成不匹配**：trace 的 model/thinking/cache/耗时列、belief 面板的 focus 说明、footer 的角色槽，都遵守同一条规则。「运行时没说」与「运行时说了否」是两件事。
-- **两条输入通道不可混淆**：`approve_frame` 是唯一表示「同意」的命令，仅在 `awaitingResponse` 时可用；普通 `prompt` 永不释放 pause；`frame_correct` 有自己的输入框（不是 prompt 框）。
+- **两条输入通道不可混淆**：`approve_frame` 是唯一表示「同意**某一版**」的命令，仅在 `awaitingResponse` 时可用；普通 `prompt` 永不释放 pause；`frame_correct` 有自己的输入框（不是 prompt 框）。`set_auto_approve_frame` 是第三种，且**不是**前两种的变体：它同意的是**尚未写出**的读法，因此不带 versionId，在界面上是复选框而不是按钮——它绝不能被误当成「同意当前这一版」。它打开的瞬间会批准正在等待的那一版（运行时的 `setAutoApproveFrame` 行为），且同样走 `approveFormulation`，所以未答复的反对一样会拒绝它。
 
 ## 相关的信念循环概念（Related belief-loop concepts）
 
