@@ -26,6 +26,7 @@ const V1 = {
 	taskId: "task-1",
 	ordinal: 1,
 	recordedAt: base.timestamp,
+	formedInEpisodeOrdinal: 1,
 	origin: "propose",
 	content: CONTENT,
 	reason: "first reading",

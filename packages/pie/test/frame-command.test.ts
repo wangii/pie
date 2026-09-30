@@ -69,6 +69,7 @@ function version(): ProblemFormulationVersion {
 		taskId: "task-1",
 		ordinal: 1,
 		recordedAt: "2026-09-20T10:01:00.000Z",
+		formedInEpisodeOrdinal: 1,
 		origin: "propose",
 		content: {
 			interpretation: "I read this as a reading shown beside the editor",

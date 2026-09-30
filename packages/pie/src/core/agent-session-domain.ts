@@ -212,6 +212,12 @@ export interface ProblemFormulationVersion {
 	/** The version this one revises; absent only for the first version of a task. */
 	readonly previousVersionId?: FormulationVersionId;
 	readonly recordedAt: string;
+	/**
+	 * The round this version was formed in: the ordinal of the episode that was open when it was
+	 * published, or 0 when no episode was open. Recorded rather than derived from the version's
+	 * sources, so a reading that cites an older round still reads at the point it formed.
+	 */
+	readonly formedInEpisodeOrdinal: number;
 	readonly origin: FormulationOrigin;
 	readonly content: FormulationContent;
 	/** Short reason this version was formed or revised. */
@@ -617,6 +623,12 @@ export interface ExecutionEpisode {
 	readonly ordinal: number;
 	readonly status: EpisodeStatus;
 	readonly stage: EpisodeStage;
+	/**
+	 * When the round opened, copied from the `EpisodeOpened` event's timestamp. It lives on the
+	 * record, not only on the event, so a replayed snapshot — which a reconnecting client reads
+	 * instead of the log it missed — still carries the round's place on the task-level time axis.
+	 */
+	readonly startedAt: string;
 	readonly steering: readonly Intervention[];
 	readonly routing?: Routing;
 	/**
@@ -1602,6 +1614,7 @@ function applyEpisodeEvent(snapshot: AgentSessionSnapshot, event: AgentSessionDo
 				ordinal: event.ordinal,
 				status: "active",
 				stage: "routing",
+				startedAt: event.timestamp,
 				steering: [],
 				body: { kind: "pending" },
 			};

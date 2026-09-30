@@ -49,6 +49,25 @@ function releasePublication(controller: BeliefLoopController): void {
 }
 
 describe("formulation publishing", () => {
+	it("records the episode boundary the reading was formed at", () => {
+		const { controller } = createController();
+		beginTask(controller);
+
+		// `beginDomainTask` opens the first round, so the first reading is formed at episode 1.
+		// The boundary is what the canvas places the Frame at, and the publisher is the only
+		// writer: it has to be a number even though the sources are empty, so a version with no
+		// citation is still placed with the round it was formed in.
+		const first = controller.publishFormulation({ content: CONTENT, reason: "first reading", sources: [] });
+		if (first.outcome === "rejected") throw new Error(first.reason);
+		const task = controller.domainSnapshot.tasks.get(controller.currentTaskId!)!;
+		expect(first.value.formedInEpisodeOrdinal).toBe(1);
+		expect(first.value.formedInEpisodeOrdinal).toBe(task.episodes[task.episodes.length - 1].ordinal);
+
+		// The value travels with the record: a replay of the same log reports the same boundary,
+		// not a value re-derived from the version's citations (there are none here).
+		expect(controller.formulationHistory()[0]?.formedInEpisodeOrdinal).toBe(1);
+	});
+
 	it("records a first version and numbers revisions from it", () => {
 		const { controller, events } = createController();
 		beginTask(controller);

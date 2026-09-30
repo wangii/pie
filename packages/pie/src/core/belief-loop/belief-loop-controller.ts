@@ -1118,12 +1118,18 @@ export class BeliefLoopController {
 		// revision that changed the reading answers the round as substantively as "it still holds"
 		// does. Read before the version is recorded, since the publication is what settles it.
 		const recheckEpisode = this.publishedRecheckEpisode();
+		// The canvas boundary: the latest round the task had when this reading was formed, whether
+		// that round was still open or had just closed (a publication is not always inside an open
+		// episode), and 0 when the task had no round yet. Read off the episode ordinals rather than
+		// compared by timestamp, because episode records carry no time of their own.
+		const latestEpisode = task.episodes[task.episodes.length - 1];
 		const version: ProblemFormulationVersion = {
 			id: createDomainId("formulation"),
 			taskId: task.id,
 			ordinal: task.formulations.length + 1,
 			previousVersionId: current?.id,
 			recordedAt: new Date().toISOString(),
+			formedInEpisodeOrdinal: latestEpisode?.ordinal ?? 0,
 			origin: "propose",
 			content,
 			reason,

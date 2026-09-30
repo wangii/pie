@@ -36,6 +36,7 @@ function version(ordinal: number): ProblemFormulationVersion {
 		ordinal,
 		previousVersionId: ordinal > 1 ? `formulation-${ordinal - 1}` : undefined,
 		recordedAt: `2026-09-20T10:0${ordinal}:00.000Z`,
+		formedInEpisodeOrdinal: ordinal,
 		origin: "propose",
 		content: {
 			interpretation: `I read this as reading ${ordinal}`,

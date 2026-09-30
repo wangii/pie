@@ -229,13 +229,25 @@ describe("RPC domain state", () => {
 			expect(snapshotResponse.command).toBe("get_domain_snapshot");
 			expect(snapshotResponse.success).toBe(true);
 			const snapshot = snapshotResponse.data as {
-				tasks: Array<{ status: string; formulations: Array<{ ordinal: number }> }>;
+				tasks: Array<{
+					status: string;
+					formulations: Array<{ ordinal: number }>;
+					episodes: Array<{ id: string; ordinal: number; startedAt?: string }>;
+				}>;
 				cursor?: { stage: string };
 			};
 			expect(snapshot.tasks).toHaveLength(1);
 			expect(snapshot.tasks[0].status).toBe("active");
 			expect(snapshot.tasks[0].formulations.map((version) => version.ordinal)).toEqual([1]);
 			expect(snapshot.cursor?.stage).toBeDefined();
+
+			// The round's start rides on the record, not only on the EpisodeOpened event: a client
+			// that reconnects reads this snapshot instead of the log it missed, and the vertical
+			// time order depends on the episode carrying its occurrence time here.
+			expect(snapshot.tasks[0].episodes.length).toBeGreaterThan(0);
+			expect(snapshot.tasks[0].episodes[0].startedAt).toBeDefined();
+			expect(typeof snapshot.tasks[0].episodes[0].startedAt).toBe("string");
+			expect(snapshot.tasks[0].episodes[0].startedAt).not.toBe("");
 		} finally {
 			await cleanup();
 		}
