@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Model.h"
+#include "DomainEvents.h"
 
 namespace pie::gui {
 
@@ -252,11 +253,37 @@ void projectBeliefRail(const NativeGuiModel& model, const Task& task, GraphTaskS
     }
 }
 
+// Sum per-turn token telemetry by (episodeId, stage). This is the only source
+// of per-block token spend: the domain records carry none. The trace is empty
+// after a replay/reconnect, so an absent key is the fallback, never zero.
+std::map<std::string, long> aggregateStageTokens(const NativeGuiModel& model) {
+    std::map<std::string, long> out;
+    for (const TraceEntry& entry : model.trace()) {
+        if (entry.kind != TraceEntry::Kind::Turn) continue;
+        if (!entry.usage.any()) continue;
+        long total = 0;
+        if (entry.usage.input >= 0) total += entry.usage.input;
+        if (entry.usage.output >= 0) total += entry.usage.output;
+        if (entry.usage.cacheRead >= 0) total += entry.usage.cacheRead;
+        if (entry.usage.cacheWrite >= 0) total += entry.usage.cacheWrite;
+        out[entry.episodeId + "\x1f" + std::to_string(static_cast<int>(entry.stage))] += total;
+    }
+    return out;
+}
+
+// The tokens for one block, or -1 when no telemetry named it.
+long stageTokenLookup(const std::map<std::string, long>& tokens, const std::string& episodeId,
+                      EpisodeStage stage) {
+    const auto it = tokens.find(episodeId + "\x1f" + std::to_string(static_cast<int>(stage)));
+    return it == tokens.end() ? -1 : it->second;
+}
+
 void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const ExecutionEpisode& episode,
-                       GraphTaskState& out) {
+                       const std::map<std::string, long>& stageTokens, GraphTaskState& out) {
     EpisodeGutter gutter;
     gutter.id = episode.id;
     gutter.ordinal = episode.ordinal;
+    gutter.occurredAtMs = episode.occurredAtMs;
     gutter.status = episode.status;
     gutter.stage = episode.stage;
     gutter.routingDecision = episode.routing.has_value() ? toString(episode.routing->decision) : "";
@@ -297,6 +324,7 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.family = NodeFamily::Routing;
         node.episodeId = episode.id;
         node.routingDecision = routing.decision;
+        node.occurredAtMs = routing.occurredAtMs;
         node.title = "route";
         node.compactText = std::string(toString(routing.decision)) + " · " +
                            toString(routing.difficulty);
@@ -319,6 +347,7 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("select", episode.id);
         node.family = NodeFamily::ExperimentSelection;
         node.episodeId = episode.id;
+        node.occurredAtMs = selection.occurredAtMs;
         node.title = "select";
         node.compactText = firstLine(selection.intent);
         std::string text;
@@ -344,6 +373,8 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("plan", plan.id);
         node.family = NodeFamily::Plan;
         node.episodeId = episode.id;
+        node.blockTokens = stageTokenLookup(stageTokens, episode.id, EpisodeStage::Proposing);
+        node.occurredAtMs = plan.occurredAtMs;
         node.title = "plan";
         node.compactText = plan.intent.has_value() ? firstLine(*plan.intent) : plan.id;
         std::string text;
@@ -375,6 +406,8 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("exec", execution.id);
         node.family = NodeFamily::Execution;
         node.episodeId = episode.id;
+        node.blockTokens = stageTokenLookup(stageTokens, episode.id, EpisodeStage::Executing);
+        node.occurredAtMs = execution.occurredAtMs;
         node.executionStatus = execution.status;
         node.title = execution.tool.empty() ? execution.id : execution.tool;
         node.compactText = firstLine(execution.intention);
@@ -405,6 +438,8 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("distill", distillation.id);
         node.family = NodeFamily::Distillation;
         node.episodeId = episode.id;
+        node.blockTokens = stageTokenLookup(stageTokens, episode.id, EpisodeStage::Distilling);
+        node.occurredAtMs = distillation.occurredAtMs;
         node.title = "distill";
         node.compactText = firstLine(distillation.contents);
         std::string text;
@@ -421,6 +456,7 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("delta", delta.id);
         node.family = NodeFamily::BeliefDelta;
         node.episodeId = episode.id;
+        node.occurredAtMs = delta.occurredAtMs;
         node.beliefOperation = delta.operation;
         node.deltaPhase = delta.producerPhase;
         node.title = toString(delta.operation);
@@ -446,6 +482,7 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("steer", intervention.id);
         node.family = NodeFamily::Intervention;
         node.episodeId = episode.id;
+        node.occurredAtMs = intervention.occurredAtMs;
         node.title = "steer";
         node.compactText = firstLine(intervention.contents);
         std::string text;
@@ -465,6 +502,7 @@ void projectEpisodeRow(const NativeGuiModel& model, const Task& task, const Exec
         node.id = nodeId("recheck", episode.id);
         node.family = NodeFamily::Recheck;
         node.episodeId = episode.id;
+        node.occurredAtMs = parseIso8601Millis(recheck.recordedAt);
         node.title = "recheck";
         node.compactText = toString(recheck.verdict);
         std::string text;
@@ -493,13 +531,16 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model, const Task* task) {
     std::set<std::string> beliefIds;
     projectBeliefRail(model, *task, out, beliefIds);
 
-    // The version rail, oldest first. `task.formulations` is append-only, so its
-    // order is the ordinal order.
+    // The version list, oldest first. `task.formulations` is append-only, so its
+    // order is the ordinal order; the layout places each version on the shared
+    // task-level vertical time axis.
     for (const ProblemFormulationVersion& version : task->formulations) {
         GraphRailVersion rail;
         rail.id = version.id;
         rail.ordinal = version.ordinal;
         rail.recordedAt = version.recordedAt;
+        rail.occurredAtMs = parseIso8601Millis(version.recordedAt);
+        rail.formedInEpisodeOrdinal = version.formedInEpisodeOrdinal;
         rail.previousVersionId = version.previousVersionId.value_or("");
         rail.approved = task->formulationReview.has_value() &&
                         task->formulationReview->approval.has_value() &&
@@ -536,8 +577,9 @@ GraphTaskState projectGraphTask(const NativeGuiModel& model, const Task* task) {
         out.nodes.push_back(std::move(node));
     }
 
+    const std::map<std::string, long> stageTokens = aggregateStageTokens(model);
     for (const ExecutionEpisode& episode : task->episodes) {
-        projectEpisodeRow(model, *task, episode, out);
+        projectEpisodeRow(model, *task, episode, stageTokens, out);
     }
 
     // --- edges ----------------------------------------------------------

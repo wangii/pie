@@ -76,6 +76,7 @@ static const char* kSnapshotResponse = R"JSON(
             "taskId": "task-1",
             "ordinal": 1,
             "recordedAt": "2026-01-01T00:00:00.000Z",
+            "formedInEpisodeOrdinal": 1,
             "origin": "propose",
             "content": {
               "interpretation": "the runtime may lack a declared dependency",
@@ -424,6 +425,8 @@ int main() {
                     if (formulations != nullptr) {
                         const Value& version = formulations->at(0);
                         check(version.integer("ordinal") == 1, "formulation ordinal");
+                        check(version.integer("formedInEpisodeOrdinal") == 1,
+                              "the formation boundary survives the snapshot");
                         check(version.has("previousVersionId") == false,
                               "the first version names no predecessor");
                         check(version.object("content") != nullptr &&

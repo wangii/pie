@@ -6,17 +6,21 @@
 // which is unreadable in exactly the situation the canvas exists for.
 //
 // The v1 rule was "a closed LoopFrame is the stable unit". The v7 rule is the same
-// idea with the right unit: **a closed ExecutionEpisode**, plus (task scope) a
-// closed Task. Once a row's episode is closed, nothing may be appended to it —
-// the fold enforces that — so its positions cannot legitimately change, and
-// freezing them is not a heuristic but a consequence of the invariant.
+// idea with the right unit: **a closed ExecutionEpisode**. Once a row's episode is
+// closed, nothing may be appended to it — the fold enforces that — so its
+// INTERNAL geometry (each station's x, width and radius) cannot legitimately
+// change. Its y is NOT frozen: episodes and Frame versions share one top-to-bottom
+// time axis, so a closed row's y follows the fresh layout as new, earlier-timed
+// entries arrive. Freezing x while letting y move is what keeps a station from
+// sliding sideways without pinning the row against the time order.
 //
-// The belief rail is frozen differently, and more simply than in v1: a belief's
-// position is now decided by the belief rail's own order (record order), not by
-// the round that first wrote it. The v1 `stableBeliefAnchors` / `createdInFrame`
-// machinery existed to keep a belief next to its creating frame; with the delta ->
-// belief edge expressing that relation explicitly, a belief has no anchor to
-// track, and the whole re-anchoring path is gone.
+// The belief rail is frozen the simple way: a belief's position is decided by the
+// belief rail's own order (record order), not by the round that first wrote it, so
+// a drawn entry stays where it was drawn. A Frame version is NOT frozen here — it
+// lives on the shared time axis and must take the fresh y. The v1
+// `stableBeliefAnchors` / `createdInFrame` machinery existed to keep a belief next
+// to its creating frame; with the delta -> belief edge expressing that relation
+// explicitly, a belief has no anchor to track, and that path is gone.
 
 #pragma once
 
@@ -38,16 +42,18 @@ struct CompletedEpisodeLayout {
 struct GraphLiveState {
     // Rows whose episode has closed, frozen. Keyed by episode id.
     std::map<std::string, CompletedEpisodeLayout> completedEpisodes;
-    // The Frame rail and the belief rail, frozen as bands. Both are append-only:
-    // a version is never edited and a belief is never re-ordered, so a rail entry
-    // that was drawn once stays where it was drawn.
+    // Beliefs only, frozen by position. The belief rail is append-only, so an
+    // entry that was drawn once stays where it was drawn. Frame versions are
+    // deliberately absent: they are on the shared time axis and take the fresh y.
     std::map<std::string, Dot> stableRailNodes;
 };
 
-// Merge a freshly computed layout with the frozen rows in `live`. Rows whose
-// episode is closed keep their cached positions; every other node takes the fresh
-// one. `live` is updated in place. The returned layout has the same canvas extent
-// as `fresh`, so the scrollable area still grows with the session.
+// Merge a freshly computed layout with the frozen rows in `live`. A closed row
+// keeps its cached internal geometry (x, width, radius) but takes the fresh y; a
+// frozen belief keeps its position; a Frame version always takes the fresh
+// position. Every other node takes the fresh one. `live` is updated in place. The
+// returned layout has the same canvas extent as `fresh`, so the scrollable area
+// still grows with the session.
 PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state, const PieGraphLayout& fresh,
                                    GraphLiveState& live);
 

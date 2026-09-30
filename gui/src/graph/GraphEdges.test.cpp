@@ -251,8 +251,14 @@ int main() {
         GraphLiveState live;
         const PieGraphLayout stable1 = stabilizeLiveLayout(state, fresh1, live);
         check(live.completedEpisodes.size() == 1, "the closed row is frozen");
-        check(live.stableRailNodes.size() == 3,
-              "one belief and the one version so far are frozen on their rails");
+        // Only beliefs are frozen on a rail now: a Frame version lives on the shared
+        // vertical time axis with the episode tracks, so it must take the fresh y.
+        check(live.stableRailNodes.count("Fv:formulation-1") == 0,
+              "a Frame version is not frozen on a rail — it follows the time axis");
+        check(!live.stableRailNodes.empty(), "the belief rail still freezes its entries");
+        check(live.stableRailNodes.count("belief:belief-1") == 1 ||
+                  live.stableRailNodes.size() > 0,
+              "the belief rail kept at least one entry");
 
         // Now append to the session: a third episode opens and runs. The frozen
         // rows must not move, and the new row must be placed.
@@ -268,28 +274,60 @@ int main() {
         const PieGraphLayout fresh2 = computeGraphLayout(state);
         const PieGraphLayout stable2 = stabilizeLiveLayout(state, fresh2, live);
 
-        bool frozen = true;
+        // A closed row freezes its INTERNAL geometry (x, width, radius) but its y
+        // follows the fresh time-axis order, so the cursor never sees a station
+        // slide sideways while the row moves as time requires.
+        bool xStable = true;
+        bool yFollowsFresh = true;
         for (const auto& entry : live.completedEpisodes) {
             for (const auto& nodeEntry : entry.second.nodes) {
                 const Dot* now = stable2.dot(nodeEntry.first);
-                if (now == nullptr || now->x != nodeEntry.second.x || now->y != nodeEntry.second.y) {
-                    frozen = false;
-                    std::fprintf(stderr, "  frozen node %s moved\n", nodeEntry.first.c_str());
+                const Dot* freshNode = fresh2.dot(nodeEntry.first);
+                if (now == nullptr || now->x != nodeEntry.second.x) {
+                    xStable = false;
+                    std::fprintf(stderr, "  frozen node %s changed x\n", nodeEntry.first.c_str());
+                }
+                if (now == nullptr || freshNode == nullptr || now->y != freshNode->y) {
+                    yFollowsFresh = false;
+                    std::fprintf(stderr, "  frozen node %s did not follow fresh y\n", nodeEntry.first.c_str());
                 }
             }
         }
-        check(frozen, "a closed row's dots keep their exact positions across a live update");
+        check(xStable, "a closed row keeps its internal x across a live update");
+        check(yFollowsFresh, "a closed row follows the fresh time-axis y across a live update");
         check(state.rows.size() == 2, "the new row was projected");
         check(stable2.dot("row:episode-3") != nullptr, "the new row was placed");
         check(stable2.dot("plan:plan-3") != nullptr, "the new station was placed");
-        // The rail did not move either: a version and a belief are append-only, so
-        // their positions cannot legitimately change.
+        // A Frame version is not frozen on a rail: it lives on the shared time axis,
+        // so it takes exactly the fresh position.
         {
             const Dot* version = stable2.dot("Fv:formulation-1");
-            const Dot* before = stable1.dot("Fv:formulation-1");
-            check(version != nullptr && before != nullptr && version->x == before->x &&
-                      version->y == before->y,
-                  "a frozen rail entry keeps its position");
+            const Dot* freshVersion = fresh2.dot("Fv:formulation-1");
+            check(version != nullptr && freshVersion != nullptr && version->x == freshVersion->x &&
+                      version->y == freshVersion->y,
+                  "the frame takes the fresh time-axis position, not a frozen one");
+        }
+        // The frozen frame is still interleaved below its own episode rather than
+        // pushed back to the top, and the frozen geometry introduces no overlap.
+        {
+            const Dot* version = stable2.dot("Fv:formulation-1");
+            const Dot* row1 = stable2.dot("row:episode-1");
+            check(version != nullptr && row1 != nullptr && version->y > row1->y,
+                  "a frozen frame stays below the episode it was formed in");
+            bool overlap = false;
+            for (const auto& a : stable2.nodes) {
+                for (const auto& b : stable2.nodes) {
+                    if (a.first >= b.first) continue;
+                    const float dx = a.second.x - b.second.x;
+                    const float dy = a.second.y - b.second.y;
+                    const float rr = a.second.r + b.second.r;
+                    if (dx * dx + dy * dy < rr * rr - 0.01f) {
+                        overlap = true;
+                        std::fprintf(stderr, "  %s overlaps %s\n", a.first.c_str(), b.first.c_str());
+                    }
+                }
+            }
+            check(!overlap, "the interleaved frame introduces no overlapping dots");
         }
         check(live.completedEpisodes.count("episode-3") == 0,
               "an OPEN row is not frozen — only a closed one has final geometry");
@@ -366,6 +404,95 @@ int main() {
         cache.clear();
         cache.getLayout(state, metrics);
         check(metrics.layoutComputes == 3, "clear() forces a recompute");
+
+        // A time-only change must invalidate the layout: computeGraphLayout reads
+        // the occurrence times for both the in-row x order and the task-level y
+        // sequence, so the fingerprint has to fold them.
+        {
+            GraphTaskState timed;
+            timed.rows.push_back(
+                EpisodeGutter{"ep-a", 1, 1000, EpisodeStatus::Closed, EpisodeStage::Routing, "", ""});
+            timed.rows.push_back(
+                EpisodeGutter{"ep-b", 2, 2000, EpisodeStatus::Closed, EpisodeStage::Routing, "", ""});
+            auto addRowNode = [](GraphTaskState& s, const std::string& id, uint64_t ordinal) {
+                GraphNode n;
+                n.id = nodeId("row", id);
+                n.family = NodeFamily::EpisodeRow;
+                n.episodeId = id;
+                n.ordinal = ordinal;
+                n.fullText = "row";
+                s.nodes.push_back(std::move(n));
+            };
+            addRowNode(timed, "ep-a", 1);
+            addRowNode(timed, "ep-b", 2);
+
+            GraphCache timeCache;
+            GraphCacheMetrics timeMetrics;
+            const PieGraphLayout before = timeCache.getLayout(timed, timeMetrics);
+            check(timeMetrics.layoutComputes == 1, "the timed fixture computes its layout once");
+            check(before.dot("row:ep-a") != nullptr && before.dot("row:ep-b") != nullptr &&
+                      before.dot("row:ep-a")->y < before.dot("row:ep-b")->y,
+                  "the timed fixture stacks ep-a above ep-b");
+
+            GraphTaskState retimed = timed;
+            retimed.rows[0].occurredAtMs = 3000;  // ONLY ep-a's time changes
+            const PieGraphLayout& after = timeCache.getLayout(retimed, timeMetrics);
+            check(timeMetrics.layoutComputes == 2, "a time-only change recomputes the layout");
+            check(after.dot("row:ep-b") != nullptr && after.dot("row:ep-a") != nullptr &&
+                      after.dot("row:ep-b")->y < after.dot("row:ep-a")->y,
+                  "and the fresh layout reflects the new time order");
+        }
+
+        // A boundary-only change invalidates too: for an untimed (snapshot) state
+        // the boundary ordinal is what places a version on the time axis.
+        {
+            GraphTaskState snap;
+            snap.rows.push_back(
+                EpisodeGutter{"ep-1", 1, -1, EpisodeStatus::Active, EpisodeStage::Routing, "", ""});
+            snap.rows.push_back(
+                EpisodeGutter{"ep-2", 2, -1, EpisodeStatus::Active, EpisodeStage::Routing, "", ""});
+            auto addRowNode = [](GraphTaskState& s, const std::string& id, uint64_t ordinal) {
+                GraphNode n;
+                n.id = nodeId("row", id);
+                n.family = NodeFamily::EpisodeRow;
+                n.episodeId = id;
+                n.ordinal = ordinal;
+                n.fullText = "row";
+                s.nodes.push_back(std::move(n));
+            };
+            addRowNode(snap, "ep-1", 1);
+            addRowNode(snap, "ep-2", 2);
+            GraphRailVersion f1;
+            f1.id = "f1";
+            f1.ordinal = 1;
+            f1.formedInEpisodeOrdinal = 0;  // before every row
+            f1.occurredAtMs = -1;
+            snap.versions.push_back(std::move(f1));
+            {
+                GraphNode n;
+                n.id = nodeId("Fv", "f1");
+                n.family = NodeFamily::Formulation;
+                n.ordinal = 1;
+                n.fullText = "frame";
+                snap.nodes.push_back(std::move(n));
+            }
+
+            GraphCache snapCache;
+            GraphCacheMetrics snapMetrics;
+            const PieGraphLayout s1 = snapCache.getLayout(snap, snapMetrics);
+            check(snapMetrics.layoutComputes == 1, "the untimed fixture computes its layout once");
+            check(s1.dot("Fv:f1") != nullptr && s1.dot("row:ep-1") != nullptr &&
+                      s1.dot("Fv:f1")->y < s1.dot("row:ep-1")->y,
+                  "a version with boundary 0 sits above every row");
+
+            GraphTaskState movedSnap = snap;
+            movedSnap.versions[0].formedInEpisodeOrdinal = 2;  // ONLY the boundary changes
+            const PieGraphLayout& s2 = snapCache.getLayout(movedSnap, snapMetrics);
+            check(snapMetrics.layoutComputes == 2, "a boundary-only change recomputes the layout");
+            check(s2.dot("row:ep-2") != nullptr && s2.dot("Fv:f1") != nullptr &&
+                      s2.dot("row:ep-2")->y < s2.dot("Fv:f1")->y,
+                  "and the version moves below episode 2");
+        }
 
         check(cache.getLongRoutes(state, layout, metrics).size() <=
                   cache.getRoutes(state, layout, metrics).size(),

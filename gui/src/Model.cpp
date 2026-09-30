@@ -1189,6 +1189,7 @@ bool NativeGuiModel::applyEpisodeEvent(const DomainEvent& event) {
             episode.ordinal = ordinal;
             episode.status = EpisodeStatus::Active;
             episode.stage = EpisodeStage::Routing;
+            episode.occurredAtMs = parseIso8601Millis(event.timestamp);
             task->episodes.push_back(std::move(episode));
             return true;
         }
@@ -1213,6 +1214,7 @@ bool NativeGuiModel::applyEpisodeEvent(const DomainEvent& event) {
                 return true;
             }
             l.episode->routing = std::move(routing);
+            l.episode->routing->occurredAtMs = parseIso8601Millis(event.timestamp);
             return true;
         }
         case DomainEventKind::EpisodeBodySelected: {
@@ -1360,6 +1362,7 @@ bool NativeGuiModel::applyEpisodeEvent(const DomainEvent& event) {
                 return true;
             }
             l.episode->steering.push_back(std::move(intervention));
+            l.episode->steering.back().occurredAtMs = parseIso8601Millis(event.timestamp);
             return true;
         }
         case DomainEventKind::ExperimentSelected: {
@@ -1396,6 +1399,7 @@ bool NativeGuiModel::applyEpisodeEvent(const DomainEvent& event) {
             // way to tell a stale replay from a fresh re-selection; it is applied
             // silently rather than judged.
             l.episode->experimentSelection = std::move(selection);
+            l.episode->experimentSelection->occurredAtMs = parseIso8601Millis(event.timestamp);
             return true;
         }
         case DomainEventKind::ExperimentSelectionVoided: {
@@ -1529,6 +1533,7 @@ bool NativeGuiModel::applyLoopEvent(const DomainEvent& event) {
             }
             snapshot_.activeBeliefs = active;
             episode->body.beliefDeltas.push_back(std::move(delta));
+            episode->body.beliefDeltas.back().occurredAtMs = parseIso8601Millis(event.timestamp);
             // A belief the revision sent back for re-examination is answered by
             // the delta that re-states, replaces, or retracts it — following the
             // refinement chain. Deriving this in the fold keeps "has it been
@@ -1589,6 +1594,7 @@ bool NativeGuiModel::applyLoopEvent(const DomainEvent& event) {
                 return true;
             }
             episode->body.plan = std::move(plan);
+            episode->body.plan->occurredAtMs = parseIso8601Millis(event.timestamp);
             // Dispatching commits the choice, so the selection stops being
             // pending: what remains is the plan.
             episode->experimentSelection.reset();
@@ -1636,6 +1642,7 @@ bool NativeGuiModel::applyLoopEvent(const DomainEvent& event) {
                 recordFileOp(execution.tool, path);
             }
             episode->body.trajectory.push_back(std::move(execution));
+            episode->body.trajectory.back().occurredAtMs = parseIso8601Millis(event.timestamp);
             return true;
         }
         case DomainEventKind::ExecutionCompleted: {
@@ -1725,6 +1732,7 @@ bool NativeGuiModel::applyLoopEvent(const DomainEvent& event) {
                 return true;
             }
             episode->body.distillation = std::move(distillation);
+            episode->body.distillation->occurredAtMs = parseIso8601Millis(event.timestamp);
             return true;
         }
         default:

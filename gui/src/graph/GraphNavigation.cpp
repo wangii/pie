@@ -11,7 +11,8 @@ PanResult computeFocusPan(const PieGraphLayout& layout, const std::string& nodeI
     PanResult p;
     const Dot* dot = layout.dot(nodeId);
     if (dot == nullptr) return p;
-    // The dot's centre IS the node's centre: there is no box to take a midpoint of.
+    // The block's centre IS the node's centre and, for a rectangle, its midpoint:
+    // a block of any width is still centred on (x, y).
     float cx = dot->x;
     float cy = dot->y;
     // Center the node at the viewport centre: pan = viewportCentre - node*zoom.

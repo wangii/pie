@@ -244,6 +244,14 @@ target_link_libraries(pi_gui_graph_live_test PRIVATE pi_gui_graph)
 target_include_directories(pi_gui_graph_live_test PRIVATE src)
 add_test(NAME pi_gui_graph_live_test COMMAND pi_gui_graph_live_test)
 
+# Block width from token telemetry, verified with synthetic telemetry (the demo
+# fixture carries no message_start/message_end, so this path is fallback-only
+# there).
+add_executable(pi_gui_graph_token_width_test src/graph/GraphTokenWidth.test.cpp)
+target_link_libraries(pi_gui_graph_token_width_test PRIVATE pi_gui_graph)
+target_include_directories(pi_gui_graph_token_width_test PRIVATE src)
+add_test(NAME pi_gui_graph_token_width_test COMMAND pi_gui_graph_token_width_test)
+
 # M6: the belief list rows — labels, derived status, the supersession chain and
 # the review obligations the panel surfaces.
 add_executable(pi_gui_belief_list_test src/BeliefList.test.cpp)
@@ -424,6 +432,17 @@ target_link_libraries(pi_gui_render_wiring_test PRIVATE pi_gui_model imgui_backe
 target_include_directories(pi_gui_render_wiring_test PRIVATE
     src ${imgui_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include/imgui_markdown)
 add_test(NAME pi_gui_render_wiring_test COMMAND pi_gui_render_wiring_test)
+
+# The graph canvas's render geometry (rectangle block fill, in-row frame), asserted
+# on real ImGui draw-list vertices in a bare context (no window).
+add_executable(pi_gui_graph_render_test
+    src/graph/GraphView.render.test.cpp
+    src/graph/GraphView.cpp
+    src/Theme.cpp
+)
+target_link_libraries(pi_gui_graph_render_test PRIVATE pi_gui_graph imgui_backend)
+target_include_directories(pi_gui_graph_render_test PRIVATE src ${imgui_SOURCE_DIR})
+add_test(NAME pi_gui_graph_render_test COMMAND pi_gui_graph_render_test)
 
 # openTurn() contract + the footer's turn -> active-slot derivation.
 add_executable(pi_gui_open_turn_test src/OpenTurn.test.cpp src/Footer.cpp src/Theme.cpp)

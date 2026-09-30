@@ -236,6 +236,81 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
+    // The vertical time sequence reaches the live display: a closed row keeps
+    // its internal x/shape but follows the new y, a Frame is not pinned to an
+    // old rail y, and a frozen belief does not move
+    // ---------------------------------------------------------------------
+    {
+        NativeGuiModel model;
+        auto emit = [&](const char* line) { applyRpcLine(model, line); };
+        emit(R"({"type":"TaskOpened","schemaVersion":7,"eventId":"t1","taskId":"t","initialPrompt":{"id":"p","original":"x","effective":"x"},"inheritedBeliefs":[]})");
+        // Episode 1 opens at t=2026-01-01T00:00:02Z.
+        emit(R"({"type":"EpisodeOpened","schemaVersion":7,"eventId":"o1","timestamp":"2026-01-01T00:00:02.000Z","taskId":"t","episodeId":"ep1","ordinal":1})");
+        emit(R"({"type":"RoutingDecided","schemaVersion":7,"eventId":"r1","timestamp":"2026-01-01T00:00:02.100Z","taskId":"t","episodeId":"ep1","routing":{"id":"ro1","statement":"s","decision":"belief-loop","suitabilityProbability":0.5,"successProbability":0.5,"estimatedSteps":1,"difficulty":"low","reason":"r"}})");
+        emit(R"({"type":"EpisodeBodySelected","schemaVersion":7,"eventId":"b1","taskId":"t","episodeId":"ep1","body":"belief-loop","openBeliefsAtStart":[]})");
+        emit(R"({"type":"PlanProduced","schemaVersion":7,"eventId":"pl1","timestamp":"2026-01-01T00:00:02.150Z","taskId":"t","episodeId":"ep1","plan":{"id":"plan-1","selectedToExplore":[],"intent":"probe","formulation":{"kind":"unformed"}}})");
+        emit(R"({"type":"BeliefDeltaApplied","schemaVersion":7,"eventId":"d1","timestamp":"2026-01-01T00:00:02.200Z","taskId":"t","episodeId":"ep1","delta":{"id":"delta-1","episodeId":"ep1","producerPhase":"propose","operation":"propose","resultBeliefId":"b1","resultingBeliefs":[{"id":"b1","statement":"a carried claim","domain":"code","expectation":"e","evidenceRounds":1,"skillRefs":[],"supportedBy":[],"refutedBy":[],"withdrawn":false}]},"activeBeliefs":["b1"]})");
+        emit(R"({"type":"EpisodeClosed","schemaVersion":7,"eventId":"c1","timestamp":"2026-01-01T00:00:02.300Z","taskId":"t","episodeId":"ep1"})");
+        // A version formed in episode 1, recorded at t=00:00:03Z.
+        emit(R"({"type":"ProblemFormulationRecorded","schemaVersion":7,"eventId":"f1","timestamp":"2026-01-01T00:00:03.000Z","taskId":"t","version":{"id":"form-1","taskId":"t","ordinal":1,"recordedAt":"2026-01-01T00:00:03.000Z","formedInEpisodeOrdinal":1,"origin":"propose","content":{"interpretation":"i","focus":"f","tension":"t","implication":"im"},"reason":"r","sources":[]}})");
+        check(model.issues().empty(), "the live time-axis fixture folds cleanly");
+
+        GraphTaskState state = projectGraphTask(model);
+        GraphLiveState live;
+        const PieGraphLayout fresh1 = computeGraphLayout(state);
+        const PieGraphLayout stable1 = stabilizeLiveLayout(state, fresh1, live);
+        check(live.completedEpisodes.count("ep1") == 1, "episode 1 is frozen once closed");
+        check(live.stableRailNodes.count("Fv:form-1") == 0,
+              "the Frame version is not frozen on a rail");
+        check(live.stableRailNodes.count("B:b1") == 1, "the belief is frozen on its rail");
+        const Dot* b1Before = stable1.dot("B:b1");
+        const Dot* epBefore = stable1.dot("row:ep1");
+
+        // Episode 2 opens with an EARLIER timestamp: the time axis must place it
+        // above episode 1, so the closed row's y follows the fresh layout.
+        emit(R"({"type":"EpisodeOpened","schemaVersion":7,"eventId":"o2","timestamp":"2026-01-01T00:00:01.000Z","taskId":"t","episodeId":"ep2","ordinal":2})");
+        check(model.issues().empty(), "the backdated round folds cleanly");
+        state = projectGraphTask(model);
+        const PieGraphLayout fresh2 = computeGraphLayout(state);
+        const PieGraphLayout stable2 = stabilizeLiveLayout(state, fresh2, live);
+
+        const Dot* epFresh = fresh2.dot("row:ep1");
+        const Dot* epNow = stable2.dot("row:ep1");
+        const Dot* ep2Now = stable2.dot("row:ep2");
+        check(epFresh != nullptr && epNow != nullptr && ep2Now != nullptr,
+              "both episode rows are placed after the backdated append");
+        check(ep2Now != nullptr && epNow != nullptr && ep2Now->y < epNow->y,
+              "the earlier episode sits above the closed one on the time axis");
+        check(epBefore != nullptr && epNow != nullptr && epNow->y == epFresh->y &&
+                  epNow->y != epBefore->y,
+              "the closed row follows the fresh y instead of its frozen y");
+        check(epBefore != nullptr && epNow != nullptr && epNow->x == epBefore->x,
+              "the closed row keeps its internal x");
+        {
+            const Dot* frameNow = stable2.dot("Fv:form-1");
+            const Dot* frameFresh = fresh2.dot("Fv:form-1");
+            check(frameNow != nullptr && frameFresh != nullptr && frameNow->y == frameFresh->y,
+                  "the Frame takes the fresh time-axis y, not an old rail y");
+        }
+        {
+            const Dot* b1Now = stable2.dot("B:b1");
+            check(b1Before != nullptr && b1Now != nullptr && b1Now->x == b1Before->x &&
+                      b1Now->y == b1Before->y,
+                  "the frozen belief keeps its position");
+        }
+        {
+            bool moved = false;
+            for (const EpisodeGutter& g : stable2.gutters) {
+                if (g.id != "ep1") continue;
+                for (const EpisodeGutter& f : fresh2.gutters) {
+                    if (f.id == "ep1" && g.rect.y == f.rect.y) moved = true;
+                }
+            }
+            check(moved, "the closed row's gutter follows the fresh y too");
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // An empty session is a state the canvas renders
     // ---------------------------------------------------------------------
     {

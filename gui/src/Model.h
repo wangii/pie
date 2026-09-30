@@ -230,6 +230,10 @@ struct Routing {
     int estimatedSteps = 0;
     RoutingDifficulty difficulty = RoutingDifficulty::Unknown;
     std::string reason;
+    // When the event that created this record was observed. -1 when the record
+    // came from a snapshot, which carries no per-record time. The graph orders a
+    // row by this when present and falls back to record order when absent.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: TaskOutcome — a task result, not a world belief. Epistemic sufficiency and
@@ -299,6 +303,10 @@ struct ProblemFormulationVersion {
     uint64_t ordinal = 0;
     std::optional<FormulationVersionId> previousVersionId;
     std::string recordedAt;
+    // The ordinal of the episode the version was formed in, or 0 when none was open. Recorded
+    // by the runtime at publication; the canvas reads it to place the Frame between rows
+    // instead of inferring a position from the version's citations.
+    uint64_t formedInEpisodeOrdinal = 0;
     std::string origin;
     FormulationContent content;
     std::string reason;
@@ -404,6 +412,8 @@ struct Plan {
     // Which formulation version this experiment was chosen under.
     FormulationAdoption formulation;
     bool valid() const { return !id.empty(); }
+    // Event-observed creation time; -1 for a snapshot-loaded record. See Routing.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: ExperimentSelectionRecord — a choice, not a commitment: it can be voided
@@ -415,6 +425,8 @@ struct ExperimentSelectionRecord {
     std::optional<std::string> advancementCondition;
     std::optional<std::string> advancementNext;
     FormulationAdoption formulation;
+    // Event-observed creation time; -1 for a snapshot-loaded record. See Routing.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: Execution
@@ -437,6 +449,10 @@ struct Execution {
     std::optional<std::string> filePath;
     // UI-side expand/collapse state for the graph tooltip.
     bool expanded = true;
+    // Event-observed START time; -1 for a snapshot-loaded record. A completion
+    // event must not overwrite this: the node's place is where the execution
+    // began, not where it finished. See Routing.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: Distillation
@@ -446,6 +462,8 @@ struct Distillation {
     std::string contents;
     std::vector<BeliefDeltaId> outputs;
     bool valid() const { return !id.empty(); }
+    // Event-observed creation time; -1 for a snapshot-loaded record. See Routing.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: BeliefDelta — the only writer of the belief registry.
@@ -467,6 +485,8 @@ struct BeliefDelta {
     // Complete immutable records changed by this operation, including both sides
     // of a refinement.
     std::vector<Belief> resultingBeliefs;
+    // Event-observed creation time; -1 for a snapshot-loaded record. See Routing.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: Intervention
@@ -476,6 +496,8 @@ struct Intervention {
     EpisodeStage stage = EpisodeStage::Unknown;
     std::optional<ExecutionId> afterExecution;
     std::string createdAt;
+    // Event-observed creation time; -1 for a snapshot-loaded record. See Routing.
+    int64_t occurredAtMs = -1;
 };
 
 // TS: EpisodeBody = PendingEpisode | BeliefLoopEpisode | FastPathEpisode
@@ -506,6 +528,10 @@ struct ExecutionEpisode {
     uint64_t ordinal = 0;
     EpisodeStatus status = EpisodeStatus::Active;
     EpisodeStage stage = EpisodeStage::Routing;
+    // When the round opened, observed from EpisodeOpened. -1 when the record came
+    // from a snapshot, which carries no per-record time. The task-level layout
+    // merges episodes and Frame versions on one vertical time axis by this value.
+    int64_t occurredAtMs = -1;
     std::vector<Intervention> steering;
     std::optional<Routing> routing;
     // The choice propose has made and not yet dispatched; cleared when a plan

@@ -19,7 +19,10 @@
 //   * `nodes`          — every node's Dot{x, y, r}, keyed by NodeId.
 //   * `gutters`        — one band per episode row: the separator and the ordinal
 //                        label live in the left gutter.
-//   * `versionRail`    — the band the Frame versions are laid along.
+//   * `versionRail`    — the reserved top band. Frame versions are laid on the
+//                        shared vertical time axis with the episode rows, so this
+//                        band is kept only so the first entry's y does not depend
+//                        on whether a reading exists yet; it stays zero-width.
 //   * `beliefRail`     — the band the global belief column occupies.
 //   * `outcomeBand`    — the task outcome strip; zero-sized when none was recorded.
 //
@@ -43,6 +46,10 @@ struct Dot {
     float x = 0.0f;
     float y = 0.0f;
     float r = 0.0f;
+    // Full block width. Height stays 2*r; a circle is w == 2*r, a wider block is a
+    // rectangle. Defaults to 0 so a consumer that never sets it still sees a
+    // circle of radius r.
+    float w = 0.0f;
     bool valid() const { return r > 0.0f; }
 };
 
@@ -51,8 +58,8 @@ struct PieGraphLayout {
     std::map<std::string, Dot> nodes;
     // One band per episode row, in row order.
     std::vector<EpisodeGutter> gutters;
-    // The Frame rail's band and the belief column's band. Both are zero-sized when
-    // the state has no versions / no beliefs.
+    // The reserved top band (always zero-width; see the file header) and the belief
+    // column's band. The belief band is zero-sized when the state has no beliefs.
     GraphRect versionRail;
     GraphRect beliefRail;
     // The task outcome strip, or a zero-size rect when the task recorded none.

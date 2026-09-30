@@ -28,11 +28,20 @@ PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state, const PieGraphLa
                 // A node the cache knows about but the fresh layout dropped (a
                 // record removed by a snapshot replacement) must not be
                 // resurrected: only nodes still present in `state` are frozen.
-                if (nodeBelongsTo(state, entry.first, gutter.id)) out.nodes[entry.first] = entry.second;
+                if (!nodeBelongsTo(state, entry.first, gutter.id)) continue;
+                // The row's INTERNAL geometry is frozen — the x of each station, its
+                // width and radius — so a station never slides sideways under the
+                // cursor. Its y follows the fresh layout: the vertical axis is the
+                // task-level time sequence, and a closed row's place on that axis is
+                // decided by its occurrence time, not by when it was first drawn.
+                const auto freshIt = fresh.nodes.find(entry.first);
+                if (freshIt == fresh.nodes.end()) continue;
+                Dot dot = entry.second;
+                dot.y = freshIt->second.y;
+                out.nodes[entry.first] = dot;
             }
-            for (EpisodeGutter& freshGutter : out.gutters) {
-                if (freshGutter.id == gutter.id) freshGutter.rect = cached->second.rect;
-            }
+            // The gutter rect is a horizontal band: its x/width stay fresh too, so
+            // the separator follows the row it labels instead of pinning an old y.
             continue;
         }
 
@@ -47,11 +56,14 @@ PieGraphLayout stabilizeLiveLayout(const GraphTaskState& state, const PieGraphLa
         live.completedEpisodes.emplace(gutter.id, std::move(frozen));
     }
 
-    // The rails are append-only too, so an entry that has been drawn once keeps
-    // its position. A node that is not in the rail set was never frozen and takes
-    // the fresh position, which is what lets a brand-new belief appear.
+    // The BELIEF rail is append-only, so an entry that has been drawn once keeps
+    // its position. A Frame version is not frozen here: it lives on the shared
+    // vertical time axis with the episode tracks, so freezing its y would pin it
+    // against the very order the axis expresses. A node that is not in the rail
+    // set was never frozen and takes the fresh position, which is what lets a
+    // brand-new belief or version appear.
     for (const GraphNode& node : state.nodes) {
-        const bool onRail = node.family == NodeFamily::Belief || node.family == NodeFamily::Formulation;
+        const bool onRail = node.family == NodeFamily::Belief;
         if (!onRail) continue;
         const auto cached = live.stableRailNodes.find(node.id.value);
         if (cached != live.stableRailNodes.end()) {

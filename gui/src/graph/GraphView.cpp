@@ -274,28 +274,33 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state,
         if (dot != nullptr) {
             const ImVec2 centre = toScreen(dot->x, dot->y);
             const bool faded = state.cursorStage == EpisodeStage::Closed;
+            const float halfH = dot->r * view.zoom;
+            const float halfW = (dot->w > 0.0f ? dot->w * 0.5f : dot->r) * view.zoom;
             // paneBg(true) is the one animated colour in the GUI. It used to wash a
             // pane background; it now draws this ring (§6.3).
             const ImVec4 pulse = paneBg(true);
             if (!faded) {
-                const float radius = (dot->r + st.currentHaloWidth) * view.zoom;
-                draw->AddCircle(centre, radius,
-                                IM_COL32(static_cast<int>(pulse.x * 255.0f),
-                                         static_cast<int>(pulse.y * 255.0f),
-                                         static_cast<int>(pulse.z * 255.0f), 220),
-                                static_cast<int>(std::max(st.dotRingWidth * 2.0f * view.zoom, 1.0f)));
+                const float o = (dot->r + st.currentHaloWidth - dot->r) * view.zoom;
+                draw->AddRect(ImVec2(centre.x - halfW - o, centre.y - halfH - o),
+                              ImVec2(centre.x + halfW + o, centre.y + halfH + o),
+                              IM_COL32(static_cast<int>(pulse.x * 255.0f),
+                                       static_cast<int>(pulse.y * 255.0f),
+                                       static_cast<int>(pulse.z * 255.0f), 220),
+                              4.0f * view.zoom,
+                              static_cast<float>(std::max(st.dotRingWidth * 2.0f * view.zoom, 1.0f)), 0);
             }
             // A faded station still gets a steady ring: "the round ended here" must
             // remain visible, it just must not pulse as if work were happening.
-            draw->AddCircle(centre, (dot->r + 2.0f) * view.zoom,
-                            rgba(st.dotRingCurrent, faded ? 0.28f : 0.9f),
-                            static_cast<int>(std::max(st.dotRingWidth * view.zoom, 1.0f)));
+            const float o = 2.0f * view.zoom;
+            draw->AddRect(ImVec2(centre.x - halfW - o, centre.y - halfH - o),
+                          ImVec2(centre.x + halfW + o, centre.y + halfH + o),
+                          rgba(st.dotRingCurrent, faded ? 0.28f : 0.9f), 4.0f * view.zoom,
+                          static_cast<float>(std::max(st.dotRingWidth * view.zoom, 1.0f)), 0);
         }
     }
 
-    // --- dots, then the hover hit test --------------------------------
+    // --- blocks, then the hover hit test ------------------------------
     const GraphNode* hoveredNode = nullptr;
-    const float hitRadius = std::max(st.dotDiameter * view.zoom * 0.6f, 4.0f);
     for (const GraphNode& node : state.nodes) {
         const Dot* dot = layout.dot(node.id.value);
         if (dot == nullptr) continue;
@@ -307,18 +312,23 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state,
                                node.state == NodeVisualState::CurrentFaded;
 
         const ImU32 fill = rgba(nodeDotColor(node), alpha);
-        const float radius = std::max(dot->r * view.zoom, 2.0f);
+        // A block is a rectangle: its half-height is the dot radius and its
+        // half-width comes from Dot.w (a circle is w == 2r).
+        const float halfH = std::max(dot->r * view.zoom, 2.0f);
+        const float halfW = std::max((dot->w > 0.0f ? dot->w * 0.5f : dot->r) * view.zoom, 2.0f);
+        const ImVec2 boxMin(centre.x - halfW, centre.y - halfH);
+        const ImVec2 boxMax(centre.x + halfW, centre.y + halfH);
 
         // A delta is a diamond and a selection is a hollow ring: the shape carries
         // the kind, so a colour-blind reader still has the distinction.
         if (node.family == NodeFamily::BeliefDelta) {
-            const float d = radius * 1.25f;
+            const float d = halfH * 1.25f;
             draw->AddQuadFilled(ImVec2(centre.x, centre.y - d), ImVec2(centre.x + d, centre.y),
                                 ImVec2(centre.x, centre.y + d), ImVec2(centre.x - d, centre.y), fill);
         } else if (node.family == NodeFamily::ExperimentSelection) {
-            draw->AddCircle(centre, radius, fill, 0, static_cast<int>(std::max(st.dotRingWidth * view.zoom, 1.0f)));
+            draw->AddCircle(centre, halfH, fill, 0, static_cast<int>(std::max(st.dotRingWidth * view.zoom, 1.0f)));
         } else {
-            draw->AddCircleFilled(centre, radius, fill);
+            draw->AddRectFilled(boxMin, boxMax, fill);
         }
 
         // Rings, outermost claim last so the strongest wins visually.
@@ -326,15 +336,21 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state,
         if (isFocused(node)) {
             // The focus accent bar became a ring: with no box there is no left edge
             // to put a bar on, and a ring reads as "in scope" just as well.
-            draw->AddCircle(centre, radius + 2.0f * view.zoom, rgba(st.focusAccent, alpha),
-                            static_cast<int>(std::max(st.focusBarWidth * view.zoom, 1.0f)));
+            const float o = 2.0f * view.zoom;
+            draw->AddRect(ImVec2(boxMin.x - o, boxMin.y - o), ImVec2(boxMax.x + o, boxMax.y + o),
+                          rgba(st.focusAccent, alpha), 3.0f * view.zoom,
+                          static_cast<float>(std::max(st.focusBarWidth * view.zoom, 1.0f)), 0);
         }
         if (isSelected) {
-            draw->AddCircle(centre, radius + 3.0f * view.zoom, rgba(st.dotRingSelected, 1.0f),
-                            static_cast<int>(std::max(st.dotRingWidth * 1.5f * view.zoom, 1.0f)));
+            const float o = 3.0f * view.zoom;
+            draw->AddRect(ImVec2(boxMin.x - o, boxMin.y - o), ImVec2(boxMax.x + o, boxMax.y + o),
+                          rgba(st.dotRingSelected, 1.0f), 3.0f * view.zoom,
+                          static_cast<float>(std::max(st.dotRingWidth * 1.5f * view.zoom, 1.0f)), 0);
         } else if (!isCurrent && node.family != NodeFamily::ExperimentSelection) {
-            draw->AddCircle(centre, radius, rgba(st.dotRingDefault, st.dotRingDefaultAlpha / 255.0f * alpha),
-                            static_cast<int>(std::max(st.dotRingWidth * view.zoom, 1.0f)));
+            draw->AddRect(boxMin, boxMax,
+                          rgba(st.dotRingDefault, st.dotRingDefaultAlpha / 255.0f * alpha),
+                          3.0f * view.zoom,
+                          static_cast<float>(std::max(st.dotRingWidth * view.zoom, 1.0f)), 0);
         }
 
         // A belief's series mark: one small mark per round that carried it, capped
@@ -344,14 +360,15 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state,
             const uint32_t marks = std::min<uint32_t>(node.evidenceRounds, 4);
             for (uint32_t i = 0; i < marks; ++i) {
                 draw->AddCircleFilled(
-                    ImVec2(centre.x - radius + static_cast<float>(i) * st.seriesMarkRadius * 2.2f,
-                           centre.y - radius - st.seriesMarkRadius * 2.0f),
+                    ImVec2(centre.x - halfW + static_cast<float>(i) * st.seriesMarkRadius * 2.2f,
+                           centre.y - halfH - st.seriesMarkRadius * 2.0f),
                     st.seriesMarkRadius * view.zoom, rgba(st.textMuted, alpha));
             }
         }
 
-        // Hover: radial hit test, per §6.2.
-        if (hovered && std::hypot(mouse.x - centre.x, mouse.y - centre.y) <= hitRadius) {
+        // Hover: a block is hit inside its rectangle, not inside a circle.
+        if (hovered && mouse.x >= boxMin.x - 3.0f && mouse.x <= boxMax.x + 3.0f &&
+            mouse.y >= boxMin.y - 3.0f && mouse.y <= boxMax.y + 3.0f) {
             if (hoveredNode == nullptr || node.state == NodeVisualState::Current) hoveredNode = &node;
         }
     }
@@ -405,7 +422,7 @@ bool renderGraphView(GraphViewState& view, const GraphTaskState& state,
     // A read-only canvas still has to say what a shape means. One row, bottom
     // left, drawn last so it sits above the links.
     {
-        static const char* kLegend = "dot = record  ·  diamond = belief delta  ·  ring = experiment selection";
+        static const char* kLegend = "block = record  ·  diamond = belief delta  ·  ring = experiment selection";
         const ImVec2 size = ImGui::CalcTextSize(kLegend);
         draw->AddText(ImVec2(canvasMin.x + 8.0f, canvasMax.y - size.y - 6.0f),
                       rgba(st.textMuted, 0.65f), kLegend);

@@ -157,6 +157,26 @@ void renderGraphFooter(const pie::gui::NativeGuiModel& m) {
         renderRoleSlot("Distillation", f.distillation, active == 1);
         ImGui::SameLine();
         renderRoleSlot("Execution", f.execution, active == 2);
+        ImGui::SameLine();
+
+        // The activity indicator, pinned to the footer's right edge: the harness /
+        // agent is still working exactly when an assistant turn is open
+        // (`openTurn()`). Right alignment is the only thing that was missing — the
+        // state was already here.
+        const bool working = turn != nullptr;
+        const char* const label = working ? "working" : "idle";
+        const float textW = ImGui::CalcTextSize(label).x;
+        const float dotW = 12.0f;
+        const float rightX = ImGui::GetWindowWidth() - textW - dotW - 12.0f;
+        if (rightX > ImGui::GetCursorPosX() + 8.0f) ImGui::SetCursorPosX(rightX);
+        ImDrawList* const draw = ImGui::GetWindowDrawList();
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float cy = p.y + ImGui::GetTextLineHeight() * 0.5f;
+        const ImU32 col = working ? IM_COL32(104, 204, 120, 255) : IM_COL32(120, 126, 136, 255);
+        draw->AddCircleFilled(ImVec2(p.x + 4.0f, cy), 4.0f, col);
+        ImGui::Dummy(ImVec2(dotW, 0.0f));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(label);
     }
 }
 

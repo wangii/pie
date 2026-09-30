@@ -543,16 +543,26 @@ int main() {
             check(exec != nullptr && distill != nullptr && exec->x < distill->x,
                   "the executions come before the distillation");
         }
-        // The rail dots are above the row dots, and the row anchor is left of its
-        // stations.
+        // The Frame reads at the boundary it was formed at. `versionRail` stays
+        // above the rows as an empty band (every version in the fixture is
+        // anchored), so the invariant that the rail never intrudes on row one
+        // still holds; the two versions interleave below their own episodes.
         {
-            const Dot* version = layout.dot("Fv:formulation-1");
+            const Dot* v1 = layout.dot("Fv:formulation-1");
+            const Dot* v2 = layout.dot("Fv:formulation-2");
+            const Dot* row1 = layout.dot("row:episode-1");
+            const Dot* row2 = layout.dot("row:episode-2");
+            check(v1 != nullptr && row1 != nullptr && row2 != nullptr,
+                  "both rows and the first Frame version are placed");
+            check(v1 != nullptr && row1 != nullptr && v1->y > row1->y,
+                  "a Frame formed in episode 1 sits below episode 1's row");
+            check(v1 != nullptr && row2 != nullptr && v1->y < row2->y,
+                  "and above episode 2's row");
+            check(v2 != nullptr && v1 != nullptr && v2->y > v1->y,
+                  "the later Frame sits below the version it revises");
             const Dot* route = layout.dot("route:routing-1");
-            const Dot* anchor = layout.dot("row:episode-1");
-            check(version != nullptr && route != nullptr && version->y < route->y,
-                  "the Frame rail is above the rows");
-            check(anchor != nullptr && route != nullptr && anchor->x < route->x,
-                  "the row anchor sits in the gutter, left of the stations");
+            check(route != nullptr && v1 != nullptr && route->y < v1->y,
+                  "the Frame is never above the round it was formed in");
         }
         // An empty state still lays out: a zero canvas would make a consumer's
         // division undefined.
@@ -564,6 +574,102 @@ int main() {
                   "an empty state still has a positive canvas");
             check(!emptyLayout.outcomeBand.w, "an empty state has no outcome band");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Occurrence time: start is kept, completion does not overwrite it
+    // ---------------------------------------------------------------------
+    {
+        const GraphNode* exec1 = state.node("exec:exec-1");
+        const GraphNode* exec2 = state.node("exec:exec-2");
+        check(exec1 != nullptr && exec2 != nullptr, "both executions are projected");
+        check(exec1 != nullptr &&
+                  exec1->occurredAtMs == parseIso8601Millis("2026-01-01T00:00:06.000Z"),
+              "an execution's occurrence is its ExecutionStarted time");
+        check(exec1 != nullptr &&
+                  exec1->occurredAtMs != parseIso8601Millis("2026-01-01T00:00:06.500Z"),
+              "its ExecutionCompleted time does not overwrite the start");
+        check(exec1 != nullptr && exec2 != nullptr &&
+                  exec1->occurredAtMs < exec2->occurredAtMs,
+              "the two executions keep their start order");
+    }
+
+    // ---------------------------------------------------------------------
+    // Snapshot round trip: a restored episode keeps its start time, so the
+    // vertical time order survives a reconnect; a snapshot without the field
+    // falls back to the boundary order instead of failing
+    // ---------------------------------------------------------------------
+    {
+        const std::string snapshot = R"({
+          "sessionId":"session-1",
+          "activeBranchTasks":["task-1"],
+          "tasks":[{"id":"task-1","initialPrompt":{"id":"p1","original":"x","effective":"x"},
+                    "status":"active","inheritedBeliefs":[],"introducedBeliefs":[],
+                    "focus":[],"focusDeclared":false,"formulations":[],"formulationCorrections":[],
+                    "episodes":[
+                      {"id":"episode-2","taskId":"task-1","ordinal":2,"status":"active",
+                       "stage":"routing","startedAt":"2026-01-01T00:00:01.000Z","steering":[],
+                       "body":{"kind":"pending"}},
+                      {"id":"episode-1","taskId":"task-1","ordinal":1,"status":"closed",
+                       "stage":"closed","startedAt":"2026-01-01T00:00:05.000Z","steering":[],
+                       "body":{"kind":"pending"}}]}],
+          "beliefs":[],"activeBeliefs":[]
+        })";
+        json::Value parsed;
+        check(json::parse(snapshot, parsed, nullptr), "the round-trip snapshot parses");
+        AgentSessionSnapshot snap;
+        check(readDomainSnapshot(parsed, snap), "the round-trip snapshot reads");
+        NativeGuiModel restored;
+        restored.applyDomainSnapshot(snap);
+        check(restored.issues().empty(), "a snapshot with startedAt folds without issues");
+        const Task* restoredTask = restored.task("task-1");
+        check(restoredTask != nullptr && restoredTask->episodes.size() == 2,
+              "both snapshot episodes loaded");
+        if (restoredTask != nullptr && restoredTask->episodes.size() == 2) {
+            check(restoredTask->episodes[1].occurredAtMs ==
+                      parseIso8601Millis("2026-01-01T00:00:05.000Z"),
+                  "the restored episode keeps its startedAt on the record");
+        }
+        const GraphTaskState restoredState = projectGraphTask(restored);
+        const PieGraphLayout layout = computeGraphLayout(restoredState);
+        const Dot* re1 = layout.dot("row:episode-1");
+        const Dot* re2 = layout.dot("row:episode-2");
+        check(re1 != nullptr && re2 != nullptr, "the restored episodes are placed");
+        check(re2 != nullptr && re1 != nullptr && re2->y < re1->y,
+              "the earlier-opened episode rests above the later one, as it does live");
+
+        // An older snapshot with no startedAt: the episodes stay at -1 and fall
+        // back to the boundary order, without an issue.
+        const std::string legacy = R"({
+          "sessionId":"session-2",
+          "activeBranchTasks":["task-1"],
+          "tasks":[{"id":"task-1","initialPrompt":{"id":"p1","original":"x","effective":"x"},
+                    "status":"active","inheritedBeliefs":[],"introducedBeliefs":[],
+                    "focus":[],"focusDeclared":false,"formulations":[],"formulationCorrections":[],
+                    "episodes":[
+                      {"id":"episode-2","taskId":"task-1","ordinal":2,"status":"active",
+                       "stage":"routing","steering":[],"body":{"kind":"pending"}},
+                      {"id":"episode-1","taskId":"task-1","ordinal":1,"status":"closed",
+                       "stage":"closed","steering":[],"body":{"kind":"pending"}}]}],
+          "beliefs":[],"activeBeliefs":[]
+        })";
+        json::Value legacyParsed;
+        check(json::parse(legacy, legacyParsed, nullptr), "the legacy snapshot parses");
+        AgentSessionSnapshot legacySnap;
+        check(readDomainSnapshot(legacyParsed, legacySnap), "the legacy snapshot reads");
+        NativeGuiModel legacyModel;
+        legacyModel.applyDomainSnapshot(legacySnap);
+        check(legacyModel.issues().empty(), "a snapshot without startedAt folds without issues");
+        const Task* legacyTask = legacyModel.task("task-1");
+        check(legacyTask != nullptr && legacyTask->episodes.size() == 2 &&
+                  legacyTask->episodes[0].occurredAtMs == -1,
+              "an episode with no startedAt stays at the missing-time sentinel");
+        const GraphTaskState legacyState = projectGraphTask(legacyModel);
+        const PieGraphLayout legacyLayout = computeGraphLayout(legacyState);
+        const Dot* le1 = legacyLayout.dot("row:episode-1");
+        const Dot* le2 = legacyLayout.dot("row:episode-2");
+        check(le1 != nullptr && le2 != nullptr && le1->y < le2->y,
+              "and falls back to the ordinal order");
     }
 
     if (failures == 0) {

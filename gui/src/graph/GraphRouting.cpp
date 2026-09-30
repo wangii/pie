@@ -17,6 +17,7 @@
 
 #include "graph/GraphRouting.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "graph/GraphStyle.h"
@@ -25,19 +26,24 @@ namespace pie::gui {
 
 namespace {
 
-// The point on the circle around `from` in the direction of `to`, pulled back by
-// linkGapFromDot so the link does not touch the dot.
+// The point on the block boundary around `from` in the direction of `to`, pulled back by
+// linkGapFromDot so the link does not touch the block. A block is a rectangle of
+// half-width w/2 and half-height r; a circle is the special case w == 2r.
 std::pair<float, float> anchorTowards(const Dot& from, const Dot& to) {
     const float dx = to.x - from.x;
     const float dy = to.y - from.y;
     const float length = std::sqrt(dx * dx + dy * dy);
-    const float pull = from.r + kGraphStyle.linkGapFromDot;
     if (length <= 0.0001f) return {from.x, from.y};
-    const float t = pull / length;
-    // A very short link would otherwise invert: clamp so the anchor never ends up
-    // on the far side of the target.
-    const float clamped = std::min(t, 0.5f);
-    return {from.x + dx * clamped, from.y + dy * clamped};
+    const float halfW = from.w > 0.0f ? from.w * 0.5f : from.r;
+    const float halfH = from.r;
+    const float ux = dx / length;
+    const float uy = dy / length;
+    // Distance from the centre to the rectangle boundary along the unit direction.
+    const float tx = std::fabs(ux) > 0.0001f ? halfW / std::fabs(ux) : length;
+    const float ty = std::fabs(uy) > 0.0001f ? halfH / std::fabs(uy) : length;
+    const float hit = std::min(tx, ty);
+    const float dist = std::min(hit + kGraphStyle.linkGapFromDot, length);
+    return {from.x + ux * dist, from.y + uy * dist};
 }
 
 } // namespace

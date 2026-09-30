@@ -43,6 +43,10 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
         h = hashMixStr(h, n.episodeId);
         h = hashMix(h, n.order);
         h = hashMix(h, n.ordinal);
+        // The layout reads this: it orders the stations inside a row by occurrence.
+        // A time-only change must invalidate, or the cache serves a stale x order.
+        h = hashMix(h, static_cast<uint64_t>(n.occurredAtMs));
+        h = hashMix(h, static_cast<uint64_t>(n.blockTokens));
         h = hashMix(h, static_cast<uint64_t>(n.state));
         h = hashMix(h, static_cast<uint64_t>(n.executionStatus));
         h = hashMix(h, static_cast<uint64_t>(n.routingDecision));
@@ -74,6 +78,9 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
     for (const EpisodeGutter& row : state.rows) {
         h = hashMixStr(h, row.id);
         h = hashMix(h, row.ordinal);
+        // The task-level sequence reads this: it is the episode's place on the
+        // shared vertical time axis.
+        h = hashMix(h, static_cast<uint64_t>(row.occurredAtMs));
         h = hashMix(h, static_cast<uint64_t>(row.status));
         h = hashMix(h, static_cast<uint64_t>(row.stage));
         h = hashMixStr(h, row.routingDecision);
@@ -84,6 +91,11 @@ uint64_t GraphCache::stateFingerprint(const GraphTaskState& state) const {
     for (const GraphRailVersion& version : state.versions) {
         h = hashMixStr(h, version.id);
         h = hashMix(h, version.ordinal);
+        // The layout reads both: recordedAt decides the version's place on the
+        // time axis and formedInEpisodeOrdinal is the boundary fallback when the
+        // time is absent.
+        h = hashMix(h, static_cast<uint64_t>(version.occurredAtMs));
+        h = hashMix(h, version.formedInEpisodeOrdinal);
         h = hashMix(h, version.current ? 1 : 0);
         h = hashMix(h, version.approved ? 1 : 0);
     }
@@ -104,6 +116,7 @@ uint64_t GraphCache::layoutFingerprint(const PieGraphLayout& layout) const {
         h = hashMix(h, static_cast<uint64_t>(dot.x * 100.0f));
         h = hashMix(h, static_cast<uint64_t>(dot.y * 100.0f));
         h = hashMix(h, static_cast<uint64_t>(dot.r * 100.0f));
+        h = hashMix(h, static_cast<uint64_t>(dot.w * 100.0f));
     }
     h = hashMix(h, layout.gutters.size());
     for (const EpisodeGutter& gutter : layout.gutters) {

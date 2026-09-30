@@ -573,6 +573,7 @@ bool readFormulationVersion(const json::Value& v, ProblemFormulationVersion& out
     if (v.has("previousVersionId")) out.previousVersionId = v.string("previousVersionId");
     else out.previousVersionId.reset();
     out.recordedAt = v.string("recordedAt");
+    out.formedInEpisodeOrdinal = static_cast<uint64_t>(v.integer("formedInEpisodeOrdinal", 0));
     out.origin = v.string("origin");
     const json::Value* content = v.object("content");
     if (content != nullptr) readFormulationContent(*content, out.content);
@@ -813,6 +814,10 @@ bool readEpisode(const json::Value& v, ExecutionEpisode& out) {
     out.ordinal = static_cast<uint64_t>(v.integer("ordinal", 0));
     out.status = parseEpisodeStatus(v.string("status"));
     out.stage = parseEpisodeStage(v.string("stage"));
+    // A restored session reads its episode start from the snapshot record. An
+    // older snapshot has no `startedAt`; an empty string parses to -1, which keeps
+    // the episode on the boundary fallback rather than misplacing it.
+    out.occurredAtMs = parseIso8601Millis(v.string("startedAt"));
     const json::Value* steering = v.find("steering");
     if (steering != nullptr && steering->isArray()) {
         for (size_t i = 0; i < steering->size(); ++i) {

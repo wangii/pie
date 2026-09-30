@@ -9,9 +9,10 @@
 //    the canvas is one `ExecutionEpisode`, and the nodes in it are the records the
 //    contract names — routing, experiment selection, plan, executions,
 //    distillation, belief deltas, interventions, recheck.
-//  * `ProblemFormulation` (the product's "Frame") is a first-class node family on
-//    its own rail, because the whole product is organized around it. The v1
-//    projection had no counterpart.
+//  * `ProblemFormulation` (the product's "Frame") is a first-class node family,
+//    because the whole product is organized around it. The v1 projection had no
+//    counterpart. Versions are placed on the shared task-level vertical time axis
+//    together with the episode tracks, not in a rail of their own.
 //  * The Frame nodes are joined by `previousVersionId`, and the records that
 //    shaped them are joined by `version.sources`. This is the first surface where
 //    `sources[]` can be audited — §7.2 calls it out as such.
@@ -54,7 +55,7 @@ enum class NodeFamily {
     BeliefDelta,         // one per episode.body.beliefDeltas entry
     Intervention,        // one per episode.steering entry
     Recheck,             // task.formulationRecheck, drawn in the row it reconsiders
-    Formulation,         // a Frame version, on the version rail
+    Formulation,         // a Frame version, on the task-level time axis
 };
 const char* nodeFamilyToString(NodeFamily f);
 
@@ -125,6 +126,12 @@ struct GraphNode {
     // Station position within the row, and the tiebreaker for a deterministic
     // layout. Derived from record order, never stored on the record.
     uint64_t order = 0;
+    // When the record this node projects was observed, in epoch ms. -1 when
+    // unknown (a snapshot carries no per-record time). The layout orders a row by
+    // this across families when present, so plan/propose/execution/distillation
+    // interleave by occurrence rather than by fixed family sequence; it falls
+    // back to `order` when the times are absent.
+    int64_t occurredAtMs = -1;
 
     // --- family-specific, all read off explicit fields -------------------
     ExecutionStatus executionStatus = ExecutionStatus::Unknown;
@@ -140,6 +147,10 @@ struct GraphNode {
     // dot, so "this claim has been tested repeatedly" is visible at a glance.
     uint32_t evidenceRounds = 0;
     uint64_t ordinal = 0;  // episode ordinal, or version ordinal
+    // Token spend attributed to this block, summed from per-turn telemetry by
+    // (episodeId, stage). -1 means no telemetry arrived, so the layout falls back
+    // to the base block width.
+    long blockTokens = -1;
 };
 
 struct GraphEdge {
@@ -158,6 +169,10 @@ struct GraphEdge {
 struct EpisodeGutter {
     std::string id;
     uint64_t ordinal = 0;
+    // When the episode opened, in epoch ms, or -1 when unknown. The task-level
+    // layout orders episode tracks and Frame versions on one vertical time axis
+    // by this value, falling back to `ordinal` when it is absent.
+    int64_t occurredAtMs = -1;
     EpisodeStatus status = EpisodeStatus::Unknown;
     EpisodeStage stage = EpisodeStage::Unknown;
     std::string routingDecision;  // "belief-loop" | "fast-path" | "" while pending
@@ -172,6 +187,14 @@ struct GraphRailVersion {
     std::string id;
     uint64_t ordinal = 0;
     std::string recordedAt;
+    // `recordedAt` parsed to epoch ms, or -1 when it does not parse. The
+    // task-level layout uses this to place the version on the shared vertical
+    // time axis; `formedInEpisodeOrdinal` is the fallback when it is absent.
+    int64_t occurredAtMs = -1;
+    // The episode the version was formed in, or 0 when none was open: the boundary the
+    // layout falls back to when the version has no occurrence time, independent of
+    // which records the version happens to cite.
+    uint64_t formedInEpisodeOrdinal = 0;
     std::string previousVersionId;
     // The version the runtime cursor's task currently holds. Not "approved": that
     // is the review's fact, shown by the Frame pane.
